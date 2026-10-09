@@ -1,0 +1,292 @@
+# Release packaging: the Bevy runtime (`asamu`) and the importer (`asamu-import`) for every
+# supported target, zipped with LICENSE and docs/PLAYING.md, uploaded as workflow artifacts and
+# attached to a DRAFT GitHub release (a maintainer reviews and publishes it by hand).
+#
+# The packages contain our own code only. They never contain game data: players convert their own
+# copy locally with `asamu-import all` (see docs/PLAYING.md). The package job requires exactly the
+# four expected files in each zip (the two programs, LICENSE, PLAYING.md) and refuses any file that
+# starts with the magic bytes of game data or converted data. A manual run with a `tag` input builds
+# and packages that tag; a release that is already published is never modified.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to attach a draft release to (empty: workflow artifacts only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # A manual run with a tag builds that tag, not the branch it was started from.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Repository hygiene (no game payloads / RE dumps / private paths)
+        run: cargo run --locked -p repo-hygiene
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: hygiene
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            exe: ".exe"
+            smoke: true
+          # 22.04 (glibc 2.35) so the binaries also run on older distributions than the newest runner.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            exe: ""
+            smoke: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            exe: ""
+            smoke: true
+          # Cross-compiled on the arm64 runner (the same check CI runs); not executed there.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            exe: ""
+            smoke: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # A manual run with a tag builds that tag, not the branch it was started from.
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Linux system dependencies (Bevy)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+          cache-on-failure: true
+      - name: Build release binaries
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: cargo build --locked --release --target ${{ matrix.target }} -p asamu -p asamu-import
+      - name: Check the architecture (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          want="${{ matrix.target }}"
+          want="${want%%-*}"
+          [[ "${want}" == aarch64 ]] && want=arm64
+          for b in asamu asamu-import; do
+            archs="$(lipo -archs "target/${{ matrix.target }}/release/${b}")"
+            echo "${b}: ${archs}"
+            if [[ "${archs}" != "${want}" ]]; then
+              echo "${b} is ${archs}, expected ${want}" >&2
+              exit 1
+            fi
+          done
+      - name: Smoke test (help output only; no game data on the runner)
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release"
+          "$bin/asamu-import${{ matrix.exe }}" --help
+          "$bin/asamu-import${{ matrix.exe }}" all --help
+          "$bin/asamu${{ matrix.exe }}" --help
+      - name: Stage binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staged
+          cp "target/${{ matrix.target }}/release/asamu${{ matrix.exe }}" staged/
+          cp "target/${{ matrix.target }}/release/asamu-import${{ matrix.exe }}" staged/
+      - uses: actions/upload-artifact@v5
+        with:
+          name: bin-${{ matrix.target }}
+          path: staged/
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: Package zips
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.meta.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # A manual run with a tag builds that tag, not the branch it was started from.
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Version label
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # The tag (pushed, or given to a manual run), else the branch name plus the short
+          # commit; never a slash.
+          if [[ -n "${INPUT_TAG:-}" ]]; then
+            version="${INPUT_TAG}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="${GITHUB_REF_NAME}-${GITHUB_SHA:0:8}"
+          fi
+          version="${version//\//-}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "artifact=asamu-decomp-${version}" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bin-*
+          path: bins
+      - name: Build zips
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          count=0
+          for dir in bins/bin-*; do
+            target="${dir#bins/bin-}"
+            name="asamu-decomp-${VERSION}-${target}"
+            mkdir -p "pkg/${name}"
+            cp "${dir}"/* "pkg/${name}/"
+            # Artifacts do not keep the executable bit.
+            if [[ "${target}" != *windows* ]]; then
+              chmod 755 "pkg/${name}/asamu" "pkg/${name}/asamu-import"
+            fi
+            cp LICENSE "pkg/${name}/LICENSE"
+            cp docs/PLAYING.md "pkg/${name}/PLAYING.md"
+            (cd pkg && zip -q -r -9 "../dist/${name}.zip" "${name}")
+            count=$((count + 1))
+          done
+          if [[ "${count}" -ne 4 ]]; then
+            echo "expected 4 targets, packaged ${count}" >&2
+            exit 1
+          fi
+      - name: Verify package contents (no game data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed='^asamu-decomp-[^/]+/((asamu|asamu-import)(\.exe)?|LICENSE|PLAYING\.md)?$'
+          for z in dist/*.zip; do
+            if unzip -Z1 "${z}" | grep -vE "${allowed}"; then
+              echo "unexpected entry in ${z} (above)" >&2
+              exit 1
+            fi
+            # Exactly the four files, each once.
+            top="$(basename "${z}" .zip)"
+            exe=""
+            [[ "${top}" == *windows* ]] && exe=".exe"
+            expected="$(printf '%s\n' "${top}/LICENSE" "${top}/PLAYING.md" "${top}/asamu${exe}" \
+              "${top}/asamu-import${exe}" | LC_ALL=C sort)"
+            actual="$(unzip -Z1 "${z}" | grep -v '/$' | LC_ALL=C sort)"
+            if [[ "${actual}" != "${expected}" ]]; then
+              printf 'unexpected file list in %s:\n%s\nexpected:\n%s\n' "${z}" "${actual}" "${expected}" >&2
+              exit 1
+            fi
+            echo "${z}:"
+            unzip -Z1 "${z}" | sed 's/^/  /'
+          done
+          # No packaged file may start like an original game file (UE3 package or texture cache,
+          # Scaleform, Bink) or like converted data (DDS, Ogg, WAV, glTF binary, PNG).
+          while IFS= read -r -d '' f; do
+            magic="$(head -c 4 "${f}" | od -An -tx1 | tr -d ' \n')"
+            # c1832a9e: UE3 package / .tfc tag; 465753 FWS, 435753 CWS (SWF); 474658 GFX; 42494b BIK;
+            # 44445320 "DDS "; 4f676753 "OggS"; 52494646 "RIFF"; 676c5446 "glTF"; 89504e47 PNG.
+            case "${magic}" in
+              c1832a9e* | 9e2a83c1* | 465753* | 435753* | 474658* | 42494b* | 44445320 | 4f676753 | \
+                52494646 | 676c5446 | 89504e47)
+                echo "game-data magic bytes in ${f}" >&2
+                exit 1
+                ;;
+            esac
+          done < <(find pkg -type f -print0)
+          (cd dist && sha256sum -- *.zip > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.meta.outputs.artifact }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.package.outputs.artifact }}
+          path: dist
+      - name: Create or update the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # The tag given to a manual run, else the pushed tag (or the tag a manual run started on).
+          TAG="${INPUT_TAG:-}"
+          if [[ -z "${TAG}" && "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ -z "${TAG}" ]]; then
+            echo "no tag to attach a release to" >&2
+            exit 1
+          fi
+          cat > notes.md <<'EOF'
+          Pre-release build of the ASAMU-decomp engine recreation (`asamu`) and its importer
+          (`asamu-import`) for Windows x86_64, Linux x86_64 and macOS (Apple silicon and Intel).
+
+          **No game data is included.** You need your own copy of *A Story About My Uncle*
+          (Steam App 278360). Unzip, then run `asamu-import all` to convert your install into a
+          local folder, and `asamu --level AG-Workshop` to play. See `PLAYING.md` in the zip for
+          the full guide, the honest feature status and troubleshooting.
+
+          The binaries are not code-signed. `SHA256SUMS.txt` lists the zip hashes.
+          EOF
+          if draft="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft \
+            --jq .isDraft 2> /dev/null)"; then
+            # Only a draft may get new assets; a published release is never changed from here.
+            if [[ "${draft}" != "true" ]]; then
+              echo "release ${TAG} is already published; refusing to replace its assets" >&2
+              exit 1
+            fi
+            gh release upload "${TAG}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" dist/* --draft --verify-tag \
+              --title "ASAMU-decomp ${TAG}" --notes-file notes.md --repo "${GITHUB_REPOSITORY}"
+          fi
