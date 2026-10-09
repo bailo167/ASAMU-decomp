@@ -33,17 +33,26 @@
 //!   effective acceleration, `TerminalVelocity` clamp).
 //! - 5.2 `processLanded` bookkeeping (floor, base, force-floor-check,
 //!   unit-length acceleration).
+//! - `APawn::physFlying` (`docs/reverse-engineering/GRAPPLE.md` G-PH-3; the
+//!   mode the grapple puts the pawn in): one update per call, the UDK
+//!   `CalcVelocity` with fluid friction `0.5 × FluidFriction`, no braking and
+//!   the `AirSpeed` cap, no gravity, one move with the near-vertical-wall
+//!   step-up rule or a slide with one `TwoWallAdjust` retry, velocity
+//!   re-derived from the displacement (the height gained by a step-up left
+//!   out), no landing.
 //!
 //! # Scope decisions and gaps (see `docs/PARITY.md`, "Movement model")
 //!
-//! - **Script is not modelled.** The controller/pawn script (`PlayerMove`,
-//!   `DoJump`, `MayFall`, `NotifyHitWall`, `HitWall`, `Landed`,
-//!   `NotifyJumpApex`, ...) is replaced by: acceleration `= AccelRate ·`
-//!   input direction (TENTATIVE, spec 9.3); jump `Velocity.Z = JumpZ` and
-//!   Physics = Falling (TENTATIVE, spec 5.1); `MayFall` leaves the
-//!   permission flag set (STRONG for a running player, spec 3.4); all hit and
-//!   landing notifications are no-ops. Consequently nothing sets
-//!   `bJustTeleported`, and `processHitWall` never changes the physics mode.
+//! - **Script.** The ASAMU pawn script layer ([`crate::pawn`]) supplies the
+//!   acceleration, the jump and the run-time `GroundSpeed`/`AirControl`, and
+//!   receives the `Landed` event from `processLanded` through
+//!   [`PawnHooks`]. Without it ([`ClassDefaults`]) the stand-ins are:
+//!   acceleration `= AccelRate ·` input direction, jump `Velocity.Z = JumpZ`
+//!   and Physics = Falling, `Landed` a no-op. In both cases `MayFall` leaves
+//!   the permission flag set (STRONG for a running player, spec 3.4) and the
+//!   hit notifications (`NotifyHitWall`, `HitWall`, `NotifyFallingHitWall`,
+//!   `NotifyJumpApex`) are no-ops, so nothing sets `bJustTeleported` and
+//!   `processHitWall` never changes the physics mode.
 //! - **World mapping.** Every surface of a [`CollisionWorld`] is static
 //!   world geometry belonging to one actor (like BSP): it is step-up-able,
 //!   can be a base, never forces floor re-traces and has no physical
@@ -53,7 +62,7 @@
 //! - **Not ported:** crouching / walk-slowly and their ledge checks (3.6/3.7;
 //!   `CheckForLedges` output is UNKNOWN), the `processLanded` sanity trace /
 //!   `FindSpot` / random kick (5.2 step 1), the UDK stuck-falling nudge
-//!   (4.9), rotation (6), swimming/flying/other modes (10).
+//!   (4.9), rotation (6), swimming and the other modes of section 10.
 //! - **Collision skin.** UE3's exact pull-back inside line checks is UNKNOWN
 //!   (spec 9.5 q7). `MoveActor` here pulls the reported hit time back by
 //!   [`CONTACT_SKIN`] along the move (a numerical tolerance of this port, not
@@ -64,8 +73,11 @@
 //!   non-finite moves are refused, so a broken [`CollisionWorld`] cannot
 //!   make the state non-finite. Robustness only; results from a conforming
 //!   world pass through bit for bit.
-//! - **Grapple bridge.** `external_accel` (the placeholder grapple pull) is
-//!   not part of the original physics: while falling it is added to the
+//! - **Flying.** Entered and left only by script (grapple attach/release,
+//!   [`PawnPhysicsState::flying`]); the native code never lands a flying
+//!   pawn. `processHitWall` is a no-op here too.
+//! - **Grapple bridge.** `external_accel` (the placeholder grapple pull of
+//!   the debug configuration) is not part of the original physics: while falling it is added to the
 //!   acceleration after the air-control limiter; while walking it lifts the
 //!   pawn into falling when it beats gravity, otherwise its horizontal part
 //!   is added to the walking velocity after `CalcVelocity`.
@@ -81,10 +93,10 @@
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::movement::{LocomotionIntent, MovementModel};
+use crate::movement::{ClassDefaults, Landing, LocomotionIntent, MovementModel, PawnHooks};
 use crate::params::MovementParams;
 use crate::sim::{PlayerState, StepEvents};
-use crate::world::{CONTACT_SKIN, CollisionShape, CollisionWorld, Hit};
+use crate::world::{ActorTag, CONTACT_SKIN, CollisionShape, CollisionWorld, Hit};
 
 // ---------------------------------------------------------------------------
 // Algorithm constants of the native code (provenance: NativeCode). Addresses
@@ -170,6 +182,19 @@ pub const TWO_WALL_SAME_TOLERANCE: f64 = 1.0e-4;
 /// Horizontal extent inflation of the `MoveActor` sweep (STRONG).
 /// NativeCode `UWorld::MoveActor @ 0x1008E94A0` (data 0x10171DA60).
 pub const MOVE_RADIUS_INFLATION: f32 = 1.001;
+/// Flying friction = this × `PhysicsVolume.FluidFriction` (GRAPPLE.md
+/// G-PH-3). NativeCode `APawn::physFlying @ 0x100AE1710` (data 0x101636054).
+pub const FLYING_FRICTION_FACTOR: f32 = 0.5;
+/// A blocking hit while flying tries `stepUp` only when the surface normal's
+/// `|Z|` is below this (near-vertical wall; G-PH-3). NativeCode
+/// `APawn::physFlying @ 0x100AE1710` (data 0x1016825B8).
+pub const FLYING_STEP_UP_MAX_ABS_NORMAL_Z: f32 = 0.2;
+/// … and only when `u = (0, 0, −1) · unit(V)` exceeds this (G-PH-3).
+/// NativeCode `APawn::physFlying @ 0x100AE1710` (data 0x10168F00C).
+pub const FLYING_STEP_UP_MIN_UP_DOWN: f32 = -0.2;
+/// … and is below this (G-PH-3). NativeCode `APawn::physFlying @
+/// 0x100AE1710` (data 0x101636054).
+pub const FLYING_STEP_UP_MAX_UP_DOWN: f32 = 0.5;
 
 /// Safety bound on `stepUp` repetitions per call. Not a gameplay value: the
 /// native code has no bound; the repetition condition shrinks the move each
@@ -192,11 +217,14 @@ pub enum PhysicsMode {
     Walking,
     /// `PHYS_Falling` (2).
     Falling,
+    /// `PHYS_Flying` (4): set by the grapple gun on attach (GRAPPLE.md G-AT-6).
+    Flying,
 }
 
 /// Native-physics bookkeeping that persists between ticks
-/// ([`PlayerState::pawn`]). The physics mode itself is
-/// [`PlayerState::grounded`] (walking ⇔ grounded).
+/// ([`PlayerState::pawn`]). The physics mode is [`Self::flying`] (flying)
+/// or else [`PlayerState::grounded`] (walking ⇔ grounded, falling
+/// otherwise).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PawnPhysicsState {
     /// Floor normal (UE3 `Pawn.Floor`, Pawn+0x37C); zero when unknown.
@@ -207,6 +235,10 @@ pub struct PawnPhysicsState {
     /// Force a floor trace on the next walking sub-step (Pawn+0x298 bit 27;
     /// set when entering walking).
     pub force_floor_check: bool,
+    /// Physics is `PHYS_Flying` (only the grapple sets it; `grounded` is then
+    /// false). Written by script, never by the native code.
+    #[serde(default)]
+    pub flying: bool,
 }
 
 /// The parameter values the port reads, resolved from [`MovementParams`].
@@ -245,6 +277,11 @@ pub struct PawnTuning {
     /// `MaxSpeedModifier()` for a human, not crouched, not walking slowly:
     /// `MovementSpeedModifier` ← `movement.movement_speed_modifier`.
     pub max_speed_modifier: f32,
+    /// `AirSpeed` (Pawn+0x344), the flying speed cap ← `movement.air_speed`
+    /// (replaced at run time by the script value, [`PawnHooks::air_speed`]).
+    pub air_speed: f32,
+    /// `PhysicsVolume.FluidFriction` (+0x2AC) ← `movement.fluid_friction`.
+    pub fluid_friction: f32,
 }
 
 impl PawnTuning {
@@ -266,6 +303,8 @@ impl PawnTuning {
             limit_fall_accel: params.limit_fall_accel.value,
             slope_boost_friction: params.slope_boost_friction.value,
             max_speed_modifier: params.movement_speed_modifier.value,
+            air_speed: params.air_speed.value,
+            fluid_friction: params.fluid_friction.value,
         }
     }
 }
@@ -414,16 +453,42 @@ pub fn udk_calc_velocity(
     max_speed: f32,
     friction: f32,
 ) -> CalcVelocityResult {
+    udk_calc_velocity_with(
+        velocity, accel_dir, accel_rate, dt, max_speed, friction, false, true,
+    )
+}
+
+/// `AUDKPawn::CalcVelocity` (spec 2.1) with explicit `bFluid` and `bBrake`
+/// (`bBuoyant = 0`). Walking passes `(false, true)`; flying passes
+/// `(true, false)` with `max_speed = AirSpeed` and `friction = 0.5 ×
+/// FluidFriction` (GRAPPLE.md G-PH-3), which with zero acceleration gives
+/// `V·(1 − F·dt)²`.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn udk_calc_velocity_with(
+    velocity: Vec3,
+    accel_dir: Vec3,
+    accel_rate: f32,
+    dt: f32,
+    max_speed: f32,
+    friction: f32,
+    fluid: bool,
+    brake: bool,
+) -> CalcVelocityResult {
     let acceleration = accel_dir * accel_rate;
     let mut v = velocity;
-    if acceleration != Vec3::ZERO {
-        // Turning friction: pulls the velocity direction towards the input.
+    if !brake || acceleration != Vec3::ZERO {
+        // Turning friction: pulls the velocity direction towards the input
+        // (with no input it scales the velocity by `1 − F·dt`).
         let speed = v.length();
         v -= (v - accel_dir * speed) * friction * dt;
     } else {
         v = apply_velocity_braking(v, dt, friction);
     }
-    // The fluid-friction factor `1 − bFluid·F·dt` is exactly 1 here.
+    // The fluid-friction factor `1 − bFluid·F·dt` (exactly 1 without fluid).
+    if fluid {
+        v *= 1.0 - friction * dt;
+    }
     v += acceleration * dt;
     if v.length_squared() > max_speed * max_speed {
         v = safe_normal(v) * max_speed;
@@ -492,6 +557,8 @@ struct MoveHit {
     time: f32,
     normal: Vec3,
     start_penetrating: bool,
+    /// The hit actor carries the tag `NotLandable` (ABILITIES.md §5).
+    not_landable: bool,
 }
 
 impl MoveHit {
@@ -499,6 +566,7 @@ impl MoveHit {
         time: 1.0,
         normal: Vec3::ZERO,
         start_penetrating: false,
+        not_landable: false,
     };
 
     fn blocked(&self) -> bool {
@@ -529,6 +597,7 @@ impl MoveHit {
             time,
             normal,
             start_penetrating: hit.start_penetrating,
+            not_landable: hit.surface.tag == ActorTag::NotLandable,
         }
     }
 }
@@ -541,8 +610,9 @@ enum Flow {
     Continue { remaining: f32, iterations: u32 },
 }
 
-struct Pawn<'w, W: CollisionWorld + ?Sized> {
+struct Pawn<'w, 'h, W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> {
     world: &'w W,
+    hooks: &'h mut H,
     t: PawnTuning,
     move_shape: CollisionShape,
     trace_shape: CollisionShape,
@@ -558,7 +628,7 @@ struct Pawn<'w, W: CollisionWorld + ?Sized> {
     landed_impact: Option<f32>,
 }
 
-impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
+impl<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> Pawn<'_, '_, W, H> {
     /// `UWorld::MoveActor`: sweep by `delta`, stop at the first blocking hit
     /// (pulled back by [`CONTACT_SKIN`] along the move).
     fn move_actor(&mut self, delta: Vec3) -> MoveHit {
@@ -619,6 +689,7 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
             let flow = match self.mode {
                 PhysicsMode::Walking => self.phys_walking(remaining, iterations),
                 PhysicsMode::Falling => self.phys_falling(remaining, iterations),
+                PhysicsMode::Flying => self.phys_flying(remaining),
             };
             match flow {
                 Flow::Done => return,
@@ -687,12 +758,13 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
                         time: 0.0,
                         normal: self.floor,
                         start_penetrating: false,
+                        not_landable: false,
                     }
                 };
                 if hit.blocked() {
                     // World geometry is step-up-able: always stepUp (3.2).
                     blocked = true;
-                    self.step_up(safe_normal(delta), delta * (1.0 - hit.time), hit);
+                    self.step_up(safe_normal(delta), delta * (1.0 - hit.time), hit, true);
                 }
             }
 
@@ -706,6 +778,7 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
                     time: POINT_ONE,
                     normal: self.floor,
                     start_penetrating: false,
+                    not_landable: false,
                 };
                 floor_dist = MAX_FLOOR_DIST;
                 floor_is_base = true;
@@ -815,26 +888,37 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
         Flow::Done
     }
 
-    /// `APawn::stepUp` (spec 3.2.1) for a walking pawn, with the repetition
-    /// of step 4 written as a loop. Every path through the loop body ends
-    /// with the planned step down (then returns, or repeats), so when the
-    /// [`MAX_STEP_UP_REPEATS`] safety bound is exhausted the pawn has already
-    /// stepped down and the rest of the move is simply not made.
-    fn step_up(&mut self, desired_dir: Vec3, delta: Vec3, hit: MoveHit) {
+    /// `APawn::stepUp` (spec 3.2.1), with the repetition of step 4 written
+    /// as a loop. `walking` selects the walking variant (the step down is
+    /// always planned; a non-walkable slope moves nothing) or the flying one
+    /// (a non-walkable slope is followed and not stepped down from). Every
+    /// path through the loop body ends with the planned step down (then
+    /// returns, or repeats), so when the [`MAX_STEP_UP_REPEATS`] safety bound
+    /// is exhausted the pawn has already stepped down and the rest of the
+    /// move is simply not made.
+    fn step_up(&mut self, desired_dir: Vec3, delta: Vec3, hit: MoveHit, walking: bool) {
         let down = Vec3::NEG_Z;
         let step_down = down * (self.t.max_step_height + STEP_FUDGE);
         let mut delta = delta;
         let mut hit = hit;
         for _ in 0..MAX_STEP_UP_REPEATS {
-            // 1./2. Near-vertical wall or walkable surface: up, then across.
-            // (A non-walkable slope hit while walking moves nothing here.)
+            let mut step_down_planned = walking;
+            // 1. Near-vertical wall or walkable surface: up, then across.
             if down.dot(hit.normal) > STEP_UP_WALL_DOT || hit.normal.z >= self.t.walkable_floor_z {
                 self.move_actor(-step_down);
                 hit = self.move_actor(delta);
+                step_down_planned = true;
+            } else if !walking {
+                // 2. A non-walkable slope, not walking: move along it.
+                let along = Vec3::new(delta.x, delta.y, delta.z + delta.length() * hit.normal.z);
+                hit = self.move_actor(along);
             }
-            // 3. Clear: step down and finish.
+            // (A non-walkable slope hit while walking moves nothing here.)
+            // 3. Clear: step down (if planned) and finish.
             if !hit.blocked() {
-                self.move_actor(step_down);
+                if step_down_planned {
+                    self.move_actor(step_down);
+                }
                 return;
             }
             // 4. Still a wall and enough of the move was made: step down and
@@ -842,7 +926,9 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
             if down.dot(hit.normal) > STEP_UP_WALL_DOT
                 && delta.length_squared() * hit.time > STEP_UP_REPEAT_THRESHOLD
             {
-                self.move_actor(step_down);
+                if step_down_planned {
+                    self.move_actor(step_down);
+                }
                 delta *= 1.0 - hit.time;
                 continue;
             }
@@ -860,9 +946,75 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
                     self.move_actor(adjusted);
                 }
             }
-            self.move_actor(step_down);
+            if step_down_planned {
+                self.move_actor(step_down);
+            }
             return;
         }
+    }
+
+    /// `APawn::physFlying` (GRAPPLE.md G-PH-3): one update per call (no
+    /// sub-steps), no gravity, no landing.
+    fn phys_flying(&mut self, dt: f32) -> Flow {
+        self.stats.record(PhysicsMode::Flying, dt);
+        // 1.–2. Velocity: UDK CalcVelocity with fluid friction, no braking,
+        // capped at AirSpeed · MaxSpeedModifier.
+        let accel_dir = if self.acceleration == Vec3::ZERO {
+            Vec3::ZERO
+        } else {
+            safe_normal(self.acceleration)
+        };
+        let calc = udk_calc_velocity_with(
+            self.velocity,
+            accel_dir,
+            self.t.accel_rate,
+            dt,
+            self.t.air_speed * self.t.max_speed_modifier,
+            FLYING_FRICTION_FACTOR * self.t.fluid_friction,
+            true,
+            false,
+        );
+        self.velocity = calc.velocity;
+        self.acceleration = calc.acceleration;
+        // 3.–4. No gravity; one move by V·dt (no zone velocity).
+        let mut old_location = self.location;
+        let delta = self.velocity * dt;
+        let hit = self.move_actor(delta);
+        if hit.blocked() {
+            // 5. Blocking hit.
+            self.floor = hit.normal;
+            let vel_dir = safe_normal(self.velocity);
+            let up_down = Vec3::NEG_Z.dot(vel_dir);
+            if hit.normal.z.abs() < FLYING_STEP_UP_MAX_ABS_NORMAL_Z
+                && up_down < FLYING_STEP_UP_MAX_UP_DOWN
+                && up_down > FLYING_STEP_UP_MIN_UP_DOWN
+            {
+                // Near-vertical wall, moving roughly horizontally: step up
+                // with the rest of the move; the height it gains is left out
+                // of the velocity below.
+                let step_z = self.location.z;
+                self.step_up(vel_dir, delta * (1.0 - hit.time), hit, false);
+                old_location.z = self.location.z + (old_location.z - step_z);
+            } else {
+                // processHitWall is a no-op (module docs); slide along the
+                // surface unless that points backwards, one TwoWallAdjust
+                // retry on a second hit.
+                let slide = (delta - hit.normal * delta.dot(hit.normal)) * (1.0 - hit.time);
+                if slide.dot(vel_dir) >= 0.0 {
+                    let second = self.move_actor(slide);
+                    if second.blocked() {
+                        let adjusted =
+                            two_wall_adjust(vel_dir, slide, second.normal, hit.normal, second.time);
+                        self.move_actor(adjusted);
+                    }
+                }
+            }
+        } else {
+            self.floor = Vec3::Z;
+        }
+        // 6. Velocity from the displacement (velocity into walls is lost).
+        self.velocity = (self.location - old_location) / dt;
+        Flow::Done
     }
 
     /// `AUDKPawn::physFalling` → `APawn::physFalling` (spec 4.2–4.8).
@@ -941,7 +1093,7 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
                     }
                     let returned = step * (1.0 - hit.time);
                     self.stats.returned_time += returned;
-                    self.process_landed(hit.normal);
+                    self.process_landed(hit);
                     return Flow::Continue {
                         remaining: remaining + returned,
                         iterations,
@@ -958,7 +1110,7 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
                     let second = self.move_actor(slide);
                     if second.blocked() {
                         if second.normal.z >= walkable {
-                            return self.land_after_slide(second.normal, remaining, iterations);
+                            return self.land_after_slide(second, remaining, iterations);
                         }
                         let adjusted_slide = two_wall_adjust(
                             safe_normal(adjusted),
@@ -973,12 +1125,8 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
                             && hit.normal.dot(second.normal) < 0.0;
                         let third = self.move_actor(adjusted_slide);
                         if ditch || (third.blocked() && third.normal.z >= walkable) {
-                            let normal = if third.blocked() {
-                                third.normal
-                            } else {
-                                second.normal
-                            };
-                            return self.land_after_slide(normal, remaining, iterations);
+                            let floor_hit = if third.blocked() { third } else { second };
+                            return self.land_after_slide(floor_hit, remaining, iterations);
                         }
                     }
                 }
@@ -1006,11 +1154,11 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
     }
 
     /// A landing detected after a slide carries zero time.
-    fn land_after_slide(&mut self, normal: Vec3, remaining: f32, iterations: u32) -> Flow {
+    fn land_after_slide(&mut self, hit: MoveHit, remaining: f32, iterations: u32) -> Flow {
         if remaining > 0.0 {
             self.stats.dropped_time += remaining;
         }
-        self.process_landed(normal);
+        self.process_landed(hit);
         Flow::Continue {
             remaining: 0.0,
             iterations,
@@ -1018,12 +1166,24 @@ impl<W: CollisionWorld + ?Sized> Pawn<'_, W> {
     }
 
     /// `APawn::processLanded` (spec 5.2) without the sanity trace / FindSpot
-    /// rejection and without script notifications.
-    fn process_landed(&mut self, normal: Vec3) {
+    /// rejection. The pawn script's `Landed` event (step 3) goes to the
+    /// [`PawnHooks`]; the controller's `NotifyLanded` is not handled by the
+    /// ASAMU controller (ABILITIES.md §5).
+    fn process_landed(&mut self, hit: MoveHit) {
+        let normal = hit.normal;
         self.floor = normal;
         if self.landed_impact.is_none() {
             self.landed_impact = Some(self.velocity.z);
         }
+        self.hooks.landed(&Landing {
+            hit_normal: normal,
+            velocity: self.velocity,
+            location: self.location,
+            not_landable: hit.not_landable,
+        });
+        // Script writes made by `Landed` apply to the rest of the tick.
+        self.t.ground_speed = self.hooks.ground_speed();
+        self.t.air_control = self.hooks.air_control();
         // SetPostLandedPhysics → setPhysics(Walking): base on the floor
         // actor, force a floor check.
         if self.mode != PhysicsMode::Walking {
@@ -1050,10 +1210,41 @@ impl Ue3PawnMovement {
         dt: f32,
         events: &mut StepEvents,
     ) -> TickStats {
+        let mut hooks = ClassDefaults::new(params);
+        self.advance_scripted_with_stats(
+            state,
+            intent,
+            external_accel,
+            params,
+            &mut hooks,
+            world,
+            dt,
+            events,
+        )
+    }
+
+    /// [`MovementModel::advance_scripted`] that also returns the tick's time
+    /// accounting. A non-finite or non-positive `dt` is a no-op.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_scripted_with_stats<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized>(
+        &self,
+        state: &mut PlayerState,
+        intent: &LocomotionIntent,
+        external_accel: Vec3,
+        params: &MovementParams,
+        hooks: &mut H,
+        world: &W,
+        dt: f32,
+        events: &mut StepEvents,
+    ) -> TickStats {
         if !(dt.is_finite() && dt > 0.0) {
             return TickStats::default();
         }
-        let t = PawnTuning::from_params(params);
+        let mut t = PawnTuning::from_params(params);
+        // Run-time script values (`GroundSpeed`, `AirControl`, `AirSpeed`).
+        t.ground_speed = hooks.ground_speed();
+        t.air_control = hooks.air_control();
+        t.air_speed = hooks.air_speed();
         let trace_shape = CollisionShape {
             radius: t.collision_radius,
             half_height: t.collision_half_height,
@@ -1062,7 +1253,8 @@ impl Ue3PawnMovement {
             radius: t.collision_radius * MOVE_RADIUS_INFLATION,
             half_height: t.collision_half_height,
         };
-        let was_walking = state.grounded;
+        let flying = state.pawn.flying;
+        let was_walking = state.grounded && !flying;
         let external = if external_accel.is_finite() {
             external_accel
         } else {
@@ -1070,6 +1262,7 @@ impl Ue3PawnMovement {
         };
         let mut pawn = Pawn {
             world,
+            hooks,
             t,
             move_shape,
             trace_shape,
@@ -1078,7 +1271,9 @@ impl Ue3PawnMovement {
             // [script] PlayerMove: Acceleration = AccelRate · Normal(input)
             // (TENTATIVE, spec 9.3; analog magnitude discarded).
             acceleration: intent.wish_dir * t.accel_rate,
-            mode: if was_walking {
+            mode: if flying {
+                PhysicsMode::Flying
+            } else if was_walking {
                 PhysicsMode::Walking
             } else {
                 PhysicsMode::Falling
@@ -1110,6 +1305,7 @@ impl Ue3PawnMovement {
             floor: pawn.floor,
             based: pawn.based,
             force_floor_check: pawn.force_floor_check,
+            flying: pawn.mode == PhysicsMode::Flying,
         };
         if !was_walking && state.grounded {
             events.landed = pawn.landed_impact;
@@ -1122,17 +1318,27 @@ impl Ue3PawnMovement {
 }
 
 impl MovementModel for Ue3PawnMovement {
-    fn advance<W: CollisionWorld + ?Sized>(
+    fn advance_scripted<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized>(
         &self,
         state: &mut PlayerState,
         intent: &LocomotionIntent,
         external_accel: Vec3,
         params: &MovementParams,
+        hooks: &mut H,
         world: &W,
         dt: f32,
         events: &mut StepEvents,
     ) {
-        self.advance_with_stats(state, intent, external_accel, params, world, dt, events);
+        self.advance_scripted_with_stats(
+            state,
+            intent,
+            external_accel,
+            params,
+            hooks,
+            world,
+            dt,
+            events,
+        );
     }
 }
 
@@ -1339,6 +1545,7 @@ mod tests {
             normal,
             grapple_able: false,
             start_penetrating: true,
+            surface: crate::world::Surface::default(),
         };
         // Conforming: bit-identical (time in [0, 1], unit normal; also a unit
         // normal whose squared length is not exactly 1 in f32).

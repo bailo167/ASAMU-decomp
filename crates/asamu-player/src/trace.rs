@@ -152,13 +152,20 @@ impl TraceSample {
         state: &PlayerState,
         fov: f32,
     ) -> Self {
-        let (grapple_state, grapple_anchor, rope_length) = match state.grapple {
-            GrappleState::Idle => (TraceGrappleState::Idle, None, None),
-            GrappleState::Attached {
-                anchor,
-                rope_length,
-            } => (TraceGrappleState::Attached, Some(anchor), Some(rope_length)),
-        };
+        // The original grapple gun has no rope: its samples carry the anchor
+        // and no rope length.
+        let (grapple_state, grapple_anchor, rope_length) =
+            match (state.grapple, state.script.gun.anchor()) {
+                (_, Some(anchor)) => (TraceGrappleState::Attached, Some(anchor), None),
+                (GrappleState::Idle, None) => (TraceGrappleState::Idle, None, None),
+                (
+                    GrappleState::Attached {
+                        anchor,
+                        rope_length,
+                    },
+                    None,
+                ) => (TraceGrappleState::Attached, Some(anchor), Some(rope_length)),
+            };
         Self {
             tick,
             time,
@@ -522,7 +529,6 @@ pub fn record_run_with<M: MovementModel, W: CollisionWorld + ?Sized>(
     world: &W,
     dt: f32,
 ) -> Trace {
-    let fov = params.camera.fov_degrees.value;
     let mut trace = Trace::new(meta);
     let mut state = *initial;
     trace.samples.push(TraceSample::capture(
@@ -530,7 +536,7 @@ pub fn record_run_with<M: MovementModel, W: CollisionWorld + ?Sized>(
         0.0,
         &InputFrame::default(),
         &state,
-        fov,
+        state.fov(params),
     ));
     for (i, input) in inputs.iter().enumerate() {
         step_with(model, &mut state, input, params, world, dt);
@@ -540,7 +546,7 @@ pub fn record_run_with<M: MovementModel, W: CollisionWorld + ?Sized>(
             tick as f64 * f64::from(dt),
             input,
             &state,
-            fov,
+            state.fov(params),
         ));
     }
     trace

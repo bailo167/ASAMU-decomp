@@ -7,13 +7,38 @@
 //! translates devices → `InputFrame`, and simulation state → camera, meshes,
 //! gizmos and HUD.
 //!
-//! **Placeholder physics:** no gameplay constant has been recovered from the
-//! original game yet; every parameter is a documented placeholder (see
-//! `docs/PARITY.md`, "Placeholder parameters").
+//! **Movement and abilities use the original's values and rules**: by
+//! default the player runs the port of the original's native pawn physics
+//! with `PlayerParams::asamu_original()` (class defaults and config values of
+//! the original, each with provenance) and the ASAMU script layer: jump
+//! release damping, sprint, story mode and zoom, landing, eye height and
+//! bob, power jump, the original **grapple gun** (`asamu.GrappleGun`: pull
+//! of 10⁷/d uu/s² in flying physics capped at 2000 uu/s, release below
+//! 200 uu, grapple budget refilled by landings) and the **rocket boots**.
+//! The graybox level enables every ability with 3 grapples (a test
+//! configuration; the original's Kismet sets them per level). The on-screen
+//! banner says which parameters are original and which are placeholders
+//! (see `docs/PARITY.md`).
 //!
-//! Controls: click to capture the mouse, WASD move, mouse look, Space jump,
-//! hold left mouse to grapple, R respawn, F9 start/stop trace recording,
-//! Esc release the mouse (pauses).
+//! Command line (debugging): `--placeholder` runs the old placeholder model
+//! with the placeholder parameters (and the placeholder rope grapple);
+//! `--placeholder-movement` keeps the original parameters on the
+//! placeholder model. `ASAMU_MOVEMENT=placeholder` is the same as
+//! `--placeholder`.
+//!
+//! Controls follow the original's `DefaultInput.ini` keyboard bindings: WASD
+//! move, mouse look, Space jump (release damps the jump; in the air it also
+//! fires the rocket boots), left shift sprint, left mouse fire (grapple;
+//! releasing the button releases the grapple), hold right mouse to power
+//! jump (zoom in story mode), E or Enter use, F7 quick load (respawn at the
+//! checkpoint). Not original (debug/app): click to capture the mouse, arrow
+//! keys move, R respawn, F2 toggle story mode, F3 cycle the grapple capacity
+//! (0/1/2/3/unlimited), F4 toggle the rocket boots, F6 activate the attractor
+//! pad (stand-ins for the original's Kismet actions), F9 start/stop trace
+//! recording, Esc release the mouse (pauses). Mouse sensitivity is an app
+//! setting: the original's `PlayerInput` look scaling (`MouseSensitivity`
+//! 30, `LookRightScale` 300, `LookUpScale` −250) is not ported because its
+//! exact formula is not specified yet.
 
 use std::path::PathBuf;
 
@@ -23,7 +48,9 @@ use asamu_core::coords::{
 use asamu_core::glam as sim_glam;
 use asamu_core::units::uu_per_s_to_presentation_m_per_s;
 use asamu_game::{Game, GameState};
-use asamu_player::{Aim, GrappleState, InputFrame};
+use asamu_player::{
+    Aim, BootsStateName, GrappleState, InputFrame, MovementModelKind, PawnStateName,
+};
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -41,16 +68,106 @@ const MOUSE_RADIANS_PER_COUNT: f32 = 0.0025;
 const ROPE_HAND_DOWN_UU: f32 = 14.0;
 const ROPE_HAND_RIGHT_UU: f32 = 10.0;
 
-const BANNER: &str =
-    "ASAMU-decomp pre-alpha \u{b7} placeholder physics (no original constants yet)";
+/// The banner's first lines: which model and which parameter set runs.
+fn banner(game: &Game) -> String {
+    let report = game.params().provenance_report();
+    let placeholders: Vec<&str> = report
+        .iter()
+        .filter(|e| e.provenance.is_placeholder())
+        .map(|e| e.name.as_str())
+        .collect();
+    let original = report.len() - placeholders.len();
+    let movement = match game.movement_model() {
+        MovementModelKind::Ue3Pawn => "native pawn physics port",
+        MovementModelKind::Placeholder => "PLACEHOLDER movement model",
+    };
+    if game.uses_original_params() {
+        let p = game.params();
+        let m = &p.movement;
+        let gun = p
+            .gun
+            .as_ref()
+            .map(|g| {
+                format!(
+                    "GrappleGun: range {}, release {}, AirSpeed {}, pull 10^7/d",
+                    g.max_distance.value, g.release_distance.value, g.grapple_accel.value
+                )
+            })
+            .unwrap_or_else(|| "no grapple gun".to_owned());
+        format!(
+            "ASAMU-decomp pre-alpha \u{b7} {movement} + ASAMU script layer (original grapple gun, rocket boots)\n\
+             ORIGINAL values ({original} params): GroundSpeed {}, AccelRate {}, JumpZ {}, AirControl {}, \
+             cylinder {}/{}, eye {}, FOV {} \u{b7} {gun}\n\
+             PLACEHOLDER: {} params read only by the debug models (placeholder movement, rope grapple) \u{b7} \
+             graybox abilities: everything on, 3 grapples (test configuration)",
+            m.max_ground_speed.value,
+            m.ground_acceleration.value,
+            m.jump_velocity.value,
+            m.air_control.value,
+            m.capsule_radius.value,
+            m.capsule_half_height.value,
+            p.camera.eye_height.value,
+            p.camera.fov_degrees.value,
+            placeholders.len()
+        )
+    } else {
+        format!(
+            "ASAMU-decomp pre-alpha \u{b7} {movement} \u{b7} PLACEHOLDER parameters \
+             ({} of {}; debug configuration, no ASAMU script layer)",
+            placeholders.len(),
+            report.len()
+        )
+    }
+}
+
+/// Which configuration the command line / environment selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Config {
+    /// Original parameters on the native-physics port (default).
+    Original,
+    /// Original parameters on the placeholder model.
+    PlaceholderMovement,
+    /// Placeholder parameters on the placeholder model (legacy graybox).
+    Placeholder,
+}
+
+const USAGE: &str = "usage: asamu [--original | --placeholder | --placeholder-movement]\n  \
+    --original              original parameters on the native pawn physics port (default)\n  \
+    --placeholder           placeholder parameters and model (debugging)\n  \
+    --placeholder-movement  original parameters on the placeholder model (debugging)";
+
+/// The configuration, or `None` when only the usage was requested.
+fn parse_config() -> Result<Option<Config>, String> {
+    let mut config = match std::env::var("ASAMU_MOVEMENT").as_deref() {
+        Ok("placeholder") => Config::Placeholder,
+        Ok("ue3") | Ok("original") | Err(_) => Config::Original,
+        Ok(other) => return Err(format!("unknown ASAMU_MOVEMENT value {other:?}")),
+    };
+    for arg in std::env::args().skip(1) {
+        config = match arg.as_str() {
+            "--placeholder" => Config::Placeholder,
+            "--placeholder-movement" => Config::PlaceholderMovement,
+            "--original" => Config::Original,
+            "-h" | "--help" => return Ok(None),
+            other => return Err(format!("unknown argument {other:?} (try --help)")),
+        };
+    }
+    Ok(Some(config))
+}
 
 /// The simulation plus render-interpolation state.
 #[derive(Resource)]
 struct Sim {
     game: Game,
+    /// First banner line (configuration and parameter provenance).
+    banner: String,
     /// Collision-centre position before / after the latest tick (UU).
     prev_position: sim_glam::Vec3,
     curr_position: sim_glam::Vec3,
+    /// Eye (view) position before / after the latest tick (UU), including
+    /// the script layer's eye height and walk bob.
+    prev_eye: sim_glam::Vec3,
+    curr_eye: sim_glam::Vec3,
 }
 
 impl Sim {
@@ -58,6 +175,9 @@ impl Sim {
         let p = self.game.player().position;
         self.prev_position = p;
         self.curr_position = p;
+        let e = self.game.eye_position();
+        self.prev_eye = e;
+        self.curr_eye = e;
     }
 }
 
@@ -67,6 +187,8 @@ struct PendingInput {
     look_yaw: f32,
     look_pitch: f32,
     jump: bool,
+    /// `use` (E / Enter) pressed since the last tick.
+    use_key: bool,
     /// The grapple only reads the mouse once the click that captured the
     /// cursor has been released.
     grapple_armed: bool,
@@ -81,8 +203,30 @@ struct HudText;
 #[derive(Component)]
 struct Crosshair;
 
+/// A rendered mover (index into `Level::movers`).
+#[derive(Component)]
+struct MoverVisual(usize);
+
 fn main() -> AppExit {
-    let game = match Game::graybox() {
+    let config = match parse_config() {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            println!("{USAGE}");
+            return AppExit::Success;
+        }
+        Err(message) => {
+            eprintln!("{message}\n{USAGE}");
+            return AppExit::error();
+        }
+    };
+    let game = match config {
+        Config::Original => Game::graybox(),
+        Config::PlaceholderMovement => {
+            Game::graybox().map(|g| g.with_movement_model(MovementModelKind::Placeholder))
+        }
+        Config::Placeholder => Game::graybox_placeholder(),
+    };
+    let game = match game {
         Ok(game) => game,
         Err(err) => {
             eprintln!("failed to create the graybox game: {err}");
@@ -91,6 +235,9 @@ fn main() -> AppExit {
     };
     let tick_rate_hz = game.clock().tick_rate_hz();
     let position = game.player().position;
+    let eye = game.eye_position();
+    let banner = banner(&game);
+    println!("{banner}");
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -110,8 +257,11 @@ fn main() -> AppExit {
         })
         .insert_resource(Sim {
             game,
+            banner,
             prev_position: position,
             curr_position: position,
+            prev_eye: eye,
+            curr_eye: eye,
         })
         .init_resource::<PendingInput>()
         .add_systems(Startup, (spawn_level, spawn_camera_and_light, spawn_hud))
@@ -122,7 +272,7 @@ fn main() -> AppExit {
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         )
         .add_systems(FixedUpdate, fixed_tick)
-        .add_systems(Update, (sync_camera, draw_gizmos, update_hud))
+        .add_systems(Update, (sync_camera, sync_movers, draw_gizmos, update_hud))
         .run()
 }
 
@@ -183,6 +333,59 @@ fn spawn_level(
         let h = sim_glam::Vec3::splat(g.half_extent);
         spawn_box(g.position - h, g.position + h, hook.clone());
     }
+    let crystal = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.3, 0.9, 1.0),
+        emissive: LinearRgba::rgb(0.1, 0.5, 0.7),
+        ..default()
+    });
+    let flower = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.8, 0.4, 1.0),
+        emissive: LinearRgba::rgb(0.4, 0.1, 0.6),
+        ..default()
+    });
+    let interactable = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.9, 0.3),
+        ..default()
+    });
+    let mover_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.45, 0.2),
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+    for c in &level.crystals {
+        let h = sim_glam::Vec3::splat(c.half_extent);
+        spawn_box(c.center - h, c.center + h, crystal.clone());
+    }
+    for f in &level.flowers {
+        let h = sim_glam::Vec3::splat(f.half_extent);
+        spawn_box(f.center - h, f.center + h, flower.clone());
+    }
+    for i in &level.interactables {
+        spawn_box(i.min, i.max, interactable.clone());
+    }
+    for (index, m) in level.movers.iter().enumerate() {
+        let size = bevy_vec(ue_extents_to_bevy(m.max - m.min, SCALE));
+        commands.spawn((
+            MoverVisual(index),
+            Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
+            MeshMaterial3d(mover_material.clone()),
+            Transform::from_translation(to_render((m.min + m.max) * 0.5)),
+        ));
+    }
+}
+
+/// Moves the rendered movers to their simulated positions.
+fn sync_movers(sim: Res<Sim>, mut movers: Query<(&MoverVisual, &mut Transform)>) {
+    let level = sim.game.level();
+    let objects = sim.game.objects();
+    for (visual, mut transform) in &mut movers {
+        if let (Some(m), Some(offset)) = (
+            level.movers.get(visual.0),
+            objects.mover_offsets.get(visual.0),
+        ) {
+            transform.translation = to_render((m.min + m.max) * 0.5 + *offset);
+        }
+    }
 }
 
 fn spawn_camera_and_light(mut commands: Commands) {
@@ -202,7 +405,7 @@ fn spawn_camera_and_light(mut commands: Commands) {
     ));
 }
 
-fn spawn_hud(mut commands: Commands) {
+fn spawn_hud(mut commands: Commands, sim: Res<Sim>) {
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -212,7 +415,7 @@ fn spawn_hud(mut commands: Commands) {
         },
         children![(
             HudText,
-            Text::new(BANNER),
+            Text::new(sim.banner.clone()),
             TextFont {
                 font_size: FontSize::Px(15.0),
                 ..default()
@@ -270,9 +473,44 @@ fn cursor_and_pause(
         *pending = PendingInput::default();
         return;
     }
-    if keys.just_pressed(KeyCode::KeyR) {
+    // R (debug) and F7 (the original's QuickLoad: restart from the
+    // checkpoint) respawn.
+    if keys.just_pressed(KeyCode::KeyR) || keys.just_pressed(KeyCode::F7) {
         sim.game.respawn();
         sim.snap_interpolation();
+    }
+    // F2 (debug): story mode, which the original toggles from Kismet.
+    if keys.just_pressed(KeyCode::F2) {
+        let on = sim.game.toggle_story_mode();
+        info!("story mode {}", if on { "on" } else { "off" });
+    }
+    // F3/F4/F6 (debug): stand-ins for the original's Kismet actions
+    // (SeqAct_SetMaxGrapples, SeqAct_ToggleRocketBoots, SeqAct_ToggleAttractor).
+    if keys.just_pressed(KeyCode::F3) {
+        let next = match sim.game.player().script.gun.max_grapples {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            3 => -1,
+            _ => 0,
+        };
+        sim.game.set_max_grapples(next);
+        info!(
+            "grapple capacity {}",
+            sim.game.player().script.gun.max_grapples
+        );
+    }
+    if keys.just_pressed(KeyCode::F4) {
+        let on = !sim.game.player().script.boots.enabled;
+        sim.game.enable_rocket_boots(on);
+        info!("rocket boots {}", if on { "enabled" } else { "disabled" });
+    }
+    if keys.just_pressed(KeyCode::F6) {
+        let pads: Vec<u32> = sim.game.level().attractors.iter().map(|a| a.id).collect();
+        for id in pads {
+            sim.game.activate_attractor(id);
+        }
+        info!("attractor pads activated");
     }
     if keys.just_pressed(KeyCode::F9) {
         toggle_recording(&mut sim.game);
@@ -322,6 +560,9 @@ fn gather_input(
     if keys.just_pressed(KeyCode::Space) {
         pending.jump = true;
     }
+    if keys.just_pressed(KeyCode::KeyE) || keys.just_pressed(KeyCode::Enter) {
+        pending.use_key = true;
+    }
     if !mouse.pressed(MouseButton::Left) {
         pending.grapple_armed = true;
     }
@@ -359,16 +600,36 @@ fn fixed_tick(
         jump_pressed: std::mem::take(&mut pending.jump),
         jump_held: keys.pressed(KeyCode::Space),
         grapple_held: pending.grapple_armed && mouse.pressed(MouseButton::Left),
+        sprint_held: keys.pressed(KeyCode::ShiftLeft),
+        power_jump_held: mouse.pressed(MouseButton::Right),
+        use_pressed: std::mem::take(&mut pending.use_key),
     };
     let before = sim.game.player().position;
+    let eye_before = sim.game.eye_position();
     if let Some(report) = sim.game.tick(&input) {
         sim.prev_position = before;
         sim.curr_position = sim.game.player().position;
+        sim.prev_eye = eye_before;
+        sim.curr_eye = sim.game.eye_position();
         if report.respawned {
             sim.snap_interpolation();
         }
         if let Some(id) = report.checkpoint_activated {
             info!("checkpoint {id} activated");
+        }
+        if let Some(landing) = report.events.landing
+            && landing.hard
+        {
+            info!("hard landing at {:.0} uu/s", landing.velocity_z);
+        }
+        if report.events.use_requested {
+            info!("use (story mode): the original interacts through the fire button");
+        }
+        for event in report.world.iter() {
+            info!("world: {event:?}");
+        }
+        if let Some(fire) = report.events.gun.fire {
+            info!("grapple fire: {fire:?}");
         }
     }
 }
@@ -386,38 +647,44 @@ fn sync_camera(
     let params = sim.game.params();
     let player = sim.game.player();
     let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
-    let centre = sim.prev_position.lerp(sim.curr_position, alpha);
-    let eye = centre + sim_glam::Vec3::Z * params.camera.eye_height.value;
+    let eye = sim.prev_eye.lerp(sim.curr_eye, alpha);
     let max_pitch = params.camera.max_pitch_degrees.value.to_radians();
     let yaw = player.yaw + pending.look_yaw;
     let pitch = (player.pitch + pending.look_pitch).clamp(-max_pitch, max_pitch);
     transform.translation = to_render(eye);
     transform.rotation = bevy_quat(ue_view_to_bevy_rotation(yaw, pitch));
 
-    // The FOV parameter is horizontal (UE3 convention, TENTATIVE for ASAMU);
-    // Bevy's perspective FOV is vertical.
+    // The FOV is horizontal (UE3 convention); Bevy's perspective FOV is
+    // vertical. The story-mode zoom changes the run-time FOV.
     if let Projection::Perspective(perspective) = projection.as_mut() {
         let aspect = (window.width() / window.height().max(1.0)).max(0.1);
-        let horizontal = params.camera.fov_degrees.value.to_radians();
+        let horizontal = sim.game.fov().to_radians();
         perspective.fov = 2.0 * ((horizontal * 0.5).tan() / aspect).atan();
     }
 }
 
 fn draw_gizmos(sim: Res<Sim>, fixed: Res<Time<Fixed>>, mut gizmos: Gizmos) {
     let game = &sim.game;
-    let params = game.params();
     let player = game.player();
     let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
     let centre = sim.prev_position.lerp(sim.curr_position, alpha);
-    let eye = centre + sim_glam::Vec3::Z * params.camera.eye_height.value;
+    let eye = sim.prev_eye.lerp(sim.curr_eye, alpha);
 
-    if let GrappleState::Attached {
+    let hand = eye - sim_glam::Vec3::Z * ROPE_HAND_DOWN_UU
+        + ue_right_flat(player.yaw) * ROPE_HAND_RIGHT_UU;
+    if let Some(anchor) = player.script.gun.anchor() {
+        // The original grapple: a beam, no rope.
+        gizmos.line(
+            to_render(hand),
+            to_render(anchor),
+            Color::srgb(0.2, 0.6, 1.0),
+        );
+        gizmos.sphere(to_render(anchor), 0.12, Color::srgb(0.3, 0.7, 1.0));
+    } else if let GrappleState::Attached {
         anchor,
         rope_length,
     } = player.grapple
     {
-        let hand = eye - sim_glam::Vec3::Z * ROPE_HAND_DOWN_UU
-            + ue_right_flat(player.yaw) * ROPE_HAND_RIGHT_UU;
         let taut = centre.distance(anchor) >= rope_length - 1.0;
         let color = if taut {
             Color::srgb(0.15, 0.1, 0.05)
@@ -426,6 +693,15 @@ fn draw_gizmos(sim: Res<Sim>, fixed: Res<Time<Fixed>>, mut gizmos: Gizmos) {
         };
         gizmos.line(to_render(hand), to_render(anchor), color);
         gizmos.sphere(to_render(anchor), 0.12, Color::srgb(1.0, 0.3, 0.1));
+    } else if let Some(aim) = game.gun_aim() {
+        if aim.impact.hit.is_some() {
+            let color = if aim.acceptable {
+                Color::srgb(0.1, 0.9, 0.2)
+            } else {
+                Color::srgb(0.9, 0.1, 0.1)
+            };
+            gizmos.sphere(to_render(aim.impact.location), 0.1, color);
+        }
     } else {
         match game.aim() {
             Aim::Grappleable { point, .. } => {
@@ -436,6 +712,33 @@ fn draw_gizmos(sim: Res<Sim>, fixed: Res<Time<Fixed>>, mut gizmos: Gizmos) {
             }
             Aim::OutOfRange => {}
         }
+    }
+
+    // Crystal charge (outline), attractor pads.
+    let level = game.level();
+    for c in &level.crystals {
+        let charged = game.objects().crystal_charged(level, c.id);
+        let size = bevy_vec(ue_extents_to_bevy(
+            sim_glam::Vec3::splat(c.half_extent * 2.2),
+            SCALE,
+        ));
+        let color = if charged {
+            Color::srgb(0.2, 1.0, 0.4)
+        } else {
+            Color::srgb(0.4, 0.4, 0.4)
+        };
+        gizmos.cube(
+            Transform::from_translation(to_render(c.center)).with_scale(size),
+            color,
+        );
+    }
+    for (a, state) in level.attractors.iter().zip(&game.objects().attractors) {
+        let color = if state.active {
+            Color::srgb(1.0, 0.2, 0.2)
+        } else {
+            Color::srgb(0.5, 0.2, 0.2)
+        };
+        gizmos.sphere(to_render(a.position), 0.4, color);
     }
 
     for c in &game.level().checkpoints {
@@ -461,17 +764,56 @@ fn update_hud(
     let game = &sim.game;
     let player = game.player();
     let speed = player.speed();
-    let grapple = match player.grapple {
-        GrappleState::Idle => "idle".to_owned(),
-        GrappleState::Attached { rope_length, .. } => {
-            format!("attached (rope {rope_length:.0} uu)")
+    let gun = &player.script.gun;
+    let grapple = if game.params().gun.is_some() {
+        let state = match gun.anchor() {
+            Some(_) => format!("attached (d {:.0} uu)", gun.distance),
+            None => "idle".to_owned(),
+        };
+        let capacity = if gun.max_grapples >= 32_767 {
+            "unlimited".to_owned()
+        } else {
+            gun.max_grapples.to_string()
+        };
+        format!(
+            "{state} | used {}/{capacity} | latch {} | weapon {:?}",
+            gun.times_grappled,
+            if gun.can_grapple { "open" } else { "closed" },
+            gun.weapon
+        )
+    } else {
+        match player.grapple {
+            GrappleState::Idle => "placeholder rope: idle".to_owned(),
+            GrappleState::Attached { rope_length, .. } => {
+                format!("placeholder rope: attached (rope {rope_length:.0} uu)")
+            }
         }
     };
-    let aim = game.aim();
-    let aim_text = match aim {
-        Aim::Grappleable { distance, .. } => format!("target {distance:.0} uu"),
-        Aim::Blocked { distance, .. } => format!("not grapple-able ({distance:.0} uu)"),
-        Aim::OutOfRange => "nothing in range".to_owned(),
+    let aim_text = match game.gun_aim() {
+        Some(aim) => match aim.impact.hit {
+            Some(_) if aim.acceptable => format!("target {:.0} uu", aim.distance),
+            Some(_) => format!("no grapple ({:.0} uu)", aim.distance),
+            None => "nothing hit".to_owned(),
+        },
+        None => match game.aim() {
+            Aim::Grappleable { distance, .. } => format!("target {distance:.0} uu"),
+            Aim::Blocked { distance, .. } => format!("not grapple-able ({distance:.0} uu)"),
+            Aim::OutOfRange => "nothing in range".to_owned(),
+        },
+    };
+    let boots = &player.script.boots;
+    let boots_text = if !boots.spawned {
+        "none".to_owned()
+    } else if !boots.enabled {
+        "disabled".to_owned()
+    } else {
+        match boots.state {
+            BootsStateName::Ready => "ready".to_owned(),
+            BootsStateName::Boosting => format!("boosting ({:.2} s)", boots.tau),
+            BootsStateName::Unavailable | BootsStateName::UnavailableAndPlayedSound => {
+                "used (land to re-arm)".to_owned()
+            }
+        }
     };
     let state = match game.state() {
         GameState::Boot => "click to play",
@@ -481,24 +823,74 @@ fn update_hud(
     let checkpoint = game
         .active_checkpoint()
         .map_or_else(|| "none".to_owned(), |id| id.to_string());
+    let script = &player.script;
+    let pawn_line = if script.started {
+        let mode = match script.code.state {
+            PawnStateName::StoryState => "story",
+            PawnStateName::Zooming => "story (zoom)",
+            _ => {
+                if script.sprint.active {
+                    "sprint"
+                } else {
+                    "walk"
+                }
+            }
+        };
+        format!(
+            "pawn {:?} | {mode} | GroundSpeed {:.0} | AirControl {:.2} | power jump {:?}{} | \
+             move lock {} | eye {:.1} | FOV {:.1}",
+            script.code.state,
+            script.ground_speed,
+            script.air_control,
+            script.power_jump.state,
+            if script.power_jump.charged {
+                " (charged)"
+            } else {
+                ""
+            },
+            script.move_input_lock,
+            script.eye_height,
+            script.fov,
+        )
+    } else {
+        "pawn script layer off (placeholder parameters)".to_owned()
+    };
     hud.0 = format!(
-        "{BANNER}\n\
-         speed {speed:.0} uu/s ({:.1} m/s presentation) | horizontal {:.0} uu/s | grounded {}\n\
-         grapple {grapple} | aim: {aim_text}\n\
+        "{}\n\
+         speed {speed:.0} uu/s ({:.1} m/s presentation) | horizontal {:.0} uu/s | {}\n\
+         {pawn_line}\n\
+         grapple {grapple} | aim: {aim_text} | rocket boots {boots_text}\n\
          tick {} @ {:.0} Hz | checkpoint {checkpoint} | respawns {} | {state}{}\n\
-         WASD move | mouse look | Space jump | hold LMB grapple | R respawn | F9 record trace | Esc release mouse",
+         WASD move | mouse look | Space jump (air: rocket boost) | LShift sprint | LMB grapple | hold RMB power jump / zoom | \
+         E use | F7/R respawn | debug: F2 story mode, F3 grapple capacity, F4 boots, F6 attractor, F9 record trace | Esc release mouse",
+        sim.banner,
         uu_per_s_to_presentation_m_per_s(speed),
         player.horizontal_speed(),
-        if player.grounded { "yes" } else { "no" },
+        if player.pawn.flying {
+            "flying (grapple)"
+        } else if player.grounded {
+            "walking"
+        } else {
+            "falling"
+        },
         game.clock().tick(),
         game.clock().tick_rate_hz(),
         game.respawn_count(),
         if game.is_recording() { " | REC" } else { "" },
     );
     let mut color = crosshair.into_inner();
-    color.0 = match aim {
-        Aim::Grappleable { .. } => Color::srgb(0.2, 1.0, 0.3),
-        Aim::Blocked { .. } => Color::srgb(1.0, 0.4, 0.4),
-        Aim::OutOfRange => Color::WHITE,
+    color.0 = if game.params().gun.is_some() {
+        // The original HUD crosshair state (GRAPPLE.md G-TG-2).
+        if game.crosshair() {
+            Color::srgb(0.2, 1.0, 0.3)
+        } else {
+            Color::WHITE
+        }
+    } else {
+        match game.aim() {
+            Aim::Grappleable { .. } => Color::srgb(0.2, 1.0, 0.3),
+            Aim::Blocked { .. } => Color::srgb(1.0, 0.4, 0.4),
+            Aim::OutOfRange => Color::WHITE,
+        }
     };
 }

@@ -29,7 +29,20 @@
 //!   magnitudes), the state is left exactly as it was and
 //!   [`StepEvents::non_finite_rejected`] is set.
 //!
-//! Order of operations within a tick:
+//! # Raw physics vs the ASAMU script layer
+//!
+//! When [`PlayerParams::pawn`] is `Some` (the original parameter set,
+//! [`PlayerParams::asamu_original`]), a tick runs the ASAMU script layer
+//! around the movement model ([`crate::pawn`], whose module docs give the
+//! order: input events → map actors → controller → pawn state code →
+//! physics with `Landed` → eye height → power-jump actor → rocket boots →
+//! grapple gun), with the original grapple ([`crate::grapple_gun`]). The
+//! input events form the first half of the tick ([`begin_step`]) and the
+//! rest the second ([`finish_step`]), so a caller can tick map-placed actors
+//! in between, as the original does ([`PendingStep`]). When it
+//! is `None` (the placeholder set) the tick runs the raw physics below with
+//! the placeholder rope grapple ([`crate::grapple`]), unchanged from before
+//! the script layer existed:
 //!
 //! 1. Sanitize input; apply look deltas (yaw wrapped to `[-π, π)`, pitch
 //!    clamped to `±max_pitch_degrees`).
@@ -51,10 +64,14 @@ use asamu_core::rotator::wrap_radians;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::events::EventLog;
 use crate::grapple::{self, GrappleEvent, GrappleState};
+use crate::grapple_gun::GunEvents;
 use crate::input::InputFrame;
 use crate::movement::{LocomotionIntent, MovementModel, PlaceholderMovement};
 use crate::params::PlayerParams;
+use crate::pawn::{LandingOutcome, PawnScript, PowerJumpEvent};
+use crate::rocket_boots::BootsEvent;
 use crate::ue3_movement::PawnPhysicsState;
 use crate::world::CollisionWorld;
 
@@ -71,7 +88,9 @@ pub struct PlayerState {
     pub pitch: f32,
     /// Standing on a walkable floor.
     pub grounded: bool,
-    /// Grapple state.
+    /// State of the placeholder **rope** grapple (raw pipeline only; the
+    /// original grapple of the script layer is [`PawnScript::gun`]). Use
+    /// [`Self::grapple_anchor`] to ask "attached, and where?" for either.
     pub grapple: GrappleState,
     /// Grapple button level on the previous tick (press-edge detection).
     pub grapple_was_held: bool,
@@ -82,6 +101,12 @@ pub struct PlayerState {
     /// from the default (unbased) value.
     #[serde(default)]
     pub pawn: PawnPhysicsState,
+    /// Run-time state of the ASAMU script layer ([`crate::pawn`]): speeds,
+    /// sprint, script state, eye height and bob, FOV, power jump. Unused
+    /// (`started == false`) without pawn parameters. Not part of the trace
+    /// format.
+    #[serde(default)]
+    pub script: PawnScript,
 }
 
 impl PlayerState {
@@ -99,6 +124,32 @@ impl PlayerState {
     #[must_use]
     pub fn view_direction(&self) -> Vec3 {
         ue_view_direction(self.yaw, self.pitch)
+    }
+
+    /// Unit aim direction of the script layer during a tick: the camera's
+    /// cached point-of-view rotation ([`PawnScript::pov_yaw`], the view as
+    /// the previous tick ended; GRAPPLE.md G-TG-1). Without the script layer
+    /// it is [`Self::view_direction`].
+    #[must_use]
+    pub fn aim_direction(&self) -> Vec3 {
+        if self.script.started {
+            ue_view_direction(self.script.pov_yaw, self.script.pov_pitch)
+        } else {
+            self.view_direction()
+        }
+    }
+
+    /// The grapple anchor while attached: the original grapple gun's
+    /// ([`PawnScript::gun`]) or the placeholder rope's ([`Self::grapple`]).
+    #[must_use]
+    pub fn grapple_anchor(&self) -> Option<Vec3> {
+        self.script.gun.anchor().or(self.grapple.anchor())
+    }
+
+    /// `true` while either grapple is attached.
+    #[must_use]
+    pub fn is_grapple_attached(&self) -> bool {
+        self.grapple_anchor().is_some()
     }
 
     /// Speed, UU/s.
@@ -129,6 +180,30 @@ impl PlayerState {
             && self.pitch.is_finite()
             && self.pawn.floor.is_finite()
             && grapple_ok
+            && self.script.is_finite()
+    }
+
+    /// The view (camera) location, UU: `position + (0, 0, EyeHeight) +
+    /// WalkBob` with the script layer's run-time eye height and bob
+    /// (ABILITIES.md A-CM-1), else `position + camera.eye_height`.
+    #[must_use]
+    pub fn view_location(&self, params: &PlayerParams) -> Vec3 {
+        if self.script.started {
+            self.position + self.script.view_offset()
+        } else {
+            self.position + Vec3::Z * params.camera.eye_height.value
+        }
+    }
+
+    /// The horizontal FOV in degrees: the script layer's run-time FOV (the
+    /// story-mode zoom changes it), else `camera.fov_degrees`.
+    #[must_use]
+    pub fn fov(&self, params: &PlayerParams) -> f32 {
+        if self.script.started {
+            self.script.fov
+        } else {
+            params.camera.fov_degrees.value
+        }
     }
 }
 
@@ -153,7 +228,8 @@ pub struct StepEvents {
     /// tick, airborne at the end), e.g. walked off a ledge or was lifted by
     /// the grapple.
     pub left_ground: bool,
-    /// Grapple attach / miss / release.
+    /// Placeholder rope grapple attach / miss / release (raw pipeline; the
+    /// original grapple reports in [`Self::gun`]).
     pub grapple: Option<GrappleEvent>,
     /// Geometry blocked the rope's positional correction this tick.
     pub rope_correction_blocked: bool,
@@ -162,6 +238,26 @@ pub struct StepEvents {
     /// The incoming state was non-finite, or the step would have produced a
     /// non-finite state; the state was left unchanged.
     pub non_finite_rejected: bool,
+    /// The script layer's `Landed` reaction (first landing of the tick).
+    #[serde(default)]
+    pub landing: Option<LandingOutcome>,
+    /// A power-jump event.
+    #[serde(default)]
+    pub power_jump: Option<PowerJumpEvent>,
+    /// `use` was pressed in story mode (interact with usable actors).
+    #[serde(default)]
+    pub use_requested: bool,
+    /// Original grapple gun: fire outcome, attach, release
+    /// ([`crate::grapple_gun`]).
+    #[serde(default)]
+    pub gun: GunEvents,
+    /// Rocket-boots event ([`crate::rocket_boots`]).
+    #[serde(default)]
+    pub boots: Option<BootsEvent>,
+    /// Kismet-visible events and grapple handler calls, in order
+    /// ([`crate::events`]).
+    #[serde(default)]
+    pub kismet: EventLog,
 }
 
 /// Builds the locomotion intent from sanitized input and the view yaw.
@@ -178,8 +274,8 @@ pub fn locomotion_intent(input: &InputFrame, yaw: f32) -> LocomotionIntent {
     }
 }
 
-/// Advances `state` by one tick of `dt` seconds with the default
-/// ([`PlaceholderMovement`]) locomotion model.
+/// Advances `state` by one tick of `dt` seconds with the
+/// [`PlaceholderMovement`] locomotion model.
 ///
 /// A non-finite or non-positive `dt` leaves the state untouched; see the
 /// module docs for the other guards. `params` are expected to pass
@@ -195,7 +291,8 @@ pub fn step<W: CollisionWorld + ?Sized>(
     step_with(&PlaceholderMovement, state, input, params, world, dt)
 }
 
-/// [`step`] with an explicit locomotion model.
+/// [`step`] with an explicit locomotion model: [`begin_step`] and
+/// [`finish_step`] with the same world.
 pub fn step_with<M: MovementModel, W: CollisionWorld + ?Sized>(
     model: &M,
     state: &mut PlayerState,
@@ -204,51 +301,147 @@ pub fn step_with<M: MovementModel, W: CollisionWorld + ?Sized>(
     world: &W,
     dt: f32,
 ) -> StepEvents {
-    let mut events = StepEvents::default();
+    let pending = begin_step(state, input, params, world, dt);
+    finish_step(model, state, pending, params, world)
+}
+
+/// What [`finish_step`] does with a [`PendingStep`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingMode {
+    /// Invalid `dt`: nothing happens.
+    NoOp,
+    /// Non-finite incoming state: rejected, nothing changes.
+    Rejected,
+    /// The tick runs.
+    Run,
+}
+
+/// A tick whose input events have run ([`begin_step`]) and whose actor
+/// ticks are still to come ([`finish_step`]).
+///
+/// The original processes key events before any actor ticks (GRAPPLE.md
+/// G-IN-5 / G-TM-2): the fire trace of a press sees the map-placed actors
+/// (movers, recharge crystals) where the previous frame left them, and
+/// handler calls made by the attach (`Grappled`) reach those actors before
+/// their own tick. A caller that simulates map actors (`asamu-game`) ticks
+/// them between the two calls and hands [`finish_step`] the updated world;
+/// [`step_with`] uses one world for both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[must_use = "a pending step must be finished with `finish_step`"]
+pub struct PendingStep {
+    /// The state before the tick (restored when the tick would produce a
+    /// non-finite state).
+    before: PlayerState,
+    /// The sanitized input.
+    input: InputFrame,
+    /// The (clamped) tick length.
+    dt: f32,
+    /// Events raised by the input events.
+    events: StepEvents,
+    /// What happens next.
+    mode: PendingMode,
+}
+
+impl PendingStep {
+    /// Events raised so far (by the input events: fire, attach and its
+    /// handler calls, boost key, power-jump key-up, `use`).
+    #[must_use]
+    pub fn events(&self) -> &StepEvents {
+        &self.events
+    }
+
+    /// The tick length the step simulates, `None` when the step does
+    /// nothing (invalid `dt` or a rejected non-finite state).
+    #[must_use]
+    pub fn dt(&self) -> Option<f32> {
+        (self.mode == PendingMode::Run).then_some(self.dt)
+    }
+}
+
+/// First half of a tick: validates `dt` and the state, sanitizes the input
+/// and runs the input events (sprint, jump, rocket-boost key, power-jump
+/// key, `use`, fire) against `input_world` — with the script layer only;
+/// the raw pipeline does everything in [`finish_step`]. See [`PendingStep`].
+pub fn begin_step<W: CollisionWorld + ?Sized>(
+    state: &mut PlayerState,
+    input: &InputFrame,
+    params: &PlayerParams,
+    input_world: &W,
+    dt: f32,
+) -> PendingStep {
+    let mut pending = PendingStep {
+        before: *state,
+        input: input.sanitized(),
+        dt: 0.0,
+        events: StepEvents::default(),
+        mode: PendingMode::NoOp,
+    };
     if !(dt.is_finite() && dt > 0.0) {
-        return events;
+        return pending;
     }
     if !state.is_finite() {
-        events.non_finite_rejected = true;
-        return events;
+        pending.events.non_finite_rejected = true;
+        pending.mode = PendingMode::Rejected;
+        return pending;
     }
-    let dt = if dt > MAX_STEP_DT {
-        events.dt_clamped = true;
+    pending.dt = if dt > MAX_STEP_DT {
+        pending.events.dt_clamped = true;
         MAX_STEP_DT
     } else {
         dt
     };
-    let before = *state;
-    let input = input.sanitized();
+    pending.mode = PendingMode::Run;
+    if let Some(pawn) = &params.pawn {
+        crate::pawn::scripted_input_events(
+            state,
+            &pending.input,
+            params,
+            pawn,
+            input_world,
+            &mut pending.events,
+        );
+    }
+    pending
+}
 
-    // 1. Look. (`max`/`min` instead of `clamp`: `f32::clamp` panics on NaN or
-    // inverted bounds, which invalid parameters could produce.)
-    let max_pitch = params.camera.max_pitch_degrees.value.to_radians();
-    state.yaw = wrap_radians(state.yaw + input.look_yaw_delta);
-    state.pitch = (state.pitch + input.look_pitch_delta)
-        .max(-max_pitch)
-        .min(max_pitch);
-
-    // 2. Grapple input.
-    events.grapple = grapple::handle_input(state, input.grapple_held, params, world);
-
-    // 3-4. Locomotion with grapple pull.
-    let intent = locomotion_intent(&input, state.yaw);
-    let pull = grapple::pull_acceleration(state, params);
-    model.advance(
-        state,
-        &intent,
-        pull,
-        &params.movement,
-        world,
+/// Second half of a tick (see [`PendingStep`]): map-actor effects on the
+/// player, controller, pawn physics, power jump, rocket boots, grapple gun —
+/// against `world`. Returns all events of the tick (those of the input
+/// events first). If the tick would leave a non-finite state, the state
+/// before [`begin_step`] is restored and only `non_finite_rejected` (and
+/// `dt_clamped`) are reported.
+pub fn finish_step<M: MovementModel, W: CollisionWorld + ?Sized>(
+    model: &M,
+    state: &mut PlayerState,
+    pending: PendingStep,
+    params: &PlayerParams,
+    world: &W,
+) -> StepEvents {
+    let PendingStep {
+        before,
+        input,
         dt,
-        &mut events,
-    );
+        mut events,
+        mode,
+    } = pending;
+    if mode != PendingMode::Run {
+        return events;
+    }
 
-    // 5. Rope constraint and speed cap.
-    let rope = grapple::enforce_rope(state, params, world);
-    events.rope_correction_blocked = rope.correction_blocked;
-    grapple::apply_speed_cap(state, params);
+    if let Some(pawn) = &params.pawn {
+        crate::pawn::scripted_actor_ticks(
+            model,
+            state,
+            &input,
+            params,
+            pawn,
+            world,
+            dt,
+            &mut events,
+        );
+    } else {
+        raw_tick(model, state, &input, params, world, dt, &mut events);
+    }
 
     // 6. Report the net grounded transition.
     if before.grounded == state.grounded {
@@ -271,6 +464,38 @@ pub fn step_with<M: MovementModel, W: CollisionWorld + ?Sized>(
         };
     }
     events
+}
+
+/// Steps 1-5 of the raw pipeline (module docs).
+fn raw_tick<M: MovementModel, W: CollisionWorld + ?Sized>(
+    model: &M,
+    state: &mut PlayerState,
+    input: &InputFrame,
+    params: &PlayerParams,
+    world: &W,
+    dt: f32,
+    events: &mut StepEvents,
+) {
+    // 1. Look. (`max`/`min` instead of `clamp`: `f32::clamp` panics on NaN or
+    // inverted bounds, which invalid parameters could produce.)
+    let max_pitch = params.camera.max_pitch_degrees.value.to_radians();
+    state.yaw = wrap_radians(state.yaw + input.look_yaw_delta);
+    state.pitch = (state.pitch + input.look_pitch_delta)
+        .max(-max_pitch)
+        .min(max_pitch);
+
+    // 2. Grapple input.
+    events.grapple = grapple::handle_input(state, input.grapple_held, params, world);
+
+    // 3-4. Locomotion with grapple pull.
+    let intent = locomotion_intent(input, state.yaw);
+    let pull = grapple::pull_acceleration(state, params);
+    model.advance(state, &intent, pull, &params.movement, world, dt, events);
+
+    // 5. Rope constraint and speed cap.
+    let rope = grapple::enforce_rope(state, params, world);
+    events.rope_correction_blocked = rope.correction_blocked;
+    grapple::apply_speed_cap(state, params);
 }
 
 #[cfg(test)]

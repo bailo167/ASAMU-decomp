@@ -75,6 +75,7 @@ fn random_inputs(rng: &mut SplitMix64, n: usize) -> Vec<InputFrame> {
             jump_pressed: rng.chance(0.05),
             jump_held: rng.chance(0.3),
             grapple_held: grapple,
+            ..InputFrame::default()
         };
         // Occasionally hostile values; the simulation must sanitize them.
         if rng.chance(0.01) {

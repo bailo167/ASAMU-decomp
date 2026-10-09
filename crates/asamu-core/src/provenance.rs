@@ -26,6 +26,15 @@ pub enum Provenance {
         /// Default property name.
         property: String,
     },
+    /// A literal constant or rule of the original's compiled UnrealScript
+    /// (bytecode, or the shipped script read locally — never reproduced in
+    /// this repository), as opposed to a class default property.
+    ScriptCode {
+        /// Script class, e.g. `asamu.ASAMUPawn`.
+        class: String,
+        /// Function, event or state (code label) holding the constant.
+        function: String,
+    },
     /// A constant or behaviour found in native code of the original executable.
     NativeCode {
         /// Symbol (function or data) in which it was found.
@@ -64,6 +73,7 @@ impl Provenance {
         match self {
             Self::Placeholder { .. } => "placeholder",
             Self::ScriptDefault { .. } => "script_default",
+            Self::ScriptCode { .. } => "script_code",
             Self::NativeCode { .. } => "native_code",
             Self::Config { .. } => "config",
             Self::MeasuredTrace { .. } => "measured_trace",
@@ -78,6 +88,7 @@ impl core::fmt::Display for Provenance {
             Self::ScriptDefault { class, property } => {
                 write!(f, "script default {class}.{property}")
             }
+            Self::ScriptCode { class, function } => write!(f, "script code {class}.{function}"),
             Self::NativeCode { symbol } => write!(f, "native code {symbol}"),
             Self::Config { file, key } => write!(f, "config {file} {key}"),
             Self::MeasuredTrace { trace_id } => write!(f, "measured trace {trace_id}"),
@@ -171,6 +182,10 @@ mod tests {
                 class: "C".into(),
                 property: "P".into(),
             },
+            Provenance::ScriptCode {
+                class: "C".into(),
+                function: "F".into(),
+            },
             Provenance::NativeCode { symbol: "S".into() },
             Provenance::Config {
                 file: "F.ini".into(),
@@ -186,6 +201,7 @@ mod tests {
             "{json}"
         );
         assert!(json.contains(r#""kind":"script_default""#));
+        assert!(json.contains(r#""kind":"script_code","class":"C","function":"F""#));
         assert!(json.contains(r#""kind":"native_code""#));
         assert!(json.contains(r#""kind":"config""#));
         assert!(json.contains(r#""kind":"measured_trace""#));
@@ -197,6 +213,7 @@ mod tests {
             [
                 "placeholder",
                 "script_default",
+                "script_code",
                 "native_code",
                 "config",
                 "measured_trace"

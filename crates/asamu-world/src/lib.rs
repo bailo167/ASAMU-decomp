@@ -1,10 +1,13 @@
-//! Runtime world representation: levels, checkpoints, grapple points.
+//! Runtime world representation: levels, checkpoints, grapple points,
+//! grapple-reactive objects and the ability state a level sets.
 //!
-//! This crate holds plain data (no Bevy, no UE3 parsing). Levels converted
-//! from the user's original install will eventually be produced by the
-//! importer into this form; today the only level is
-//! [`graybox_test_level`], which is **hand-made test geometry, not original
-//! content**.
+//! This crate holds plain data (no Bevy, no UE3 parsing) plus the run-time
+//! state machines of map-placed gameplay actors ([`objects`]: recharge
+//! crystals, glow flowers, movers, interactables, attractor pads) and the
+//! per-level ability state ([`abilities`]). Levels converted from the
+//! user's original install will eventually be produced by the importer into
+//! this form; today the only level is [`graybox_test_level`], which is
+//! **hand-made test geometry, not original content**.
 //!
 //! Conventions: UE3 axes (X forward, Y right, Z up), distances in Unreal
 //! units (UU), yaw in radians (UE3 convention, + turns right).
@@ -12,6 +15,80 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod abilities;
+pub mod objects;
+
+pub use abilities::{KismetAbilityActions, LevelAbilities, ORIGINAL_ABILITY_ACTIONS};
+pub use objects::{
+    Attractor, GlowFlower, Interactable, Mover, MoverPath, ObjectEvent, RechargeCrystal,
+    WorldEvent, WorldObjects,
+};
+
+/// UE3 actor `Tag` values the gameplay script tests (GRAPPLE.md §5,
+/// ABILITIES.md §5). The tag `NotGrappleAble` is `grapple_able == false`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceTag {
+    /// No tag the script tests.
+    #[default]
+    None,
+    /// `TopOnlyGrappleAble`.
+    TopOnlyGrappleAble,
+    /// `BottomOnlyGrappleAble`.
+    BottomOnlyGrappleAble,
+    /// `grappleInteractable`.
+    GrappleInteractable,
+    /// `NotLandable`.
+    NotLandable,
+}
+
+/// What a static box stands for in the original.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoxKind {
+    /// A `StaticMeshActor` (has a static-mesh component; the HUD crosshair
+    /// reacts to it).
+    #[default]
+    StaticMesh,
+    /// Level geometry without a static-mesh component (BSP).
+    WorldGeometry,
+}
+
+/// What a collision primitive belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveKind {
+    /// BSP-like level geometry.
+    WorldGeometry,
+    /// A static mesh (static boxes and grapple points).
+    StaticMesh,
+    /// A mover (`InterpActor`).
+    Mover,
+    /// A recharge crystal.
+    RechargeCrystal,
+    /// A glow flower.
+    GlowFlower,
+    /// A story-mode interactable.
+    Interactable,
+}
+
+/// One collision box with what the gameplay script sees of it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CollisionPrimitive {
+    /// Minimum corner, UU (movers: at their current position).
+    pub min: Vec3,
+    /// Maximum corner, UU.
+    pub max: Vec3,
+    /// `false` = the tag `NotGrappleAble`.
+    pub grapple_able: bool,
+    /// The actor's tag.
+    pub tag: SurfaceTag,
+    /// What it belongs to.
+    pub kind: PrimitiveKind,
+    /// Actor id of tracked objects.
+    pub actor: Option<u32>,
+}
 
 /// Where a level came from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,14 +110,21 @@ pub struct StaticBox {
     pub min: Vec3,
     /// Maximum corner, UU.
     pub max: Vec3,
-    /// Whether the grapple can attach to it.
+    /// Whether the grapple can attach to it (`false` = tag
+    /// `NotGrappleAble`).
     pub grapple_able: bool,
     /// Human-readable label (debugging / rendering).
     pub label: String,
+    /// The actor's tag (besides `NotGrappleAble`).
+    #[serde(default)]
+    pub tag: SurfaceTag,
+    /// What the box stands for.
+    #[serde(default)]
+    pub kind: BoxKind,
 }
 
 impl StaticBox {
-    /// A box from two corners in any order.
+    /// A static-mesh box from two corners in any order, without a tag.
     #[must_use]
     pub fn new(a: Vec3, b: Vec3, grapple_able: bool, label: impl Into<String>) -> Self {
         Self {
@@ -48,7 +132,16 @@ impl StaticBox {
             max: a.max(b),
             grapple_able,
             label: label.into(),
+            tag: SurfaceTag::None,
+            kind: BoxKind::StaticMesh,
         }
+    }
+
+    /// The same box with `tag` (builder style).
+    #[must_use]
+    pub fn with_tag(mut self, tag: SurfaceTag) -> Self {
+        self.tag = tag;
+        self
     }
 }
 
@@ -112,6 +205,25 @@ pub struct Level {
     /// maps use it for falls is TENTATIVE. For converted levels the value
     /// will come from the map; for the graybox it is hand-picked.)
     pub kill_z: f32,
+    /// Recharge crystals.
+    #[serde(default)]
+    pub crystals: Vec<RechargeCrystal>,
+    /// Glow flowers.
+    #[serde(default)]
+    pub flowers: Vec<GlowFlower>,
+    /// Movers.
+    #[serde(default)]
+    pub movers: Vec<Mover>,
+    /// Story-mode interactables.
+    #[serde(default)]
+    pub interactables: Vec<Interactable>,
+    /// Attractor pads.
+    #[serde(default)]
+    pub attractors: Vec<Attractor>,
+    /// Ability state applied at level start (the original's Kismet
+    /// actions; see [`abilities`]).
+    #[serde(default)]
+    pub abilities: LevelAbilities,
 }
 
 /// Level validation errors.
@@ -143,6 +255,17 @@ pub enum LevelError {
     SpawnBelowKillZ {
         /// Which spawn.
         what: String,
+    },
+    /// Two level objects share an actor id.
+    #[error("duplicate object id {0}")]
+    DuplicateObjectId(u32),
+    /// A level object has an invalid value.
+    #[error("object {id}: {what}")]
+    BadObject {
+        /// Actor id.
+        id: u32,
+        /// What is wrong.
+        what: &'static str,
     },
 }
 
@@ -205,6 +328,64 @@ impl Level {
             }
             check_spawn(&c.spawn, what)?;
         }
+        self.validate_objects()
+    }
+
+    fn validate_objects(&self) -> Result<(), LevelError> {
+        let bad = |id: u32, what: &'static str| Err(LevelError::BadObject { id, what });
+        let mut ids: Vec<u32> = Vec::new();
+        let mut claim = |id: u32| -> Result<(), LevelError> {
+            if ids.contains(&id) {
+                return Err(LevelError::DuplicateObjectId(id));
+            }
+            ids.push(id);
+            Ok(())
+        };
+        for c in &self.crystals {
+            claim(c.id)?;
+            if !(finite3(c.center) && c.half_extent.is_finite() && c.half_extent > 0.0) {
+                return bad(c.id, "crystal needs a finite centre and half_extent > 0");
+            }
+            if !(c.recharge_delay.is_finite() && c.recharge_delay >= 0.0) {
+                return bad(c.id, "recharge_delay must be finite and >= 0");
+            }
+        }
+        for f in &self.flowers {
+            claim(f.id)?;
+            if !(finite3(f.center) && f.half_extent.is_finite() && f.half_extent > 0.0) {
+                return bad(f.id, "flower needs a finite centre and half_extent > 0");
+            }
+        }
+        for m in &self.movers {
+            claim(m.id)?;
+            if !(finite3(m.min) && finite3(m.max) && m.min.cmplt(m.max).all()) {
+                return bad(m.id, "mover box must be finite with min < max");
+            }
+            let MoverPath::PingPong { offset, period } = m.path;
+            if !(finite3(offset) && period.is_finite() && period > 0.0) {
+                return bad(m.id, "mover path needs a finite offset and period > 0");
+            }
+        }
+        for i in &self.interactables {
+            claim(i.id)?;
+            if !(finite3(i.min) && finite3(i.max) && i.min.cmplt(i.max).all()) {
+                return bad(i.id, "interactable box must be finite with min < max");
+            }
+        }
+        for a in &self.attractors {
+            claim(a.id)?;
+            let finite = finite3(a.position)
+                && a.range.is_finite()
+                && a.strength.is_finite()
+                && a.velocity_base_amount.is_finite()
+                && a.attract_duration.is_finite();
+            if !(finite && a.attract_duration > 0.0) {
+                return bad(
+                    a.id,
+                    "attractor values must be finite with attract_duration > 0",
+                );
+            }
+        }
         Ok(())
     }
 
@@ -212,6 +393,96 @@ impl Level {
     #[must_use]
     pub fn checkpoint_index_at(&self, p: Vec3) -> Option<usize> {
         self.checkpoints.iter().position(|c| c.contains(p))
+    }
+
+    /// Every collision box with its surface, in a stable order: static
+    /// boxes, grapple points, movers (at their current offset in `objects`,
+    /// or at rest), crystals, flowers, interactables.
+    #[must_use]
+    pub fn collision_primitives(&self, objects: Option<&WorldObjects>) -> Vec<CollisionPrimitive> {
+        let mut out = Vec::new();
+        for b in &self.static_boxes {
+            out.push(CollisionPrimitive {
+                min: b.min,
+                max: b.max,
+                grapple_able: b.grapple_able,
+                tag: b.tag,
+                kind: match b.kind {
+                    BoxKind::StaticMesh => PrimitiveKind::StaticMesh,
+                    BoxKind::WorldGeometry => PrimitiveKind::WorldGeometry,
+                },
+                actor: None,
+            });
+        }
+        for g in &self.grapple_points {
+            let h = Vec3::splat(g.half_extent);
+            out.push(CollisionPrimitive {
+                min: g.position - h,
+                max: g.position + h,
+                grapple_able: true,
+                tag: SurfaceTag::None,
+                kind: PrimitiveKind::StaticMesh,
+                actor: None,
+            });
+        }
+        for (i, m) in self.movers.iter().enumerate() {
+            let offset = objects
+                .and_then(|o| o.mover_offsets.get(i))
+                .copied()
+                .unwrap_or(Vec3::ZERO);
+            out.push(CollisionPrimitive {
+                min: m.min + offset,
+                max: m.max + offset,
+                grapple_able: true,
+                tag: SurfaceTag::None,
+                kind: PrimitiveKind::Mover,
+                actor: Some(m.id),
+            });
+        }
+        let cube = |c: Vec3, h: f32| (c - Vec3::splat(h), c + Vec3::splat(h));
+        for c in &self.crystals {
+            let (min, max) = cube(c.center, c.half_extent);
+            out.push(CollisionPrimitive {
+                min,
+                max,
+                grapple_able: true,
+                tag: SurfaceTag::None,
+                kind: PrimitiveKind::RechargeCrystal,
+                actor: Some(c.id),
+            });
+        }
+        for f in &self.flowers {
+            let (min, max) = cube(f.center, f.half_extent);
+            out.push(CollisionPrimitive {
+                min,
+                max,
+                grapple_able: true,
+                tag: SurfaceTag::None,
+                kind: PrimitiveKind::GlowFlower,
+                actor: Some(f.id),
+            });
+        }
+        for i in &self.interactables {
+            out.push(CollisionPrimitive {
+                min: i.min,
+                max: i.max,
+                grapple_able: true,
+                tag: SurfaceTag::None,
+                kind: PrimitiveKind::Interactable,
+                actor: Some(i.id),
+            });
+        }
+        out
+    }
+
+    /// Current location of the mover `id` (rest centre plus its offset in
+    /// `objects`).
+    #[must_use]
+    pub fn mover_location(&self, objects: &WorldObjects, id: u32) -> Option<Vec3> {
+        let i = self.movers.iter().position(|m| m.id == id)?;
+        let m = self.movers.get(i)?;
+        let offset = objects.mover_offsets.get(i).copied().unwrap_or(Vec3::ZERO);
+        Some((m.min + m.max) * 0.5 + offset)
     }
 
     /// The axis-aligned boxes for collision: static boxes followed by one cube
@@ -233,12 +504,18 @@ impl Level {
 
 /// A small hand-made graybox level for the first gameplay slice.
 ///
-/// **Not original content.** Dimensions are in UU and were chosen by us so the
-/// placeholder movement/grapple can cross it: a start platform with low steps
-/// and a guard wall, a gap with one grapple hook leading to a lower platform
-/// (checkpoint 1), a second gap under a grapple-able beam and two hooks leading
-/// to a final platform (checkpoint 2), and an off-path non-grapple-able
-/// pillar for "miss" feedback.
+/// **Not original content.** Dimensions are in UU and were chosen by us: a
+/// start platform with low steps and a guard wall, a gap with one grapple
+/// hook leading to a lower platform (checkpoint 1), a second gap under a
+/// grapple-able beam and two hooks leading to a final platform (checkpoint
+/// 2), and an off-path non-grapple-able pillar for "miss" feedback. North of
+/// the start platform (off the main path) a playground holds one of each
+/// grapple-reactive object: a recharge crystal, a glow flower, a moving
+/// block on our own back-and-forth path, a `NotLandable` pad, a story-mode
+/// interactable on the platform and an (inactive until activated)
+/// attractor pad hovering over the start platform. Abilities:
+/// [`LevelAbilities::graybox_test`] (everything on, 3 grapples) — a test
+/// configuration.
 #[must_use]
 pub fn graybox_test_level() -> Level {
     let v = Vec3::new;
@@ -285,6 +562,13 @@ pub fn graybox_test_level() -> Level {
                 false,
                 "final platform",
             ),
+            StaticBox::new(
+                v(900.0, 1000.0, -120.0),
+                v(1100.0, 1200.0, -100.0),
+                true,
+                "NotLandable pad",
+            )
+            .with_tag(SurfaceTag::NotLandable),
         ],
         grapple_points: vec![
             GrapplePoint {
@@ -325,6 +609,39 @@ pub fn graybox_test_level() -> Level {
             },
         ],
         kill_z: -1500.0,
+        crystals: vec![RechargeCrystal {
+            id: 101,
+            center: v(300.0, 1300.0, 350.0),
+            half_extent: 30.0,
+            recharge_delay: objects::CRYSTAL_DEFAULT_RECHARGE_DELAY,
+            should_recharge: true,
+            parent_crystal: false,
+            linked_parent: None,
+        }],
+        flowers: vec![GlowFlower {
+            id: 201,
+            center: v(-300.0, 1300.0, 300.0),
+            half_extent: 25.0,
+        }],
+        movers: vec![Mover {
+            id: 301,
+            min: v(-60.0, 2000.0, 540.0),
+            max: v(60.0, 2120.0, 660.0),
+            path: MoverPath::PingPong {
+                offset: v(800.0, 0.0, 0.0),
+                period: 4.0,
+            },
+            label: "moving block (our test path)".into(),
+        }],
+        interactables: vec![Interactable {
+            id: 401,
+            min: v(-580.0, 280.0, 0.0),
+            max: v(-520.0, 340.0, 60.0),
+            max_interact_times: objects::INTERACTABLE_DEFAULT_MAX_INTERACT_TIMES,
+            label: "story interactable".into(),
+        }],
+        attractors: vec![Attractor::as_placed(501, v(0.0, 0.0, 150.0))],
+        abilities: LevelAbilities::graybox_test(),
     }
 }
 

@@ -31,6 +31,19 @@
 //!
 //! Iteration order over boxes is the `Vec` order and ties keep the earlier
 //! candidate, so results are deterministic.
+//!
+//! # Surfaces (what the gameplay script sees of the hit actor)
+//!
+//! Every hit carries the [`Surface`] of the primitive it hit: the UE3 actor
+//! class the primitive stands for ([`ActorClass`]), the actor's `Tag`
+//! ([`ActorTag`]) and an optional actor id. The grapple gun and the landing
+//! handler read these (GRAPPLE.md §5/§12, ABILITIES.md §5). The tag
+//! `NotGrappleAble` is the `grapple_able == false` flag that every primitive
+//! already carries (an actor has a single tag in UE3, so a primitive that is
+//! not grapple-able cannot also carry one of the other tags in the original;
+//! this representation is a superset). [`CollisionWorld::actor_location`]
+//! reports where a tracked actor currently is, so the grapple anchor can ride
+//! moving targets (GRAPPLE.md G-AT-7/8).
 
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -56,6 +69,138 @@ pub struct CollisionShape {
     pub half_height: f32,
 }
 
+/// UE3 actor `Tag` values that the gameplay script tests (GRAPPLE.md §2 and
+/// §5, ABILITIES.md §5). A UE3 actor has exactly one tag; the tag
+/// `NotGrappleAble` is represented by `grapple_able == false` (module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorTag {
+    /// No tag the script tests.
+    #[default]
+    None,
+    /// `TopOnlyGrappleAble` (`GrappleGun.topOnlyGrappleTag`): the grapple only
+    /// attaches to faces whose normal Z is at least `TOP_GRAPPLE_ANGLE`
+    /// (G-AC-4).
+    TopOnlyGrappleAble,
+    /// `BottomOnlyGrappleAble` (`GrappleGun.bottomOnlyGrappleTag`): only faces
+    /// whose normal Z is at most `-BOTTOM_GRAPPLE_ANGLE` (G-AC-4).
+    BottomOnlyGrappleAble,
+    /// `grappleInteractable` (`GrappleGun.grappleInteractableTag`): the gun
+    /// reports the actor as the Kismet originator of the grapple (G-AT-3, §14).
+    GrappleInteractable,
+    /// `NotLandable`: a landing on this actor skips the pawn's whole script
+    /// landing handler (ABILITIES.md §5, G-CT-4).
+    NotLandable,
+}
+
+/// The UE3 actor class a collision primitive stands for, as far as the
+/// gameplay script distinguishes classes (GRAPPLE.md §1, §5, §6, §12).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "class", rename_all = "snake_case")]
+pub enum ActorClass {
+    /// Level geometry without a static-mesh component (BSP brushes; the hit
+    /// actor is the level's `WorldInfo`).
+    #[default]
+    WorldGeometry,
+    /// A `StaticMeshActor` (static, has a static-mesh component).
+    StaticMesh,
+    /// An `InterpActor` (mover): the grapple anchor follows it (G-AT-7).
+    InterpActor,
+    /// `ASAMURechargeCrystal` (`InterpActor`; grapple-able, release-instant,
+    /// no decal). `charged` is the crystal's state when the surface was
+    /// built (state `Charged`, G-WO-1).
+    RechargeCrystal {
+        /// The crystal is in its `Charged` state.
+        charged: bool,
+    },
+    /// `ASAMUGlowFlower` (`InterpActor`; grapple-able, release-instant, no
+    /// decal; G-WO-2).
+    GlowFlower,
+    /// `ASAMUFallingRock` (`InterpActor`; grapple-able; G-WO-3).
+    FallingRock,
+    /// `ASAMUFallingWhenGrappledRock` (`InterpActor`; grapple-able; G-WO-4).
+    FallingWhenGrappledRock,
+    /// `ASAMUFloatingRock` (`DynamicSMActor`; ordinary target, the anchor
+    /// does **not** follow it; G-WO-5).
+    FloatingRock,
+    /// `ASAMUInteractable_Actor` (`DynamicSMActor`; story-mode interaction
+    /// target, G-AC-0).
+    Interactable,
+}
+
+impl ActorClass {
+    /// The hit component is a static-mesh component (the crosshair rule of
+    /// G-TG-2 ignores other components).
+    #[must_use]
+    pub fn has_static_mesh_component(self) -> bool {
+        !matches!(self, Self::WorldGeometry)
+    }
+
+    /// The class implements `ASAMUGrappleAbleInterface` (its `Grappled` /
+    /// `UnGrappled` handlers run, G-AT-3, G-RL-1).
+    #[must_use]
+    pub fn grapple_able_interface(self) -> bool {
+        matches!(
+            self,
+            Self::RechargeCrystal { .. }
+                | Self::GlowFlower
+                | Self::FallingRock
+                | Self::FallingWhenGrappledRock
+        )
+    }
+
+    /// The class implements `ASAMUReleaseGrappleInstantInterface` (G-RL-3).
+    #[must_use]
+    pub fn release_instant(self) -> bool {
+        matches!(self, Self::RechargeCrystal { .. } | Self::GlowFlower)
+    }
+
+    /// The class implements `ASAMUDoesNotAcceptGrappleDecal` (cosmetic).
+    #[must_use]
+    pub fn rejects_decal(self) -> bool {
+        matches!(self, Self::RechargeCrystal { .. } | Self::GlowFlower)
+    }
+
+    /// The class derives from `InterpActor`, so the grapple anchor follows
+    /// the actor (G-AT-7).
+    #[must_use]
+    pub fn is_interp_actor(self) -> bool {
+        matches!(
+            self,
+            Self::InterpActor
+                | Self::RechargeCrystal { .. }
+                | Self::GlowFlower
+                | Self::FallingRock
+                | Self::FallingWhenGrappledRock
+        )
+    }
+}
+
+/// What the gameplay script sees of the actor a primitive belongs to (see
+/// the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Surface {
+    /// Id of the actor, when the world tracks it (movers, crystals,
+    /// interactables); `None` for static geometry.
+    #[serde(default)]
+    pub actor: Option<u32>,
+    /// The actor's class.
+    #[serde(default)]
+    pub class: ActorClass,
+    /// The actor's tag.
+    #[serde(default)]
+    pub tag: ActorTag,
+}
+
+/// Where a tracked actor currently is ([`CollisionWorld::actor_location`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActorLocation {
+    /// Actor id (as in [`Surface::actor`]).
+    pub id: u32,
+    /// Current location, UU.
+    pub location: Vec3,
+}
+
 /// A sweep or ray contact.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Hit {
@@ -67,10 +212,14 @@ pub struct Hit {
     pub position: Vec3,
     /// Unit surface normal pointing towards the mover.
     pub normal: Vec3,
-    /// Whether the surface accepts the grapple.
+    /// Whether the surface accepts the grapple (`false` = the actor tag
+    /// `NotGrappleAble`).
     pub grapple_able: bool,
     /// The sweep/ray started inside the surface.
     pub start_penetrating: bool,
+    /// Class, tag and id of the hit actor.
+    #[serde(default)]
+    pub surface: Surface,
 }
 
 /// Geometry queries the simulation needs. Implementations must be
@@ -83,6 +232,13 @@ pub trait CollisionWorld {
     /// Casts a ray from `origin` along `direction` (normalized internally) up
     /// to `max_distance` and returns the first contact, if any.
     fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<Hit>;
+
+    /// Current location of the tracked actor `id` (movers), if the world
+    /// knows it. The default knows no actors.
+    fn actor_location(&self, id: u32) -> Option<Vec3> {
+        let _ = id;
+        None
+    }
 }
 
 /// An axis-aligned bounding box.
@@ -140,6 +296,9 @@ pub struct SolidBox {
     pub bounds: Aabb,
     /// Whether the grapple can attach to this box.
     pub grapple_able: bool,
+    /// The actor the box belongs to.
+    #[serde(default)]
+    pub surface: Surface,
 }
 
 /// An infinite horizontal ground plane (solid below `z`).
@@ -158,6 +317,10 @@ pub struct BoxWorld {
     pub ground: Option<GroundPlane>,
     /// Solid boxes.
     pub boxes: Vec<SolidBox>,
+    /// Current locations of tracked actors (movers), for
+    /// [`CollisionWorld::actor_location`].
+    #[serde(default)]
+    pub actors: Vec<ActorLocation>,
 }
 
 /// A candidate contact from one primitive.
@@ -423,8 +586,35 @@ impl BoxWorld {
         self.boxes.push(SolidBox {
             bounds: Aabb::from_corners(a, b),
             grapple_able,
+            surface: Surface::default(),
         });
         self
+    }
+
+    /// Adds a box belonging to the actor described by `surface` (builder
+    /// style).
+    #[must_use]
+    pub fn with_surface_box(
+        mut self,
+        a: Vec3,
+        b: Vec3,
+        grapple_able: bool,
+        surface: Surface,
+    ) -> Self {
+        self.boxes.push(SolidBox {
+            bounds: Aabb::from_corners(a, b),
+            grapple_able,
+            surface,
+        });
+        self
+    }
+
+    /// Records (or updates) the location of the tracked actor `id`.
+    pub fn set_actor_location(&mut self, id: u32, location: Vec3) {
+        match self.actors.iter_mut().find(|a| a.id == id) {
+            Some(a) => a.location = location,
+            None => self.actors.push(ActorLocation { id, location }),
+        }
     }
 
     /// `true` if the shape centred at `position` overlaps any solid
@@ -560,6 +750,10 @@ impl SlopeWorld {
 }
 
 impl CollisionWorld for SlopeWorld {
+    fn actor_location(&self, id: u32) -> Option<Vec3> {
+        self.boxes.actor_location(id)
+    }
+
     fn sweep_capsule(&self, start: Vec3, end: Vec3, shape: CollisionShape) -> Option<Hit> {
         let d = end - start;
         let length = d.length();
@@ -572,7 +766,7 @@ impl CollisionWorld for SlopeWorld {
                 .cast(start, d, h.support(shape))
                 .and_then(|c| blocking(c, d))
             {
-                let hit = make_hit(start, d, length, c, h.grapple_able);
+                let hit = make_hit(start, d, length, c, (h.grapple_able, Surface::default()));
                 if best.is_none_or(|b| hit.time < b.time) {
                     best = Some(hit);
                 }
@@ -593,7 +787,13 @@ impl CollisionWorld for SlopeWorld {
         let d = dir * max_distance;
         for h in &self.half_spaces {
             if let Some(c) = h.cast(origin, d, 0.0) {
-                let hit = make_hit(origin, d, max_distance, c, h.grapple_able);
+                let hit = make_hit(
+                    origin,
+                    d,
+                    max_distance,
+                    c,
+                    (h.grapple_able, Surface::default()),
+                );
                 if best.is_none_or(|b| hit.time < b.time) {
                     best = Some(hit);
                 }
@@ -603,7 +803,13 @@ impl CollisionWorld for SlopeWorld {
     }
 }
 
-fn make_hit(origin: Vec3, d: Vec3, length: f32, c: Candidate, grapple_able: bool) -> Hit {
+fn make_hit(
+    origin: Vec3,
+    d: Vec3,
+    length: f32,
+    c: Candidate,
+    (grapple_able, surface): (bool, Surface),
+) -> Hit {
     let t = c.t.clamp(0.0, 1.0);
     Hit {
         time: t,
@@ -612,20 +818,25 @@ fn make_hit(origin: Vec3, d: Vec3, length: f32, c: Candidate, grapple_able: bool
         normal: c.normal,
         grapple_able,
         start_penetrating: c.inside,
+        surface,
     }
 }
 
 impl CollisionWorld for BoxWorld {
+    fn actor_location(&self, id: u32) -> Option<Vec3> {
+        self.actors.iter().find(|a| a.id == id).map(|a| a.location)
+    }
+
     fn sweep_capsule(&self, start: Vec3, end: Vec3, shape: CollisionShape) -> Option<Hit> {
         let d = end - start;
         let length = d.length();
         if !(length.is_finite() && start.is_finite()) || length < MIN_MOVE {
             return None;
         }
-        let mut best: Option<(Candidate, bool)> = None;
-        let mut consider = |c: Candidate, grapple_able: bool| {
+        let mut best: Option<(Candidate, (bool, Surface))> = None;
+        let mut consider = |c: Candidate, info: (bool, Surface)| {
             if best.is_none_or(|(b, _)| c.t < b.t) {
-                best = Some((c, grapple_able));
+                best = Some((c, info));
             }
         };
         if let Some(g) = self.ground {
@@ -639,7 +850,7 @@ impl CollisionWorld for BoxWorld {
                             depth: surface - start.z,
                             inside: true,
                         },
-                        g.grapple_able,
+                        (g.grapple_able, Surface::default()),
                     );
                 }
             } else if d.z < 0.0 {
@@ -652,17 +863,17 @@ impl CollisionWorld for BoxWorld {
                             depth: 0.0,
                             inside: false,
                         },
-                        g.grapple_able,
+                        (g.grapple_able, Surface::default()),
                     );
                 }
             }
         }
         for b in &self.boxes {
             if let Some(c) = sweep_vs_box(start, d, &b.bounds, shape).and_then(|c| blocking(c, d)) {
-                consider(c, b.grapple_able);
+                consider(c, (b.grapple_able, b.surface));
             }
         }
-        best.map(|(c, g)| make_hit(start, d, length, c, g))
+        best.map(|(c, info)| make_hit(start, d, length, c, info))
     }
 
     fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<Hit> {
@@ -676,10 +887,10 @@ impl CollisionWorld for BoxWorld {
             return None;
         }
         let d = dir * max_distance;
-        let mut best: Option<(Candidate, bool)> = None;
-        let mut consider = |c: Candidate, grapple_able: bool| {
+        let mut best: Option<(Candidate, (bool, Surface))> = None;
+        let mut consider = |c: Candidate, info: (bool, Surface)| {
             if best.is_none_or(|(b, _)| c.t < b.t) {
-                best = Some((c, grapple_able));
+                best = Some((c, info));
             }
         };
         if let Some(g) = self.ground {
@@ -691,7 +902,7 @@ impl CollisionWorld for BoxWorld {
                         depth: g.z - origin.z,
                         inside: true,
                     },
-                    g.grapple_able,
+                    (g.grapple_able, Surface::default()),
                 );
             } else if d.z < 0.0 {
                 let t = (g.z - origin.z) / d.z;
@@ -703,7 +914,7 @@ impl CollisionWorld for BoxWorld {
                             depth: 0.0,
                             inside: false,
                         },
-                        g.grapple_able,
+                        (g.grapple_able, Surface::default()),
                     );
                 }
             }
@@ -711,10 +922,10 @@ impl CollisionWorld for BoxWorld {
         for b in &self.boxes {
             // A ray starting inside a solid is blocked immediately.
             if let Some(c) = ray_vs_box(origin, d, b.bounds.min, b.bounds.max) {
-                consider(c, b.grapple_able);
+                consider(c, (b.grapple_able, b.surface));
             }
         }
-        best.map(|(c, g)| make_hit(origin, d, max_distance, c, g))
+        best.map(|(c, info)| make_hit(origin, d, max_distance, c, info))
     }
 }
 

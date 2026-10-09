@@ -1,4 +1,12 @@
 //! Per-tick player input.
+//!
+//! [`InputFrame`] holds **abstract actions**, not keys: the app maps devices
+//! to them. The original's keyboard mapping (`DefaultInput.ini`,
+//! GAMEPLAY_LEADS.md "Input bindings") is: W/S/A/D → the move axes, Space →
+//! jump (press: `Jump`, release: `ReleaseJump`; also `RocketBoostKeyDown`),
+//! left shift → sprint (`StartSprinting` / `StopSprinting`), left mouse →
+//! fire (the grapple), right mouse → power jump (`PowerJumpKeyDown` /
+//! `PowerJumpKeyUp`), E or Enter → `use`.
 
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +45,18 @@ pub struct InputFrame {
     /// Grapple button is currently held (level). The simulation detects the
     /// press edge itself, so the frame does not need a separate "pressed" flag.
     pub grapple_held: bool,
+    /// Sprint button held (level; the original's `StartSprinting` on press,
+    /// `StopSprinting` on release — edges detected by the simulation).
+    #[serde(default)]
+    pub sprint_held: bool,
+    /// Power-jump button held (level; `PowerJumpKeyDown` / `PowerJumpKeyUp`
+    /// edges detected by the simulation). In story mode it zooms.
+    #[serde(default)]
+    pub power_jump_held: bool,
+    /// `use` was pressed (edge) since the previous tick (only does something
+    /// in story mode).
+    #[serde(default)]
+    pub use_pressed: bool,
 }
 
 impl InputFrame {
@@ -61,6 +81,9 @@ impl InputFrame {
             jump_pressed: self.jump_pressed,
             jump_held: self.jump_held,
             grapple_held: self.grapple_held,
+            sprint_held: self.sprint_held,
+            power_jump_held: self.power_jump_held,
+            use_pressed: self.use_pressed,
         }
     }
 
@@ -88,6 +111,9 @@ mod tests {
             jump_pressed: true,
             jump_held: true,
             grapple_held: true,
+            sprint_held: true,
+            power_jump_held: true,
+            use_pressed: true,
         };
         assert!(!f.is_finite());
         let s = f.sanitized();
@@ -97,6 +123,7 @@ mod tests {
         assert_eq!(s.look_yaw_delta, 0.0);
         assert_eq!(s.look_pitch_delta, -0.5);
         assert!(s.jump_pressed && s.jump_held && s.grapple_held);
+        assert!(s.sprint_held && s.power_jump_held && s.use_pressed);
     }
 
     #[test]
@@ -109,10 +136,17 @@ mod tests {
             jump_pressed: false,
             jump_held: false,
             grapple_held: true,
+            sprint_held: true,
+            power_jump_held: false,
+            use_pressed: true,
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: InputFrame = serde_json::from_str(&json).unwrap();
         assert_eq!(back, f);
+        // Frames written before the action fields existed still parse.
+        let old = r#"{"move_forward":0.0,"move_right":0.0,"look_yaw_delta":0.0,"look_pitch_delta":0.0,"jump_pressed":false,"grapple_held":false}"#;
+        let back: InputFrame = serde_json::from_str(old).unwrap();
+        assert_eq!(back, InputFrame::default());
         assert!(serde_json::from_str::<InputFrame>(&json.replace("}", r#","bogus":1}"#)).is_err());
     }
 }

@@ -89,6 +89,7 @@ fn walking_at(position: Vec3, floor: Vec3, based: bool, force: bool) -> PlayerSt
         floor,
         based,
         force_floor_check: force,
+        ..PawnPhysicsState::default()
     };
     s
 }
@@ -856,6 +857,7 @@ impl CollisionWorld for GarbageWorld {
             normal,
             grapple_able: false,
             start_penetrating: (r >> 40).is_multiple_of(3),
+            surface: asamu_player::world::Surface::default(),
         })
     }
 
@@ -1145,4 +1147,131 @@ fn walking_into_an_obtuse_corner_follows_the_second_wall() {
     );
     assert!(p.y > p0.y + 5.0, "{p}");
     assert!(s.grounded && (p.z - p0.z).abs() < 1e-3);
+}
+
+// ---------------------------------------------------------------------------
+// physFlying (GRAPPLE.md G-PH-3): the mode the grapple uses.
+// ---------------------------------------------------------------------------
+
+fn flying(position: Vec3, velocity: Vec3) -> PlayerState {
+    let mut s = airborne(position, velocity);
+    s.pawn.flying = true;
+    s
+}
+
+#[test]
+fn flying_is_one_update_with_fluid_drag_the_air_speed_cap_and_no_gravity() {
+    // G-PH-3 steps 1–4, 6: one update per tick even for long frames (no
+    // sub-steps), V·(1 − F·dt)² with F = 0.5 × FluidFriction, the 3-D cap at
+    // AirSpeed (here the class default 440 through `ClassDefaults`), no
+    // gravity, velocity re-derived from the displacement.
+    let params = PlayerParams::asamu_original();
+    let world = BoxWorld::new();
+    let f = 0.5 * f64::from(params.movement.fluid_friction.value);
+    for dt in [DT, 0.2] {
+        let v0 = Vec3::new(300.0, -100.0, 50.0);
+        let mut s = flying(Vec3::new(0.0, 0.0, 500.0), v0);
+        let (_, stats) = tick(&mut s, no_input(), &params, &world, dt);
+        assert_modes(&stats, &[(PhysicsMode::Flying, dt)]);
+        assert_accounting(&stats, dt);
+        let k = (1.0 - f * f64::from(dt)).powi(2);
+        let expected = d(v0) * k;
+        assert!(
+            (d(s.velocity) - expected).length() < 1e-3,
+            "{dt}: {} vs {expected}",
+            s.velocity
+        );
+        assert!(s.pawn.flying && !s.grounded);
+        let moved = d(s.position) - DVec3::new(0.0, 0.0, 500.0);
+        assert!(
+            (moved - expected * f64::from(dt)).length() < 1e-2,
+            "{moved}"
+        );
+    }
+    // The cap: 3000 uu/s is cut to AirSpeed.
+    let mut s = flying(Vec3::new(0.0, 0.0, 500.0), Vec3::new(0.0, 3000.0, 0.0));
+    tick(&mut s, no_input(), &params, &world, DT);
+    close(
+        f64::from(s.speed()),
+        f64::from(params.movement.air_speed.value),
+        1e-2,
+        "cap",
+    );
+}
+
+#[test]
+fn flying_never_lands_and_slides_along_floors_and_walls() {
+    // G-PH-3 step 5: a blocking hit slides along the surface; velocity into
+    // it is lost; there is no landing while flying.
+    let params = PlayerParams::asamu_original();
+    let world = BoxWorld::new().with_ground(0.0, false);
+    let z = hh(&params) + 1.0;
+    let mut s = flying(Vec3::new(0.0, 0.0, z), Vec3::new(300.0, 0.0, -300.0));
+    for _ in 0..10 {
+        let (e, _) = tick(&mut s, no_input(), &params, &world, DT);
+        assert!(e.landed.is_none());
+        assert!(s.pawn.flying && !s.grounded);
+    }
+    assert!(s.position.z >= hh(&params) - 1e-3);
+    assert!(
+        s.velocity.z.abs() < 1e-2,
+        "velocity into the floor lost: {}",
+        s.velocity
+    );
+    assert!(s.velocity.x > 250.0, "slides along: {}", s.velocity);
+}
+
+#[test]
+fn flying_steps_up_only_near_vertical_walls_while_moving_roughly_horizontally() {
+    // G-PH-3 step 5: |N.z| < 0.2 and −0.2 < (0,0,−1)·unit(V) < 0.5 → stepUp
+    // with the rest of the move; the gained height is left out of the
+    // re-derived velocity. Moving steeply down (u ≥ 0.5) → slide instead.
+    let params = PlayerParams::asamu_original();
+    let world = BoxWorld::new().with_box(
+        Vec3::new(50.0, -500.0, -1000.0),
+        Vec3::new(150.0, 500.0, 0.0),
+        false,
+    );
+    // Centre 10 uu below the ledge top (within MaxStepHeight + 2), moving
+    // horizontally at the class-default AirSpeed cap into the wall.
+    let z0 = hh(&params) - 10.0;
+    let mut s = flying(Vec3::new(25.0, 0.0, z0), Vec3::new(440.0, 0.0, 0.0));
+    tick(&mut s, no_input(), &params, &world, DT);
+    assert!(
+        s.position.z > z0 + 5.0,
+        "raised onto the ledge: {}",
+        s.position
+    );
+    assert!(
+        s.position.x > 50.0 - radius(&params),
+        "moved on over it: {}",
+        s.position
+    );
+    assert!(
+        s.velocity.z.abs() < 1.0,
+        "step height excluded from V: {}",
+        s.velocity
+    );
+    // Steep downward motion into the same wall (u ≥ 0.5): no step-up, a
+    // slide down the wall.
+    let mut steep = flying(Vec3::new(25.0, 0.0, z0), Vec3::new(200.0, 0.0, -380.0));
+    tick(&mut steep, no_input(), &params, &world, DT);
+    assert!(steep.position.z < z0, "no step up: {}", steep.position);
+    assert!(
+        steep.position.x < 50.0 - radius(&params) + 0.01,
+        "{}",
+        steep.position
+    );
+}
+
+#[test]
+fn flying_walking_falling_mode_comes_from_the_flying_flag() {
+    // A flying pawn with `grounded` set (inconsistent input) still flies.
+    let params = PlayerParams::asamu_original();
+    let world = BoxWorld::new();
+    let mut s = flying(Vec3::new(0.0, 0.0, 500.0), Vec3::new(0.0, 0.0, 0.0));
+    s.grounded = true;
+    let (_, stats) = tick(&mut s, no_input(), &params, &world, DT);
+    assert_modes(&stats, &[(PhysicsMode::Flying, DT)]);
+    assert!(!s.grounded && s.pawn.flying);
 }

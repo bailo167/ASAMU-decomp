@@ -1,11 +1,14 @@
-//! Grapple: target acquisition, attach/release, pull and rope constraint.
+//! The placeholder **rope** grapple of the debug configuration.
 //!
-//! # PLACEHOLDER behaviour
+//! # PLACEHOLDER behaviour (debug only)
 //!
-//! How the original grapple works is **UNKNOWN** (no grapple symbols exist in
-//! the native executable, so it is expected to be UnrealScript — STRONG
-//! indicator, see `docs/STATUS.md`). This module implements a simple,
-//! documented model:
+//! This is **our own** rope model, kept for the raw pipeline that runs
+//! without the ASAMU script layer ([`crate::PlayerParams::placeholder`]).
+//! The original grapple — no rope, a `10⁷/d` pull in flying physics,
+//! release below 200 uu, a grapple budget — is ported in
+//! [`crate::grapple_gun`] from `docs/reverse-engineering/GRAPPLE.md` and runs
+//! whenever the script layer does ([`crate::PlayerParams::asamu_original`]).
+//! This model is not evidence of anything about the original:
 //!
 //! - **Acquire**: on the *press edge* of the grapple button, cast a ray from the
 //!   eye along the view direction up to `max_range`. The first surface hit must
@@ -134,7 +137,7 @@ pub enum GrappleEvent {
 /// Eye position (UU) for `state`.
 #[must_use]
 pub fn eye_position(state: &PlayerState, params: &PlayerParams) -> Vec3 {
-    state.position + Vec3::Z * params.camera.eye_height.value
+    state.view_location(params)
 }
 
 /// Casts the grapple ray from the eye along the view direction.

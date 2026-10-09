@@ -32,7 +32,18 @@
 //! see `docs/reverse-engineering/NATIVE_PHYSICS.md`), parameterised by script
 //! defaults. That port is [`crate::ue3_movement::Ue3PawnMovement`], a second
 //! [`MovementModel`]; [`MovementModelKind`] selects between the two at run
-//! time. [`crate::sim::step`] still defaults to [`PlaceholderMovement`].
+//! time ([`MovementModelKind::Ue3Pawn`] is its default). The raw
+//! [`crate::sim::step`] still uses [`PlaceholderMovement`].
+//!
+//! # Script hooks
+//!
+//! The original's pawn script writes `GroundSpeed` and `AirControl` at run
+//! time (sprint, story mode, landings) and reacts to landings *inside* the
+//! native physics (`processLanded` calls the pawn's `Landed` event before the
+//! rest of the tick walks). [`MovementModel::advance_scripted`] takes those
+//! values and that event through [`PawnHooks`]; [`MovementModel::advance`]
+//! uses [`ClassDefaults`] (the parameter values, no reaction), which is
+//! bit-identical to the behaviour before the hooks existed.
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -62,6 +73,78 @@ pub struct LocomotionIntent {
     pub jump: bool,
 }
 
+/// A landing, as seen by the pawn script's `Landed` event (called by the
+/// native `processLanded` before the pawn switches to walking).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Landing {
+    /// Floor normal of the landing hit.
+    pub hit_normal: Vec3,
+    /// Velocity at the landing (after the native landing-velocity rule).
+    pub velocity: Vec3,
+    /// Collision-centre position at the landing.
+    pub location: Vec3,
+    /// The floor actor carries the tag `NotLandable` (ABILITIES.md §5), from
+    /// the landing hit's [`crate::world::Surface`]. ([`PlaceholderMovement`]
+    /// always reports `false`.)
+    pub not_landable: bool,
+}
+
+/// Run-time pawn values written by script and the script's reaction to a
+/// landing, as read by the movement model during one tick.
+pub trait PawnHooks {
+    /// Current `GroundSpeed` (walking cap; air `BoundSpeed` threshold), UU/s.
+    fn ground_speed(&self) -> f32;
+    /// Current `AirControl`.
+    fn air_control(&self) -> f32;
+    /// Current `AirSpeed` (the flying speed cap), UU/s. The grapple gun sets
+    /// it to `fGrappleAccel` (GRAPPLE.md G-PH-4).
+    fn air_speed(&self) -> f32;
+    /// The pawn's `Landed` event. Afterwards the model re-reads
+    /// [`Self::ground_speed`] and [`Self::air_control`] for the rest of the
+    /// tick.
+    fn landed(&mut self, landing: &Landing);
+}
+
+/// [`PawnHooks`] with the class defaults of [`MovementParams`] and no
+/// reaction to landings (the behaviour without a script layer).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClassDefaults {
+    /// `movement.max_ground_speed`.
+    pub ground_speed: f32,
+    /// `movement.air_control`.
+    pub air_control: f32,
+    /// `movement.air_speed`.
+    pub air_speed: f32,
+}
+
+impl ClassDefaults {
+    /// The values of `params`.
+    #[must_use]
+    pub fn new(params: &MovementParams) -> Self {
+        Self {
+            ground_speed: params.max_ground_speed.value,
+            air_control: params.air_control.value,
+            air_speed: params.air_speed.value,
+        }
+    }
+}
+
+impl PawnHooks for ClassDefaults {
+    fn ground_speed(&self) -> f32 {
+        self.ground_speed
+    }
+
+    fn air_control(&self) -> f32 {
+        self.air_control
+    }
+
+    fn air_speed(&self) -> f32 {
+        self.air_speed
+    }
+
+    fn landed(&mut self, _landing: &Landing) {}
+}
+
 /// A locomotion model: integrates velocity and moves the player through the
 /// world for one tick.
 ///
@@ -69,8 +152,24 @@ pub struct LocomotionIntent {
 /// `state.grounded` and `state.pawn` (model bookkeeping), must be
 /// deterministic, and must not use global state.
 pub trait MovementModel {
-    /// Advances locomotion by `dt` seconds. `external_accel` (UU/s²) is added
-    /// on top of the model's own forces (used for the grapple pull).
+    /// Advances locomotion by `dt` seconds with run-time pawn values and the
+    /// landing reaction supplied by `hooks` (see the module docs).
+    /// `external_accel` (UU/s²) is added on top of the model's own forces
+    /// (used for the grapple pull).
+    #[allow(clippy::too_many_arguments)]
+    fn advance_scripted<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized>(
+        &self,
+        state: &mut PlayerState,
+        intent: &LocomotionIntent,
+        external_accel: Vec3,
+        params: &MovementParams,
+        hooks: &mut H,
+        world: &W,
+        dt: f32,
+        events: &mut StepEvents,
+    );
+
+    /// [`Self::advance_scripted`] with [`ClassDefaults`].
     #[allow(clippy::too_many_arguments)]
     fn advance<W: CollisionWorld + ?Sized>(
         &self,
@@ -81,7 +180,19 @@ pub trait MovementModel {
         world: &W,
         dt: f32,
         events: &mut StepEvents,
-    );
+    ) {
+        let mut hooks = ClassDefaults::new(params);
+        self.advance_scripted(
+            state,
+            intent,
+            external_accel,
+            params,
+            &mut hooks,
+            world,
+            dt,
+            events,
+        );
+    }
 }
 
 /// The documented PLACEHOLDER locomotion model (see module docs).
@@ -93,10 +204,11 @@ pub struct PlaceholderMovement;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MovementModelKind {
-    /// [`PlaceholderMovement`] (current default).
-    #[default]
+    /// [`PlaceholderMovement`] (kept for debugging).
     Placeholder,
-    /// [`Ue3PawnMovement`], the port of the original's native pawn physics.
+    /// [`Ue3PawnMovement`], the port of the original's native pawn physics
+    /// (default).
+    #[default]
     Ue3Pawn,
 }
 
@@ -112,29 +224,38 @@ impl MovementModelKind {
 }
 
 impl MovementModel for MovementModelKind {
-    fn advance<W: CollisionWorld + ?Sized>(
+    fn advance_scripted<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized>(
         &self,
         state: &mut PlayerState,
         intent: &LocomotionIntent,
         external_accel: Vec3,
         params: &MovementParams,
+        hooks: &mut H,
         world: &W,
         dt: f32,
         events: &mut StepEvents,
     ) {
         match self {
-            Self::Placeholder => PlaceholderMovement.advance(
+            Self::Placeholder => PlaceholderMovement.advance_scripted(
                 state,
                 intent,
                 external_accel,
                 params,
+                hooks,
                 world,
                 dt,
                 events,
             ),
-            Self::Ue3Pawn => {
-                Ue3PawnMovement.advance(state, intent, external_accel, params, world, dt, events)
-            }
+            Self::Ue3Pawn => Ue3PawnMovement.advance_scripted(
+                state,
+                intent,
+                external_accel,
+                params,
+                hooks,
+                world,
+                dt,
+                events,
+            ),
         }
     }
 }
@@ -306,16 +427,33 @@ pub fn place_on_floor<W: CollisionWorld + ?Sized>(
 }
 
 impl MovementModel for PlaceholderMovement {
-    fn advance<W: CollisionWorld + ?Sized>(
+    fn advance_scripted<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized>(
         &self,
         state: &mut PlayerState,
         intent: &LocomotionIntent,
         external_accel: Vec3,
         params: &MovementParams,
+        hooks: &mut H,
         world: &W,
         dt: f32,
         events: &mut StepEvents,
     ) {
+        // The placeholder has no flying model of its own: a flying pawn (only
+        // the original grapple sets it) moves with the native-physics port's
+        // `physFlying`.
+        if state.pawn.flying {
+            Ue3PawnMovement.advance_scripted(
+                state,
+                intent,
+                external_accel,
+                params,
+                hooks,
+                world,
+                dt,
+                events,
+            );
+            return;
+        }
         let shape = collision_shape(params);
         let walkable_z = params.walkable_floor_z.value;
         let was_grounded = state.grounded;
@@ -328,7 +466,7 @@ impl MovementModel for PlaceholderMovement {
             events.jumped = true;
         }
 
-        let max_speed = params.max_ground_speed.value * intent.wish_scale;
+        let max_speed = hooks.ground_speed() * intent.wish_scale;
         let has_wish = intent.wish_dir != Vec3::ZERO && max_speed > 0.0;
         if state.grounded {
             // Accelerate the horizontal velocity towards the wish velocity.
@@ -366,7 +504,7 @@ impl MovementModel for PlaceholderMovement {
                 let add = max_speed - current;
                 if add > 0.0 {
                     let accel =
-                        (params.air_control.value * params.ground_acceleration.value * dt).min(add);
+                        (hooks.air_control() * params.ground_acceleration.value * dt).min(add);
                     v += intent.wish_dir * accel;
                 }
             }
@@ -409,6 +547,14 @@ impl MovementModel for PlaceholderMovement {
 
         if state.grounded && !was_grounded {
             events.landed = Some(impact_z);
+            // The placeholder has no sub-steps: the script's landing
+            // reaction runs after the whole move.
+            hooks.landed(&Landing {
+                hit_normal: Vec3::Z,
+                velocity: Vec3::new(v.x, v.y, impact_z),
+                location: state.position,
+                not_landable: false,
+            });
         }
         if was_grounded && !state.grounded && !events.jumped {
             events.left_ground = true;

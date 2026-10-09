@@ -81,6 +81,7 @@ fn standing_on(params: &PlayerParams, floor_z: f32, x: f32, y: f32) -> PlayerSta
         floor: Vec3::Z,
         based: true,
         force_floor_check: false,
+        ..PawnPhysicsState::default()
     };
     s
 }
@@ -1031,6 +1032,7 @@ fn scripted_inputs() -> Vec<InputFrame> {
             jump_pressed: i % 37 == 0,
             jump_held: false,
             grapple_held: (200..260).contains(&(i % 400)),
+            ..InputFrame::default()
         })
         .collect()
 }
@@ -1245,6 +1247,7 @@ fn full_step_with_grapple_stays_finite() {
             jump_pressed: rng.chance(0.05),
             jump_held: false,
             grapple_held: rng.chance(0.6),
+            ..InputFrame::default()
         };
         let events = step_with(&Ue3PawnMovement, &mut s, &input, &params, &world, DT);
         assert!(!events.non_finite_rejected);
@@ -1258,7 +1261,9 @@ fn full_step_with_grapple_stays_finite() {
 
 #[test]
 fn model_kind_names_and_default() {
-    assert_eq!(MovementModelKind::default(), MovementModelKind::Placeholder);
+    // The port is the default model (asamu-game and the app use it).
+    assert_eq!(MovementModelKind::default(), MovementModelKind::Ue3Pawn);
+    assert_eq!(MovementModelKind::Placeholder.name(), "placeholder");
     assert_eq!(MovementModelKind::Ue3Pawn.name(), "ue3_pawn");
     assert_eq!(
         serde_json::to_string(&MovementModelKind::Ue3Pawn).unwrap(),
