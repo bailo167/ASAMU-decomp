@@ -5,6 +5,7 @@
 //! `scripttext`, which require an explicit `--out` path outside the repository
 //! (or under a git-ignored `research/` subdirectory such as `research/local/`).
 
+mod bytecode;
 mod kismet;
 mod map;
 mod objects;
@@ -166,6 +167,9 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Bytecode subcommands: `disasm`, `calls`, `bytecode-coverage`.
+    #[command(flatten)]
+    Bytecode(bytecode::BytecodeCmd),
 }
 
 fn main() {
@@ -227,6 +231,7 @@ fn run(cli: &Cli) -> Result<()> {
             force: *force,
             json: cli.json,
         }),
+        Cmd::Bytecode(c) => bytecode::run(c, cli.json),
     }
 }
 
