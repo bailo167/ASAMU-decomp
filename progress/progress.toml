@@ -914,24 +914,29 @@ note = "Ogg passthrough export (Bevy audio feature includes Vorbis)."
 [[category.item]]
 id = "cues"
 name = "Sound cues / attenuation"
-status = "partial"
-note = "SoundCue graphs decoded/exported; runtime cue evaluation and attenuation not implemented."
+status = "implemented"
+evidence = "apps/asamu/src/audio; docs/reverse-engineering/AUDIO.md"
+note = "Cue graph evaluator with native semantics and constants; attenuation models confirmed from the executable."
 
 [[category.item]]
 id = "narration"
 name = "Narrator / voice + subtitles"
-status = "partial"
-note = "Subtitle data per wave decoded (14 languages); narration playback/subtitle UI not implemented."
+status = "implemented"
+evidence = "apps/asamu/src/audio; docs/reverse-engineering/AUDIO.md"
+note = "Narrator queue with timed subtitles; Kismet NarratorLine via AudioCommand (app wiring pending)."
 
 [[category.item]]
 id = "music"
 name = "Music"
-status = "not_started"
+status = "partial"
+note = "Music cues play; ASAMUAdaptiveMusicManager (adaptive tracks/beat events) not ported."
 
 [[category.item]]
 id = "events"
 name = "Gameplay audio events"
-status = "not_started"
+status = "implemented"
+evidence = "apps/asamu/src/audio; docs/reverse-engineering/AUDIO.md"
+note = "Gameplay sound events mapped to the cues referenced by class defaults."
 
 # --------------------------------------------------------------------------
 # Save / Progression
