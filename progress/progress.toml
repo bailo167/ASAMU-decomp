@@ -9,7 +9,7 @@
 
 schema = 1
 title = "ASAMU-decomp — reimplementation progress"
-current_milestone = "M9"
+current_milestone = "M10"
 
 # --------------------------------------------------------------------------
 # Milestones
@@ -49,8 +49,8 @@ note = "Bytecode disassembly still pending."
 [[milestone]]
 id = "M6"
 name = "Original-data importer"
-status = "partial"
-note = "Textures, meshes and level scenes convert; materials, audio, skeletal, matinee pending."
+status = "implemented"
+note = "Textures, meshes, materials, levels, audio, matinee, skeletal/anim convert; single end-to-end command pending."
 
 [[milestone]]
 id = "M7"
@@ -67,7 +67,8 @@ note = "Grapple implemented from spec with real values; awaiting original traces
 [[milestone]]
 id = "M9"
 name = "First original level imported/playable"
-status = "not_started"
+status = "implemented"
+note = "Converted levels render in Bevy and play with original physics, grapple, collision, kill zones and checkpoints."
 
 [[milestone]]
 id = "M10"
@@ -575,12 +576,16 @@ note = "1,512/1,512 meshes consumed exactly and matched field-for-field."
 [[category.item]]
 id = "skeletal-meshes"
 name = "Skeletal meshes"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/SKELETAL.md; crates/asamu-ue3/tests/skeletal_real_data.rs"
+note = "28/28 meshes consumed exactly; independent decoder agreed."
 
 [[category.item]]
 id = "animations"
 name = "Animations"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/SKELETAL.md; crates/asamu-ue3/tests/anim_real_data.rs"
+note = "395/395 sequences, keys bit-identical to an independent decoder."
 
 [[category.item]]
 id = "materials"
@@ -785,7 +790,7 @@ note = "Kill zones + KillZ death sequence with respawn after 18 ticks at latest 
 id = "moving-platforms"
 name = "Moving platforms (interpolation)"
 status = "partial"
-note = "Movers ticked in game loop (graybox); Matinee data not decoded."
+note = "Matinee decoded with exact curve evaluation (MATINEE.md); runtime movers not yet driven by it."
 
 [[category.item]]
 id = "level-streaming"
@@ -817,27 +822,34 @@ note = "Graybox prototype: level boxes, first-person camera, input, fixed-step s
 [[category.item]]
 id = "static-mesh-render"
 name = "Static mesh rendering from converted data"
-status = "not_started"
+status = "verified"
+evidence = "apps/asamu; crates/asamu-assets"
+note = "All 12 maps: 27,665 draws match placements recomputed independently from raw scenes; AG-Workshop visually checked."
 
 [[category.item]]
 id = "materials-render"
 name = "Material approximation"
-status = "not_started"
+status = "implemented"
+evidence = "apps/asamu; crates/asamu-assets; docs/reverse-engineering/MATERIALS.md"
+note = "Approximate PBR from materials.json; neutral fallback for missing textures."
 
 [[category.item]]
 id = "lighting"
 name = "Lighting / lightmaps"
-status = "not_started"
+status = "partial"
+note = "Point/spot/directional lights mapped approximately; baked lightmaps (LightMapTexture2D) not used yet."
 
 [[category.item]]
 id = "post"
 name = "Post-processing, fog, sky"
-status = "not_started"
+status = "partial"
+note = "Sky/fog/ambient approximation only; no original post-process chain."
 
 [[category.item]]
 id = "hud"
 name = "HUD / subtitles / menus"
-status = "not_started"
+status = "partial"
+note = "Crosshair, grapple count, abilities, subtitle area; menus and Scaleform UI not replaced yet."
 
 # --------------------------------------------------------------------------
 # Audio

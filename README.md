@@ -8,9 +8,9 @@
 > This repository contains **no original copyrighted game assets, code or data**. To use it you will need your own
 > legitimate copy of *A Story About My Uncle*; the importer converts data locally from your installation.
 >
-> **Current state: pre-alpha research. Not playable.**
+> **Current state: pre-alpha. Original levels can be imported from your own copy and walked/grappled through with the original movement physics; story, menus and audio playback are not done yet.**
 
-**Current milestone:** M9 — First original level imported/playable (importer converts textures, meshes and level scenes; player runs original physics, grapple and abilities with recovered values)
+**Current milestone:** M10 — Core gameplay complete (M9: an original level imports, renders and plays with original physics and grapple)
 
 ## Progress
 
@@ -29,17 +29,17 @@
 | UnrealScript | 8 | 7 | 5 | 1 | 87% | 62% |
 | Kismet | 5 | 5 | 0 | 0 | 100% | 0% |
 | Maps | 7 | 7 | 2 | 0 | 100% | 28% |
-| Assets | 8 | 6 | 6 | 0 | 75% | 75% |
+| Assets | 8 | 8 | 8 | 0 | 100% | 100% |
 | Player | 9 | 9 | 0 | 0 | 100% | 0% |
 | Grapple | 8 | 8 | 0 | 0 | 100% | 0% |
 | World | 7 | 5 | 0 | 1 | 71% | 0% |
-| Rendering | 6 | 1 | 0 | 0 | 16% | 0% |
+| Rendering | 6 | 3 | 1 | 3 | 50% | 16% |
 | Audio | 5 | 1 | 0 | 2 | 20% | 0% |
 | Save/Progression | 5 | 2 | 0 | 3 | 40% | 0% |
 | Importer | 7 | 5 | 3 | 2 | 71% | 42% |
 | Platforms | 5 | 4 | 0 | 0 | 80% | 0% |
 | Tests | 8 | 8 | 3 | 0 | 100% | 37% |
-| **Overall** | **125** | **104** | **44** | **10** | **83%** | **35%** |
+| **Overall** | **125** | **108** | **47** | **13** | **86%** | **37%** |
 
 <!-- progress-table:end -->
 
