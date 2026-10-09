@@ -2,6 +2,19 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-10 — Session 1: Phase 5 merged (M9 reached), Phase 6 running
+
+**Done**: runtime world (triangle BVH collision, scene loading, death/checkpoints/streaming), Bevy rendering of
+converted levels (AG-Workshop visually verified; placements checked on all maps), materials (approximate PBR),
+audio decode (Ogg passthrough, cues, subtitles), Matinee (exact curve evaluation), skeletal meshes + animations.
+**M9 reached**: an original level imports, renders and plays with original physics and grapple. Tracker scope
+expanded (Kismet runtime, NPCs, worm, interactables, lightmaps, skinned render, trace capture, parity suite):
+81% complete / 36% verified of 133 items.
+
+**Running (Phase 6)**: Kismet runtime + Matinee movers, runtime audio + narration, menus + save system,
+lightmaps, NPCs/worm/interactables + skinned rendering, `asamu-import all` + release workflow + PLAYING.md +
+TRACE_CAPTURE.md.
+
 ## 2026-10-10 — Session 1 (overnight): gameplay port, importer foundations, bytecode, green CI
 
 **Done**

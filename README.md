@@ -112,10 +112,28 @@ Highlights (full evidence with confidence labels in [`docs/reverse-engineering/`
 
 ```bash
 cargo build --workspace          # all crates and tools
-cargo run -p asamu               # the (pre-alpha) Bevy shell
+cargo run -p asamu               # graybox prototype (no game data needed)
 cargo test --workspace
 cargo run -p progress-gen -- --check
 ```
+
+## Importing your copy and playing (pre-alpha)
+
+The importer reads your own Steam installation (found automatically, or set `ASAMU_ORIGINAL_DIR`) and writes
+converted data to a user-local folder (macOS: `~/Library/Application Support/asamu-decomp/converted`). Nothing
+is uploaded or shared.
+
+```bash
+cargo run --release -p asamu-import -- textures
+cargo run --release -p asamu-import -- meshes --collision
+cargo run --release -p asamu-import -- materials
+cargo run --release -p asamu-import -- levels
+cargo run --release -p asamu -- --converted "$HOME/Library/Application Support/asamu-decomp/converted" --level AG-Workshop
+```
+
+Current scope: levels render with approximate materials and lights, and play with the original movement physics,
+grapple, power jump and rocket boots, collision, kill zones and checkpoints. Story scripting, audio playback,
+menus and NPCs are in progress.
 
 See [docs/BUILDING.md](docs/BUILDING.md) for platform prerequisites.
 
