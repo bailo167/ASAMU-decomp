@@ -1,0 +1,16 @@
+[package]
+name = "repo-hygiene"
+description = "Refuse original game payloads, raw RE dumps and private paths in the public repository"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

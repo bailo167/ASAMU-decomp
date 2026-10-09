@@ -1,0 +1,861 @@
+# ASAMU-decomp progress — the canonical source of truth.
+#
+# Statuses: not_started | investigating | partial | implemented | verified | blocked
+# Definitions are in CLAUDE.md ("Progress tracking — no fake progress").
+#   * implemented / verified items MUST carry `evidence` (doc, test or tool path).
+#   * blocked items MUST carry `blocker`.
+# After editing, run `cargo run -p progress-gen` to regenerate progress.svg and
+# the README table. CI runs `cargo run -p progress-gen -- --check`.
+
+schema = 1
+title = "ASAMU-decomp — reimplementation progress"
+current_milestone = "M0"
+
+# --------------------------------------------------------------------------
+# Milestones
+# --------------------------------------------------------------------------
+
+[[milestone]]
+id = "M0"
+name = "Repository + analysis infrastructure"
+status = "partial"
+
+[[milestone]]
+id = "M1"
+name = "Original installation inventory"
+status = "not_started"
+
+[[milestone]]
+id = "M2"
+name = "Binary/symbol map"
+status = "investigating"
+
+[[milestone]]
+id = "M3"
+name = "UE3 package reader"
+status = "not_started"
+
+[[milestone]]
+id = "M4"
+name = "Import/export/object recovery"
+status = "not_started"
+
+[[milestone]]
+id = "M5"
+name = "Kismet/script structural recovery"
+status = "not_started"
+
+[[milestone]]
+id = "M6"
+name = "Original-data importer"
+status = "not_started"
+
+[[milestone]]
+id = "M7"
+name = "Rust/Bevy player controller"
+status = "not_started"
+
+[[milestone]]
+id = "M8"
+name = "Grapple behavioural parity"
+status = "not_started"
+
+[[milestone]]
+id = "M9"
+name = "First original level imported/playable"
+status = "not_started"
+
+[[milestone]]
+id = "M10"
+name = "Core gameplay complete"
+status = "not_started"
+
+[[milestone]]
+id = "M11"
+name = "Full game/story path"
+status = "not_started"
+
+[[milestone]]
+id = "M12"
+name = "Behavioural/regression parity pass"
+status = "not_started"
+
+[[milestone]]
+id = "M13"
+name = "Windows/Linux/macOS release"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Binary RE — the unstripped original Mac executable
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "binary"
+name = "Binary RE"
+
+[[category.item]]
+id = "arch-loadcmds"
+name = "Architecture, load commands, segments"
+status = "partial"
+note = "x86_64 Mach-O, 28 load commands, PIE, unsigned (codesign). Segment map not yet documented."
+
+[[category.item]]
+id = "linked-libs"
+name = "Linked frameworks and bundled middleware"
+status = "partial"
+note = "otool -L: SDL2, OpenAL, Steam API, libstdc++, Cocoa/Carbon/OpenGL/IOKit."
+
+[[category.item]]
+id = "ghidra-project"
+name = "Headless Ghidra import preserving original symbols"
+status = "not_started"
+
+[[category.item]]
+id = "native-registration"
+name = "UE3 native class registration (AutoInitializeRegistrants*)"
+status = "investigating"
+
+[[category.item]]
+id = "asamu-natives"
+name = "ASAMU-specific native code identified"
+status = "investigating"
+
+[[category.item]]
+id = "physics-paths"
+name = "Native physics paths reached by player/grapple script"
+status = "not_started"
+
+[[category.item]]
+id = "rtti-vtables"
+name = "RTTI / vtable usefulness assessed"
+status = "not_started"
+
+[[category.item]]
+id = "strings-xrefs"
+name = "String → xref → function workflow"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Symbols
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "symbols"
+name = "Symbols"
+
+[[category.item]]
+id = "census"
+name = "Symbol table census (total/defined/undefined/local)"
+status = "investigating"
+
+[[category.item]]
+id = "demangle"
+name = "C++ demangling coverage"
+status = "not_started"
+
+[[category.item]]
+id = "classifier"
+name = "Reproducible symbol classifier (tools/asamu-symbols)"
+status = "not_started"
+
+[[category.item]]
+id = "game-families"
+name = "Game-specific symbol families"
+status = "investigating"
+
+[[category.item]]
+id = "exec-thunks"
+name = "exec* native thunk inventory (script-callable natives)"
+status = "not_started"
+
+[[category.item]]
+id = "compilation-units"
+name = "Compilation-unit names (static initializers)"
+status = "investigating"
+
+[[category.item]]
+id = "package-correlation"
+name = "Symbol ↔ package export correlation"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# UE3 Packages
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "ue3"
+name = "UE3 Packages"
+
+[[category.item]]
+id = "summary"
+name = "Package summary (tag, versions, header size, folder, flags)"
+status = "investigating"
+
+[[category.item]]
+id = "version-census"
+name = "Version/licensee census across every package"
+status = "investigating"
+
+[[category.item]]
+id = "flags"
+name = "Package flag decoding for v868"
+status = "not_started"
+
+[[category.item]]
+id = "names"
+name = "Name table"
+status = "not_started"
+
+[[category.item]]
+id = "imports"
+name = "Import table"
+status = "not_started"
+
+[[category.item]]
+id = "exports"
+name = "Export table"
+status = "not_started"
+
+[[category.item]]
+id = "generations"
+name = "GUID, generations, engine/cooker versions"
+status = "not_started"
+
+[[category.item]]
+id = "summary-tail"
+name = "Summary tail (additional packages, texture allocations)"
+status = "not_started"
+
+[[category.item]]
+id = "object-refs"
+name = "Object reference (package index) resolution"
+status = "not_started"
+
+[[category.item]]
+id = "hostile-input"
+name = "Malformed-input rejection tests"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Compression
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "compression"
+name = "Compression"
+
+[[category.item]]
+id = "flag-meaning"
+name = "Meaning of CompressionFlags = 2 for this build"
+status = "investigating"
+
+[[category.item]]
+id = "chunk-table"
+name = "Package-level compressed chunk table"
+status = "not_started"
+
+[[category.item]]
+id = "block-headers"
+name = "Per-chunk block header layout"
+status = "not_started"
+
+[[category.item]]
+id = "lzo-decoder"
+name = "Bounds-checked LZO1X decompressor"
+status = "not_started"
+
+[[category.item]]
+id = "decompress-all"
+name = "Every compressed package decompresses and re-parses"
+status = "not_started"
+
+[[category.item]]
+id = "uncompressed"
+name = "Uncompressed package path"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Objects
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "objects"
+name = "Objects"
+
+[[category.item]]
+id = "class-hierarchy"
+name = "Class / super-class resolution"
+status = "not_started"
+
+[[category.item]]
+id = "property-tags"
+name = "Tagged property serialization"
+status = "not_started"
+
+[[category.item]]
+id = "defaults"
+name = "Class default objects (gameplay defaults)"
+status = "not_started"
+
+[[category.item]]
+id = "structs-enums"
+name = "Struct / enum / const definitions"
+status = "not_started"
+
+[[category.item]]
+id = "cross-package"
+name = "Cross-package import → export resolution"
+status = "not_started"
+
+[[category.item]]
+id = "object-summary"
+name = "Sanitized per-object metadata summaries"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# UnrealScript
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "script"
+name = "UnrealScript"
+
+[[category.item]]
+id = "locate-asamu"
+name = "Locate the ASAMU script package (no ASAMU.u on disk)"
+status = "investigating"
+
+[[category.item]]
+id = "class-list"
+name = "ASAMU class list and inheritance"
+status = "not_started"
+
+[[category.item]]
+id = "functions"
+name = "Functions, states, native/scripted flags"
+status = "not_started"
+
+[[category.item]]
+id = "properties"
+name = "Script properties and flags"
+status = "not_started"
+
+[[category.item]]
+id = "bytecode-presence"
+name = "Bytecode presence determined empirically"
+status = "not_started"
+
+[[category.item]]
+id = "disasm"
+name = "Minimal bytecode introspection (not bulk decompilation)"
+status = "not_started"
+
+[[category.item]]
+id = "movement-script"
+name = "Player movement logic understood"
+status = "not_started"
+
+[[category.item]]
+id = "grapple-script"
+name = "Grapple logic understood"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Kismet
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "kismet"
+name = "Kismet"
+
+[[category.item]]
+id = "sequence-objects"
+name = "Sequence object enumeration per map"
+status = "not_started"
+
+[[category.item]]
+id = "links"
+name = "Input/output/variable/event links"
+status = "not_started"
+
+[[category.item]]
+id = "custom-classes"
+name = "ASAMU-custom sequence classes"
+status = "not_started"
+
+[[category.item]]
+id = "graph-export"
+name = "Sanitized JSON/DOT graph export (local only)"
+status = "not_started"
+
+[[category.item]]
+id = "flow-summary"
+name = "Per-level flow summaries"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Maps
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "maps"
+name = "Maps"
+
+[[category.item]]
+id = "mapext"
+name = ".asamu proven to be a UE3 map package"
+status = "investigating"
+note = "Config: MapExt=asamu, +Extensions=asamu; header tag/version match. Needs World/Level export proof."
+
+[[category.item]]
+id = "map-list"
+name = "Map list and level order"
+status = "investigating"
+
+[[category.item]]
+id = "actor-census"
+name = "Actor class census per map"
+status = "not_started"
+
+[[category.item]]
+id = "player-starts"
+name = "PlayerStart / checkpoint candidates"
+status = "not_started"
+
+[[category.item]]
+id = "streaming"
+name = "Streaming levels"
+status = "not_started"
+
+[[category.item]]
+id = "volumes"
+name = "Triggers, volumes, kill zones"
+status = "not_started"
+
+[[category.item]]
+id = "loc-packages"
+name = "Per-map localization packages (_LOC_INT)"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Assets
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "assets"
+name = "Assets"
+
+[[category.item]]
+id = "textures"
+name = "Textures (Texture2D + .tfc caches)"
+status = "not_started"
+
+[[category.item]]
+id = "static-meshes"
+name = "Static meshes"
+status = "not_started"
+
+[[category.item]]
+id = "skeletal-meshes"
+name = "Skeletal meshes"
+status = "not_started"
+
+[[category.item]]
+id = "animations"
+name = "Animations"
+status = "not_started"
+
+[[category.item]]
+id = "materials"
+name = "Material parameters"
+status = "not_started"
+
+[[category.item]]
+id = "collision"
+name = "Collision geometry"
+status = "not_started"
+
+[[category.item]]
+id = "audio-assets"
+name = "Audio (SoundNodeWave)"
+status = "not_started"
+
+[[category.item]]
+id = "transforms-lights"
+name = "Level transforms and lights"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Player
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "player"
+name = "Player"
+
+[[category.item]]
+id = "sim-harness"
+name = "Deterministic fixed-step simulation harness"
+status = "not_started"
+
+[[category.item]]
+id = "ground-move"
+name = "Ground movement / acceleration"
+status = "not_started"
+
+[[category.item]]
+id = "air-control"
+name = "Air control"
+status = "not_started"
+
+[[category.item]]
+id = "jump"
+name = "Jump"
+status = "not_started"
+
+[[category.item]]
+id = "gravity"
+name = "Gravity"
+status = "not_started"
+
+[[category.item]]
+id = "collision-capsule"
+name = "Collision dimensions"
+status = "not_started"
+
+[[category.item]]
+id = "camera"
+name = "Camera"
+status = "not_started"
+
+[[category.item]]
+id = "fov"
+name = "FOV"
+status = "not_started"
+
+[[category.item]]
+id = "input-map"
+name = "Input bindings (DefaultInput.ini)"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Grapple
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "grapple"
+name = "Grapple"
+
+[[category.item]]
+id = "targeting"
+name = "Target acquisition"
+status = "not_started"
+
+[[category.item]]
+id = "range"
+name = "Grapple distance"
+status = "not_started"
+
+[[category.item]]
+id = "attach-rules"
+name = "Attachment rules"
+status = "not_started"
+
+[[category.item]]
+id = "pull"
+name = "Grapple acceleration / pull"
+status = "not_started"
+
+[[category.item]]
+id = "swing"
+name = "Constraint / swing behaviour"
+status = "not_started"
+
+[[category.item]]
+id = "release"
+name = "Release momentum"
+status = "not_started"
+
+[[category.item]]
+id = "max-speed"
+name = "Maximum speed"
+status = "not_started"
+
+[[category.item]]
+id = "abilities"
+name = "Suit ability progression / unlocks"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# World
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "world"
+name = "World"
+
+[[category.item]]
+id = "level-load"
+name = "Level loading from converted data"
+status = "not_started"
+
+[[category.item]]
+id = "triggers"
+name = "Triggers"
+status = "not_started"
+
+[[category.item]]
+id = "checkpoints"
+name = "Checkpoints"
+status = "not_started"
+
+[[category.item]]
+id = "death-reset"
+name = "Death / reset"
+status = "not_started"
+
+[[category.item]]
+id = "moving-platforms"
+name = "Moving platforms (interpolation)"
+status = "not_started"
+
+[[category.item]]
+id = "level-streaming"
+name = "Level streaming"
+status = "not_started"
+
+[[category.item]]
+id = "story-sequencing"
+name = "Story sequencing"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "rendering"
+name = "Rendering"
+
+[[category.item]]
+id = "bevy-shell"
+name = "Bevy application shell"
+status = "partial"
+note = "Window + camera only."
+
+[[category.item]]
+id = "static-mesh-render"
+name = "Static mesh rendering from converted data"
+status = "not_started"
+
+[[category.item]]
+id = "materials-render"
+name = "Material approximation"
+status = "not_started"
+
+[[category.item]]
+id = "lighting"
+name = "Lighting / lightmaps"
+status = "not_started"
+
+[[category.item]]
+id = "post"
+name = "Post-processing, fog, sky"
+status = "not_started"
+
+[[category.item]]
+id = "hud"
+name = "HUD / subtitles / menus"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Audio
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "audio"
+name = "Audio"
+
+[[category.item]]
+id = "decode"
+name = "Audio data decode (local conversion)"
+status = "not_started"
+
+[[category.item]]
+id = "cues"
+name = "Sound cues / attenuation"
+status = "not_started"
+
+[[category.item]]
+id = "narration"
+name = "Narrator / voice + subtitles"
+status = "not_started"
+
+[[category.item]]
+id = "music"
+name = "Music"
+status = "not_started"
+
+[[category.item]]
+id = "events"
+name = "Gameplay audio events"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Save / Progression
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "save"
+name = "Save/Progression"
+
+[[category.item]]
+id = "save-format"
+name = "Original save location and format"
+status = "not_started"
+
+[[category.item]]
+id = "progression"
+name = "Checkpoint / chapter progression"
+status = "not_started"
+
+[[category.item]]
+id = "settings"
+name = "System settings (UASAMUSystemSettingsManager)"
+status = "investigating"
+
+[[category.item]]
+id = "chapter-select"
+name = "Chapter select"
+status = "not_started"
+
+[[category.item]]
+id = "collectibles"
+name = "Collectibles / achievements"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Importer
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "importer"
+name = "Importer"
+
+[[category.item]]
+id = "locate"
+name = "Steam install discovery (tools/asamu-locate)"
+status = "not_started"
+
+[[category.item]]
+id = "inventory"
+name = "Install inventory (tools/asamu-inventory)"
+status = "not_started"
+
+[[category.item]]
+id = "decompress-cache"
+name = "Local decompressed package cache"
+status = "not_started"
+
+[[category.item]]
+id = "mesh-convert"
+name = "Mesh conversion"
+status = "not_started"
+
+[[category.item]]
+id = "texture-convert"
+name = "Texture conversion"
+status = "not_started"
+
+[[category.item]]
+id = "level-convert"
+name = "Level conversion"
+status = "not_started"
+
+[[category.item]]
+id = "import-cli"
+name = "asamu-import end-to-end CLI"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Platforms
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "platforms"
+name = "Platforms"
+
+[[category.item]]
+id = "linux"
+name = "Linux x86_64 build in CI"
+status = "not_started"
+
+[[category.item]]
+id = "windows"
+name = "Windows x86_64 build in CI"
+status = "not_started"
+
+[[category.item]]
+id = "macos-arm64"
+name = "macOS arm64 build in CI"
+status = "not_started"
+
+[[category.item]]
+id = "macos-x86_64"
+name = "macOS x86_64 check in CI"
+status = "not_started"
+
+[[category.item]]
+id = "release-packaging"
+name = "Release packaging"
+status = "not_started"
+
+# --------------------------------------------------------------------------
+# Tests
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "tests"
+name = "Tests"
+
+[[category.item]]
+id = "ci"
+name = "Cross-platform CI (fmt, clippy, test, progress check)"
+status = "not_started"
+
+[[category.item]]
+id = "hygiene"
+name = "Repository hygiene check (tools/repo-hygiene)"
+status = "partial"
+note = "Implemented locally; not yet run in CI."
+
+[[category.item]]
+id = "progress-check"
+name = "Progress matrix stale check"
+status = "partial"
+note = "Implemented locally; not yet run in CI."
+
+[[category.item]]
+id = "synthetic-fixtures"
+name = "Synthetic UE3 fixtures"
+status = "not_started"
+
+[[category.item]]
+id = "real-data"
+name = "Env-gated real-data tests"
+status = "not_started"
+
+[[category.item]]
+id = "fuzz"
+name = "Truncation / corruption fuzz tests"
+status = "not_started"
+
+[[category.item]]
+id = "trace-format"
+name = "Trajectory trace format"
+status = "not_started"
+
+[[category.item]]
+id = "trace-replay"
+name = "Trace replay harness"
+status = "not_started"

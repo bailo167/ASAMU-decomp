@@ -1,0 +1,18 @@
+[package]
+name = "asamu"
+description = "A Story About My Uncle — Rust/Bevy engine recreation (executable)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asamu-core.workspace = true
+asamu-game.workspace = true
+asamu-player.workspace = true
+bevy.workspace = true
+
+[lints]
+workspace = true

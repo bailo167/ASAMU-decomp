@@ -1,0 +1,21 @@
+[package]
+name = "asamu-inventory"
+description = "Generate sanitized metadata inventories of an original ASAMU install"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asamu-locate.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+
+[lints]
+workspace = true

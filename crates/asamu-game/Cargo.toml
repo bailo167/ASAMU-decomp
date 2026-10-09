@@ -1,0 +1,18 @@
+[package]
+name = "asamu-game"
+description = "High-level game state for the ASAMU recreation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asamu-core.workspace = true
+asamu-player.workspace = true
+asamu-world.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

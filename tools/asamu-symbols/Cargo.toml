@@ -1,0 +1,19 @@
+[package]
+name = "asamu-symbols"
+description = "Categorize symbols of the unstripped original Mac executable (outputs statistics only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+cpp_demangle.workspace = true
+
+[lints]
+workspace = true

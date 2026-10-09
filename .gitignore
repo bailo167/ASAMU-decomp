@@ -1,0 +1,98 @@
+# ---------------------------------------------------------------------------
+# ASAMU-decomp source hygiene
+#
+# This repository is PUBLIC. It contains only our own code, tooling, tests,
+# format documentation and sanitized metadata. Original game payloads, raw
+# reverse-engineering dumps and decompiler output must never be committed.
+# See docs/LEGAL.md and CLAUDE.md ("Original game hygiene").
+# ---------------------------------------------------------------------------
+
+# --- Rust build output -------------------------------------------------------
+/target/
+**/target/
+*.pdb
+
+# --- Original game data (never commit) ---------------------------------------
+original/
+original-*/
+depot_*/
+steamapps/
+*.u
+*.upk
+*.umap
+*.udk
+*.asamu
+*.tfc
+*.bin
+!crates/**/tests/fixtures/**/*.bin
+*.int
+*.INT
+*.ue3profile
+*.dylib
+*.dll
+*.exe
+*.so
+*.app/
+*.icns
+*.bik
+*.swf
+*.gfx
+*.uasset
+*.wav
+*.ogg
+*.mp3
+*.mp4
+*.xma
+*.fsb
+*.bnk
+*.pak
+# The original Mach-O is named ASAMU; anchor to root so the case-insensitive
+# macOS filesystem does not also ignore our lowercase `asamu` crates.
+/ASAMU
+
+# --- Local reverse-engineering payloads (never commit) -----------------------
+research/local/
+research/raw/
+research/ghidra/
+research/decompiled/
+research/extracted/
+research/symbol-dumps/
+research/decompressed/
+research/strings/
+research/traces/raw/
+*.gpr
+*.rep
+*.ghidra
+*.gzf
+*.idb
+*.i64
+*.nam
+*.til
+*.id0
+*.id1
+*.id2
+*.bndb
+*.nm.txt
+*.symbols.txt
+*.strings.txt
+*.decompressed
+*.lzo
+
+# --- Converted user-local data (produced from the user's own install) --------
+converted/
+asamu-data/
+/data/
+
+# --- Local env / secrets ------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+
+# --- Editors / OS -------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

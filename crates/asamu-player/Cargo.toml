@@ -1,0 +1,17 @@
+[package]
+name = "asamu-player"
+description = "Deterministic, render-free player movement, grapple and camera simulation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asamu-core.workspace = true
+glam.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

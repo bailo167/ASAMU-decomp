@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/asamu",
+    "crates/asamu-core",
+    "crates/asamu-game",
+    "crates/asamu-player",
+    "crates/asamu-world",
+    "crates/asamu-assets",
+    "crates/asamu-ue3",
+    "tools/asamu-locate",
+    "tools/asamu-inventory",
+    "tools/asamu-inspect",
+    "tools/asamu-symbols",
+    "tools/progress-gen",
+    "tools/repo-hygiene",
+]
+default-members = [
+    "crates/asamu-core",
+    "crates/asamu-game",
+    "crates/asamu-player",
+    "crates/asamu-world",
+    "crates/asamu-assets",
+    "crates/asamu-ue3",
+    "tools/asamu-locate",
+    "tools/asamu-inventory",
+    "tools/asamu-inspect",
+    "tools/asamu-symbols",
+    "tools/progress-gen",
+    "tools/repo-hygiene",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bailo167/ASAMU-decomp"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+asamu-core = { path = "crates/asamu-core" }
+asamu-game = { path = "crates/asamu-game" }
+asamu-player = { path = "crates/asamu-player" }
+asamu-world = { path = "crates/asamu-world" }
+asamu-assets = { path = "crates/asamu-assets" }
+asamu-ue3 = { path = "crates/asamu-ue3" }
+asamu-locate = { path = "tools/asamu-locate" }
+
+# External (pinned)
+bevy = { version = "=0.20.0", default-features = false, features = ["3d", "ui"] }
+glam = { version = "=0.34.1", features = ["serde"] }
+clap = { version = "=4.6.7", features = ["derive"] }
+thiserror = "=2.0.21"
+anyhow = "=1.0.104"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+toml = "=1.1.8"
+sha2 = "=0.11.0"
+walkdir = "=2.5.0"
+cpp_demangle = "=0.5.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+indexing_slicing = "allow"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

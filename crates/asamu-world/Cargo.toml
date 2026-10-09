@@ -1,0 +1,17 @@
+[package]
+name = "asamu-world"
+description = "Levels, triggers, checkpoints and moving platforms (runtime representation)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asamu-core.workspace = true
+glam.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

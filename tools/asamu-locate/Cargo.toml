@@ -1,0 +1,16 @@
+[package]
+name = "asamu-locate"
+description = "Locate a legitimate Steam installation of A Story About My Uncle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

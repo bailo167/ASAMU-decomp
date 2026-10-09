@@ -1,0 +1,16 @@
+[package]
+name = "asamu-ue3"
+description = "Defensive reader for the UE3 package generation used by A Story About My Uncle (file version 868)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  hygiene:
+    name: Hygiene + progress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hygiene
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: Repository hygiene (no game payloads / RE dumps / private paths)
+        run: cargo run -p repo-hygiene
+      - name: Progress tracker valid and generated output fresh
+        run: cargo run -p progress-gen -- --check
+
+  build:
+    name: ${{ matrix.os }}
+    needs: hygiene
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Linux system dependencies (Bevy)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (all targets, warnings are errors)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Build executable
+        run: cargo build -p asamu --locked
+      - name: Report host target
+        shell: bash
+        run: rustc -vV | grep host
+
+  macos-x86_64:
+    name: macOS x86_64 cross-check
+    needs: hygiene
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-apple-darwin
+      - name: Check workspace for x86_64-apple-darwin
+        run: cargo check --workspace --all-targets --locked --target x86_64-apple-darwin

@@ -1,0 +1,16 @@
+[package]
+name = "asamu-assets"
+description = "Runtime asset representation for data converted from a user's original install"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asamu-core.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
