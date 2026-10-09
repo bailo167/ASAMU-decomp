@@ -342,6 +342,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asamu-import"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "asamu-locate",
+ "asamu-ue3",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "asamu-inspect"
 version = "0.0.1"
 dependencies = [

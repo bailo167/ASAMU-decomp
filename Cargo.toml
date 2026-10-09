@@ -12,6 +12,7 @@ members = [
     "tools/asamu-inventory",
     "tools/asamu-inspect",
     "tools/asamu-symbols",
+    "tools/asamu-import",
     "tools/progress-gen",
     "tools/repo-hygiene",
 ]
@@ -26,6 +27,7 @@ default-members = [
     "tools/asamu-inventory",
     "tools/asamu-inspect",
     "tools/asamu-symbols",
+    "tools/asamu-import",
     "tools/progress-gen",
     "tools/repo-hygiene",
 ]

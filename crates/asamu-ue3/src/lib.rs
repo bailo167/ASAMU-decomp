@@ -34,12 +34,16 @@
 //! - [`coverage`]: exact-consumption coverage over real packages.
 //! - [`kismet`]: Kismet (sequence) graphs of map packages.
 
+pub mod bsp;
+pub mod bulkdata;
+pub mod bytecode;
 pub mod compression;
 pub mod coverage;
 pub mod error;
 pub mod flags;
 pub mod issue;
 pub mod kismet;
+pub mod level;
 pub mod lzo;
 pub mod model;
 pub mod object;
@@ -48,8 +52,10 @@ pub mod property;
 pub mod reader;
 pub mod schema;
 pub mod script;
+pub mod staticmesh;
 pub mod summary;
 pub mod tables;
+pub mod texture;
 pub mod types;
 pub mod writer;
 
