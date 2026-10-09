@@ -1153,4 +1153,5 @@ note = "Plan and schema in docs/TRACE_CAPTURE.md (field offsets cross-checked); 
 [[category.item]]
 id = "parity-suite"
 name = "Trace-replay parity suite against original traces"
-status = "not_started"
+status = "blocked"
+blocker = "Needs behavioural traces recorded from the original game (Windows copy, or the Mac build under Rosetta), which requires a human-run session; see docs/TRACE_CAPTURE.md."
