@@ -12,6 +12,10 @@ publish.workspace = true
 asamu-core.workspace = true
 glam.workspace = true
 serde.workspace = true
+# `float_roundtrip`: correctly rounded float parsing, so `f64` trace fields
+# (e.g. `time`) round-trip exactly. Feature of an already-locked package.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+thiserror.workspace = true
 
 [lints]
 workspace = true

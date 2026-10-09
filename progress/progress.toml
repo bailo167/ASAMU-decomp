@@ -53,7 +53,8 @@ status = "not_started"
 [[milestone]]
 id = "M7"
 name = "Rust/Bevy player controller"
-status = "not_started"
+status = "partial"
+note = "Deterministic sim + graybox app with placeholder physics; native physics spec recovered, faithful port pending."
 
 [[milestone]]
 id = "M8"
@@ -500,7 +501,9 @@ name = "Player"
 [[category.item]]
 id = "sim-harness"
 name = "Deterministic fixed-step simulation harness"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-player (sim.rs, tests/slice.rs, tests/robustness.rs, tests/property.rs)"
+note = "Pure fixed-step step(); byte-identical determinism tests; NaN/dt guards. Movement model itself is a placeholder."
 
 [[category.item]]
 id = "ground-move"
@@ -534,7 +537,8 @@ status = "not_started"
 [[category.item]]
 id = "camera"
 name = "Camera"
-status = "not_started"
+status = "partial"
+note = "First-person view math + graybox camera; original camera behaviour not yet recovered."
 
 [[category.item]]
 id = "fov"
@@ -558,7 +562,8 @@ name = "Grapple"
 [[category.item]]
 id = "targeting"
 name = "Target acquisition"
-status = "not_started"
+status = "partial"
+note = "Placeholder raycast targeting in runtime; original acquisition rules not yet recovered."
 
 [[category.item]]
 id = "range"
@@ -568,7 +573,8 @@ status = "not_started"
 [[category.item]]
 id = "attach-rules"
 name = "Attachment rules"
-status = "not_started"
+status = "partial"
+note = "Placeholder: grapple-able surfaces in range with occlusion. Original rules unknown."
 
 [[category.item]]
 id = "pull"
@@ -578,12 +584,14 @@ status = "not_started"
 [[category.item]]
 id = "swing"
 name = "Constraint / swing behaviour"
-status = "not_started"
+status = "partial"
+note = "Placeholder rope constraint + pull. Original swing physics unknown."
 
 [[category.item]]
 id = "release"
 name = "Release momentum"
-status = "not_started"
+status = "partial"
+note = "Release preserves velocity exactly (tested); original release behaviour unverified."
 
 [[category.item]]
 id = "max-speed"
@@ -616,12 +624,14 @@ status = "not_started"
 [[category.item]]
 id = "checkpoints"
 name = "Checkpoints"
-status = "not_started"
+status = "partial"
+note = "Graybox checkpoints in asamu-world/asamu-game; original checkpoint data not imported."
 
 [[category.item]]
 id = "death-reset"
 name = "Death / reset"
-status = "not_started"
+status = "partial"
+note = "Graybox kill_z respawn; original death/reset rules unknown."
 
 [[category.item]]
 id = "moving-platforms"
@@ -649,8 +659,9 @@ name = "Rendering"
 [[category.item]]
 id = "bevy-shell"
 name = "Bevy application shell"
-status = "partial"
-note = "Window + camera only."
+status = "implemented"
+evidence = "apps/asamu/src/main.rs"
+note = "Graybox prototype: level boxes, first-person camera, input, fixed-step sim, rope gizmo, placeholder-physics banner. Builds and passes clippy on CI targets."
 
 [[category.item]]
 id = "static-mesh-render"
@@ -857,14 +868,19 @@ status = "not_started"
 [[category.item]]
 id = "fuzz"
 name = "Truncation / corruption fuzz tests"
-status = "not_started"
+status = "partial"
+note = "Player robustness/property tests done; parser fuzz tests in progress."
 
 [[category.item]]
 id = "trace-format"
 name = "Trajectory trace format"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-player/src/trace.rs; docs/PARITY.md"
+note = "JSONL traces with schema validation, exact float round-trip, malformed-line rejection."
 
 [[category.item]]
 id = "trace-replay"
 name = "Trace replay harness"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-player/src/trace.rs (record_run, compare); tests/slice.rs"
+note = "Replay + per-field max/mean/RMS diff with first divergence. No original traces exist yet."

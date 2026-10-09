@@ -12,7 +12,9 @@ publish.workspace = true
 asamu-core.workspace = true
 asamu-player.workspace = true
 asamu-world.workspace = true
+glam.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

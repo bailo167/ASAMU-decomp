@@ -2,6 +2,26 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-09 — Session 1 (continued): native physics spec, player slice
+
+**Done**
+- Ghidra 12.1.4 headless project of the unstripped Mach-O (analysis 647 s) with committed scripts
+  (`tools/ghidra-scripts`) and anchor lists; decompiled output stays in ignored `research/`.
+- `docs/reverse-engineering/NATIVE_PHYSICS.md`: verified behavioural spec of the native pawn physics the player
+  runs on (sub-stepping, CalcVelocity/braking, walking, falling with displacement-derived velocity, gravity chain).
+- Config evidence: `ASAMU.ASAMUGameInfo`, `ASAMU.ASAMUPlayerController`, `ASAMU.ASAMUInfo` (AG maps),
+  `[UTGame.UTPawn]`, `DefaultGravityZ=-520`, input exec bindings and PlayerInput constants.
+- Player slice (placeholder physics, deterministic): `asamu-core` (units, coords, rotators, clock, provenance,
+  deterministic trig), `asamu-player` (input, params with provenance, collision world, movement model trait,
+  grapple, sim, JSONL traces + compare), `asamu-world` graybox level, `asamu-game` tick, Bevy graybox app.
+  118 tests.
+
+**Next**
+1. Merge the Phase-1 workstreams (UE3 reader + LZO, symbols, locator/inventory) once verified.
+2. Prove where the ASAMU script classes live (parse `Startup.upk`), recover class defaults (pawn speeds, JumpZ,
+   air control flag) and grapple script.
+3. Replace `PlaceholderMovement` with a faithful port of the native physics spec, fed by recovered defaults.
+
 ## 2026-10-09 — Session 1: bootstrap
 
 **Done**

@@ -325,6 +325,8 @@ version = "0.0.1"
 dependencies = [
  "glam 0.34.1",
  "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -334,7 +336,9 @@ dependencies = [
  "asamu-core",
  "asamu-player",
  "asamu-world",
+ "glam 0.34.1",
  "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -342,7 +346,6 @@ name = "asamu-inspect"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "asamu-locate",
  "asamu-ue3",
  "clap",
  "serde",
@@ -381,6 +384,8 @@ dependencies = [
  "asamu-core",
  "glam 0.34.1",
  "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -411,6 +416,8 @@ dependencies = [
  "asamu-core",
  "glam 0.34.1",
  "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -10,7 +10,6 @@ publish.workspace = true
 
 [dependencies]
 asamu-ue3.workspace = true
-asamu-locate.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
