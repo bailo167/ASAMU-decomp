@@ -1,0 +1,5 @@
+# Normalise line endings so generated-doc checks and tests behave identically on Windows.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.svg text eol=lf
