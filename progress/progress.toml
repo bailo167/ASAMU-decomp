@@ -236,8 +236,9 @@ note = "All 42 packages; independent Python parser agreed on every row."
 [[category.item]]
 id = "flags"
 name = "Package flag decoding for v868"
-status = "partial"
-note = "ContainsMap/ContainsScript/StoreCompressed correlate exactly (STRONG); other bits undecoded."
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/flags_real_data.rs"
+note = "All observed package/object/export/name flag bits named from loader/saver code + data correlations."
 
 [[category.item]]
 id = "names"
@@ -377,16 +378,16 @@ note = "ScriptStruct/Enum/Const layouts confirmed by exact consumption; 31 binar
 [[category.item]]
 id = "cross-package"
 name = "Cross-package import → export resolution"
-status = "implemented"
-evidence = "crates/asamu-ue3/src/model.rs"
-note = "Class model resolves inheritance and defaults across packages by name."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "31/31 super chains, 1,177 inherited values with the same providing class."
 
 [[category.item]]
 id = "object-summary"
 name = "Sanitized per-object metadata summaries"
-status = "implemented"
-evidence = "tools/asamu-inspect (class, defaults, props, coverage)"
-note = "Native data tails of 42,026 exports (textures, meshes, levels) not yet decoded."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "1,700 sampled objects, 6,473 tags identical (sampled)."
 
 # --------------------------------------------------------------------------
 # UnrealScript
@@ -463,16 +464,16 @@ name = "Kismet"
 [[category.item]]
 id = "sequence-objects"
 name = "Sequence object enumeration per map"
-status = "implemented"
-evidence = "docs/reverse-engineering/KISMET.md; crates/asamu-ue3/tests/kismet_real_data.rs"
-note = "All 12 maps: 3,504 objects, 0 decode failures, 0 dangling links."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "3,504 objects, 3,362 stored + 61 derived links re-decoded independently; DOT consistent with JSON."
 
 [[category.item]]
 id = "links"
 name = "Input/output/variable/event links"
-status = "implemented"
-evidence = "docs/reverse-engineering/KISMET.md; crates/asamu-ue3/tests/kismet_real_data.rs"
-note = "All 12 maps: 3,504 objects, 0 decode failures, 0 dangling links."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "3,504 objects, 3,362 stored + 61 derived links re-decoded independently; DOT consistent with JSON."
 
 [[category.item]]
 id = "custom-classes"
@@ -484,9 +485,9 @@ note = "Usage of every ASAMU SeqAct/SeqEvent per map."
 [[category.item]]
 id = "graph-export"
 name = "Sanitized JSON/DOT graph export (local only)"
-status = "implemented"
-evidence = "docs/reverse-engineering/KISMET.md; crates/asamu-ue3/tests/kismet_real_data.rs"
-note = "All 12 maps: 3,504 objects, 0 decode failures, 0 dangling links."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "3,504 objects, 3,362 stored + 61 derived links re-decoded independently; DOT consistent with JSON."
 
 [[category.item]]
 id = "flow-summary"
@@ -527,30 +528,30 @@ note = "Level order confirmed three ways: GameInfo.LevelFileNames, ASAMULevels e
 [[category.item]]
 id = "actor-census"
 name = "Actor class census per map"
-status = "implemented"
-evidence = "docs/reverse-engineering/data/defaults/map_instances.json; tools/asamu-inspect map"
-note = "Per-map class census and gameplay actor instances."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "Independent re-decode matched."
 
 [[category.item]]
 id = "player-starts"
 name = "PlayerStart / checkpoint candidates"
-status = "implemented"
-evidence = "docs/reverse-engineering/LEVEL_FORMAT.md"
-note = "PlayerStart and 109 checkpoints with transforms extracted."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "Independent re-decode matched."
 
 [[category.item]]
 id = "streaming"
 name = "Streaming levels"
-status = "implemented"
-evidence = "docs/reverse-engineering/LEVELS.md"
-note = "TheCore streamed into IceCave; Freds_place always-loaded sub-level of BeautifulCity."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "Independent re-decode matched."
 
 [[category.item]]
 id = "volumes"
 name = "Triggers, volumes, kill zones"
-status = "implemented"
-evidence = "docs/reverse-engineering/LEVEL_FORMAT.md"
-note = "1,204 brush components; kill zones, triggers, blocking/physics volumes as hulls/polygons."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "Independent re-decode matched."
 
 [[category.item]]
 id = "loc-packages"
@@ -1019,16 +1020,16 @@ note = "glTF export; positions/UVs/indices bit-identical to an independent decod
 [[category.item]]
 id = "texture-convert"
 name = "Texture conversion"
-status = "implemented"
-evidence = "tools/asamu-import/src/textures.rs"
-note = "DDS (+PNG preview) export with manifest; user-local only."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "8,883/8,883 textures + 22 cubemaps byte-identical vs an independent decoder."
 
 [[category.item]]
 id = "level-convert"
 name = "Level conversion"
-status = "implemented"
-evidence = "tools/asamu-import/src/levels.rs; docs/reverse-engineering/LEVEL_FORMAT.md"
-note = "Scene JSON + BSP/volume geometry for all maps."
+status = "verified"
+evidence = "docs/reverse-engineering/EVIDENCE_SWEEP.md"
+note = "All 12 maps: 30,284 actors, 39,961 components, lights, hulls, BSP: 0 differences."
 
 [[category.item]]
 id = "import-cli"
