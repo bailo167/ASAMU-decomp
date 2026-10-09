@@ -576,13 +576,13 @@ note = "Pure fixed-step step(); byte-identical determinism tests; NaN/dt guards.
 id = "ground-move"
 name = "Ground movement / acceleration"
 status = "partial"
-note = "Native algorithm specified (NATIVE_PHYSICS.md section 2-3); script defaults and Rust implementation pending."
+note = "Native CalcVelocity/braking/walking ported (Ue3PawnMovement); real AccelRate/GroundSpeed/friction defaults pending."
 
 [[category.item]]
 id = "air-control"
 name = "Air control"
 status = "partial"
-note = "Native limiter specified; flag default and implementation pending."
+note = "Native air-control limiter ported; flag default and AirControl value pending."
 
 [[category.item]]
 id = "jump"
@@ -593,8 +593,9 @@ note = "Jump impulse is script-side (no native DoJump)."
 [[category.item]]
 id = "gravity"
 name = "Gravity"
-status = "partial"
-note = "Source recovered (config -520 + native chain incl. 2x integrator effect); runtime implementation pending."
+status = "implemented"
+evidence = "crates/asamu-player/src/ue3_movement.rs; tests/ue3_spec_conformance.rs"
+note = "Native gravity chain + 2x falling integrator ported; DefaultGravityZ=-520 from config. Not trace-verified."
 
 [[category.item]]
 id = "collision-capsule"
