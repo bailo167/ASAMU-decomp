@@ -592,9 +592,9 @@ note = "All materials + 17,449 expressions decode exactly; PBR approximation mat
 [[category.item]]
 id = "collision"
 name = "Collision geometry"
-status = "implemented"
-evidence = "docs/reverse-engineering/MESHES.md; docs/reverse-engineering/LEVEL_FORMAT.md"
-note = "kDOP/collision triangles, BSP and volume hulls extracted; runtime collision not yet built from them."
+status = "verified"
+evidence = "crates/asamu-world/src/collision; crates/asamu-world/tests/collision_props.rs"
+note = "Triangle BVH matches brute force on random and real scenes; independent oracle for cylinder sweeps."
 
 [[category.item]]
 id = "audio-assets"
@@ -756,24 +756,30 @@ name = "World"
 [[category.item]]
 id = "level-load"
 name = "Level loading from converted data"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-world; crates/asamu-game (tests/real_maps.rs, scene_real_data.rs)"
+note = "Converted scenes load in 20-67 ms; player spawns grounded on all 10 maps with a PlayerStart."
 
 [[category.item]]
 id = "triggers"
 name = "Triggers"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-world; crates/asamu-game (tests/real_maps.rs, scene_real_data.rs)"
+note = "Trigger/TriggerVolume touch events emitted as sim events (Kismet runtime consumes later)."
 
 [[category.item]]
 id = "checkpoints"
 name = "Checkpoints"
-status = "partial"
-note = "Graybox checkpoints in asamu-world/asamu-game; original checkpoint data not imported."
+status = "implemented"
+evidence = "crates/asamu-world; crates/asamu-game (tests/real_maps.rs, scene_real_data.rs)"
+note = "Highest-index save rule, spawn transforms, negative-index fallback per script."
 
 [[category.item]]
 id = "death-reset"
 name = "Death / reset"
-status = "partial"
-note = "Graybox kill_z respawn; original death/reset rules unknown."
+status = "implemented"
+evidence = "crates/asamu-world; crates/asamu-game (tests/real_maps.rs, scene_real_data.rs)"
+note = "Kill zones + KillZ death sequence with respawn after 18 ticks at latest checkpoint."
 
 [[category.item]]
 id = "moving-platforms"
@@ -784,7 +790,9 @@ note = "Movers ticked in game loop (graybox); Matinee data not decoded."
 [[category.item]]
 id = "level-streaming"
 name = "Level streaming"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-world; crates/asamu-game (tests/real_maps.rs, scene_real_data.rs)"
+note = "Freds_place always with BeautifulCity; TheCore streamed on request."
 
 [[category.item]]
 id = "story-sequencing"

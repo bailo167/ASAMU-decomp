@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="980" height="747" viewBox="0 0 980 747" role="img" aria-label="ASAMU-decomp — reimplementation progress — 79% complete, 34% verified">
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="747" viewBox="0 0 980 747" role="img" aria-label="ASAMU-decomp — reimplementation progress — 83% complete, 35% verified">
 <style>
 :root{--bg:#ffffff;--bd:#d0d7de;--fg:#1f2328;--mu:#59636e;--ns:#8c959f;--inv:#0969da;--par:#bf8700;--imp:#4ac26b;--ver:#1a7f37;--blk:#cf222e;--mk:#ffffff}
 @media (prefers-color-scheme: dark){:root{--bg:#0d1117;--bd:#30363d;--fg:#e6edf3;--mu:#9198a1;--ns:#6e7681;--inv:#4493f8;--par:#d29922;--imp:#3fb950;--ver:#238636;--blk:#f85149;--mk:#ffffff}}
@@ -20,7 +20,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 </style>
 <rect class="bg" x="0.5" y="0.5" width="979" height="746" rx="8"/>
 <text class="ttl" x="24" y="38">ASAMU-decomp — reimplementation progress</text>
-<text class="sub" x="24" y="62">Completion 79% (99 of 125 items implemented or verified) · Verified 34% (43) · Current milestone: M9 — First original level imported/playable</text>
+<text class="sub" x="24" y="62">Completion 83% (104 of 125 items implemented or verified) · Verified 35% (44) · Current milestone: M9 — First original level imported/playable</text>
 <text class="muted" x="24" y="84">Generated from progress/progress.toml by tools/progress-gen. Completion = (implemented + verified) / total; floored.</text>
 <text class="lbl" x="24" y="117">Milestones</text>
 <g><title>M0 — Repository + analysis infrastructure: Verified</title><rect class="c verified" x="206" y="104" width="18" height="18" rx="2"/><path class="mark" d="M209 113l4 4l7 -8"/></g>
@@ -130,10 +130,10 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <rect class="c not_started" x="252.5" y="393.5" width="17" height="17" rx="2"><title>Assets / Skeletal meshes — Not started</title></rect>
 <rect class="c not_started" x="275.5" y="393.5" width="17" height="17" rx="2"><title>Assets / Animations — Not started</title></rect>
 <g><title>Assets / Material parameters — Verified — All materials + 17,449 expressions decode exactly; PBR approximation matched by an independent decoder on 1,100 entries.</title><rect class="c verified" x="298" y="393" width="18" height="18" rx="2"/><path class="mark" d="M301 402l4 4l7 -8"/></g>
-<rect class="c implemented" x="321" y="393" width="18" height="18" rx="2"><title>Assets / Collision geometry — Implemented — kDOP/collision triangles, BSP and volume hulls extracted; runtime collision not yet built from them.</title></rect>
+<g><title>Assets / Collision geometry — Verified — Triangle BVH matches brute force on random and real scenes; independent oracle for cylinder sweeps.</title><rect class="c verified" x="321" y="393" width="18" height="18" rx="2"/><path class="mark" d="M324 402l4 4l7 -8"/></g>
 <g><title>Assets / Audio (SoundNodeWave) — Verified — 852 waves consumed exactly; Ogg streams valid; independent checker agreed.</title><rect class="c verified" x="344" y="393" width="18" height="18" rx="2"/><path class="mark" d="M347 402l4 4l7 -8"/></g>
 <g><title>Assets / Level transforms and lights — Verified — 30,284 actor LocalToWorld matrices and 3,437 light components re-derived independently.</title><rect class="c verified" x="367" y="393" width="18" height="18" rx="2"/><path class="mark" d="M370 402l4 4l7 -8"/></g>
-<text class="pct" x="830" y="406">75%</text><text class="muted" x="876" y="406">6/8 · ✓5</text>
+<text class="pct" x="830" y="406">75%</text><text class="muted" x="876" y="406">6/8 · ✓6</text>
 <text class="lbl" x="24" y="437">Player</text>
 <rect class="c implemented" x="206" y="424" width="18" height="18" rx="2"><title>Player / Deterministic fixed-step simulation harness — Implemented — Pure fixed-step step(); byte-identical determinism tests; NaN/dt guards. Movement model itself is a placeholder.</title></rect>
 <rect class="c implemented" x="229" y="424" width="18" height="18" rx="2"><title>Player / Ground movement / acceleration — Implemented — Native physics port with original values (GroundSpeed 440, AccelRate 2048, friction 8). Not trace-verified.</title></rect>
@@ -156,14 +156,14 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <rect class="c implemented" x="367" y="455" width="18" height="18" rx="2"><title>Grapple / Suit ability progression / unlocks — Implemented — Grapple budget/recharge, power jump/leap, rocket boots, per-level unlock state. Not trace-verified.</title></rect>
 <text class="pct" x="830" y="468">100%</text><text class="muted" x="876" y="468">8/8 · ✓0</text>
 <text class="lbl" x="24" y="499">World</text>
-<rect class="c not_started" x="206.5" y="486.5" width="17" height="17" rx="2"><title>World / Level loading from converted data — Not started</title></rect>
-<rect class="c not_started" x="229.5" y="486.5" width="17" height="17" rx="2"><title>World / Triggers — Not started</title></rect>
-<g><title>World / Checkpoints — Partial — Graybox checkpoints in asamu-world/asamu-game; original checkpoint data not imported.</title><rect class="c partial-o" x="252.5" y="486.5" width="17" height="17" rx="2"/><path class="partial-f" d="M252 486h9v18h-9z"/></g>
-<g><title>World / Death / reset — Partial — Graybox kill_z respawn; original death/reset rules unknown.</title><rect class="c partial-o" x="275.5" y="486.5" width="17" height="17" rx="2"/><path class="partial-f" d="M275 486h9v18h-9z"/></g>
+<rect class="c implemented" x="206" y="486" width="18" height="18" rx="2"><title>World / Level loading from converted data — Implemented — Converted scenes load in 20-67 ms; player spawns grounded on all 10 maps with a PlayerStart.</title></rect>
+<rect class="c implemented" x="229" y="486" width="18" height="18" rx="2"><title>World / Triggers — Implemented — Trigger/TriggerVolume touch events emitted as sim events (Kismet runtime consumes later).</title></rect>
+<rect class="c implemented" x="252" y="486" width="18" height="18" rx="2"><title>World / Checkpoints — Implemented — Highest-index save rule, spawn transforms, negative-index fallback per script.</title></rect>
+<rect class="c implemented" x="275" y="486" width="18" height="18" rx="2"><title>World / Death / reset — Implemented — Kill zones + KillZ death sequence with respawn after 18 ticks at latest checkpoint.</title></rect>
 <g><title>World / Moving platforms (interpolation) — Partial — Movers ticked in game loop (graybox); Matinee data not decoded.</title><rect class="c partial-o" x="298.5" y="486.5" width="17" height="17" rx="2"/><path class="partial-f" d="M298 486h9v18h-9z"/></g>
-<rect class="c not_started" x="321.5" y="486.5" width="17" height="17" rx="2"><title>World / Level streaming — Not started</title></rect>
+<rect class="c implemented" x="321" y="486" width="18" height="18" rx="2"><title>World / Level streaming — Implemented — Freds_place always with BeautifulCity; TheCore streamed on request.</title></rect>
 <rect class="c not_started" x="344.5" y="486.5" width="17" height="17" rx="2"><title>World / Story sequencing — Not started</title></rect>
-<text class="pct" x="830" y="499">0%</text><text class="muted" x="876" y="499">0/7 · ✓0</text>
+<text class="pct" x="830" y="499">71%</text><text class="muted" x="876" y="499">5/7 · ✓0</text>
 <text class="lbl" x="24" y="530">Rendering</text>
 <rect class="c implemented" x="206" y="517" width="18" height="18" rx="2"><title>Rendering / Bevy application shell — Implemented — Graybox prototype: level boxes, first-person camera, input, fixed-step sim, rope gizmo, placeholder-physics banner. Builds and passes clippy on CI targets.</title></rect>
 <rect class="c not_started" x="229.5" y="517.5" width="17" height="17" rx="2"><title>Rendering / Static mesh rendering from converted data — Not started</title></rect>
@@ -213,15 +213,15 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <rect class="c implemented" x="367" y="672" width="18" height="18" rx="2"><title>Tests / Trace replay harness — Implemented — Replay + per-field max/mean/RMS diff with first divergence. No original traces exist yet.</title></rect>
 <text class="pct" x="830" y="685">100%</text><text class="muted" x="876" y="685">8/8 · ✓3</text>
 <g><title>Verified</title><rect class="c verified" x="24" y="710" width="18" height="18" rx="2"/><path class="mark" d="M27 719l4 4l7 -8"/></g>
-<text class="muted" x="48" y="721">Verified (43)</text>
+<text class="muted" x="48" y="721">Verified (44)</text>
 <rect class="c implemented" x="161" y="710" width="18" height="18" rx="2"><title>Implemented</title></rect>
-<text class="muted" x="185" y="721">Implemented (56)</text>
+<text class="muted" x="185" y="721">Implemented (60)</text>
 <g><title>Partial</title><rect class="c partial-o" x="319.5" y="710.5" width="17" height="17" rx="2"/><path class="partial-f" d="M319 710h9v18h-9z"/></g>
-<text class="muted" x="343" y="721">Partial (12)</text>
+<text class="muted" x="343" y="721">Partial (10)</text>
 <rect class="c investigating" x="449" y="710" width="18" height="18" rx="2"><title>Investigating</title></rect>
 <text class="muted" x="473" y="721">Investigating (0)</text>
 <g><title>Blocked</title><rect class="c blocked" x="614" y="710" width="18" height="18" rx="2"/><path class="mark" d="M619 715l8 8M627 715l-8 8"/></g>
 <text class="muted" x="638" y="721">Blocked (0)</text>
 <rect class="c not_started" x="737.5" y="710.5" width="17" height="17" rx="2"><title>Not started</title></rect>
-<text class="muted" x="761" y="721">Not started (14)</text>
+<text class="muted" x="761" y="721">Not started (11)</text>
 </svg>
