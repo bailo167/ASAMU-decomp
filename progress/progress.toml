@@ -9,7 +9,7 @@
 
 schema = 1
 title = "ASAMU-decomp — reimplementation progress"
-current_milestone = "M10"
+current_milestone = "M11"
 
 # --------------------------------------------------------------------------
 # Milestones
@@ -73,22 +73,26 @@ note = "Converted levels render in Bevy and play with original physics, grapple,
 [[milestone]]
 id = "M10"
 name = "Core gameplay complete"
-status = "not_started"
+status = "implemented"
+note = "Movement, abilities, grapple, checkpoints, death, movers, Kismet, NPCs; parity pending original traces."
 
 [[milestone]]
 id = "M11"
 name = "Full game/story path"
-status = "not_started"
+status = "partial"
+note = "Story chain connects Workshop to Epilogue in the smoke harness (some exits need harness help); full manual playthrough not yet done."
 
 [[milestone]]
 id = "M12"
 name = "Behavioural/regression parity pass"
-status = "not_started"
+status = "blocked"
+note = "Tooling ready; needs traces recorded from the original game."
 
 [[milestone]]
 id = "M13"
 name = "Windows/Linux/macOS release"
-status = "not_started"
+status = "partial"
+note = "CI builds all targets; release workflow exists, not yet run."
 
 # --------------------------------------------------------------------------
 # Binary RE — the unstripped original Mac executable
@@ -824,20 +828,23 @@ note = "Level-start abilities, checkpoints, narrator lines, transitions driven b
 [[category.item]]
 id = "npcs"
 name = "NPCs (Maddie, villagers, backpack Maddie)"
-status = "partial"
-note = "Maddie/villager/backpack state machines implemented; not yet ticked by Game (wiring pending); NPC pawns do not block the player."
+status = "implemented"
+evidence = "docs/INTEGRATION.md; crates/asamu-game/src/npc.rs; apps/asamu/src/kismet.rs"
+note = "NPC system ticked in the game frame; villagers/Maddie render skinned; NPC pawns do not block the player (documented gap)."
 
 [[category.item]]
 id = "worm"
 name = "Worm AI"
-status = "partial"
-note = "Worm 9-state AI implemented with corrected look-chain timing; wiring into Game/Kismet pending; timings unverified vs original."
+status = "implemented"
+evidence = "docs/INTEGRATION.md; crates/asamu-game/src/npc.rs; apps/asamu/src/kismet.rs; docs/reverse-engineering/NPCS.md"
+note = "Worm AI wired to Kismet start/shutdown/pause and kill-zone death notifications; timings not trace-verified."
 
 [[category.item]]
 id = "interactables"
 name = "Interactables, collectibles and story items in levels"
-status = "partial"
-note = "Interactables, collectibles, story items, glow flowers implemented in NpcSystem; save/UI wiring pending."
+status = "implemented"
+evidence = "docs/INTEGRATION.md; crates/asamu-game/src/npc.rs; apps/asamu/src/kismet.rs"
+note = "Interactables, collectibles and story items reach Kismet events and progression saves."
 [[category]]
 id = "rendering"
 name = "Rendering"
@@ -887,8 +894,9 @@ note = "Skinned NPCs + first-person hands from skeletal glTF with animation play
 [[category.item]]
 id = "post"
 name = "Post-processing, fog, sky"
-status = "partial"
-note = "Sky/fog/ambient approximation only; no original post-process chain."
+status = "implemented"
+evidence = "apps/asamu/src/post; docs/reverse-engineering/POST_FOG_SKY.md"
+note = "Height fog (native formulas), post-process volumes, bloom, original colour-grading LUTs."
 
 [[category.item]]
 id = "hud"
@@ -929,8 +937,9 @@ note = "Narrator queue with timed subtitles; Kismet NarratorLine via AudioComman
 [[category.item]]
 id = "music"
 name = "Music"
-status = "partial"
-note = "Music cues play; ASAMUAdaptiveMusicManager (adaptive tracks/beat events) not ported."
+status = "implemented"
+evidence = "apps/asamu/src/audio/music.rs; docs/reverse-engineering/AUDIO.md"
+note = "Adaptive music manager, multipliers, beat events; stems start muted like the original."
 
 [[category.item]]
 id = "events"
@@ -978,8 +987,9 @@ note = "Chapters entered per SAVE.md; loads converted maps."
 [[category.item]]
 id = "collectibles"
 name = "Collectibles / achievements"
-status = "partial"
-note = "25 collectibles (5 per middle chapter), extras thresholds, 15 achievements recovered; not implemented."
+status = "implemented"
+evidence = "docs/INTEGRATION.md; crates/asamu-game/src/npc.rs; apps/asamu/src/kismet.rs; crates/asamu-game/src/save.rs"
+note = "Collectibles, story items and achievements recorded in progression."
 
 # --------------------------------------------------------------------------
 # Importer
@@ -1148,8 +1158,9 @@ note = "Replay + per-field max/mean/RMS diff with first divergence. No original 
 [[category.item]]
 id = "trace-capture"
 name = "Original-game trace capture tooling (Windows oracle)"
-status = "partial"
-note = "Plan and schema in docs/TRACE_CAPTURE.md (field offsets cross-checked); no recorder built yet."
+status = "implemented"
+evidence = "tools/trace-recorder; tools/asamu-trace; docs/TRACE_CAPTURE.md"
+note = "Read-only lldb recorder + convert/replay/compare; 309 static checks pass; not yet run against the live game."
 
 [[category.item]]
 id = "parity-suite"

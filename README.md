@@ -8,9 +8,9 @@
 > This repository contains **no original copyrighted game assets, code or data**. To use it you will need your own
 > legitimate copy of *A Story About My Uncle*; the importer converts data locally from your installation.
 >
-> **Current state: pre-alpha. Original levels can be imported from your own copy and walked/grappled through with the original movement physics; story, menus and audio playback are not done yet.**
+> **Current state: pre-alpha. With your own copy imported, the story levels load with their original scripting, physics, grapple, NPCs, audio, lighting and menus, and chain from Workshop to the Epilogue. Rough edges remain and behavioural parity with the original is not yet measured.**
 
-**Current milestone:** M10 — Core gameplay complete (M9: an original level imports, renders and plays with original physics and grapple)
+**Current milestone:** M11 — Full game/story path (core gameplay, Kismet story scripting, NPCs, audio, menus and saves connected; parity testing awaits original-game traces)
 
 ## Progress
 
@@ -32,14 +32,14 @@
 | Assets | 8 | 8 | 8 | 0 | 100% | 100% |
 | Player | 9 | 9 | 0 | 0 | 100% | 0% |
 | Grapple | 8 | 8 | 0 | 0 | 100% | 0% |
-| World | 10 | 7 | 0 | 3 | 70% | 0% |
-| Rendering | 8 | 7 | 1 | 1 | 87% | 12% |
-| Audio | 5 | 4 | 0 | 1 | 80% | 0% |
-| Save/Progression | 5 | 4 | 0 | 1 | 80% | 0% |
+| World | 10 | 10 | 0 | 0 | 100% | 0% |
+| Rendering | 8 | 8 | 1 | 0 | 100% | 12% |
+| Audio | 5 | 5 | 0 | 0 | 100% | 0% |
+| Save/Progression | 5 | 5 | 0 | 0 | 100% | 0% |
 | Importer | 7 | 7 | 5 | 0 | 100% | 71% |
 | Platforms | 5 | 5 | 0 | 0 | 100% | 0% |
-| Tests | 10 | 8 | 3 | 1 | 80% | 30% |
-| **Overall** | **133** | **125** | **60** | **7** | **93%** | **45%** |
+| Tests | 10 | 9 | 3 | 0 | 90% | 30% |
+| **Overall** | **133** | **132** | **60** | **0** | **99%** | **45%** |
 
 <!-- progress-table:end -->
 
@@ -131,9 +131,8 @@ cargo run --release -p asamu-import -- levels
 cargo run --release -p asamu -- --converted "$HOME/Library/Application Support/asamu-decomp/converted" --level AG-Workshop
 ```
 
-Current scope: levels render with approximate materials and lights, and play with the original movement physics,
-grapple, power jump and rocket boots, collision, kill zones and checkpoints. Story scripting, audio playback,
-menus and NPCs are in progress.
+Or run everything at once with `cargo run --release -p asamu-import -- all`, then start `asamu` without
+`--level` to get the main menu. See [docs/PLAYING.md](docs/PLAYING.md).
 
 See [docs/BUILDING.md](docs/BUILDING.md) for platform prerequisites.
 
