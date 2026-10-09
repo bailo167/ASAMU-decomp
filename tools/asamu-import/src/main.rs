@@ -9,17 +9,25 @@
 //! - [`textures`]: Texture2D → DDS (+ optional PNG previews)
 //! - [`meshes`]: StaticMesh → glTF 2.0
 //! - [`levels`]: map actors/volumes/collision → scene description
+//! - [`materials`]: Material/MaterialInstance → approximate PBR descriptions
+//! - [`audio`]: SoundNodeWave/SoundCue → audio files + cue graphs
+//! - [`matinee`]: InterpData → track JSON
+//! - [`skeletal`]: SkeletalMesh/AnimSet → glTF with skins and animations
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod audio;
 mod levels;
+mod materials;
+mod matinee;
 mod meshes;
 #[path = "../../asamu-inspect/src/safety.rs"]
 #[allow(dead_code)]
 mod safety;
+mod skeletal;
 mod textures;
 
 #[derive(Parser, Debug)]
@@ -43,6 +51,14 @@ enum Cmd {
     Meshes(meshes::Args),
     /// Extract level scene descriptions.
     Levels(levels::Args),
+    /// Convert materials to approximate runtime material descriptions.
+    Materials(materials::Args),
+    /// Convert sounds (SoundNodeWave) and sound cues.
+    Audio(audio::Args),
+    /// Export Matinee (InterpData) tracks.
+    Matinee(matinee::Args),
+    /// Convert skeletal meshes and animations.
+    Skeletal(skeletal::Args),
 }
 
 /// Default user-local output directory (no extra crates): per-OS data dir + `asamu-decomp/converted`.
@@ -80,5 +96,9 @@ fn main() -> Result<()> {
         Cmd::Textures(a) => textures::run(&ctx, a),
         Cmd::Meshes(a) => meshes::run(&ctx, a),
         Cmd::Levels(a) => levels::run(&ctx, a),
+        Cmd::Materials(a) => materials::run(&ctx, a),
+        Cmd::Audio(a) => audio::run(&ctx, a),
+        Cmd::Matinee(a) => matinee::run(&ctx, a),
+        Cmd::Skeletal(a) => skeletal::run(&ctx, a),
     }
 }

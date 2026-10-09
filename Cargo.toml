@@ -51,7 +51,7 @@ asamu-ue3 = { path = "crates/asamu-ue3" }
 asamu-locate = { path = "tools/asamu-locate" }
 
 # External (pinned)
-bevy = { version = "=0.20.0", default-features = false, features = ["3d", "ui"] }
+bevy = { version = "=0.20.0", default-features = false, features = ["3d", "ui", "dds", "audio"] }
 glam = { version = "=0.34.1", features = ["serde"] }
 clap = { version = "=4.6.7", features = ["derive"] }
 thiserror = "=2.0.21"
