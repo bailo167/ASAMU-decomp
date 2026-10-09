@@ -8,12 +8,16 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Let main runs finish (and save their caches); only PR runs are superseded.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # CI only needs to compile and test; skipping debuginfo cuts Bevy build/link time a lot.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   hygiene:
@@ -27,6 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: hygiene
+          cache-on-failure: true
       - name: rustfmt
         run: cargo fmt --all --check
       - name: Repository hygiene (no game payloads / RE dumps / private paths)
@@ -54,10 +59,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy (all targets, warnings are errors)
+        with:
+          cache-on-failure: true
+      - name: Clippy (all targets incl. the Bevy app, warnings are errors)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Test
-        run: cargo test --workspace --locked
+      - name: Test (all library/tool crates; the Bevy app has no tests)
+        run: cargo test --locked
       - name: Build executable
         run: cargo build -p asamu --locked
       - name: Report host target
@@ -76,5 +83,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: x86_64-apple-darwin
+          cache-on-failure: true
       - name: Check workspace for x86_64-apple-darwin
         run: cargo check --workspace --all-targets --locked --target x86_64-apple-darwin
