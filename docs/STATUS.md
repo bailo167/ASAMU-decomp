@@ -2,6 +2,24 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-10 — Session 1 (overnight): gameplay port, importer foundations, bytecode, green CI
+
+**Done**
+- Gameplay defaults to the original: native physics port + 39 recovered parameters with provenance, pawn script
+  layer (releasable jump, sprint 880, story speed, landing, zoom, power jump/leap), GrappleGun (range 5000, pull,
+  2000 cap, release rules, budget/crystals), rocket boots, attractors, falling rocks; original frame order.
+- Importer: textures → DDS (8,920 textures verified), static meshes → glTF (1,512/1,512 exact), level scenes
+  (30,284 actors, BSP, volumes) — all independently re-decoded.
+- Bytecode decoder: 12,801/12,801 scripts exact; token table matches the executable.
+- **CI fully green** on Windows, Linux, macOS arm64 and the x86_64 cross-check (M0 complete).
+- Tracker: 76% complete / 32% verified (125 items).
+
+**Running**: Phase 5 — triangle collision + level load + death/checkpoints, Bevy rendering of converted levels,
+materials, audio, Matinee, skeletal meshes/animations.
+
+**Next**: Phase 6 — Kismet runtime subset + story sequencing, narration/subtitles, music, HUD/menus, save system,
+chapter select, collectibles; then trace capture tooling for parity and release packaging.
+
 ## 2026-10-09/10 — Session 1 (overnight): object decoder, defaults, Kismet, behaviour specs, save, binary
 
 **Done**
