@@ -818,17 +818,20 @@ status = "not_started"
 [[category.item]]
 id = "npcs"
 name = "NPCs (Maddie, villagers, backpack Maddie)"
-status = "not_started"
+status = "partial"
+note = "Maddie/villager/backpack state machines implemented; not yet ticked by Game (wiring pending); NPC pawns do not block the player."
 
 [[category.item]]
 id = "worm"
 name = "Worm AI"
-status = "not_started"
+status = "partial"
+note = "Worm 9-state AI implemented with corrected look-chain timing; wiring into Game/Kismet pending; timings unverified vs original."
 
 [[category.item]]
 id = "interactables"
 name = "Interactables, collectibles and story items in levels"
-status = "not_started"
+status = "partial"
+note = "Interactables, collectibles, story items, glow flowers implemented in NpcSystem; save/UI wiring pending."
 [[category]]
 id = "rendering"
 name = "Rendering"
@@ -872,7 +875,9 @@ note = "Original baked light/shadow maps decoded (24,628 components exact) and a
 [[category.item]]
 id = "skinned-render"
 name = "Skinned meshes + animation playback (hands, NPCs)"
-status = "not_started"
+status = "implemented"
+evidence = "apps/asamu/src/npc"
+note = "Skinned NPCs + first-person hands from skeletal glTF with animation playback by state."
 [[category.item]]
 id = "post"
 name = "Post-processing, fog, sky"
