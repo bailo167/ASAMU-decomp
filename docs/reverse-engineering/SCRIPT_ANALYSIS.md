@@ -15,6 +15,14 @@
 - `Startup.upk` is 52 MB with 17,658 names (header field).
 - The executable registers natives for package `ASAMU` (`AutoInitializeRegistrantsASAMU`), so a package named
   `ASAMU` must be loadable at runtime.
+- `Localization/INT/ASAMU.int` (UTF-16LE) has localized-property sections for classes of the `ASAMU` package:
+  `ASAMUHUD`, `ASAMUHUDMovie`, `ASAMUHUDMovieTimeTrial`, `ASAMUSettingsManager`, `GFxASAMUMainMenu`,
+  `GFxASAMUPauseMenu`, `GFxASAMUPauseMenuTimeTrial`, `GFxASAMUWorkshopMonitor`, `GFxASAMUCredits`.
+  (UE3 `.int` sections are named after the class whose `localized` properties they fill.) Note the script-side
+  `ASAMUSettingsManager` differs in name from the native `UASAMUSystemSettingsManager`.
+- The other INT files (`*_Narrator.int`, `*_Voice.int`) contain subtitle sections keyed by `SoundNodeWave`
+  objects (e.g. `Misc.Narrator_Sanctuary_GrappleSymbol`, `rocketBoots.Narrator_StarHaven_RocketBoots_*`), i.e.
+  narration is SoundNodeWave-driven with localized subtitles.
 
 ## STRONG
 

@@ -230,8 +230,8 @@ fn esc(s: &str) -> String {
 const W: i64 = 980;
 const LABEL_X: i64 = 24;
 const CELLS_X: i64 = 206;
-const CELL: i64 = 14;
-const GAP: i64 = 4;
+const CELL: i64 = 18;
+const GAP: i64 = 5;
 const PCT_COL_W: i64 = 150;
 
 fn cells_per_row() -> i64 {
@@ -266,19 +266,19 @@ fn cell_svg(out: &mut String, x: i64, y: i64, s: Status, tip: &str) {
         Status::Verified => {
             let _ = writeln!(
                 out,
-                r#"<g><title>{tip}</title><rect class="c {k}" x="{x}" y="{y}" width="{CELL}" height="{CELL}" rx="2"/><path class="mark" d="M{} {}l3 3l6 -6"/></g>"#,
+                r#"<g><title>{tip}</title><rect class="c {k}" x="{x}" y="{y}" width="{CELL}" height="{CELL}" rx="2"/><path class="mark" d="M{} {}l4 4l7 -8"/></g>"#,
                 x + 3,
-                y + 7
+                y + 9
             );
         }
         Status::Blocked => {
             let _ = writeln!(
                 out,
-                r#"<g><title>{tip}</title><rect class="c {k}" x="{x}" y="{y}" width="{CELL}" height="{CELL}" rx="2"/><path class="mark" d="M{} {}l6 6M{} {}l-6 6"/></g>"#,
-                x + 4,
-                y + 4,
-                x + 10,
-                y + 4
+                r#"<g><title>{tip}</title><rect class="c {k}" x="{x}" y="{y}" width="{CELL}" height="{CELL}" rx="2"/><path class="mark" d="M{} {}l8 8M{} {}l-8 8"/></g>"#,
+                x + 5,
+                y + 5,
+                x + 13,
+                y + 5
             );
         }
         Status::Investigating | Status::Implemented => {

@@ -1,0 +1,57 @@
+# Native movement-physics anchors in the original Mac executable.
+# Symbol names only (from the unstripped symbol table). Used as input to
+# ExportFunctionSummaries.java / DecompileToLocal.java. Trailing '*' = prefix.
+#
+# Rationale: ASAMU's script package is NonNative, so player movement is
+# expected to run on stock UE3/UDK native Pawn physics parameterised by
+# script defaults (TENTATIVE). These functions are the behavioural spec.
+
+# Stock UE3 pawn physics
+APawn::phys*
+APawn::CalcVelocity
+APawn::NewFallVelocity
+APawn::stepUp
+APawn::startNewPhysics
+APawn::physicsRotation
+APawn::CalculateSlopeSlide
+APawn::calcMoveFlags
+APawn::ApplyVelocityBraking
+APawn::GetMaxAccel
+APawn::GetMaxSpeed
+APawn::GetGravityDirection
+APawn::GetFallDuration
+APawn::SetPostLandedPhysics
+APawn::SetMaxLandingVelocity
+APawn::GetPawnViewLocation
+APawn::GetViewRotation
+APawn::SetBase
+
+# UDK pawn overrides (UDKBase is a native package)
+AUDKPawn::CalcVelocity
+AUDKPawn::physFalling
+AUDKPawn::performPhysics
+AUDKPawn::GetGravityZ
+AUDKPawn::UpdateEyeHeight
+AUDKPawn::CalculateSlopeSlide
+AUDKPawn::setPhysics
+AUDKPawn::physicsRotation
+AUDKPawn::SuggestJumpVelocity
+AUDKPawn::TickSpecial
+
+# Actor-level physics
+AActor::performPhysics
+AActor::moveSmooth
+AActor::stepUp
+AActor::setPhysics
+AActor::GetGravityZ
+AActor::physCustom
+AActor::physFalling
+AActor::physWalking
+AActor::physInterpolating
+AActor::physProjectile
+AActor::physicsRotation
+
+# Camera
+ACamera::ApplyCameraModifiers
+ACamera::SetViewTarget
+ACamera::CheckViewTarget
