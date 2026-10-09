@@ -585,8 +585,9 @@ status = "not_started"
 [[category.item]]
 id = "materials"
 name = "Material parameters"
-status = "partial"
-note = "Material references per mesh section exported; material parameters/expressions not decoded."
+status = "verified"
+evidence = "docs/reverse-engineering/MATERIALS.md; crates/asamu-ue3/tests/material_real_data.rs"
+note = "All materials + 17,449 expressions decode exactly; PBR approximation matched by an independent decoder on 1,100 entries."
 
 [[category.item]]
 id = "collision"
