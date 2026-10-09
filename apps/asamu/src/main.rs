@@ -498,6 +498,13 @@ fn add_default_plugins(app: &mut App, title: &str) {
         npc::NpcPlugin,
         post::PostPlugin,
         kismet::KismetPlugin,
+    ))
+    .add_plugins((
+        particles::ParticlesPlugin,
+        vfx::VfxPlugin,
+        timetrial::TimeTrialPlugin,
+        gamepad::GamepadPlugin,
+        water::WaterPlugin,
     ));
 }
 
