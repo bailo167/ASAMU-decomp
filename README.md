@@ -10,7 +10,7 @@
 >
 > **Current state: pre-alpha research. Not playable.**
 
-**Current milestone:** M0 — Repository + analysis infrastructure
+**Current milestone:** M4 — Import/export/object recovery (M1 inventory and M3 package reader verified; M0 awaits a green Windows CI run)
 
 ## Progress
 
@@ -21,14 +21,14 @@
 
 | Category | Items | Implemented + verified | Verified | In progress | Completion | Verified % |
 |---|---:|---:|---:|---:|---:|---:|
-| Binary RE | 8 | 2 | 0 | 4 | 25% | 0% |
-| Symbols | 7 | 0 | 0 | 3 | 0% | 0% |
-| UE3 Packages | 10 | 0 | 0 | 2 | 0% | 0% |
-| Compression | 6 | 0 | 0 | 1 | 0% | 0% |
-| Objects | 6 | 0 | 0 | 0 | 0% | 0% |
-| UnrealScript | 8 | 0 | 0 | 1 | 0% | 0% |
-| Kismet | 5 | 0 | 0 | 0 | 0% | 0% |
-| Maps | 7 | 0 | 0 | 2 | 0% | 0% |
+| Binary RE | 8 | 5 | 2 | 2 | 62% | 25% |
+| Symbols | 7 | 6 | 3 | 1 | 85% | 42% |
+| UE3 Packages | 10 | 9 | 8 | 1 | 90% | 80% |
+| Compression | 6 | 6 | 6 | 0 | 100% | 100% |
+| Objects | 6 | 1 | 0 | 2 | 16% | 0% |
+| UnrealScript | 8 | 2 | 2 | 3 | 25% | 25% |
+| Kismet | 5 | 0 | 0 | 1 | 0% | 0% |
+| Maps | 7 | 1 | 1 | 3 | 14% | 14% |
 | Assets | 8 | 0 | 0 | 0 | 0% | 0% |
 | Player | 9 | 1 | 0 | 6 | 11% | 0% |
 | Grapple | 8 | 0 | 0 | 4 | 0% | 0% |
@@ -36,10 +36,10 @@
 | Rendering | 6 | 1 | 0 | 0 | 16% | 0% |
 | Audio | 5 | 0 | 0 | 0 | 0% | 0% |
 | Save/Progression | 5 | 0 | 0 | 1 | 0% | 0% |
-| Importer | 7 | 0 | 0 | 0 | 0% | 0% |
-| Platforms | 5 | 0 | 0 | 0 | 0% | 0% |
-| Tests | 8 | 2 | 0 | 3 | 25% | 0% |
-| **Overall** | **125** | **6** | **0** | **29** | **4%** | **0%** |
+| Importer | 7 | 2 | 2 | 1 | 28% | 28% |
+| Platforms | 5 | 3 | 0 | 1 | 60% | 0% |
+| Tests | 8 | 5 | 0 | 3 | 62% | 0% |
+| **Overall** | **125** | **42** | **24** | **31** | **33%** | **19%** |
 
 <!-- progress-table:end -->
 
@@ -99,10 +99,14 @@ Highlights (full evidence with confidence labels in [`docs/reverse-engineering/`
   **CONFIRMED**
 - All packages share the UE3 tag `0x9E2A83C1`, file version **868**, licensee version **0**. **CONFIRMED** (header bytes)
 - `.asamu` is the game's UE3 map extension (`MapExt=asamu`). **STRONG**
-- There is no `ASAMU.u` on disk, but `ASAMU` is listed in `[Engine.StartupPackages]`. Leading hypothesis: the game
-  script was cooked into `Startup.upk`. **TENTATIVE**, under investigation
-- The ASAMU-specific native C++ layer in the executable is small (system settings plus package registration),
-  so gameplay is expected to live in UnrealScript. **STRONG**
+- There is no `ASAMU.u` on disk: the cooker merged the ASAMU script package into `Startup.upk`, where package
+  `asamu` holds all 172 game classes. **CONFIRMED** (export tables)
+- Compression flag 2 is LZO1X; all 42 packages parse and decompress with zero findings, cross-checked by an
+  independent implementation. **CONFIRMED**
+- The ASAMU native C++ layer is only a settings manager; there is no grapple native code. The player
+  (`ASAMUPawn` → `UTPawn` → `UDKPawn`) moves with stock native pawn physics, now specified in
+  [NATIVE_PHYSICS.md](docs/reverse-engineering/NATIVE_PHYSICS.md). The grapple is a script weapon
+  (`GrappleGun` → `UDKWeapon`). **CONFIRMED**
 
 ## Building
 

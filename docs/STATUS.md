@@ -2,6 +2,28 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-09 — Session 1 (continued): package reader, ASAMU.u found, symbol map
+
+**Done**
+- `asamu-ue3` + `asamu-inspect`: verified UE3 v868 reader with safe LZO1X; all 42 packages parse with zero
+  findings; independent Python + liblzo2 cross-check agreed on every name/import/export row and stream hash.
+- `asamu-symbols`: native registration map (1,535 native classes, 2,505 exec thunks); ASAMU native surface is
+  only the settings manager.
+- `asamu-locate` + `asamu-inventory`: Steam discovery and a byte-reproducible sanitized inventory (committed).
+- **Missing `ASAMU.u` solved (CONFIRMED):** merged into `Startup.upk` as package `asamu` (172 classes,
+  4,371 exports). `ASAMUPawn → UTPawn → UDKPawn`; grapple = `GrappleGun → UDKWeapon` +
+  `ASAMUPlayerController` state `Grappling`. Every class ships a `ScriptText` source buffer (local reading only;
+  never commit — see CLAUDE.md).
+
+**Next (highest value)**
+1. Object payload decoding: tagged properties + UClass/UStruct/UFunction/UProperty for v868, verified by exact
+   payload consumption across all script packages.
+2. Class default objects → real values for `ASAMUPawn`/`UTPawn`/`UDKPawn` (GroundSpeed, AccelRate, AirControl,
+   JumpZ, air-control flag, CustomGravityScaling), `GrappleGun`, `ASAMUPowerJump`, `ASAMURocketBoots`.
+3. Grapple/power-jump/rocket-boost behaviour spec (local reading of script + bytecode introspection), then a
+   faithful `asamu-player` port on top of the native physics spec.
+4. Kismet graphs per map (sanitized), checkpoint and level flow.
+
 ## 2026-10-09 — Session 1 (continued): native physics spec, player slice
 
 **Done**

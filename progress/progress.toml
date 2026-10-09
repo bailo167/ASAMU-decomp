@@ -9,7 +9,7 @@
 
 schema = 1
 title = "ASAMU-decomp — reimplementation progress"
-current_milestone = "M0"
+current_milestone = "M4"
 
 # --------------------------------------------------------------------------
 # Milestones
@@ -19,31 +19,32 @@ current_milestone = "M0"
 id = "M0"
 name = "Repository + analysis infrastructure"
 status = "partial"
+note = "Everything except a completed Windows CI run."
 
 [[milestone]]
 id = "M1"
 name = "Original installation inventory"
-status = "not_started"
+status = "verified"
 
 [[milestone]]
 id = "M2"
 name = "Binary/symbol map"
-status = "investigating"
+status = "implemented"
 
 [[milestone]]
 id = "M3"
 name = "UE3 package reader"
-status = "not_started"
+status = "verified"
 
 [[milestone]]
 id = "M4"
 name = "Import/export/object recovery"
-status = "not_started"
+status = "investigating"
 
 [[milestone]]
 id = "M5"
 name = "Kismet/script structural recovery"
-status = "not_started"
+status = "investigating"
 
 [[milestone]]
 id = "M6"
@@ -103,8 +104,9 @@ note = "x86_64 Mach-O, 28 load commands, PIE, unsigned (codesign). Segment map n
 [[category.item]]
 id = "linked-libs"
 name = "Linked frameworks and bundled middleware"
-status = "partial"
-note = "otool -L: SDL2, OpenAL, Steam API, libstdc++, Cocoa/Carbon/OpenGL/IOKit."
+status = "implemented"
+evidence = "docs/reverse-engineering/SYMBOL_ANALYSIS.md"
+note = "Imports by library counted; statically linked middleware classified."
 
 [[category.item]]
 id = "ghidra-project"
@@ -116,12 +118,16 @@ note = "Headless import + auto-analysis of the unstripped Mach-O (647 s); origin
 [[category.item]]
 id = "native-registration"
 name = "UE3 native class registration (AutoInitializeRegistrants*)"
-status = "investigating"
+status = "verified"
+evidence = "docs/reverse-engineering/SYMBOL_ANALYSIS.md"
+note = "11 packages register classes, 8 register script natives; 1,535 native classes."
 
 [[category.item]]
 id = "asamu-natives"
 name = "ASAMU-specific native code identified"
-status = "investigating"
+status = "verified"
+evidence = "docs/reverse-engineering/SYMBOL_ANALYSIS.md"
+note = "Only UASAMUSystemSettingsManager; no grapple natives."
 
 [[category.item]]
 id = "physics-paths"
@@ -138,7 +144,8 @@ status = "not_started"
 [[category.item]]
 id = "strings-xrefs"
 name = "String → xref → function workflow"
-status = "not_started"
+status = "partial"
+note = "ExportFunctionSummaries gives strings/callers/callees per function; no broad string sweep yet."
 
 # --------------------------------------------------------------------------
 # Symbols
@@ -151,37 +158,50 @@ name = "Symbols"
 [[category.item]]
 id = "census"
 name = "Symbol table census (total/defined/undefined/local)"
-status = "investigating"
+status = "verified"
+evidence = "docs/reverse-engineering/SYMBOL_ANALYSIS.md; tools/asamu-symbols/tests/real_binary.rs"
+note = "Re-derived independently with nm/otool."
 
 [[category.item]]
 id = "demangle"
 name = "C++ demangling coverage"
-status = "not_started"
+status = "implemented"
+evidence = "tools/asamu-symbols/src/demangle.rs"
+note = "107,452 mangled C++ names; cpp_demangle coverage documented."
 
 [[category.item]]
 id = "classifier"
 name = "Reproducible symbol classifier (tools/asamu-symbols)"
-status = "not_started"
+status = "verified"
+evidence = "tools/asamu-symbols; docs/reverse-engineering/data/symbols/summary.json"
+note = "0 unclassified; ~100-symbol spot checks per category."
 
 [[category.item]]
 id = "game-families"
 name = "Game-specific symbol families"
-status = "investigating"
+status = "implemented"
+evidence = "docs/reverse-engineering/SYMBOL_ANALYSIS.md"
+note = "ASAMU native surface = 60 symbols (settings manager + registration)."
 
 [[category.item]]
 id = "exec-thunks"
 name = "exec* native thunk inventory (script-callable natives)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/SYMBOL_ANALYSIS.md"
+note = "2,505 exec thunks; 324 native tables decoded from file bytes."
 
 [[category.item]]
 id = "compilation-units"
 name = "Compilation-unit names (static initializers)"
-status = "investigating"
+status = "implemented"
+evidence = "docs/reverse-engineering/SYMBOL_ANALYSIS.md"
+note = "1,330 compilation units via debug map."
 
 [[category.item]]
 id = "package-correlation"
 name = "Symbol ↔ package export correlation"
-status = "not_started"
+status = "partial"
+note = "Class-level map in CORRELATION.md; property-level layout correlation pending."
 
 # --------------------------------------------------------------------------
 # UE3 Packages
@@ -194,52 +214,71 @@ name = "UE3 Packages"
 [[category.item]]
 id = "summary"
 name = "Package summary (tag, versions, header size, folder, flags)"
-status = "investigating"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "version-census"
 name = "Version/licensee census across every package"
-status = "investigating"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "flags"
 name = "Package flag decoding for v868"
-status = "not_started"
+status = "partial"
+note = "ContainsMap/ContainsScript/StoreCompressed correlate exactly (STRONG); other bits undecoded."
 
 [[category.item]]
 id = "names"
 name = "Name table"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "imports"
 name = "Import table"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "exports"
 name = "Export table"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "generations"
 name = "GUID, generations, engine/cooker versions"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "summary-tail"
 name = "Summary tail (additional packages, texture allocations)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "object-refs"
 name = "Object reference (package index) resolution"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "All 42 packages; independent Python parser agreed on every row."
 
 [[category.item]]
 id = "hostile-input"
 name = "Malformed-input rejection tests"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-ue3/tests/{hostile,robustness}.rs"
+note = "Truncation at every offset, byte flips, extreme values, cycles, chunk/block attacks; no panics."
 
 # --------------------------------------------------------------------------
 # Compression
@@ -252,32 +291,44 @@ name = "Compression"
 [[category.item]]
 id = "flag-meaning"
 name = "Meaning of CompressionFlags = 2 for this build"
-status = "investigating"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "CompressionFlags=2 is LZO1X: every block of 38 packages decompresses to the declared size; SHA-identical to liblzo2."
 
 [[category.item]]
 id = "chunk-table"
 name = "Package-level compressed chunk table"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "485 chunks / 12,063 blocks of 0x20000; layout invariants hold for all packages."
 
 [[category.item]]
 id = "block-headers"
 name = "Per-chunk block header layout"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "485 chunks / 12,063 blocks of 0x20000; layout invariants hold for all packages."
 
 [[category.item]]
 id = "lzo-decoder"
 name = "Bounds-checked LZO1X decompressor"
-status = "not_started"
+status = "verified"
+evidence = "crates/asamu-ue3/src/lzo.rs"
+note = "Safe LZO1X; identical output to liblzo2 and an independent decoder on all 12,063 real blocks; 70k-case differential fuzz."
 
 [[category.item]]
 id = "decompress-all"
 name = "Every compressed package decompresses and re-parses"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "485 chunks / 12,063 blocks of 0x20000; layout invariants hold for all packages."
 
 [[category.item]]
 id = "uncompressed"
 name = "Uncompressed package path"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md; crates/asamu-ue3/tests/real_data.rs"
+note = "4 uncompressed packages parse with zero findings."
 
 # --------------------------------------------------------------------------
 # Objects
@@ -290,7 +341,9 @@ name = "Objects"
 [[category.item]]
 id = "class-hierarchy"
 name = "Class / super-class resolution"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/SCRIPT_ANALYSIS.md (asamu-inspect exports super_path)"
+note = "Super chains from export SuperIndex."
 
 [[category.item]]
 id = "property-tags"
@@ -310,12 +363,14 @@ status = "not_started"
 [[category.item]]
 id = "cross-package"
 name = "Cross-package import → export resolution"
-status = "not_started"
+status = "partial"
+note = "Imports resolve to names/paths; cross-package object loading not implemented."
 
 [[category.item]]
 id = "object-summary"
 name = "Sanitized per-object metadata summaries"
-status = "not_started"
+status = "partial"
+note = "asamu-inspect objects/map give per-object metadata; payloads undecoded."
 
 # --------------------------------------------------------------------------
 # UnrealScript
@@ -328,27 +383,34 @@ name = "UnrealScript"
 [[category.item]]
 id = "locate-asamu"
 name = "Locate the ASAMU script package (no ASAMU.u on disk)"
-status = "investigating"
+status = "verified"
+evidence = "docs/reverse-engineering/SCRIPT_ANALYSIS.md"
+note = "asamu package (4,371 exports, 172 classes) is inside Startup.upk."
 
 [[category.item]]
 id = "class-list"
 name = "ASAMU class list and inheritance"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/SCRIPT_ANALYSIS.md"
+note = "All 172 classes + inheritance from export tables."
 
 [[category.item]]
 id = "functions"
 name = "Functions, states, native/scripted flags"
-status = "not_started"
+status = "partial"
+note = "922 functions + 62 states enumerated by name; flags/natives undecoded."
 
 [[category.item]]
 id = "properties"
 name = "Script properties and flags"
-status = "not_started"
+status = "partial"
+note = "~2,800 properties enumerated by name/type; flags/defaults undecoded."
 
 [[category.item]]
 id = "bytecode-presence"
 name = "Bytecode presence determined empirically"
-status = "not_started"
+status = "partial"
+note = "ScriptText TextBuffers present for all 583 classes (source shipped, local-only); bytecode format not yet introspected."
 
 [[category.item]]
 id = "disasm"
@@ -386,7 +448,8 @@ status = "not_started"
 [[category.item]]
 id = "custom-classes"
 name = "ASAMU-custom sequence classes"
-status = "not_started"
+status = "partial"
+note = "49 SeqAct_* + 20 SeqEvent_* + 1 SeqCond_* ASAMU classes enumerated."
 
 [[category.item]]
 id = "graph-export"
@@ -409,18 +472,21 @@ name = "Maps"
 [[category.item]]
 id = "mapext"
 name = ".asamu proven to be a UE3 map package"
-status = "investigating"
-note = "Config: MapExt=asamu, +Extensions=asamu; header tag/version match. Needs World/Level export proof."
+status = "verified"
+evidence = "docs/reverse-engineering/PACKAGE_ANALYSIS.md"
+note = "Every .asamu has exactly one TheWorld + PersistentLevel and the ContainsMap bit; no other package does."
 
 [[category.item]]
 id = "map-list"
 name = "Map list and level order"
-status = "investigating"
+status = "partial"
+note = "12 maps + per-map ASAMU class import counts; story order not yet from data."
 
 [[category.item]]
 id = "actor-census"
 name = "Actor class census per map"
-status = "not_started"
+status = "partial"
+note = "asamu-inspect map gives per-map class census; not yet summarised in LEVELS.md."
 
 [[category.item]]
 id = "player-starts"
@@ -440,7 +506,8 @@ status = "not_started"
 [[category.item]]
 id = "loc-packages"
 name = "Per-map localization packages (_LOC_INT)"
-status = "not_started"
+status = "partial"
+note = "All _LOC_INT packages parse; contents undecoded."
 
 # --------------------------------------------------------------------------
 # Assets
@@ -742,7 +809,8 @@ status = "not_started"
 [[category.item]]
 id = "settings"
 name = "System settings (UASAMUSystemSettingsManager)"
-status = "investigating"
+status = "partial"
+note = "Native UASAMUSystemSettingsManager + script ASAMUSettingsManager identified."
 
 [[category.item]]
 id = "chapter-select"
@@ -765,17 +833,22 @@ name = "Importer"
 [[category.item]]
 id = "locate"
 name = "Steam install discovery (tools/asamu-locate)"
-status = "not_started"
+status = "verified"
+evidence = "tools/asamu-locate; tools/asamu-locate/tests"
+note = "Real-install test + 55 tests incl. both VDF formats."
 
 [[category.item]]
 id = "inventory"
 name = "Install inventory (tools/asamu-inventory)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/data/inventory/mac-depot278362-build1822049.json"
+note = "Byte-for-byte reproducible; 21 hashes spot-checked with shasum."
 
 [[category.item]]
 id = "decompress-cache"
 name = "Local decompressed package cache"
-status = "not_started"
+status = "partial"
+note = "asamu-inspect decompress writes uncompressed streams to an explicit local path; no managed cache yet."
 
 [[category.item]]
 id = "mesh-convert"
@@ -808,22 +881,29 @@ name = "Platforms"
 [[category.item]]
 id = "linux"
 name = "Linux x86_64 build in CI"
-status = "not_started"
+status = "implemented"
+evidence = ".github/workflows/ci.yml (run 37918793290: ubuntu-latest passed)"
+note = "clippy + tests + Bevy app build."
 
 [[category.item]]
 id = "windows"
 name = "Windows x86_64 build in CI"
-status = "not_started"
+status = "investigating"
+note = "CI job exceeded the window before cancellation; caching fix pushed."
 
 [[category.item]]
 id = "macos-arm64"
 name = "macOS arm64 build in CI"
-status = "not_started"
+status = "implemented"
+evidence = ".github/workflows/ci.yml (run 37918793290: macos-latest passed)"
+note = "clippy + tests + Bevy app build."
 
 [[category.item]]
 id = "macos-x86_64"
 name = "macOS x86_64 check in CI"
-status = "not_started"
+status = "implemented"
+evidence = ".github/workflows/ci.yml (macOS x86_64 cross-check job)"
+note = "cargo check --target x86_64-apple-darwin."
 
 [[category.item]]
 id = "release-packaging"
@@ -841,7 +921,8 @@ name = "Tests"
 [[category.item]]
 id = "ci"
 name = "Cross-platform CI (fmt, clippy, test, progress check)"
-status = "not_started"
+status = "partial"
+note = "Linux and macOS arm64 full runs passed; macOS x86_64 check passed; Windows not yet completed."
 
 [[category.item]]
 id = "hygiene"
@@ -858,18 +939,23 @@ note = "Implemented locally; not yet run in CI."
 [[category.item]]
 id = "synthetic-fixtures"
 name = "Synthetic UE3 fixtures"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-ue3/tests/common/mod.rs"
+note = "Byte-level package writer for synthetic fixtures."
 
 [[category.item]]
 id = "real-data"
 name = "Env-gated real-data tests"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-ue3/tests/real_data.rs; tools/*/tests"
+note = "Env-gated; skip cleanly without game data."
 
 [[category.item]]
 id = "fuzz"
 name = "Truncation / corruption fuzz tests"
-status = "partial"
-note = "Player robustness/property tests done; parser fuzz tests in progress."
+status = "implemented"
+evidence = "crates/asamu-ue3/tests/hostile.rs; crates/asamu-player/tests/robustness.rs"
+note = "Parser + simulation robustness suites."
 
 [[category.item]]
 id = "trace-format"

@@ -46,6 +46,10 @@ Never commit, paste or upload:
 - textures, meshes, animations, music, voice, movies, Scaleform/GFx movies, whole map payloads
 - giant `strings`/`nm` dumps, complete Ghidra output, bulk decompiled functions, verbatim proprietary code
 - decompressed packages or any byte-for-byte extracted object payload
+- **UnrealScript source text.** The cooked packages contain `TextBuffer` `ScriptText` objects holding the original
+  `.uc` source of all 583 ASAMU/UTGame classes (and engine classes in the `.u` files). It may be read locally
+  (under ignored `research/`) to understand behaviour, but never extracted into, quoted in, paraphrased
+  line-by-line in, or committed to this repository. Describe behaviour in our own words; implement independently.
 
 Safe to publish: hashes, sizes, counts, format structures and offsets, class/function/symbol names
 needed to explain architecture, behavioural descriptions, sanitized inventories, evidence summaries,
@@ -71,7 +75,8 @@ Rules of thumb:
   - Windows: `C:\Program Files (x86)\Steam` (plus registry-less fallbacks)
 - Override with `ASAMU_ORIGINAL_DIR=/path/to/A Story About My Uncle`.
 - Mac layout: `A Story About My Uncle.app/Contents/{MacOS/ASAMU, Resources/{ASAMU,Engine}}`.
-  Windows layout (expected): `Binaries/Win32/ASAMU.exe`, `ASAMU/CookedPCConsole` (unverified here).
+  Windows layout (STRONG, from the TOC files shipped in the Mac depot): `Binaries/Win32/ASAMU-Win32-Shipping.exe`,
+  `ASAMU/CookedPC`. The locator also accepts `ASAMU.exe` / `CookedPCConsole` variants.
 - Never hard-code a username or home path.
 
 ### Environment variables
@@ -82,6 +87,16 @@ Rules of thumb:
 | `ASAMU_STEAM_ROOT` | Override the Steam root used for discovery. |
 | `ASAMU_RESEARCH_DIR` | Where local (ignored) RE output goes. Defaults to `research/local`. |
 | `GHIDRA_INSTALL_DIR` | Ghidra installation used by headless scripts. |
+
+## Where things are (quick map)
+
+- ASAMU script classes: `Startup.upk` → top-level package `asamu` (172 classes); stock UDK game script:
+  `Startup.upk` → `UTGame`. See `docs/reverse-engineering/SCRIPT_ANALYSIS.md`.
+- Player pawn `ASAMUPawn` → `UTPawn` → `UDKPawn`: movement runs on native pawn physics
+  (`docs/reverse-engineering/NATIVE_PHYSICS.md`). Grapple = `GrappleGun` (`UDKWeapon`) +
+  `ASAMUPlayerController` state `Grappling`.
+- Tools: `asamu-inspect` (packages), `asamu-symbols` (executable), `asamu-locate`/`asamu-inventory` (install),
+  `tools/ghidra-scripts` (Ghidra headless).
 
 ## Ghidra strategy
 
