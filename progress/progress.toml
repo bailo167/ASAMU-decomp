@@ -632,6 +632,16 @@ note = "30,284 actor LocalToWorld matrices and 3,437 light components re-derived
 # Player
 # --------------------------------------------------------------------------
 
+
+[[category.item]]
+id = "particles"
+name = "Particle systems (emitters, modules, beams/trails)"
+status = "not_started"
+
+[[category.item]]
+id = "decals"
+name = "Decals (DecalActor / DecalComponent)"
+status = "not_started"
 [[category]]
 id = "player"
 name = "Player"
@@ -703,6 +713,11 @@ note = "DefaultInput.ini actions; mouse-look scaling formula not ported (documen
 # Grapple
 # --------------------------------------------------------------------------
 
+
+[[category.item]]
+id = "gamepad"
+name = "Gamepad input per DefaultInput.ini"
+status = "not_started"
 [[category]]
 id = "grapple"
 name = "Grapple"
@@ -845,6 +860,21 @@ name = "Interactables, collectibles and story items in levels"
 status = "implemented"
 evidence = "docs/INTEGRATION.md; crates/asamu-game/src/npc.rs; apps/asamu/src/kismet.rs"
 note = "Interactables, collectibles and story items reach Kismet events and progression saves."
+
+[[category.item]]
+id = "camera-anims"
+name = "Camera animations, AnimNotify events, look-at"
+status = "not_started"
+
+[[category.item]]
+id = "npc-collision"
+name = "NPC pawns block the player"
+status = "not_started"
+
+[[category.item]]
+id = "time-trial"
+name = "Time trial mode"
+status = "not_started"
 [[category]]
 id = "rendering"
 name = "Rendering"
@@ -891,6 +921,21 @@ name = "Skinned meshes + animation playback (hands, NPCs)"
 status = "implemented"
 evidence = "apps/asamu/src/npc"
 note = "Skinned NPCs + first-person hands from skeletal glTF with animation playback by state."
+
+[[category.item]]
+id = "particles-render"
+name = "Particle effects at runtime"
+status = "not_started"
+
+[[category.item]]
+id = "gameplay-vfx"
+name = "Grapple beam, hit decal/light, velocity cone, speed lines, lens effects"
+status = "not_started"
+
+[[category.item]]
+id = "water-foliage"
+name = "Water/fluid surfaces, foliage, SpeedTree"
+status = "not_started"
 [[category.item]]
 id = "post"
 name = "Post-processing, fog, sky"
@@ -909,6 +954,11 @@ note = "Main/pause/settings/chapter-select menus, HUD, collectibles counter (fun
 # Audio
 # --------------------------------------------------------------------------
 
+
+[[category.item]]
+id = "localized-text"
+name = "Localized UI text, tutorials, credits from the user install"
+status = "not_started"
 [[category]]
 id = "audio"
 name = "Audio"

@@ -2,6 +2,30 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-10 — Morning summary (Session 1, overnight run)
+
+**Where things stand**
+- Every original data type decodes and converts from the user's own install (`asamu-import all`: ~13k files,
+  2.2 GB, ~1.5 min): packages, script, class defaults, Kismet, bytecode, textures, static/skeletal meshes,
+  animations, materials, audio, Matinee, levels, lightmaps.
+- The app plays the story levels with the original movement physics, abilities and grapple (recovered values),
+  triangle collision, checkpoints/kill zones, the original Kismet scripting (97/97 op classes), Matinee movers,
+  NPCs/worm, audio (cues, narration + subtitles, adaptive music), baked lighting, fog/colour grading, menus and
+  saves. The smoke harness follows the story chain Workshop → … → Epilogue.
+- Tracker: 133 + 11 newly listed gap items; parity suite blocked on original-game traces (tooling ready:
+  `tools/trace-recorder`, `asamu-trace`, `docs/TRACE_CAPTURE.md`).
+- CI green on Windows/Linux/macOS; release workflow exists but no tag has been pushed (needs your go-ahead).
+
+**Needs you**
+1. Record original-game traces (Mac build via Steam + `tools/trace-recorder`, or Windows) to unlock behavioural
+   verification of movement/grapple/abilities (M8, M12).
+2. Decide whether to cut a first tagged pre-release (draft) with `release.yml`.
+3. Original-save import needs the original's save encryption key read from your own executable — out of scope
+   until you decide.
+
+**Next (Phase 8)**: particles, decals, gameplay VFX (beam/velocity cone/speed lines), localized text, camera
+animations/AnimNotify/look-at, NPC collision, time trial, gamepad, water/foliage.
+
 ## 2026-10-10 — Session 1: Phase 5 merged (M9 reached), Phase 6 running
 
 **Done**: runtime world (triangle BVH collision, scene loading, death/checkpoints/streaming), Bevy rendering of
