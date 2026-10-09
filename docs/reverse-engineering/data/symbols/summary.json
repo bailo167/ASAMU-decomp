@@ -1,0 +1,4932 @@
+{
+  "schema": 1,
+  "tool": "asamu-symbols",
+  "binary": {
+    "file_size": 67378284,
+    "uuid": "9601348A-2FAC-3566-998D-B4114A14260B",
+    "dylibs": [
+      "Carbon",
+      "Cocoa",
+      "openal.dylib",
+      "OpenGL",
+      "IOKit",
+      "Security",
+      "libSDL2-2.0.0.dylib",
+      "libsteam_api.dylib",
+      "libstdc++.6.dylib",
+      "libSystem.B.dylib",
+      "AppKit",
+      "CoreFoundation",
+      "CoreServices",
+      "Foundation",
+      "libobjc.A.dylib"
+    ]
+  },
+  "totals": {
+    "nlist_entries": 535281,
+    "stab_entries": 400188,
+    "stab_by_type": {
+      "BNSYM": 85915,
+      "ENSYM": 85915,
+      "FUN": 171830,
+      "GSYM": 16017,
+      "OSO": 1330,
+      "SO": 3990,
+      "SOL": 2489,
+      "STSYM": 32702
+    },
+    "symbols": 135093,
+    "defined": 134643,
+    "undefined": 450,
+    "nm_type_census": {
+      "D": 4850,
+      "S": 9458,
+      "T": 62276,
+      "U": 450,
+      "b": 11214,
+      "d": 2058,
+      "s": 21156,
+      "t": 23631
+    },
+    "kinds": {
+      "bss": 15936,
+      "data": 32800,
+      "text": 85907,
+      "undefined": 450
+    },
+    "scopes": {
+      "global": 77034,
+      "local": 58059
+    },
+    "kind_scope": {
+      "bss/global": 4722,
+      "bss/local": 11214,
+      "data/global": 9586,
+      "data/local": 23214,
+      "text/global": 62276,
+      "text/local": 23631,
+      "undefined/global": 450
+    },
+    "sections": {
+      "__DATA,__bss": 11214,
+      "__DATA,__common": 4722,
+      "__DATA,__const": 5919,
+      "__DATA,__data": 6908,
+      "__DATA,__program_vars": 1,
+      "__TEXT,__const": 1725,
+      "__TEXT,__const_coal": 12,
+      "__TEXT,__cstring": 2,
+      "__TEXT,__gcc_except_tab": 18233,
+      "__TEXT,__text": 85907
+    },
+    "private_extern": 23027,
+    "invalid_name_offsets": 0,
+    "non_utf8_names": 0
+  },
+  "demangle": {
+    "leading_underscore": 116858,
+    "no_leading_underscore": 18235,
+    "itanium_candidates": 107452,
+    "ok": 107451,
+    "ok_suffix_stripped": 0,
+    "failed": 1,
+    "not_mangled": 27641
+  },
+  "categories": {
+    "asamu": 60,
+    "audio": 29,
+    "compiler": 18375,
+    "cxx-runtime": 21,
+    "facefx": 0,
+    "lzo": 285,
+    "objc": 3,
+    "ogg-vorbis": 2769,
+    "physx": 10504,
+    "platform": 319,
+    "scaleform": 28171,
+    "sdl": 57,
+    "steam": 96,
+    "udk": 1779,
+    "ue3": 72544,
+    "unknown": 0,
+    "zlib": 81
+  },
+  "category_by_kind": {
+    "asamu": {
+      "bss": 4,
+      "data": 15,
+      "text": 41
+    },
+    "audio": {
+      "undefined": 29
+    },
+    "compiler": {
+      "bss": 4,
+      "data": 18234,
+      "text": 136,
+      "undefined": 1
+    },
+    "cxx-runtime": {
+      "data": 4,
+      "undefined": 17
+    },
+    "lzo": {
+      "data": 30,
+      "text": 255
+    },
+    "objc": {
+      "undefined": 3
+    },
+    "ogg-vorbis": {
+      "data": 2484,
+      "text": 285
+    },
+    "physx": {
+      "bss": 89,
+      "data": 528,
+      "text": 9887
+    },
+    "platform": {
+      "undefined": 319
+    },
+    "scaleform": {
+      "bss": 497,
+      "data": 4318,
+      "text": 23356
+    },
+    "sdl": {
+      "undefined": 57
+    },
+    "steam": {
+      "data": 18,
+      "text": 54,
+      "undefined": 24
+    },
+    "udk": {
+      "bss": 268,
+      "data": 245,
+      "text": 1266
+    },
+    "ue3": {
+      "bss": 15074,
+      "data": 6899,
+      "text": 50571
+    },
+    "zlib": {
+      "data": 25,
+      "text": 56
+    }
+  },
+  "category_by_origin": {
+    "asamu": {
+      "ue3:ASAMU": 60
+    },
+    "audio": {
+      "dylib:openal.dylib": 29
+    },
+    "compiler": {
+      "dylib:libSystem.B.dylib": 1,
+      "none": 7,
+      "physx:libPhysXCooking.a": 2,
+      "scaleform:libgfx.a": 60,
+      "scaleform:libgfx_as2.a": 6,
+      "scaleform:libgfx_as3.a": 4,
+      "ue3:ALAudio": 12,
+      "ue3:ASAMU": 22,
+      "ue3:Core": 1058,
+      "ue3:Engine": 13894,
+      "ue3:GFxUI": 1572,
+      "ue3:GameFramework": 321,
+      "ue3:IpDrv": 481,
+      "ue3:Launch": 34,
+      "ue3:Mac": 95,
+      "ue3:OnlineSubsystemSteamworks": 319,
+      "ue3:OpenGLDrv": 95,
+      "ue3:UDKBase": 392
+    },
+    "cxx-runtime": {
+      "dylib:libSystem.B.dylib": 2,
+      "dylib:libstdc++.6.dylib": 15,
+      "ue3:Core": 4
+    },
+    "lzo": {
+      "external:lzopro": 285
+    },
+    "objc": {
+      "dylib:CoreFoundation": 1,
+      "dylib:Foundation": 1,
+      "dylib:libobjc.A.dylib": 1
+    },
+    "ogg-vorbis": {
+      "external:libogg": 76,
+      "external:libvorbis": 2693
+    },
+    "physx": {
+      "physx:libLowLevel.a": 1665,
+      "physx:libPhysXCooking.a": 402,
+      "physx:libPhysXCore.a": 8014,
+      "physx:libPhysXExtensions.a": 342,
+      "ue3:Engine": 81
+    },
+    "platform": {
+      "dylib:AppKit": 1,
+      "dylib:CoreFoundation": 8,
+      "dylib:CoreServices": 2,
+      "dylib:Foundation": 1,
+      "dylib:OpenGL": 97,
+      "dylib:libSystem.B.dylib": 210
+    },
+    "scaleform": {
+      "none": 2,
+      "scaleform:libgfx.a": 8727,
+      "scaleform:libgfx_as2.a": 4472,
+      "scaleform:libgfx_as3.a": 12363,
+      "ue3:GFxUI": 2607
+    },
+    "sdl": {
+      "dylib:libSDL2-2.0.0.dylib": 57
+    },
+    "steam": {
+      "dylib:libsteam_api.dylib": 24,
+      "ue3:OnlineSubsystemSteamworks": 72
+    },
+    "udk": {
+      "ue3:UDKBase": 1779
+    },
+    "ue3": {
+      "ue3:ALAudio": 87,
+      "ue3:ASAMU": 45,
+      "ue3:Core": 5993,
+      "ue3:Engine": 58527,
+      "ue3:GFxUI": 1366,
+      "ue3:GameFramework": 1680,
+      "ue3:IpDrv": 1933,
+      "ue3:Launch": 188,
+      "ue3:Mac": 545,
+      "ue3:OnlineSubsystemSteamworks": 1196,
+      "ue3:OpenGLDrv": 729,
+      "ue3:UDKBase": 255
+    },
+    "zlib": {
+      "external:zlib": 81
+    }
+  },
+  "rules": [
+    {
+      "order": 1,
+      "id": "name.asamu",
+      "tier": "name",
+      "category": "asamu",
+      "description": "raw name contains `asamu` (case-insensitive): UASAMUSystemSettingsManager, AutoInitializeRegistrantsASAMU, Gasamu…Natives, ASAMU*.cpp initialisers",
+      "matched": 53
+    },
+    {
+      "order": 2,
+      "id": "name.objc",
+      "tier": "name",
+      "category": "objc",
+      "description": "Objective-C runtime names: `_OBJC_*`, `_objc_*`, `-[…]`/`+[…]`",
+      "matched": 3
+    },
+    {
+      "order": 3,
+      "id": "name.compiler-label",
+      "tier": "name",
+      "category": "compiler",
+      "description": "compiler/linker labels and crt1 startup symbols: `GCC_except_table*`, `ltmp*`, `___tcf_*`, `___cxx_global_var_init*`, `start`, `pvars`, `dyld_stub_binder`, `__mh_execute_header`, `_NXArgc`/`_NXArgv`/`_environ`/`___progname`",
+      "matched": 18375
+    },
+    {
+      "order": 4,
+      "id": "name.cxx-runtime",
+      "tier": "name",
+      "category": "cxx-runtime",
+      "description": "C++ runtime/STL: demangled owner `std::`/`__gnu_cxx::`/`__cxxabiv1::`, global `operator new/delete`, `___cxa_*`, `___gxx_*`, `__Unwind_*`",
+      "matched": 21
+    },
+    {
+      "order": 5,
+      "id": "name.scaleform",
+      "tier": "name",
+      "category": "scaleform",
+      "description": "demangled namespace `Scaleform::` (Scaleform GFx 4)",
+      "matched": 28056
+    },
+    {
+      "order": 6,
+      "id": "name.physx",
+      "tier": "name",
+      "category": "physx",
+      "description": "PhysX 2.8 naming: leading type `Nx*`/`Np*`/`Pxd*`/`Pxs*`/`Pxc*`/`Pxn*`/`NX_*`, namespaces `Opcode::`/`IceCore::`/`IceMaths::`/`Meshmerizer::`/`HullLib::`; inside a UE3 unit only members/vtables/typeinfo of such types (SDK header code), not plain UE3 variables such as `NxDumpIndex`",
+      "matched": 5825
+    },
+    {
+      "order": 7,
+      "id": "name.facefx",
+      "tier": "name",
+      "category": "facefx",
+      "description": "FaceFX SDK namespace `OC3Ent::` (UE3's own UFaceFX* integration classes are UE3, not SDK)",
+      "matched": 0
+    },
+    {
+      "order": 8,
+      "id": "name.sdl",
+      "tier": "name",
+      "category": "sdl",
+      "description": "C names `SDL_*`",
+      "matched": 57
+    },
+    {
+      "order": 9,
+      "id": "name.steam",
+      "tier": "name",
+      "category": "steam",
+      "description": "undefined `Steam*` flat API imports; Steamworks SDK header types `CSteamID`, `CGameID`, `CCallback*`, `CCallResult`, `ISteam*`",
+      "matched": 96
+    },
+    {
+      "order": 10,
+      "id": "name.openal",
+      "tier": "name",
+      "category": "audio",
+      "description": "OpenAL C API `al[A-Z]*` / `alc[A-Z]*`",
+      "matched": 29
+    },
+    {
+      "order": 11,
+      "id": "name.zlib",
+      "tier": "name",
+      "category": "zlib",
+      "description": "zlib C API/internals: `inflate*`, `deflate*`, `crc32`, `adler32`, `_tr_*`, `zcalloc`, `zcfree`, `z_errmsg`, `compress*`, `uncompress`",
+      "matched": 57
+    },
+    {
+      "order": 12,
+      "id": "name.lzo",
+      "tier": "name",
+      "category": "lzo",
+      "description": "LZO / lzopro C names `lzo*`, `_lzo*`, `__lzo*`",
+      "matched": 195
+    },
+    {
+      "order": 13,
+      "id": "name.ogg-vorbis",
+      "tier": "name",
+      "category": "ogg-vorbis",
+      "description": "libogg/libvorbis C names `ogg*`, `vorbis*`, `ov_*`, `_vorbis*`, `_ogg*`",
+      "matched": 180
+    },
+    {
+      "order": 14,
+      "id": "name.udk",
+      "tier": "name",
+      "category": "udk",
+      "description": "UDK layer names: leading type `UDK*`/`AUDK*`/`UUDK*`/`FUDK*`, `GUDKBase…Natives`, `UDKBASE_*` FNames, `intAUDK…`/`intUUDK…` natives, `AutoInitializeRegistrantsUDKBase`, `__GLOBAL__sub_I_UDK*`",
+      "matched": 1679
+    },
+    {
+      "order": 15,
+      "id": "name.ue3-header-statics",
+      "tier": "name",
+      "category": "ue3",
+      "description": "UE3 header-defined statics duplicated into every compilation unit: `GlobalVectorConstants::*`, `SSE_ONE`, `SSE_XYZ_MASK`, `SSE_SIGN_MASK`, `DebugUtilColor`",
+      "matched": 8920
+    },
+    {
+      "order": 16,
+      "id": "provenance.asamu",
+      "tier": "provenance",
+      "category": "asamu",
+      "description": "debug map: defined in a compilation unit under `Development/Src/ASAMU/`",
+      "matched": 7
+    },
+    {
+      "order": 17,
+      "id": "provenance.udk",
+      "tier": "provenance",
+      "category": "udk",
+      "description": "debug map: defined in a compilation unit under `Development/Src/UDKBase/`",
+      "matched": 100
+    },
+    {
+      "order": 18,
+      "id": "provenance.ue3",
+      "tier": "provenance",
+      "category": "ue3",
+      "description": "debug map: defined in any other `Development/Src/<Module>/` unit (Core, Engine, GameFramework, IpDrv, GFxUI, OnlineSubsystemSteamworks, OpenGLDrv, Mac, Launch, ALAudio)",
+      "matched": 63624
+    },
+    {
+      "order": 19,
+      "id": "provenance.physx",
+      "tier": "provenance",
+      "category": "physx",
+      "description": "debug map: object from a PhysX static archive (`libPhysXCore.a`, `libLowLevel.a`, `libPhysXExtensions.a`, `libPhysXCooking.a`) or PhysX SDK source",
+      "matched": 4679
+    },
+    {
+      "order": 20,
+      "id": "provenance.scaleform",
+      "tier": "provenance",
+      "category": "scaleform",
+      "description": "debug map: object from a Scaleform archive (`libgfx*.a`) or Scaleform source",
+      "matched": 115
+    },
+    {
+      "order": 21,
+      "id": "provenance.zlib",
+      "tier": "provenance",
+      "category": "zlib",
+      "description": "debug map: unit under `External/zlib/`",
+      "matched": 24
+    },
+    {
+      "order": 22,
+      "id": "provenance.lzo",
+      "tier": "provenance",
+      "category": "lzo",
+      "description": "debug map: unit under `External/lzo*/`",
+      "matched": 90
+    },
+    {
+      "order": 23,
+      "id": "provenance.ogg-vorbis",
+      "tier": "provenance",
+      "category": "ogg-vorbis",
+      "description": "debug map: unit under `External/libogg-*/` or `External/libvorbis-*/`",
+      "matched": 2589
+    },
+    {
+      "order": 24,
+      "id": "import.sdl",
+      "tier": "import",
+      "category": "sdl",
+      "description": "undefined, bound to `libSDL2-2.0.0.dylib`",
+      "matched": 0
+    },
+    {
+      "order": 25,
+      "id": "import.steam",
+      "tier": "import",
+      "category": "steam",
+      "description": "undefined, bound to `libsteam_api.dylib`",
+      "matched": 0
+    },
+    {
+      "order": 26,
+      "id": "import.openal",
+      "tier": "import",
+      "category": "audio",
+      "description": "undefined, bound to `openal.dylib`",
+      "matched": 0
+    },
+    {
+      "order": 27,
+      "id": "import.objc",
+      "tier": "import",
+      "category": "objc",
+      "description": "undefined, bound to `libobjc`",
+      "matched": 0
+    },
+    {
+      "order": 28,
+      "id": "import.cxx-runtime",
+      "tier": "import",
+      "category": "cxx-runtime",
+      "description": "undefined, bound to `libstdc++`",
+      "matched": 0
+    },
+    {
+      "order": 29,
+      "id": "import.platform",
+      "tier": "import",
+      "category": "platform",
+      "description": "any other undefined symbol (on this binary: libSystem, OpenGL, CoreFoundation, CoreServices, Foundation, AppKit)",
+      "matched": 319
+    },
+    {
+      "order": 30,
+      "id": "convention.static-init",
+      "tier": "convention",
+      "category": "compiler",
+      "description": "`__GLOBAL__sub_I_<file>` static initialiser without debug-map provenance",
+      "matched": 0
+    },
+    {
+      "order": 31,
+      "id": "convention.ue3-registration",
+      "tier": "convention",
+      "category": "ue3",
+      "description": "UE3 native registration names without provenance: `AutoInitializeRegistrants*`, `AutoGenerateNames*`, `int<Class>exec<Func>` native pointers, `G<pkg><Class>Natives` tables, `<PKG>_<Name>` FName globals",
+      "matched": 0
+    },
+    {
+      "order": 32,
+      "id": "convention.ue3-type-prefix",
+      "tier": "convention",
+      "category": "ue3",
+      "description": "leading type follows the UE3 prefix convention `[UAFTEI][A-Z]…` (weak; only reached without provenance)",
+      "matched": 0
+    },
+    {
+      "order": 33,
+      "id": "none",
+      "tier": "fallback",
+      "category": "unknown",
+      "description": "no rule matched",
+      "matched": 0
+    }
+  ],
+  "provenance": {
+    "units": 1330,
+    "units_per_component": {
+      "external:libogg": 2,
+      "external:libvorbis": 21,
+      "external:lzopro": 111,
+      "external:zlib": 10,
+      "physx:libLowLevel.a": 90,
+      "physx:libPhysXCooking.a": 14,
+      "physx:libPhysXCore.a": 270,
+      "physx:libPhysXExtensions.a": 24,
+      "scaleform:libgfx.a": 160,
+      "scaleform:libgfx_as2.a": 4,
+      "scaleform:libgfx_as3.a": 23,
+      "ue3:ALAudio": 2,
+      "ue3:ASAMU": 3,
+      "ue3:Core": 66,
+      "ue3:Engine": 408,
+      "ue3:GFxUI": 19,
+      "ue3:GameFramework": 17,
+      "ue3:IpDrv": 30,
+      "ue3:Launch": 3,
+      "ue3:Mac": 10,
+      "ue3:OnlineSubsystemSteamworks": 9,
+      "ue3:OpenGLDrv": 17,
+      "ue3:UDKBase": 17
+    },
+    "symbols_with_unit": 134634,
+    "symbols_per_origin": {
+      "dylib:AppKit": 1,
+      "dylib:CoreFoundation": 9,
+      "dylib:CoreServices": 2,
+      "dylib:Foundation": 2,
+      "dylib:OpenGL": 97,
+      "dylib:libSDL2-2.0.0.dylib": 57,
+      "dylib:libSystem.B.dylib": 213,
+      "dylib:libobjc.A.dylib": 1,
+      "dylib:libstdc++.6.dylib": 15,
+      "dylib:libsteam_api.dylib": 24,
+      "dylib:openal.dylib": 29,
+      "external:libogg": 76,
+      "external:libvorbis": 2693,
+      "external:lzopro": 285,
+      "external:zlib": 81,
+      "none": 9,
+      "physx:libLowLevel.a": 1665,
+      "physx:libPhysXCooking.a": 404,
+      "physx:libPhysXCore.a": 8014,
+      "physx:libPhysXExtensions.a": 342,
+      "scaleform:libgfx.a": 8787,
+      "scaleform:libgfx_as2.a": 4478,
+      "scaleform:libgfx_as3.a": 12367,
+      "ue3:ALAudio": 99,
+      "ue3:ASAMU": 127,
+      "ue3:Core": 7055,
+      "ue3:Engine": 72502,
+      "ue3:GFxUI": 5545,
+      "ue3:GameFramework": 2001,
+      "ue3:IpDrv": 2414,
+      "ue3:Launch": 222,
+      "ue3:Mac": 640,
+      "ue3:OnlineSubsystemSteamworks": 1587,
+      "ue3:OpenGLDrv": 824,
+      "ue3:UDKBase": 2426
+    },
+    "address_conflicts": 0,
+    "name_conflicts": 0,
+    "external_versions": {
+      "libogg": "1.2.2",
+      "libvorbis": "1.3.2"
+    },
+    "sdk_markers": [
+      "PhysX_284_UE3",
+      "SF4-Pure"
+    ],
+    "ue3_module_units": {
+      "ALAudio": [
+        "ALAudio.cpp",
+        "ALAudioDevice.cpp"
+      ],
+      "ASAMU": [
+        "ASAMU.cpp",
+        "ASAMUSystemSettingsManager.cpp",
+        "NullSurveys.cpp"
+      ],
+      "Core": [
+        "AES.cpp",
+        "BestFitAllocator.cpp",
+        "Color.cpp",
+        "ColorList.cpp",
+        "ConsoleManager.cpp",
+        "ContainerAllocationPolicies.cpp",
+        "Core.cpp",
+        "CrossLevelReferences.cpp",
+        "Database.cpp",
+        "Distributions.cpp",
+        "FCallbackDevice.cpp",
+        "FConfigCacheIni.cpp",
+        "FFileManagerGeneric.cpp",
+        "FFileManagerWindows.cpp",
+        "FMallocProfiler.cpp",
+        "FMallocProxySimpleTag.cpp",
+        "FTableOfContents.cpp",
+        "GameplayProfiler.cpp",
+        "ObjectThumbnail.cpp",
+        "PerfCounter.cpp",
+        "PerfMem.cpp",
+        "ProfilerIntegration.cpp",
+        "ProfilingHelpers.cpp",
+        "RingBuffer.cpp",
+        "SHMath.cpp",
+        "SavePackage.cpp",
+        "ScopedDebugInfo.cpp",
+        "ScriptCallstackDecoder.cpp",
+        "StackTracker.cpp",
+        "StackWalkingWindows.cpp",
+        "TrackAllocSections.cpp",
+        "UExporter.cpp",
+        "UFactory.cpp",
+        "UHelpCommandlet.cpp",
+        "UnAnsi.cpp",
+        "UnArchive.cpp",
+        "UnAsyncLoading.cpp",
+        "UnAsyncLoadingWindows.cpp",
+        "UnAsyncWork.cpp",
+        "UnBits.cpp",
+        "UnBulkData.cpp",
+        "UnClass.cpp",
+        "UnCorSc.cpp",
+        "UnCoreNative.cpp",
+        "UnCoreNet.cpp",
+        "UnGUID.cpp",
+        "UnLinker.cpp",
+        "UnMath.cpp",
+        "UnMathTest.cpp",
+        "UnMem.cpp",
+        "UnMisc.cpp",
+        "UnName.cpp",
+        "UnObj.cpp",
+        "UnObjGC.cpp",
+        "UnObjVer.cpp",
+        "UnObjectRedirector.cpp",
+        "UnOutputDevices.cpp",
+        "UnProp.cpp",
+        "UnScriptPatcher.cpp",
+        "UnStats.cpp",
+        "UnStatsNotifyProviders.cpp",
+        "UnStatsNotifyProvidersBase.cpp",
+        "UnThreadingBase.cpp",
+        "UnThreadingWindows.cpp",
+        "UnVcWin32.cpp",
+        "UnitTest.cpp"
+      ],
+      "GFxUI": [
+        "GFxUI.cpp",
+        "RHI_ConsoleMeshCache.cpp",
+        "RHI_HAL.cpp",
+        "RHI_HALSetup.cpp",
+        "RHI_MeshCache.cpp",
+        "RHI_Shader.cpp",
+        "RHI_Texture.cpp",
+        "RHI_XeBufferMemory.cpp",
+        "RHI_XeRenderTarget.cpp",
+        "ScaleformDataStore.cpp",
+        "ScaleformEngine.cpp",
+        "ScaleformFile.cpp",
+        "ScaleformFont.cpp",
+        "ScaleformFullscreenMovie.cpp",
+        "ScaleformInteraction.cpp",
+        "ScaleformLocalization.cpp",
+        "ScaleformMovie.cpp",
+        "ScaleformSound.cpp",
+        "ScaleformStats.cpp"
+      ],
+      "GameFramework": [
+        "DebugCameraController.cpp",
+        "DelayedUnpauser.cpp",
+        "DynamicSpriteComponent.cpp",
+        "GameAI.cpp",
+        "GameCamera.cpp",
+        "GameController.cpp",
+        "GameCrowd.cpp",
+        "GameFramework.cpp",
+        "GameMobile.cpp",
+        "GameMobileKismet.cpp",
+        "GamePawn.cpp",
+        "GameSequence.cpp",
+        "GameSkelControls.cpp",
+        "GameSpecialMoves.cpp",
+        "GameStats.cpp",
+        "GameWeapon.cpp",
+        "SecondaryViewportClient.cpp"
+      ],
+      "IpDrv": [
+        "Base64.cpp",
+        "ClientBeaconAddressResolver.cpp",
+        "FDebugServer.cpp",
+        "FMultiThreadedRingBuffer.cpp",
+        "FRemotePropagator.cpp",
+        "FRemotePropagatorNet.cpp",
+        "HTTPDownload.cpp",
+        "HardwareSurvey.cpp",
+        "InternetLink.cpp",
+        "IpDrv.cpp",
+        "McpMessages.cpp",
+        "McpUserCloudFileDownload.cpp",
+        "OnlineAsyncTaskManager.cpp",
+        "OnlineAuthInterfaceImpl.cpp",
+        "OnlineGameInterfaceImpl.cpp",
+        "OnlineSubsystemCommonImpl.cpp",
+        "TcpLink.cpp",
+        "TcpNetDriver.cpp",
+        "TitleFileDownloadCache.cpp",
+        "UMeshBeacon.cpp",
+        "UOnlineEventsInterfaceMcp.cpp",
+        "UOnlineNewsInterfaceMcp.cpp",
+        "UOnlinePlaylistManager.cpp",
+        "UOnlineTitleFileDownloadMcp.cpp",
+        "UOnlineTitleFileDownloadWeb.cpp",
+        "UPartyBeacon.cpp",
+        "UnSocket.cpp",
+        "UnSocketWin.cpp",
+        "UnStatsNotifyProviders_UDP.cpp",
+        "WebServer.cpp"
+      ],
+      "Launch": [
+        "Launch.cpp",
+        "LaunchEngineLoop.cpp",
+        "LaunchMisc.cpp"
+      ],
+      "Mac": [
+        "AsyncLoadingMac.cpp",
+        "FFileManagerMac.cpp",
+        "LinuxImpl.cpp",
+        "Mac.cpp",
+        "MacClient.cpp",
+        "MacObjCWrapper.mm",
+        "MacThreading.cpp",
+        "MacViewport.cpp",
+        "MacWideChar.mm",
+        "UnSocketBSD.cpp"
+      ],
+      "OnlineSubsystemSteamworks": [
+        "OnlineAsyncTaskManagerSteam.cpp",
+        "OnlineSubsystemSteamworks.cpp",
+        "OnlineSubsystemSteamworksPackage.cpp",
+        "UOnlineAuthInterfaceSteamworks.cpp",
+        "UOnlineGameInterfaceSteamworks.cpp",
+        "UOnlineLobbyInterfaceSteamworks.cpp",
+        "UnNetSteamworks.cpp",
+        "UnSocketSteamworks.cpp",
+        "VoiceInterfaceSteamworks.cpp"
+      ],
+      "OpenGLDrv": [
+        "OpenGLCommands.cpp",
+        "OpenGLConstantBuffer.cpp",
+        "OpenGLD3DBytecodeConverter.cpp",
+        "OpenGLDevice.cpp",
+        "OpenGLDrv.cpp",
+        "OpenGLIndexBuffer.cpp",
+        "OpenGLQuery.cpp",
+        "OpenGLRenderTarget.cpp",
+        "OpenGLShaderCompiler.cpp",
+        "OpenGLShaders.cpp",
+        "OpenGLState.cpp",
+        "OpenGLTexture.cpp",
+        "OpenGLUtil.cpp",
+        "OpenGLVertexBuffer.cpp",
+        "OpenGLVertexDeclaration.cpp",
+        "OpenGLViewport.cpp",
+        "OpenGLViewportMac.cpp"
+      ],
+      "UDKBase": [
+        "MobileHUDExt.cpp",
+        "UDKAnimNodes.cpp",
+        "UDKBot.cpp",
+        "UDKEffects.cpp",
+        "UDKGame.cpp",
+        "UDKHUD.cpp",
+        "UDKHoverboard.cpp",
+        "UDKMobile.cpp",
+        "UDKNet.cpp",
+        "UDKPathing.cpp",
+        "UDKPawn.cpp",
+        "UDKPlayerController.cpp",
+        "UDKSkelControls.cpp",
+        "UDKUI_Base.cpp",
+        "UDKUI_DataProviders.cpp",
+        "UDKVehicle.cpp",
+        "UDKWeapon.cpp"
+      ]
+    },
+    "ue3_module_unit_counts": {
+      "ALAudio": 2,
+      "ASAMU": 3,
+      "Core": 66,
+      "Engine": 408,
+      "GFxUI": 19,
+      "GameFramework": 17,
+      "IpDrv": 30,
+      "Launch": 3,
+      "Mac": 10,
+      "OnlineSubsystemSteamworks": 9,
+      "OpenGLDrv": 17,
+      "UDKBase": 17
+    }
+  },
+  "middleware": [
+    {
+      "library": "PhysX 2.8.4",
+      "evidence_searched": "debug-map archives libPhysX*.a/libLowLevel.a; name `PhysX`",
+      "library_units": 398,
+      "dylib_imports": 0,
+      "integration_name_hits": 263,
+      "verdict": "statically linked (library object code present)"
+    },
+    {
+      "library": "Scaleform GFx 4",
+      "evidence_searched": "debug-map archives libgfx*.a; namespace `Scaleform::`",
+      "library_units": 187,
+      "dylib_imports": 0,
+      "integration_name_hits": 28093,
+      "verdict": "statically linked (library object code present)"
+    },
+    {
+      "library": "zlib",
+      "evidence_searched": "debug-map External/zlib",
+      "library_units": 10,
+      "dylib_imports": 0,
+      "integration_name_hits": 37,
+      "verdict": "statically linked (library object code present)"
+    },
+    {
+      "library": "LZO (lzopro)",
+      "evidence_searched": "debug-map External/lzopro",
+      "library_units": 111,
+      "dylib_imports": 0,
+      "integration_name_hits": 197,
+      "verdict": "statically linked (library object code present)"
+    },
+    {
+      "library": "libogg / libvorbis",
+      "evidence_searched": "debug-map External/libogg-*, External/libvorbis-*",
+      "library_units": 23,
+      "dylib_imports": 0,
+      "integration_name_hits": 107,
+      "verdict": "statically linked (library object code present)"
+    },
+    {
+      "library": "OpenAL",
+      "evidence_searched": "imports bound to openal.dylib",
+      "library_units": 0,
+      "dylib_imports": 29,
+      "integration_name_hits": 35,
+      "verdict": "dynamically linked (imports bound to bundled dylib)"
+    },
+    {
+      "library": "SDL2",
+      "evidence_searched": "imports bound to libSDL2-2.0.0.dylib",
+      "library_units": 0,
+      "dylib_imports": 57,
+      "integration_name_hits": 58,
+      "verdict": "dynamically linked (imports bound to bundled dylib)"
+    },
+    {
+      "library": "Steamworks",
+      "evidence_searched": "imports bound to libsteam_api.dylib",
+      "library_units": 0,
+      "dylib_imports": 24,
+      "integration_name_hits": 622,
+      "verdict": "dynamically linked (imports bound to bundled dylib)"
+    },
+    {
+      "library": "FaceFX",
+      "evidence_searched": "namespace `OC3Ent::` (SDK) vs `FaceFX` names (UE3 glue)",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 161,
+      "verdict": "not linked; UE3 integration/stub code only"
+    },
+    {
+      "library": "Bink",
+      "evidence_searched": "name `Bink`",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 10,
+      "verdict": "not linked; UE3 integration/stub code only"
+    },
+    {
+      "library": "SpeedTree",
+      "evidence_searched": "name `SpeedTree`",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 91,
+      "verdict": "not linked; UE3 integration/stub code only"
+    },
+    {
+      "library": "NVIDIA APEX",
+      "evidence_searched": "names containing `Apex` (excluding `JumpApex`)",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 324,
+      "verdict": "not linked; UE3 integration/stub code only"
+    },
+    {
+      "library": "Recast/Detour",
+      "evidence_searched": "names `Recast`/`Detour`",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 17,
+      "verdict": "not linked; UE3 integration/stub code only"
+    },
+    {
+      "library": "Trioviz (stereo 3D)",
+      "evidence_searched": "name `Trioviz`",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 11,
+      "verdict": "not linked; UE3 integration/stub code only"
+    },
+    {
+      "library": "Havok",
+      "evidence_searched": "name `Havok`",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 0,
+      "verdict": "absent"
+    },
+    {
+      "library": "Wwise",
+      "evidence_searched": "namespace `AK::`, name `Wwise`",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 0,
+      "verdict": "absent"
+    },
+    {
+      "library": "FMOD",
+      "evidence_searched": "name `FMOD`",
+      "library_units": 0,
+      "dylib_imports": 0,
+      "integration_name_hits": 0,
+      "verdict": "absent"
+    }
+  ],
+  "natives": {
+    "registrant_packages": [
+      "ALAudio",
+      "ASAMU",
+      "Core",
+      "Engine",
+      "GFxUI",
+      "GameFramework",
+      "IpDrv",
+      "MacDrv",
+      "MicroTransactionProxy",
+      "OnlineSubsystemSteamworks",
+      "UDKBase"
+    ],
+    "generate_names_packages": [
+      "ASAMU",
+      "Core",
+      "Engine",
+      "GFxUI",
+      "GameFramework",
+      "IpDrv",
+      "OnlineSubsystemSteamworks",
+      "UDKBase"
+    ],
+    "natives_table_prefixes": {
+      "Core": 3,
+      "Engine": 227,
+      "GFxUI": 4,
+      "GameFramework": 24,
+      "IpDrv": 24,
+      "OnlineSubsystemSteamworks": 3,
+      "UDKBase": 38,
+      "asamu": 1
+    },
+    "natives_tables": 324,
+    "native_classes": 1535,
+    "exec_thunks": 2505,
+    "int_registrations": 2510,
+    "int_registrations_unmatched": 0,
+    "static_initializers": 599,
+    "fname_globals": {
+      "CORE_": 1,
+      "ENGINE_": 533,
+      "GAMEFRAMEWORK_": 76,
+      "GFXUI_": 15,
+      "IPDRV_": 80,
+      "KEY_": 173,
+      "ONLINESUBSYSTEMSTEAMWORKS_": 44,
+      "UDKBASE_": 61,
+      "UIKEY_": 44
+    },
+    "modules": {
+      "ALAudio": {
+        "classes": 1,
+        "classes_with_natives": 0,
+        "exec_thunks": 0,
+        "class_exec_counts": {},
+        "classes_without_natives": [
+          "UALAudioDevice"
+        ]
+      },
+      "ASAMU": {
+        "classes": 1,
+        "classes_with_natives": 1,
+        "exec_thunks": 13,
+        "class_exec_counts": {
+          "UASAMUSystemSettingsManager": 13
+        },
+        "classes_without_natives": []
+      },
+      "Core": {
+        "classes": 44,
+        "classes_with_natives": 3,
+        "exec_thunks": 398,
+        "class_exec_counts": {
+          "UDistributionFloat": 1,
+          "UDistributionVector": 1,
+          "UObject": 396
+        },
+        "classes_without_natives": [
+          "UArrayProperty",
+          "UBoolProperty",
+          "UByteProperty",
+          "UClass",
+          "UClassProperty",
+          "UCommandlet",
+          "UComponent",
+          "UComponentProperty",
+          "UConst",
+          "UDelegateProperty",
+          "UEnum",
+          "UExporter",
+          "UFactory",
+          "UField",
+          "UFloatProperty",
+          "UFunction",
+          "UHelpCommandlet",
+          "UIntProperty",
+          "UInterface",
+          "UInterfaceProperty",
+          "ULinker",
+          "ULinkerLoad",
+          "ULinkerSave",
+          "UMapProperty",
+          "UMetaData",
+          "UNameProperty",
+          "UObjectProperty",
+          "UObjectRedirector",
+          "UObjectSerializer",
+          "UPackage",
+          "UPackageMap",
+          "UProperty",
+          "UScriptStruct",
+          "UState",
+          "UStrProperty",
+          "UStruct",
+          "UStructProperty",
+          "USubsystem",
+          "USystem",
+          "UTextBuffer",
+          "UTextBufferFactory"
+        ]
+      },
+      "Engine": {
+        "classes": 1264,
+        "classes_with_natives": 212,
+        "exec_thunks": 1571,
+        "class_exec_counts": {
+          "AActor": 122,
+          "AApexDestructibleActor": 3,
+          "AAutoTestManager": 10,
+          "ACamera": 8,
+          "AController": 38,
+          "ACoverGroup": 3,
+          "ACoverLink": 23,
+          "ADecalManager": 1,
+          "ADroppedPickup": 2,
+          "ADynamicPylon": 1,
+          "AEmitter": 1,
+          "AEmitterCameraLensEffectBase": 1,
+          "AEmitterPool": 11,
+          "AEnvironmentVolume": 1,
+          "AFileWriter": 3,
+          "AFractureManager": 7,
+          "AFracturedStaticMeshActor": 8,
+          "AFracturedStaticMeshPart": 2,
+          "AGameInfo": 13,
+          "AGameReplicationInfo": 1,
+          "AHUD": 3,
+          "AInteractiveFoliageActor": 2,
+          "AInventoryManager": 1,
+          "AKActor": 2,
+          "AKActorFromStatic": 3,
+          "AKActorSpawnable": 1,
+          "ALensFlareSource": 1,
+          "AMatineeActor": 1,
+          "ANavMeshObstacle": 2,
+          "ANavigationPoint": 5,
+          "ANxForceField": 1,
+          "APawn": 49,
+          "APhysicsVolume": 1,
+          "APlayerController": 42,
+          "APlayerReplicationInfo": 1,
+          "APortalTeleporter": 4,
+          "AProcBuilding": 6,
+          "AProjectile": 1,
+          "APylon": 4,
+          "ARB_ConstraintActor": 3,
+          "ARB_LineImpulseActor": 1,
+          "ARoute": 2,
+          "ASVehicle": 7,
+          "ASkeletalMeshActor": 3,
+          "ASkeletalMeshActorMAT": 5,
+          "ASplineActor": 14,
+          "ASplineLoftActor": 2,
+          "ATerrain": 1,
+          "AVehicle": 1,
+          "AVolume": 2,
+          "AWeapon": 1,
+          "AWorldInfo": 50,
+          "UActorComponent": 4,
+          "UAnalyticEventsBase": 17,
+          "UAnimNode": 4,
+          "UAnimNodeAimOffset": 2,
+          "UAnimNodeBlend": 1,
+          "UAnimNodeBlendList": 1,
+          "UAnimNodeBlendMultiBone": 1,
+          "UAnimNodeCrossfader": 4,
+          "UAnimNodePlayCustomAnim": 3,
+          "UAnimNodeSequence": 11,
+          "UAnimNodeSequenceBlendByAim": 1,
+          "UAnimNodeSlot": 11,
+          "UAnimNodeSynch": 6,
+          "UAnimNode_MultiBlendPerBone": 1,
+          "UAnimNotify_Trails": 1,
+          "UAnimSequence": 1,
+          "UAnimTree": 11,
+          "UAppNotificationsBase": 9,
+          "UAudioComponent": 11,
+          "UAudioDevice": 2,
+          "UCameraAnimInst": 6,
+          "UCameraModifier": 3,
+          "UCameraModifier_CameraShake": 1,
+          "UCanvas": 33,
+          "UCheatManager": 9,
+          "UCloudSaveSystem": 2,
+          "UCloudStorageBase": 23,
+          "UConsole": 2,
+          "UCylinderComponent": 1,
+          "UDataStoreClient": 5,
+          "UDecalComponent": 4,
+          "UDownloadableContentEnumerator": 4,
+          "UDownloadableContentManager": 10,
+          "UDynamicLightEnvironmentComponent": 1,
+          "UEngine": 37,
+          "UExponentialHeightFogComponent": 1,
+          "UFaceFXAsset": 2,
+          "UFacebookIntegration": 6,
+          "UFluidSurfaceComponent": 3,
+          "UFogVolumeDensityComponent": 1,
+          "UFont": 5,
+          "UFracturedBaseComponent": 4,
+          "UFracturedStaticMeshComponent": 11,
+          "UGameEngine": 6,
+          "UGameUISceneClient": 3,
+          "UGameViewportClient": 17,
+          "UGameplayEventsHandler": 1,
+          "UGameplayEventsReader": 13,
+          "UGameplayEventsUploadAnalytics": 21,
+          "UGameplayEventsWriter": 28,
+          "UGenericParamListStatEntry": 9,
+          "UGoogleIntegration": 5,
+          "UHeightFogComponent": 1,
+          "UHttpBaseInterface": 7,
+          "UHttpRequestInterface": 7,
+          "UHttpResponseInterface": 2,
+          "UImageBasedReflectionComponent": 2,
+          "UImageReflectionShadowPlaneComponent": 1,
+          "UInAppMessageBase": 3,
+          "UInGameAdManager": 4,
+          "UIniLocPatcher": 2,
+          "UInput": 2,
+          "UInteraction": 1,
+          "UJsonObject": 7,
+          "ULensFlareComponent": 5,
+          "ULightComponent": 6,
+          "ULightEnvironmentComponent": 2,
+          "ULocalPlayer": 16,
+          "UMaterialInstance": 8,
+          "UMaterialInstanceTimeVarying": 8,
+          "UMaterialInterface": 16,
+          "UMeshComponent": 4,
+          "UMicroTransactionBase": 5,
+          "UMorphNodeMultiPose": 3,
+          "UMorphNodePose": 1,
+          "UMorphNodeWeight": 1,
+          "UMorphTargetSet": 1,
+          "UMultiFont": 1,
+          "UNavMeshGoal_At": 1,
+          "UNavMeshGoal_ClosestActorInList": 1,
+          "UNavMeshGoal_GenericFilterContainer": 1,
+          "UNavMeshGoal_Null": 1,
+          "UNavMeshGoal_Random": 1,
+          "UNavigationHandle": 42,
+          "UNxForceFieldComponent": 1,
+          "UOnlineGameSearch": 1,
+          "UOnlineMatchmakingStats": 2,
+          "UOnlinePlayerStorage": 32,
+          "UOnlineProfileSettings": 4,
+          "UOnlineStats": 2,
+          "UOnlineStatsRead": 8,
+          "UOnlineStatsWrite": 8,
+          "UOnlineSubsystem": 5,
+          "UPBRuleNodeMesh": 1,
+          "UParticleEmitter": 1,
+          "UParticleSystem": 6,
+          "UParticleSystemComponent": 46,
+          "UPath_AvoidInEscapableNodes": 1,
+          "UPhysicalMaterial": 1,
+          "UPhysicsAsset": 1,
+          "UPhysicsAssetInstance": 17,
+          "UPlatformInterfaceBase": 11,
+          "UPlatformInterfaceWebResponse": 3,
+          "UPlayer": 1,
+          "UPlayerInput": 2,
+          "UPointLightComponent": 1,
+          "UPrefabSequence": 2,
+          "UPrimitiveComponent": 44,
+          "URB_BodyInstance": 18,
+          "URB_ConstraintInstance": 17,
+          "URB_Handle": 7,
+          "URB_RadialImpulseComponent": 1,
+          "URB_Spring": 2,
+          "URadialBlurComponent": 5,
+          "UReachSpec": 3,
+          "USceneCapture2DComponent": 2,
+          "USceneCapture2DHitMaskComponent": 3,
+          "USceneCaptureComponent": 2,
+          "USceneCapturePortalComponent": 1,
+          "USeqAct_Delay": 1,
+          "USeqAct_Interp": 3,
+          "USeqAct_Latent": 1,
+          "USeqAct_WaitForLevelsVisible": 1,
+          "USeqEvent_Touch": 2,
+          "USeqVar_Player": 1,
+          "USequence": 3,
+          "USequenceEvent": 1,
+          "USequenceObject": 2,
+          "USequenceOp": 12,
+          "USettings": 53,
+          "USkelControlBase": 3,
+          "USkelControlLookAt": 4,
+          "USkeletalMeshComponent": 114,
+          "USoundCue": 1,
+          "USoundNodeWaveStreaming": 5,
+          "USpeedTreeComponent": 2,
+          "USplineComponent": 5,
+          "USpotLightComponent": 1,
+          "USpriteComponent": 3,
+          "UStaticMeshComponent": 4,
+          "USurface": 2,
+          "UTexture2D": 6,
+          "UTexture2DComposite": 3,
+          "UTexture2DDynamic": 4,
+          "UTextureFlipBook": 4,
+          "UTextureMovie": 3,
+          "UTextureRenderTarget2D": 1,
+          "UTranslationContext": 1,
+          "UTranslatorTag": 1,
+          "UTwitterIntegrationBase": 8,
+          "UUIDataProvider_PlayerAchievements": 2,
+          "UUIDataStore_DynamicResource": 3,
+          "UUIDataStore_GameResource": 2,
+          "UUIDataStore_InputAlias": 8,
+          "UUIDataStore_OnlineStats": 1,
+          "UUIDataStore_StringAliasMap": 3,
+          "UUIInteraction": 4,
+          "UUIManager": 2,
+          "UUIRoot": 3,
+          "UUISceneClient": 3
+        },
+        "classes_without_natives": null
+      },
+      "GFxUI": {
+        "classes": 16,
+        "classes_with_natives": 4,
+        "exec_thunks": 135,
+        "class_exec_counts": {
+          "UGFxFSCmdHandler_Kismet": 1,
+          "UGFxInteraction": 6,
+          "UGFxMoviePlayer": 55,
+          "UGFxObject": 73
+        },
+        "classes_without_natives": [
+          "UFlashMovie",
+          "UGFxAction_CloseMovie",
+          "UGFxAction_GetVariable",
+          "UGFxAction_Invoke",
+          "UGFxAction_OpenMovie",
+          "UGFxAction_SetCaptureKeys",
+          "UGFxAction_SetVariable",
+          "UGFxEngine",
+          "UGFxEvent_FSCommand",
+          "UGFxFSCmdHandler",
+          "UGFxRawData",
+          "USwfMovie"
+        ]
+      },
+      "GameFramework": {
+        "classes": 70,
+        "classes_with_natives": 22,
+        "exec_thunks": 67,
+        "class_exec_counts": {
+          "ADebugCameraController": 3,
+          "AGameAIController": 9,
+          "AGameCrowdAgent": 5,
+          "AGameCrowdAgentSkeletal": 1,
+          "AGameCrowdDestination": 1,
+          "AGameCrowdDestinationQueuePoint": 1,
+          "AGameCrowdPopulationManager": 6,
+          "AGameExplosionActor": 1,
+          "AGamePlayerCamera": 2,
+          "AGamePlayerController": 6,
+          "UGameAICommand": 1,
+          "UGameCrowdAgentBehavior": 4,
+          "UGameCrowdBehavior_PlayAnimation": 1,
+          "UGameSpecialMove": 6,
+          "UGameStateObject": 1,
+          "UGameStatsAggregator": 3,
+          "UGameThirdPersonCamera": 2,
+          "UGameThirdPersonCameraMode": 1,
+          "UMobileInputZone": 2,
+          "UMobileMenuScene": 3,
+          "UMobilePlayerInput": 7,
+          "UNavMeshGoal_OutOfViewFrom": 1
+        },
+        "classes_without_natives": [
+          "AFrameworkGame",
+          "AGameCameraBlockingVolume",
+          "AGameCrowdAgentSM",
+          "AGameCrowdBehaviorPoint",
+          "AGameCrowdInfoVolume",
+          "AGameCrowdInteractionPoint",
+          "AGameCrowdReplicationActor",
+          "AGameCrowdSpawnRelativeActor",
+          "AGamePawn",
+          "AMobileHUD",
+          "UDynamicSpriteComponent",
+          "UGameCameraBase",
+          "UGameCheatManager",
+          "UGameCrowdBehavior_RunFromPanic",
+          "UGameCrowdBehavior_WaitForGroup",
+          "UGameCrowdBehavior_WaitInQueue",
+          "UGameCrowdGroup",
+          "UGameDestinationConnRenderingComponent",
+          "UGameExplosion",
+          "UGameSkelCtrl_Recoil",
+          "UGameThirdPersonCameraMode_Default",
+          "UGameTypes",
+          "UMobileMenuImage",
+          "UMobileMenuObject",
+          "UMobileSecondaryViewportClient",
+          "UNavMeshPath_BiasAgainstPolysWithinDistanceOfLocations",
+          "USecondaryViewportClient",
+          "USeqAct_ControlGameMovie",
+          "USeqAct_Deproject",
+          "USeqAct_GameCrowdPopulationManagerToggle",
+          "USeqAct_GameCrowdSpawner",
+          "USeqAct_MobileAddInputZones",
+          "USeqAct_MobileClearInputZones",
+          "USeqAct_MobileRemoveInputZone",
+          "USeqAct_MobileSaveLoadValue",
+          "USeqAct_ModifyProperty",
+          "USeqAct_PlayAgentAnimation",
+          "USeqEvent_CrowdAgentReachedDestination",
+          "USeqEvent_HudRender",
+          "USeqEvent_MobileBase",
+          "USeqEvent_MobileButton",
+          "USeqEvent_MobileInput",
+          "USeqEvent_MobileLook",
+          "USeqEvent_MobileMotion",
+          "USeqEvent_MobileObjectPicker",
+          "USeqEvent_MobileRawInput",
+          "USeqEvent_MobileSwipe",
+          "USeqEvent_MobileZoneBase"
+        ]
+      },
+      "IpDrv": {
+        "classes": 32,
+        "classes_with_natives": 24,
+        "exec_thunks": 137,
+        "class_exec_counts": {
+          "AInternetLink": 7,
+          "ATcpLink": 9,
+          "UBase64": 4,
+          "UMcpMessageManager": 2,
+          "UMcpServiceBase": 3,
+          "UMeshBeacon": 1,
+          "UMeshBeaconClient": 3,
+          "UMeshBeaconHost": 10,
+          "UOnlineAuthInterfaceImpl": 20,
+          "UOnlineEventsInterfaceMcp": 4,
+          "UOnlineGameInterfaceImpl": 11,
+          "UOnlineNewsInterfaceMcp": 1,
+          "UOnlinePlaylistManager": 5,
+          "UOnlineSubsystemCommonImpl": 1,
+          "UOnlineTitleFileDownloadBase": 1,
+          "UOnlineTitleFileDownloadMcp": 4,
+          "UOnlineTitleFileDownloadWeb": 5,
+          "UPartyBeacon": 1,
+          "UPartyBeaconClient": 3,
+          "UPartyBeaconHost": 11,
+          "UTitleFileDownloadCache": 10,
+          "UUIDataStore_OnlinePlaylists": 2,
+          "UWebRequest": 11,
+          "UWebResponse": 8
+        },
+        "classes_without_natives": [
+          "UClientBeaconAddressResolver",
+          "UHTTPDownload",
+          "UMCPBase",
+          "UMcpMessageBase",
+          "UMcpUserCloudFileDownload",
+          "UOnlinePlaylistProvider",
+          "UTcpNetDriver",
+          "UTcpipConnection"
+        ]
+      },
+      "Mac": {
+        "classes": 1,
+        "classes_with_natives": 0,
+        "exec_thunks": 0,
+        "class_exec_counts": {},
+        "classes_without_natives": [
+          "UMacClient"
+        ]
+      },
+      "OnlineSubsystemSteamworks": {
+        "classes": 6,
+        "classes_with_natives": 3,
+        "exec_thunks": 105,
+        "class_exec_counts": {
+          "UOnlineAuthInterfaceSteamworks": 8,
+          "UOnlineGameInterfaceSteamworks": 4,
+          "UOnlineSubsystemSteamworks": 93
+        },
+        "classes_without_natives": [
+          "UIpNetConnectionSteamworks",
+          "UIpNetDriverSteamworks",
+          "UOnlineLobbyInterfaceSteamworks"
+        ]
+      },
+      "UDKBase": {
+        "classes": 100,
+        "classes_with_natives": 31,
+        "exec_thunks": 79,
+        "class_exec_counts": {
+          "AMobileHUDExt": 6,
+          "AUDKBot": 9,
+          "AUDKEmitCameraEffect": 1,
+          "AUDKGameObjective": 1,
+          "AUDKHUD": 2,
+          "AUDKPawn": 2,
+          "AUDKPlayerController": 3,
+          "AUDKVehicle": 13,
+          "AUDKWeapon": 1,
+          "UUDKAnimBlendBase": 2,
+          "UUDKAnimBlendByDriving": 1,
+          "UUDKAnimBlendByFlying": 1,
+          "UUDKAnimBlendByVehicle": 1,
+          "UUDKAnimNodeFramePlayer": 2,
+          "UUDKAnimNodeJumpLeanOffset": 1,
+          "UUDKAnimNodeSequence": 2,
+          "UUDKExplosionLight": 1,
+          "UUDKGameInteraction": 1,
+          "UUDKGameSettingsCommon": 2,
+          "UUDKGameViewportClient": 1,
+          "UUDKParticleSystemComponent": 1,
+          "UUDKPlayerInput": 1,
+          "UUDKProfileSettings": 2,
+          "UUDKSkelControl_MassBoneScaling": 2,
+          "UUDKSkelControl_TurretConstrained": 2,
+          "UUDKSkeletalMeshComponent": 1,
+          "UUDKUIDataProvider_SearchResult": 1,
+          "UUDKUIDataStore_MenuItems": 4,
+          "UUDKUIDataStore_StringAliasBindingMap": 4,
+          "UUDKUIDataStore_StringList": 6,
+          "UUDKVehicleSimHoverboard": 2
+        },
+        "classes_without_natives": [
+          "ASimpleGame",
+          "AUDKCarriedObject",
+          "AUDKEmitterPool",
+          "AUDKForcedDirectionVolume",
+          "AUDKGame",
+          "AUDKJumpPad",
+          "AUDKKActorBreakable",
+          "AUDKPickupFactory",
+          "AUDKProjectile",
+          "AUDKScout",
+          "AUDKScriptedNavigationPoint",
+          "AUDKSquadAI",
+          "AUDKTeamOwnedInfo",
+          "AUDKTeamPlayerStart",
+          "AUDKTeleporterBase",
+          "AUDKVehicleBase",
+          "AUDKVehicleFactory",
+          "AUDKVehicleMovementEffect",
+          "AUDKWeaponPawn",
+          "AUDKWeaponShield",
+          "UParticleModuleTypeDataSnow",
+          "UUDKAIDecisionComponent",
+          "UUDKAnimBlendByFall",
+          "UUDKAnimBlendByHoverJump",
+          "UUDKAnimBlendByHoverboardTilt",
+          "UUDKAnimBlendByHoverboardTurn",
+          "UUDKAnimBlendByHoverboarding",
+          "UUDKAnimBlendByIdle",
+          "UUDKAnimBlendByPhysics",
+          "UUDKAnimBlendByPhysicsVolume",
+          "UUDKAnimBlendByPosture",
+          "UUDKAnimBlendBySlotActive",
+          "UUDKAnimBlendBySpeed",
+          "UUDKAnimBlendByTurnInPlace",
+          "UUDKAnimBlendByWeapType",
+          "UUDKAnimBlendByWeapon",
+          "UUDKAnimNodeCopyBoneTranslation",
+          "UUDKAnimNodeSeqWeap",
+          "UUDKDataStore_GameSearchBase",
+          "UUDKJumpPadReachSpec",
+          "UUDKMapInfo",
+          "UUDKMapMusicInfo",
+          "UUDKSkelControl_CantileverBeam",
+          "UUDKSkelControl_Damage",
+          "UUDKSkelControl_DamageHinge",
+          "UUDKSkelControl_DamageSpring",
+          "UUDKSkelControl_HoverboardSuspension",
+          "UUDKSkelControl_HoverboardSwing",
+          "UUDKSkelControl_HoverboardVibration",
+          "UUDKSkelControl_HugGround",
+          "UUDKSkelControl_LockRotation",
+          "UUDKSkelControl_LookAt",
+          "UUDKSkelControl_PropellerBlade",
+          "UUDKSkelControl_Rotate",
+          "UUDKSkelControl_SpinControl",
+          "UUDKSkelControl_VehicleFlap",
+          "UUDKTrajectoryReachSpec",
+          "UUDKUIDataProvider_MapInfo",
+          "UUDKUIDataProvider_MenuOption",
+          "UUDKUIDataProvider_ServerDetails",
+          "UUDKUIDataProvider_SimpleElementProvider",
+          "UUDKUIDataProvider_StringArray",
+          "UUDKUIDataStore_Options",
+          "UUDKUIDataStore_StringAliasMap",
+          "UUDKUIResourceDataProvider",
+          "UUDKVehicleSimCar",
+          "UUDKVehicleSimChopper",
+          "UUDKVehicleSimHover",
+          "UUDKVehicleWheel"
+        ]
+      }
+    },
+    "decoded": {
+      "tables_decoded": 324,
+      "tables_failed": 0,
+      "table_entries": 2468,
+      "entries_resolved": 2468,
+      "entries_name_matches_symbol": 2468,
+      "entries_inherited": 106,
+      "entries_unresolved": 0,
+      "int_decoded": 2510,
+      "int_resolved": 2508,
+      "int_virtual": {
+        "AController.execPollMoveTo": "0x880",
+        "AController.execPollMoveToward": "0x888"
+      },
+      "int_inherited": {
+        "AController.execGetTeamNum": "AActor",
+        "ADebugCameraController.execConsoleCommand": "AActor",
+        "ADynamicPylon.execFlushDynamicEdges": "APylon",
+        "AGameCrowdAgent.execNativePostRenderFor": "AActor",
+        "AGameCrowdAgentSkeletal.execPlayDeath": "AGameCrowdAgent",
+        "ANavigationPoint.execGetBoundingCylinder": "AActor",
+        "ANxCylindricalForceFieldCapsule.execDoInitRBPhys": "ANxForceField",
+        "ANxForceFieldGeneric.execDoInitRBPhys": "ANxForceField",
+        "ANxForceFieldRadial.execDoInitRBPhys": "ANxForceField",
+        "ANxForceFieldTornado.execDoInitRBPhys": "ANxForceField",
+        "ANxGenericForceFieldBox.execDoInitRBPhys": "ANxForceField",
+        "APathTargetPoint.execShouldBeHiddenBySHOW_NavigationNodes": "AActor",
+        "APawn.execGetBoundingCylinder": "AActor",
+        "APawn.execGetTeamNum": "AActor",
+        "APhysicsVolume.execGetGravityZ": "AActor",
+        "APlayerController.execConsoleCommand": "AActor",
+        "APlayerController.execIsLocalController": "AController",
+        "APlayerController.execIsLocalPlayerController": "AController",
+        "APlayerReplicationInfo.execGetTeamNum": "AActor",
+        "APortalMarker.execCanTeleport": "ANavigationPoint",
+        "AProjectile.execGetTeamNum": "AActor",
+        "ATeamInfo.execGetTeamNum": "AActor",
+        "ATeleporter.execCanTeleport": "ANavigationPoint",
+        "AUDKCarriedObject.execGetTeamNum": "AActor",
+        "AUDKCarriedObject.execSetHUDLocation": "AActor",
+        "AUDKGameObjective.execGetTeamNum": "AActor",
+        "AUDKGameObjective.execSetHUDLocation": "AActor",
+        "AUDKPawn.execGetBoundingCylinder": "AActor",
+        "AUDKPawn.execGetTargetLocation": "AActor",
+        "AUDKPawn.execIsInvisible": "APawn",
+        "AUDKPawn.execNativePostRenderFor": "AActor",
+        "AUDKPawn.execSetHUDLocation": "AActor",
+        "AUDKPawn.execSuggestJumpVelocity": "APawn",
+        "AUDKPlayerController.execIsKeyboardAvailable": "APlayerController",
+        "AUDKPlayerController.execIsMouseAvailable": "APlayerController",
+        "AUDKProjectile.execGetTerminalVelocity": "AActor",
+        "AUDKScout.execSuggestJumpVelocity": "APawn",
+        "AUDKTeamOwnedInfo.execGetTeamNum": "AActor",
+        "AUDKVehicle.execGetGravityZ": "AActor",
+        "AUDKVehicle.execGetMaxRiseForce": "AVehicle",
+        "AUDKVehicle.execGetTeamNum": "AActor",
+        "AUDKVehicle.execNativePostRenderFor": "AActor",
+        "AUDKVehicle.execSetHUDLocation": "AActor",
+        "AUDKVehicleFactory.execGetTeamNum": "AActor",
+        "AUDKVehicleFactory.execSetHUDLocation": "AActor",
+        "AUDKWeaponPawn.execGetTargetLocation": "AActor",
+        "AVehicle.execGetTargetLocation": "AActor",
+        "AWorldInfo.execGetGravityZ": "AActor",
+        "UAnimNodeAdditiveBlending.execSetBlendTarget": "UAnimNodeBlend",
+        "UAnimNodeBlendBase.execPlayAnim": "UAnimNode",
+        "UAnimNodeBlendBase.execReplayAnim": "UAnimNode",
+        "UAnimNodeBlendBase.execStopAnim": "UAnimNode",
+        "UAnimNodeBlendPerBone.execSetBlendTarget": "UAnimNodeBlend",
+        "UAnimNodeSequence.execPlayAnim": "UAnimNode",
+        "UAnimNodeSequence.execReplayAnim": "UAnimNode",
+        "UAnimNodeSequence.execStopAnim": "UAnimNode",
+        "UCameraModifier_CameraShake.execModifyCamera": "UCameraModifier",
+        "UFracturedBaseComponent.execSetStaticMesh": "UStaticMeshComponent",
+        "UGameCrowdBehavior_WaitForGroup.execShouldEndIdle": "UGameCrowdAgentBehavior",
+        "UGameCrowdBehavior_WaitInQueue.execHandleMovement": "UGameCrowdAgentBehavior",
+        "UGameCrowdBehavior_WaitInQueue.execShouldEndIdle": "UGameCrowdAgentBehavior",
+        "UGameStateObject.execPreProcessStream": "UGameplayEventsHandler",
+        "UGameStatsAggregator.execPreProcessStream": "UGameplayEventsHandler",
+        "UMaterialInstance.execGetTextureParameterValue": "UMaterialInterface",
+        "UMaterialInstanceConstant.execClearParameterValues": "UMaterialInstance",
+        "UMaterialInstanceConstant.execGetMobileScalarParameterValue": "UMaterialInterface",
+        "UMaterialInstanceConstant.execGetMobileTextureParameterValue": "UMaterialInterface",
+        "UMaterialInstanceConstant.execGetMobileVectorParameterValue": "UMaterialInterface",
+        "UMaterialInstanceConstant.execSetFontParameterValue": "UMaterialInstance",
+        "UMaterialInstanceConstant.execSetParent": "UMaterialInstance",
+        "UMaterialInstanceConstant.execSetScalarParameterValue": "UMaterialInstance",
+        "UMaterialInstanceConstant.execSetTextureParameterValue": "UMaterialInstance",
+        "UMaterialInstanceConstant.execSetVectorParameterValue": "UMaterialInstance",
+        "UMaterialInstanceTimeVarying.execClearParameterValues": "UMaterialInstance",
+        "UMaterialInstanceTimeVarying.execSetFontParameterValue": "UMaterialInstance",
+        "UMaterialInstanceTimeVarying.execSetParent": "UMaterialInstance",
+        "UMaterialInstanceTimeVarying.execSetScalarCurveParameterValue": "UMaterialInstance",
+        "UMaterialInstanceTimeVarying.execSetScalarParameterValue": "UMaterialInstance",
+        "UMaterialInstanceTimeVarying.execSetTextureParameterValue": "UMaterialInstance",
+        "UMaterialInstanceTimeVarying.execSetVectorParameterValue": "UMaterialInstance",
+        "UMeshBeaconClient.execDestroyBeacon": "UMeshBeacon",
+        "UMeshBeaconHost.execDestroyBeacon": "UMeshBeacon",
+        "UMobilePlayerInput.execCancelMobileInput": "UPlayerInput",
+        "UMultiProviderAnalytics.execEndSession": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execEndStringEvent": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execEndStringEventParam": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execEndStringEventParamArray": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogCurrencyGivenEvent": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogCurrencyPurchaseEvent": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogErrorMessage": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogItemPurchaseEvent": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogStringEvent": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogStringEventParam": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogStringEventParamArray": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogUserAttributeUpdate": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execLogUserAttributeUpdateArray": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execSendCachedEvents": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execSetUserId": "UAnalyticEventsBase",
+        "UMultiProviderAnalytics.execStartSession": "UAnalyticEventsBase",
+        "UOnlineProfileSettings.execSetToDefaults": "UOnlinePlayerStorage",
+        "UOnlineSubsystemSteamworks.execInit": "UOnlineSubsystem",
+        "UPartyBeaconClient.execDestroyBeacon": "UPartyBeacon",
+        "UPartyBeaconHost.execDestroyBeacon": "UPartyBeacon",
+        "UStringsTag.execTranslate": "UTranslatorTag",
+        "UUDKUIDataStore_StringAliasBindingMap.execGetStringWithFieldName": "UUIDataStore_StringAliasMap",
+        "UUDKUIDataStore_StringAliasMap.execGetStringWithFieldName": "UUIDataStore_StringAliasMap"
+      },
+      "table_entries_with_int": 2368,
+      "table_entries_without_int": 100,
+      "int_without_table_entry": 142,
+      "int_without_table_entry_by_class": {
+        "AActor": 2,
+        "AController": 4,
+        "AUDKBot": 2,
+        "UObject": 134
+      },
+      "int_without_table_entry_latent_poll": 8,
+      "table_entries_without_int_by_class": {
+        "UActorComponent": 4,
+        "UAudioComponent": 1,
+        "UMeshComponent": 1,
+        "UObject": 12,
+        "UPrimitiveComponent": 18,
+        "USkeletalMeshComponent": 60,
+        "UStaticMeshComponent": 4
+      },
+      "exec_thunks_unregistered": 1
+    },
+    "classes_of_interest": {
+      "AActor": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 122,
+        "int_registrations": 122,
+        "private_static_class": "0x102524a98",
+        "natives_table_entries": 120
+      },
+      "ACamera": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 8,
+        "int_registrations": 8,
+        "private_static_class": "0x102525720",
+        "natives_table_entries": 8
+      },
+      "AController": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 38,
+        "int_registrations": 39,
+        "private_static_class": "0x102524c50",
+        "natives_table_entries": 35
+      },
+      "AGamePawn": {
+        "module": "GameFramework",
+        "category": "ue3",
+        "natives_table_pkg": null,
+        "exec_thunks": 0,
+        "int_registrations": 0,
+        "private_static_class": "0x10253a1b0",
+        "natives_table_entries": null
+      },
+      "AGamePlayerCamera": {
+        "module": "GameFramework",
+        "category": "ue3",
+        "natives_table_pkg": "GameFramework",
+        "exec_thunks": 2,
+        "int_registrations": 2,
+        "private_static_class": "0x102539e50",
+        "natives_table_entries": 2
+      },
+      "AGamePlayerController": {
+        "module": "GameFramework",
+        "category": "ue3",
+        "natives_table_pkg": "GameFramework",
+        "exec_thunks": 6,
+        "int_registrations": 6,
+        "private_static_class": "0x102539e78",
+        "natives_table_entries": 6
+      },
+      "AInterpActor": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": null,
+        "exec_thunks": 0,
+        "int_registrations": 0,
+        "private_static_class": "0x102527b18",
+        "natives_table_entries": null
+      },
+      "AKActor": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 2,
+        "int_registrations": 2,
+        "private_static_class": "0x1025289e8",
+        "natives_table_entries": 2
+      },
+      "AMatineeActor": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 1,
+        "int_registrations": 1,
+        "private_static_class": "0x102527b20",
+        "natives_table_entries": 1
+      },
+      "APawn": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 49,
+        "int_registrations": 51,
+        "private_static_class": "0x1025289c0",
+        "natives_table_entries": 51
+      },
+      "APhysicsVolume": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 1,
+        "int_registrations": 2,
+        "private_static_class": "0x102524ca8",
+        "natives_table_entries": 2
+      },
+      "APlayerController": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 42,
+        "int_registrations": 45,
+        "private_static_class": "0x102524c60",
+        "natives_table_entries": 45
+      },
+      "ARB_ConstraintActor": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 3,
+        "int_registrations": 3,
+        "private_static_class": "0x102528ad0",
+        "natives_table_entries": 3
+      },
+      "AUDKPawn": {
+        "module": "UDKBase",
+        "category": "udk",
+        "natives_table_pkg": "UDKBase",
+        "exec_thunks": 2,
+        "int_registrations": 8,
+        "private_static_class": "0x10253a590",
+        "natives_table_entries": 8
+      },
+      "AUDKPlayerController": {
+        "module": "UDKBase",
+        "category": "udk",
+        "natives_table_pkg": "UDKBase",
+        "exec_thunks": 3,
+        "int_registrations": 5,
+        "private_static_class": "0x10253a598",
+        "natives_table_entries": 5
+      },
+      "AWorldInfo": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 50,
+        "int_registrations": 51,
+        "private_static_class": "0x102524b20",
+        "natives_table_entries": 51
+      },
+      "UASAMUSystemSettingsManager": {
+        "module": "ASAMU",
+        "category": "asamu",
+        "natives_table_pkg": "asamu",
+        "exec_thunks": 13,
+        "int_registrations": 13,
+        "private_static_class": "0x10253a700",
+        "natives_table_entries": 13
+      },
+      "UCameraModifier": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 3,
+        "int_registrations": 3,
+        "private_static_class": "0x102525748",
+        "natives_table_entries": 3
+      },
+      "UGameThirdPersonCamera": {
+        "module": "GameFramework",
+        "category": "ue3",
+        "natives_table_pkg": "GameFramework",
+        "exec_thunks": 2,
+        "int_registrations": 2,
+        "private_static_class": "0x102539e58",
+        "natives_table_entries": 2
+      },
+      "UGameThirdPersonCameraMode": {
+        "module": "GameFramework",
+        "category": "ue3",
+        "natives_table_pkg": "GameFramework",
+        "exec_thunks": 1,
+        "int_registrations": 1,
+        "private_static_class": "0x102539e60",
+        "natives_table_entries": 1
+      },
+      "UInput": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 2,
+        "int_registrations": 2,
+        "private_static_class": "0x102527988",
+        "natives_table_entries": 2
+      },
+      "UObject": {
+        "module": "Core",
+        "category": "ue3",
+        "natives_table_pkg": "Core",
+        "exec_thunks": 396,
+        "int_registrations": 383,
+        "private_static_class": "0x1024f2c68",
+        "natives_table_entries": 261
+      },
+      "UPlayerInput": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 2,
+        "int_registrations": 2,
+        "private_static_class": "0x102527990",
+        "natives_table_entries": 2
+      },
+      "USeqAct_Interp": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 3,
+        "int_registrations": 3,
+        "private_static_class": "0x102527b28",
+        "natives_table_entries": 3
+      },
+      "USeqAct_Latent": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 1,
+        "int_registrations": 1,
+        "private_static_class": "0x102529060",
+        "natives_table_entries": 1
+      },
+      "USequence": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 3,
+        "int_registrations": 3,
+        "private_static_class": "0x102528d88",
+        "natives_table_entries": 3
+      },
+      "USequenceEvent": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 1,
+        "int_registrations": 1,
+        "private_static_class": "0x102528da0",
+        "natives_table_entries": 1
+      },
+      "USequenceOp": {
+        "module": "Engine",
+        "category": "ue3",
+        "natives_table_pkg": "Engine",
+        "exec_thunks": 12,
+        "int_registrations": 12,
+        "private_static_class": "0x102528dc0",
+        "natives_table_entries": 12
+      },
+      "UUDKPlayerInput": {
+        "module": "UDKBase",
+        "category": "udk",
+        "natives_table_pkg": "UDKBase",
+        "exec_thunks": 1,
+        "int_registrations": 1,
+        "private_static_class": "0x10253a5a0",
+        "natives_table_entries": 1
+      }
+    }
+  },
+  "asamu_symbols": [
+    {
+      "address": "0x100f8fc60",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execResetLastSavedSettings(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f8fcd0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execSaveSystemSettings(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f8fd40",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execSetBoolSetting(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f8fea0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execGetBoolSetting(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90040",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execSetFloatSetting(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f901a0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execGetFloatSetting(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90340",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execSetIntSetting(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90490",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execGetIntSetting(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90630",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execSetTextureDetail(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f906e0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execGetTextureDetail(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90750",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execSetLanguage(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90850",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execGetAvailableResolutions(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90b20",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::execInit(FFrame&, void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90b90",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "AutoInitializeRegistrantsASAMU(int&)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90c00",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "AutoGenerateNamesASAMU()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90c10",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "appOnDownloadableContentChanged(unsigned int)",
+      "rule": "provenance.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90c20",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "GetSystemSettings()",
+      "rule": "provenance.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90ca0",
+      "nm_type": "t",
+      "kind": "text",
+      "name": "_GLOBAL__sub_I_ASAMU.cpp",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x100f90eb0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::GetPrivateStaticClassUASAMUSystemSettingsManager(wchar_t const*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f90f90",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::InternalConstructor(void*)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f90fb0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::InitializePrivateStaticClassUASAMUSystemSettingsManager()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91020",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::HasUniqueStaticConfigName() const",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91030",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::HasParentClassChanged() const",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91080",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::Init()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91270",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::GetAvailableResolutions(TArray<FString, FDefaultAllocator>&, int&)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91850",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::SetLanguage(FString const&)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f918b0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::GetIntSetting(FString const&, int&)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f919a0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::GetFloatSetting(FString const&, float&)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91a90",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::GetBoolSetting(FString const&, unsigned char&)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91bd0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::SetIntSetting(FString const&, int)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91de0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::SetFloatSetting(FString const&, float)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f91ff0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::SetBoolSetting(FString const&, unsigned int)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f92200",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::SaveSystemSettings()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f92220",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::ResetLastSavedSettings()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f92350",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::SetTextureDetail(unsigned char)",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f924d0",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "CompareTextureGroups(FExposedTextureLODSettings const&, FExposedTextureLODSettings const&)",
+      "rule": "provenance.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f92570",
+      "nm_type": "T",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::GetTextureDetail()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f92670",
+      "nm_type": "t",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::~UASAMUSystemSettingsManager()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f926b0",
+      "nm_type": "t",
+      "kind": "text",
+      "name": "UASAMUSystemSettingsManager::~UASAMUSystemSettingsManager()",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f92720",
+      "nm_type": "t",
+      "kind": "text",
+      "name": "_GLOBAL__sub_I_ASAMUSystemSettingsManager.cpp",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x100f93120",
+      "nm_type": "t",
+      "kind": "text",
+      "name": "_GLOBAL__sub_I_NullSurveys.cpp",
+      "rule": "provenance.asamu",
+      "unit": "ASAMU/Src/NullSurveys.cpp"
+    },
+    {
+      "address": "0x10229e9c8",
+      "nm_type": "S",
+      "kind": "data",
+      "name": "{vtable(UASAMUSystemSettingsManager)}",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x102365630",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecResetLastSavedSettings",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x102365640",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecSaveSystemSettings",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x102365650",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecSetBoolSetting",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x102365660",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecGetBoolSetting",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x102365670",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecSetFloatSetting",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x102365680",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecGetFloatSetting",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x102365690",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecSetIntSetting",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1023656a0",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecGetIntSetting",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1023656b0",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecSetTextureDetail",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1023656c0",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecGetTextureDetail",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1023656d0",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecSetLanguage",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1023656e0",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecGetAvailableResolutions",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1023656f0",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "intUASAMUSystemSettingsManagerexecInit",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x102365700",
+      "nm_type": "D",
+      "kind": "data",
+      "name": "GasamuUASAMUSystemSettingsManagerNatives",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x10253a700",
+      "nm_type": "S",
+      "kind": "bss",
+      "name": "UASAMUSystemSettingsManager::PrivateStaticClass",
+      "rule": "name.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    },
+    {
+      "address": "0x1025a4050",
+      "nm_type": "b",
+      "kind": "bss",
+      "name": "GetSystemSettings()::SystemSettingsSingleton",
+      "rule": "provenance.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1025a44b0",
+      "nm_type": "b",
+      "kind": "bss",
+      "name": "guard variable for GetSystemSettings()::SystemSettingsSingleton",
+      "rule": "provenance.asamu",
+      "unit": "ASAMU/Src/ASAMU.cpp"
+    },
+    {
+      "address": "0x1025a4620",
+      "nm_type": "b",
+      "kind": "bss",
+      "name": "CachedTextureSettings",
+      "rule": "provenance.asamu",
+      "unit": "ASAMU/Src/ASAMUSystemSettingsManager.cpp"
+    }
+  ],
+  "keywords": {
+    "ASAMU": {
+      "mode": "substring",
+      "requested": true,
+      "symbols": 53,
+      "substring_symbols": 53,
+      "by_category": {
+        "asamu": 53
+      },
+      "game_layer_distinct_names": 29,
+      "top_names": [
+        "UASAMUSystemSettingsManager::GetAvailableResolutions",
+        "UASAMUSystemSettingsManager::GetBoolSetting",
+        "UASAMUSystemSettingsManager::GetFloatSetting",
+        "UASAMUSystemSettingsManager::GetIntSetting",
+        "UASAMUSystemSettingsManager::GetTextureDetail",
+        "UASAMUSystemSettingsManager::Init",
+        "UASAMUSystemSettingsManager::ResetLastSavedSettings",
+        "UASAMUSystemSettingsManager::SaveSystemSettings",
+        "UASAMUSystemSettingsManager::SetBoolSetting",
+        "UASAMUSystemSettingsManager::SetFloatSetting",
+        "UASAMUSystemSettingsManager::SetIntSetting",
+        "UASAMUSystemSettingsManager::SetLanguage",
+        "UASAMUSystemSettingsManager::SetTextureDetail",
+        "UASAMUSystemSettingsManager::execGetAvailableResolutions",
+        "UASAMUSystemSettingsManager::execGetBoolSetting",
+        "UASAMUSystemSettingsManager::execGetFloatSetting",
+        "UASAMUSystemSettingsManager::execGetIntSetting",
+        "UASAMUSystemSettingsManager::execGetTextureDetail",
+        "UASAMUSystemSettingsManager::execInit",
+        "UASAMUSystemSettingsManager::execResetLastSavedSettings",
+        "UASAMUSystemSettingsManager::execSaveSystemSettings",
+        "UASAMUSystemSettingsManager::execSetBoolSetting",
+        "UASAMUSystemSettingsManager::execSetFloatSetting",
+        "UASAMUSystemSettingsManager::execSetIntSetting",
+        "UASAMUSystemSettingsManager::execSetLanguage"
+      ]
+    },
+    "Camera": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 532,
+      "substring_symbols": 532,
+      "by_category": {
+        "scaleform": 17,
+        "udk": 14,
+        "ue3": 501
+      },
+      "game_layer_distinct_names": 185,
+      "top_names": [
+        "AGamePlayerCamera::AddPawnToHiddenActorsArray",
+        "AGamePlayerCamera::AdjustFOVForViewport",
+        "AGamePlayerCamera::CacheLastTargetBaseInfo",
+        "AGamePlayerCamera::ModifyPostProcessSettings",
+        "AGamePlayerCamera::RemovePawnFromHiddenActorsArray",
+        "AGamePlayerCamera::execAdjustFOVForViewport",
+        "AGamePlayerCamera::execCacheLastTargetBaseInfo",
+        "UGameThirdPersonCamera::AdjustToFocusPoint",
+        "UGameThirdPersonCamera::AdjustToFocusPointKeepingTargetInView",
+        "UGameThirdPersonCamera::EndTurn",
+        "UGameThirdPersonCamera::GetEffectiveFocusLoc",
+        "UGameThirdPersonCamera::GetPostInterpCameraOriginLocationOffset",
+        "UGameThirdPersonCamera::GetPostInterpCameraOriginRotationOffset",
+        "UGameThirdPersonCamera::GetWorstCaseLocTransform",
+        "UGameThirdPersonCamera::HandleCameraSafeZone",
+        "UGameThirdPersonCamera::HandlePawnPenetration",
+        "UGameThirdPersonCamera::InterpolateCameraOrigin",
+        "UGameThirdPersonCamera::PlayerUpdateCamera",
+        "UGameThirdPersonCamera::PreventCameraPenetration",
+        "UGameThirdPersonCamera::ShouldDoPerPolyPenetrationTests",
+        "UGameThirdPersonCamera::ShouldDoPredictavePenetrationAvoidance",
+        "UGameThirdPersonCamera::ShouldIgnorePenetrationHit",
+        "UGameThirdPersonCamera::UpdateForMovingBase",
+        "UGameThirdPersonCamera::execEndTurn",
+        "UGameThirdPersonCamera::execPlayerUpdateCamera"
+      ]
+    },
+    "Checkpoint": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 0,
+      "substring_symbols": 0,
+      "by_category": {},
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Collectible": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 0,
+      "substring_symbols": 0,
+      "by_category": {},
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Constraint": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 486,
+      "substring_symbols": 531,
+      "by_category": {
+        "physx": 285,
+        "udk": 3,
+        "ue3": 198
+      },
+      "game_layer_distinct_names": 100,
+      "top_names": [
+        "APawn::AddPathConstraint",
+        "APawn::ClearConstraints",
+        "APawn::execAddPathConstraint",
+        "APawn::execClearConstraints",
+        "ARB_ConstraintActor::InitConstraint",
+        "ARB_ConstraintActor::InitRBPhys",
+        "ARB_ConstraintActor::PostEditChangeProperty",
+        "ARB_ConstraintActor::PostEditMove",
+        "ARB_ConstraintActor::SetDisableCollision",
+        "ARB_ConstraintActor::TermConstraint",
+        "ARB_ConstraintActor::TermRBPhys",
+        "ARB_ConstraintActor::UpdateConstraintFramesFromActor",
+        "ARB_ConstraintActor::execInitConstraint",
+        "ARB_ConstraintActor::execSetDisableCollision",
+        "ARB_ConstraintActor::execTermConstraint",
+        "ARB_ConstraintActor::physRigidBody",
+        "AWorldInfo::GetNavMeshPathConstraintFromCache",
+        "AWorldInfo::ReleaseCachedConstraintsAndEvaluators",
+        "AWorldInfo::execGetNavMeshPathConstraintFromCache",
+        "AWorldInfo::execReleaseCachedConstraintsAndEvaluators",
+        "AGameCrowdAgent::IsVelocityWithinConstraints",
+        "UUDKVehicleSimHoverboard::UpdateLeanConstraint",
+        "UUDKVehicleSimHoverboard::execUpdateLeanConstraint",
+        "UEngine::UpdateConstraintActors",
+        "UNavMeshPathConstraint::EvaluatePath"
+      ]
+    },
+    "Controller": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 623,
+      "substring_symbols": 704,
+      "by_category": {
+        "scaleform": 14,
+        "sdl": 6,
+        "udk": 42,
+        "ue3": 561
+      },
+      "game_layer_distinct_names": 371,
+      "top_names": [
+        "AGamePlayerController::ClientPlayMovie",
+        "AGamePlayerController::ClientStopMovie",
+        "AGamePlayerController::GetCurrentMovie",
+        "AGamePlayerController::GetUIPlayerIndex",
+        "AGamePlayerController::KeepPlayingLoadingMovie",
+        "AGamePlayerController::ShowLoadingMovie",
+        "AGamePlayerController::TickSpecial",
+        "AGamePlayerController::eventClientPlayMovie",
+        "AGamePlayerController::execClientPlayMovie",
+        "AGamePlayerController::execClientStopMovie",
+        "AGamePlayerController::execGetCurrentMovie",
+        "AGamePlayerController::execGetUIPlayerIndex",
+        "AGamePlayerController::execKeepPlayingLoadingMovie",
+        "AGamePlayerController::execShowLoadingMovie",
+        "AUDKPlayerController::AddPostProcessSettings",
+        "AUDKPlayerController::BlendPostProcessSettings",
+        "AUDKPlayerController::GetTargetAdhesionFrictionTarget",
+        "AUDKPlayerController::HearSound",
+        "AUDKPlayerController::IsKeyboardAvailable",
+        "AUDKPlayerController::IsMouseAvailable",
+        "AUDKPlayerController::IsValidTargetAdhesionFrictionTarget",
+        "AUDKPlayerController::ModifyPostProcessSettings",
+        "AUDKPlayerController::MoveWithInterpMoveTrack",
+        "AUDKPlayerController::PreSave",
+        "AUDKPlayerController::ScoreTargetAdhesionFrictionTarget"
+      ]
+    },
+    "Crouch": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 12,
+      "substring_symbols": 12,
+      "by_category": {
+        "ue3": 12
+      },
+      "game_layer_distinct_names": 9,
+      "top_names": [
+        "APawn::CanCrouchWalk",
+        "APawn::Crouch",
+        "APawn::ForceCrouch",
+        "APawn::GetCrouchSize",
+        "APawn::UnCrouch",
+        "APawn::execForceCrouch",
+        "ENGINE_EndCrouch",
+        "ENGINE_StartCrouch",
+        "SavedbIsCrouched"
+      ]
+    },
+    "Death": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 49,
+      "substring_symbols": 52,
+      "by_category": {
+        "physx": 1,
+        "udk": 4,
+        "ue3": 44
+      },
+      "game_layer_distinct_names": 26,
+      "top_names": [
+        "AGameCrowdAgent::PlayDeath",
+        "AGameCrowdAgent::execPlayDeath",
+        "AGameCrowdAgentSkeletal::PlayDeath",
+        "FDamageEvents::AddDeathEvent",
+        "FPlayerEvents::AddDeathEvent",
+        "FTeamEvents::AddDeathEvent",
+        "UGameStateObject::HandlePlayerKillDeathEvent",
+        "UGameStatsAggregator::HandlePlayerKillDeathEvent",
+        "UGameplayEventsHandler::HandlePlayerKillDeathEvent",
+        "GAMEFRAMEWORK_FireDeathEvent",
+        "UDKBASE_BreakApartOnDeath",
+        "UDKBASE_StartFeignDeathRecoveryAnim",
+        "UGameplayEventsUploadAnalytics::LogPlayerKillDeath",
+        "UGameplayEventsUploadAnalytics::execLogPlayerKillDeath",
+        "UGameplayEventsWriter::LogPlayerKillDeath",
+        "UGameplayEventsWriter::execLogPlayerKillDeath",
+        "UParticleSystemComponent::ReportEventDeath",
+        "USeqEvent_SeeDeath::CheckActivate",
+        "FPhysXParticleSet::DeathRowManagment",
+        "FPhysXParticleSet::MoveParticleFromLifeToDeath",
+        "FPlayerKillDeathEvent::Factory",
+        "FPlayerKillDeathEvent::GetDataSize",
+        "FPlayerKillDeathEvent::GetType",
+        "FPlayerKillDeathEvent::GetTypeID",
+        "FPlayerKillDeathEvent::Serialize"
+      ]
+    },
+    "FOV": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 20,
+      "substring_symbols": 41,
+      "by_category": {
+        "physx": 1,
+        "scaleform": 2,
+        "udk": 11,
+        "ue3": 6
+      },
+      "game_layer_distinct_names": 9,
+      "top_names": [
+        "AGamePlayerCamera::AdjustFOVForViewport",
+        "AGamePlayerCamera::execAdjustFOVForViewport",
+        "UGameThirdPersonCameraMode::GetFOVBlendTime",
+        "UUDKParticleSystemComponent::SetFOV",
+        "UUDKParticleSystemComponent::execSetFOV",
+        "UUDKSkeletalMeshComponent::SetFOV",
+        "UUDKSkeletalMeshComponent::execSetFOV",
+        "GAMEFRAMEWORK_GetDesiredFOV",
+        "ENGINE_GetFOVAngle"
+      ]
+    },
+    "Fall": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 88,
+      "substring_symbols": 95,
+      "by_category": {
+        "physx": 5,
+        "udk": 21,
+        "ue3": 62
+      },
+      "game_layer_distinct_names": 53,
+      "top_names": [
+        "AUDKPawn::physFalling",
+        "AActor::physFalling",
+        "AController::PostPhysFalling",
+        "APawn::GetFallDuration",
+        "APawn::NewFallVelocity",
+        "APawn::StartFalling",
+        "APawn::execGetFallDuration",
+        "APawn::physFalling",
+        "AUDKBot::PostPhysFalling",
+        "UUDKAnimBlendByFall::ChangeFallState",
+        "UUDKAnimBlendByFall::DeferredInitAnim",
+        "UUDKAnimBlendByFall::OnCeaseRelevant",
+        "UUDKAnimBlendByFall::OnChildAnimEnd",
+        "UUDKAnimBlendByFall::PostEditChangeProperty",
+        "UUDKAnimBlendByFall::RenameChildConnectors",
+        "UUDKAnimBlendByFall::SetActiveChild",
+        "UUDKAnimBlendByFall::TickAnim",
+        "UDKBASE_StoppedFalling",
+        "UDKBASE_StuckFalling",
+        "AGameInfo::DoNavFearCostFallOff",
+        "AGameInfo::execDoNavFearCostFallOff",
+        "UCodecMovieFallback::GetFormat",
+        "UCodecMovieFallback::GetFrame",
+        "UCodecMovieFallback::GetFrameRate",
+        "UCodecMovieFallback::GetSizeX"
+      ]
+    },
+    "Grapple": {
+      "mode": "substring",
+      "requested": true,
+      "symbols": 0,
+      "substring_symbols": 0,
+      "by_category": {},
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Hook": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 9,
+      "substring_symbols": 9,
+      "by_category": {
+        "ue3": 9
+      },
+      "game_layer_distinct_names": 6,
+      "top_names": [
+        "FNotifyHook::NotifyDestroy",
+        "FNotifyHook::NotifyExec",
+        "FNotifyHook::NotifyPostChange",
+        "FNotifyHook::NotifyPreChange",
+        "SteamworksWarningMessageHook",
+        "SteamworksWarningMessageHookNoOp"
+      ]
+    },
+    "Input": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 567,
+      "substring_symbols": 626,
+      "by_category": {
+        "physx": 14,
+        "scaleform": 47,
+        "udk": 24,
+        "ue3": 482
+      },
+      "game_layer_distinct_names": 287,
+      "top_names": [
+        "UUDKPlayerInput::GetUDKBindNameFromCommand",
+        "UUDKPlayerInput::execGetUDKBindNameFromCommand",
+        "APlayerController::SetOnlyUseControllerTiltInput",
+        "APlayerController::execSetOnlyUseControllerTiltInput",
+        "UInput::Exec",
+        "UInput::ExecInputCommands",
+        "UInput::FindAxisName",
+        "UInput::FindButtonName",
+        "UInput::FlushPressedKeys",
+        "UInput::GetBind",
+        "UInput::GetBindNameFromCommand",
+        "UInput::InputAxis",
+        "UInput::InputKey",
+        "UInput::IsAltPressed",
+        "UInput::IsCtrlPressed",
+        "UInput::IsPressed",
+        "UInput::IsShiftPressed",
+        "UInput::ProcessAnalogKismetEvents",
+        "UInput::ProcessInputKismetEvents",
+        "UInput::ProcessTouchKismetEvents",
+        "UInput::ResetInput",
+        "UInput::Tick",
+        "UInput::UpdateAxisValue",
+        "UInput::execGetBind",
+        "UInput::execResetInput"
+      ]
+    },
+    "Interp": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 1755,
+      "substring_symbols": 1832,
+      "by_category": {
+        "ogg-vorbis": 1,
+        "physx": 5,
+        "scaleform": 33,
+        "udk": 1,
+        "ue3": 1715
+      },
+      "game_layer_distinct_names": 799,
+      "top_names": [
+        "AUDKPlayerController::MoveWithInterpMoveTrack",
+        "UGameThirdPersonCamera::GetPostInterpCameraOriginLocationOffset",
+        "UGameThirdPersonCamera::GetPostInterpCameraOriginRotationOffset",
+        "UGameThirdPersonCamera::InterpolateCameraOrigin",
+        "UGameThirdPersonCameraMode::GetViewOffsetInterpSpeed",
+        "UGameThirdPersonCameraMode::InterpolateCameraOrigin",
+        "UGameThirdPersonCameraMode::InterpolateCameraOriginLoc",
+        "UGameThirdPersonCameraMode::InterpolateCameraOriginRot",
+        "AActor::AdjustInterpTrackMove",
+        "AActor::FindInterpMoveTrack",
+        "AActor::GetInterpBoolPropertyNames",
+        "AActor::GetInterpBoolPropertyRef",
+        "AActor::GetInterpColorPropertyNames",
+        "AActor::GetInterpColorPropertyRef",
+        "AActor::GetInterpFloatPropertyNames",
+        "AActor::GetInterpFloatPropertyRef",
+        "AActor::GetInterpLinearColorPropertyNames",
+        "AActor::GetInterpLinearColorPropertyRef",
+        "AActor::GetInterpVectorPropertyNames",
+        "AActor::GetInterpVectorPropertyRef",
+        "AActor::MoveWithInterpMoveTrack",
+        "AActor::physInterpolating",
+        "AInterpActor::GetNetPriority",
+        "AInterpActor::ShouldTrace",
+        "AInterpActor::TickSpecial"
+      ]
+    },
+    "Jump": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 89,
+      "substring_symbols": 89,
+      "by_category": {
+        "udk": 69,
+        "ue3": 20
+      },
+      "game_layer_distinct_names": 41,
+      "top_names": [
+        "AUDKPawn::FindJumpUp",
+        "AUDKPawn::SetHighJumpFlag",
+        "AUDKPawn::SuggestJumpVelocity",
+        "AUDKPawn::TryJumpUp",
+        "AController::JumpOverWall",
+        "AController::NotifyJumpApex",
+        "APawn::FindBestJump",
+        "APawn::FindJumpUp",
+        "APawn::SetHighJumpFlag",
+        "APawn::SuggestJumpVelocity",
+        "APawn::TryJumpUp",
+        "APawn::execSuggestJumpVelocity",
+        "UObject::execJump",
+        "UObject::execJumpIfNot",
+        "UObject::execJumpIfNotEditorOnly",
+        "AUDKBot::JumpOverWall",
+        "AUDKBot::NotifyJumpApex",
+        "AUDKBot::SpecialJumpCost",
+        "AUDKJumpPad::CalculateJumpVelocity",
+        "AUDKJumpPad::PostEditChangeProperty",
+        "AUDKJumpPad::PostEditMove",
+        "AUDKScout::FindBestJump",
+        "AUDKScout::FindJumpUp",
+        "AUDKScout::SetHighJumpFlag",
+        "AUDKScout::SuggestJumpVelocity"
+      ]
+    },
+    "Kismet": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 66,
+      "substring_symbols": 69,
+      "by_category": {
+        "ue3": 66
+      },
+      "game_layer_distinct_names": 24,
+      "top_names": [
+        "AActor::IsReferencedByKismet",
+        "AActor::SupportsKismetModification",
+        "AActor::execSupportsKismetModification",
+        "UInput::ProcessAnalogKismetEvents",
+        "UInput::ProcessInputKismetEvents",
+        "UInput::ProcessTouchKismetEvents",
+        "USequence::CreateKismetLog",
+        "GAMEFRAMEWORK_RefreshKismetLinks",
+        "APrefabInstance::DestroyKismetSequence",
+        "APrefabInstance::InstanceKismetSequence",
+        "UAnimNotify_Kismet::GetEditorComment",
+        "UAnimNotify_Kismet::Notify",
+        "ULevelStreamingKismet::ShouldBeLoaded",
+        "ULevelStreamingKismet::ShouldBeVisible",
+        "UParticleSystemComponent::ReportEventKismet",
+        "USequenceObject::DrawKismetRefs",
+        "USequenceObject::FindKismetObject",
+        "FScopedRefreshEditor_KismetImpl::FireCallback",
+        "UGFxFSCmdHandler_Kismet::FSCommand",
+        "UGFxFSCmdHandler_Kismet::execFSCommand",
+        "ENGINE_Kismet_ClientPlaySound",
+        "ENGINE_Kismet_ClientStopSound",
+        "ENGINE_SpawnedByKismet",
+        "GGFxUIUGFxFSCmdHandler_KismetNatives"
+      ]
+    },
+    "Ladder": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 48,
+      "substring_symbols": 48,
+      "by_category": {
+        "ue3": 48
+      },
+      "game_layer_distinct_names": 10,
+      "top_names": [
+        "AController::EndClimbLadder",
+        "AController::execEndClimbLadder",
+        "APawn::ladderReachable",
+        "APawn::physLadder",
+        "ALadder::ClearPaths",
+        "ALadder::InitForPathFinding",
+        "ALadder::ReachedBy",
+        "ALadderVolume::PostEditChangeChainProperty",
+        "ULadderReachSpec::CostFor",
+        "ULadderReachSpec::PathColor"
+      ]
+    },
+    "Landed": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 16,
+      "substring_symbols": 16,
+      "by_category": {
+        "ue3": 16
+      },
+      "game_layer_distinct_names": 7,
+      "top_names": [
+        "AActor::processLanded",
+        "APawn::SetPostLandedPhysics",
+        "APawn::processLanded",
+        "USeqEvent_ProjectileLanded::CheckActivate",
+        "ENGINE_Landed",
+        "ENGINE_NotifyLanded",
+        "ENGINE_NotifyPostLanded"
+      ]
+    },
+    "Matinee": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 67,
+      "substring_symbols": 69,
+      "by_category": {
+        "ue3": 67
+      },
+      "game_layer_distinct_names": 22,
+      "top_names": [
+        "AMatineeActor::AddAIGroupActor",
+        "AMatineeActor::ClientInitializeAIGroupActors",
+        "AMatineeActor::GetGroupActor",
+        "AMatineeActor::GetNetPriority",
+        "AMatineeActor::GetOptimizedRepList",
+        "AMatineeActor::PostNetReceive",
+        "AMatineeActor::PreNetReceive",
+        "AMatineeActor::TickSpecial",
+        "AMatineeActor::execAddAIGroupActor",
+        "USeqAct_Interp::IsMatineeCompatibleWithPlayer",
+        "AMatineePawn::ReplacePreviewMesh",
+        "FMatineeRawDistributionFloat::GetValue",
+        "MatineeKeyReduction::MCurve::CopyCurvePoints",
+        "MatineeKeyReduction::MCurve::CreateControlPoints",
+        "MatineeKeyReduction::MCurve::FillControlPoints",
+        "MatineeKeyReduction::MCurve::RecalculateTangents",
+        "MatineeKeyReduction::MCurve::Reduce",
+        "MatineeKeyReduction::MCurve::ReduceSegment",
+        "IsMatineeBeingOpenedAndUsing",
+        "ENGINE_MatineeCancelled",
+        "ENGINE_SetMatineeConstantCameraAnim",
+        "GEngineAMatineeActorNatives"
+      ]
+    },
+    "Movement": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 33,
+      "substring_symbols": 33,
+      "by_category": {
+        "udk": 10,
+        "ue3": 23
+      },
+      "game_layer_distinct_names": 12,
+      "top_names": [
+        "APawn::HandleSerpentineMovement",
+        "USeqAct_Interp::ResetMovementInitialTransforms",
+        "AUDKVehicleMovementEffect::TickSpecial",
+        "UGameCrowdAgentBehavior::HandleMovement",
+        "UGameCrowdAgentBehavior::execHandleMovement",
+        "UGameCrowdBehavior_WaitInQueue::HandleMovement",
+        "UMobileInputZone::ComputeSmoothedMovement",
+        "UParticleModuleSourceMovement::FinalUpdate",
+        "USkeletalMesh::GenerateClothMovementScale",
+        "USkeletalMesh::GenerateClothMovementScaleFromBoneWeight",
+        "USkeletalMesh::GenerateClothMovementScaleFromDistToFixed",
+        "FViewportClient::WantsPollingMouseMovement"
+      ]
+    },
+    "Narrative": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 0,
+      "substring_symbols": 0,
+      "by_category": {},
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Pawn": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 608,
+      "substring_symbols": 1140,
+      "by_category": {
+        "udk": 119,
+        "ue3": 489
+      },
+      "game_layer_distinct_names": 330,
+      "top_names": [
+        "AGamePawn::GetOptimizedRepList",
+        "AGamePlayerCamera::AddPawnToHiddenActorsArray",
+        "AGamePlayerCamera::RemovePawnFromHiddenActorsArray",
+        "AUDKPawn::CalcVelocity",
+        "AUDKPawn::CalculateSlopeSlide",
+        "AUDKPawn::DampenNoise",
+        "AUDKPawn::DoFootPlacement",
+        "AUDKPawn::EnableFootPlacement",
+        "AUDKPawn::EnsureOverlayComponentLast",
+        "AUDKPawn::FindJumpUp",
+        "AUDKPawn::GetBoundingCylinder",
+        "AUDKPawn::GetGravityZ",
+        "AUDKPawn::GetOptimizedRepList",
+        "AUDKPawn::GetTargetLocation",
+        "AUDKPawn::HasAudibleAmbientSound",
+        "AUDKPawn::IgnoreBlockingBy",
+        "AUDKPawn::IsInvisible",
+        "AUDKPawn::NativePostRenderFor",
+        "AUDKPawn::RequestTrackingFor",
+        "AUDKPawn::RestorePreRagdollCollisionComponent",
+        "AUDKPawn::SetHUDLocation",
+        "AUDKPawn::SetHighJumpFlag",
+        "AUDKPawn::ShouldTrace",
+        "AUDKPawn::SmoothCorrection",
+        "AUDKPawn::SuggestJumpVelocity"
+      ]
+    },
+    "Physics": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 429,
+      "substring_symbols": 443,
+      "by_category": {
+        "physx": 128,
+        "udk": 29,
+        "ue3": 272
+      },
+      "game_layer_distinct_names": 155,
+      "top_names": [
+        "AUDKPawn::performPhysics",
+        "AUDKPawn::physicsRotation",
+        "AUDKPawn::setPhysics",
+        "AUDKPlayerController::SetHardwarePhysicsEnabled",
+        "AUDKPlayerController::execSetHardwarePhysicsEnabled",
+        "AActor::AutonomousPhysics",
+        "AActor::SyncActorToClothPhysics",
+        "AActor::SyncActorToRBPhysics",
+        "AActor::execAutonomousPhysics",
+        "AActor::execSetPhysics",
+        "AActor::execTraceAllPhysicsAssetInteractions",
+        "AActor::performPhysics",
+        "AActor::physicsRotation",
+        "AActor::setPhysics",
+        "APawn::PostProcessPhysics",
+        "APawn::SetPostLandedPhysics",
+        "APawn::ShouldBypassSimulatedClientPhysics",
+        "APawn::performPhysics",
+        "APawn::physicsRotation",
+        "APawn::setPhysics",
+        "APawn::startNewPhysics",
+        "APhysicsVolume::BeginDestroy",
+        "APhysicsVolume::GetGravityZ",
+        "APhysicsVolume::GetOptimizedRepList",
+        "APhysicsVolume::GetVolumeRBGravityZ"
+      ]
+    },
+    "Player": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 1349,
+      "substring_symbols": 1465,
+      "by_category": {
+        "scaleform": 1,
+        "udk": 79,
+        "ue3": 1269
+      },
+      "game_layer_distinct_names": 760,
+      "top_names": [
+        "AGamePlayerCamera::AddPawnToHiddenActorsArray",
+        "AGamePlayerCamera::AdjustFOVForViewport",
+        "AGamePlayerCamera::CacheLastTargetBaseInfo",
+        "AGamePlayerCamera::ModifyPostProcessSettings",
+        "AGamePlayerCamera::RemovePawnFromHiddenActorsArray",
+        "AGamePlayerCamera::execAdjustFOVForViewport",
+        "AGamePlayerCamera::execCacheLastTargetBaseInfo",
+        "AGamePlayerController::ClientPlayMovie",
+        "AGamePlayerController::ClientStopMovie",
+        "AGamePlayerController::GetCurrentMovie",
+        "AGamePlayerController::GetUIPlayerIndex",
+        "AGamePlayerController::KeepPlayingLoadingMovie",
+        "AGamePlayerController::ShowLoadingMovie",
+        "AGamePlayerController::TickSpecial",
+        "AGamePlayerController::eventClientPlayMovie",
+        "AGamePlayerController::execClientPlayMovie",
+        "AGamePlayerController::execClientStopMovie",
+        "AGamePlayerController::execGetCurrentMovie",
+        "AGamePlayerController::execGetUIPlayerIndex",
+        "AGamePlayerController::execKeepPlayingLoadingMovie",
+        "AGamePlayerController::execShowLoadingMovie",
+        "AUDKPlayerController::AddPostProcessSettings",
+        "AUDKPlayerController::BlendPostProcessSettings",
+        "AUDKPlayerController::GetTargetAdhesionFrictionTarget",
+        "AUDKPlayerController::HearSound"
+      ]
+    },
+    "Progress": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 77,
+      "substring_symbols": 100,
+      "by_category": {
+        "scaleform": 46,
+        "ue3": 31
+      },
+      "game_layer_distinct_names": 24,
+      "top_names": [
+        "APlayerController::eventClientSetProgressMessage",
+        "UObject::GObjIncrementalPurgeIsInProgress",
+        "UEngine::SetProgress",
+        "UGameEngine::SetProgress",
+        "UGameViewportClient::eventSetProgressMessage",
+        "UNetPendingLevel::NotifyProgress",
+        "UPendingLevel::NotifyProgress",
+        "UWorld::NotifyProgress",
+        "FActorIteratorBase::GetProgressDenominator",
+        "FFeedbackContext::UpdateProgress",
+        "UMeshBeaconClient::ProcessInProgressBandwidthTest",
+        "UMeshBeaconHost::CancelInProgressBandwidthTests",
+        "UMeshBeaconHost::HasInProgressBandwidthTest",
+        "UMeshBeaconHost::ProcessClientInProgressBandwidthTest",
+        "UMeshBeaconHost::execCancelInProgressBandwidthTests",
+        "UMeshBeaconHost::execHasInProgressBandwidthTest",
+        "UOnlineSubsystemSteamworks::DisplayAchievementProgress",
+        "UOnlineSubsystemSteamworks::execDisplayAchievementProgress",
+        "LocalizeProgress",
+        "ENGINE_ClientSetProgressMessage",
+        "ENGINE_GetAchievementProgression",
+        "ENGINE_SetProgressMessage",
+        "ENGINE_SetProgressTime",
+        "GMacSplashStartupProgress"
+      ]
+    },
+    "Respawn": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 2,
+      "substring_symbols": 28,
+      "by_category": {
+        "udk": 2
+      },
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Rope": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 0,
+      "substring_symbols": 1843,
+      "by_category": {},
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Save": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 401,
+      "substring_symbols": 421,
+      "by_category": {
+        "asamu": 6,
+        "physx": 103,
+        "sdl": 1,
+        "udk": 1,
+        "ue3": 290
+      },
+      "game_layer_distinct_names": 190,
+      "top_names": [
+        "UASAMUSystemSettingsManager::ResetLastSavedSettings",
+        "UASAMUSystemSettingsManager::SaveSystemSettings",
+        "UASAMUSystemSettingsManager::execResetLastSavedSettings",
+        "UASAMUSystemSettingsManager::execSaveSystemSettings",
+        "AUDKPlayerController::PreSave",
+        "AActor::PreSave",
+        "USeqAct_Interp::ConditionallySaveActorState",
+        "USeqAct_Interp::SaveActorTransforms",
+        "USeqAct_Interp::SaveActorVisibility",
+        "UObject::ClearAllSavePackagePathRedirections",
+        "UObject::PostSaveRoot",
+        "UObject::PreSave",
+        "UObject::PreSaveRoot",
+        "UObject::SaveConfig",
+        "UObject::SaveInstancesIntoPropagationArchive",
+        "UObject::SavePackage",
+        "UObject::SaveThumbnails",
+        "UObject::SaveToTransactionBuffer",
+        "UObject::SetSavePackagePathRedirection",
+        "UObject::execSaveConfig",
+        "UObject::execStaticSaveConfig",
+        "UObject::GSavePackagePathRedirections",
+        "USeqAct_MobileSaveLoadValue::Activated",
+        "USeqAct_MobileSaveLoadValue::DeActivated",
+        "APrefabInstance::PreSave"
+      ]
+    },
+    "Seq": {
+      "mode": "token-exact",
+      "requested": false,
+      "symbols": 1999,
+      "substring_symbols": 2871,
+      "by_category": {
+        "udk": 11,
+        "ue3": 1988
+      },
+      "game_layer_distinct_names": 416,
+      "top_names": [
+        "USeqAct_Interp::Activated",
+        "USeqAct_Interp::AddPlayerToDirectorTracks",
+        "USeqAct_Interp::ChangeDirection",
+        "USeqAct_Interp::CleanUp",
+        "USeqAct_Interp::ConditionallySaveActorState",
+        "USeqAct_Interp::DeActivated",
+        "USeqAct_Interp::DisableRadioFilterIfNeeded",
+        "USeqAct_Interp::EnableRadioFilter",
+        "USeqAct_Interp::FindDirectorGroup",
+        "USeqAct_Interp::FindFirstGroupInst",
+        "USeqAct_Interp::FindFirstGroupInstByName",
+        "USeqAct_Interp::FindGroupInst",
+        "USeqAct_Interp::FindGroupLinkedVariable",
+        "USeqAct_Interp::FindInterpDataFromVariable",
+        "USeqAct_Interp::FindUnusedGroupLinkedVariable",
+        "USeqAct_Interp::FindViewedActor",
+        "USeqAct_Interp::GetAffectedActors",
+        "USeqAct_Interp::GetNamedObjVars",
+        "USeqAct_Interp::InitGroupActorForGroup",
+        "USeqAct_Interp::InitInterp",
+        "USeqAct_Interp::InitSeqObjectForGroup",
+        "USeqAct_Interp::Initialize",
+        "USeqAct_Interp::IsMatineeCompatibleWithPlayer",
+        "USeqAct_Interp::NotifyActorsOfChange",
+        "USeqAct_Interp::NotifyEventTriggered"
+      ]
+    },
+    "Sequence": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 634,
+      "substring_symbols": 845,
+      "by_category": {
+        "physx": 1,
+        "scaleform": 2,
+        "udk": 19,
+        "ue3": 612
+      },
+      "game_layer_distinct_names": 331,
+      "top_names": [
+        "AWorldInfo::GetAllRootSequences",
+        "AWorldInfo::GetGameSequence",
+        "AWorldInfo::execGetAllRootSequences",
+        "AWorldInfo::execGetGameSequence",
+        "USequence::Activated",
+        "USequence::AddSequenceObject",
+        "USequence::BeginPlay",
+        "USequence::CheckParentSequencePointers",
+        "USequence::CleanUp",
+        "USequence::ClearExternalVariableNameUsage",
+        "USequence::ClearNameUsage",
+        "USequence::ContainsSequenceObject",
+        "USequence::CreateKismetLog",
+        "USequence::ExecuteActiveOps",
+        "USequence::FindLinksToSeqOp",
+        "USequence::FindNamedVariables",
+        "USequence::FindReferencingSequenceObjects",
+        "USequence::FindSeqObjectsByClass",
+        "USequence::FindSeqObjectsByName",
+        "USequence::FindSeqObjectsByObjectName",
+        "USequence::FindSeqObjectsByPropertyValue",
+        "USequence::FindSequenceOpReferencers",
+        "USequence::FinishDestroy",
+        "USequence::GetLevel",
+        "USequence::GetPrefabsSequence"
+      ]
+    },
+    "Spline": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 299,
+      "substring_symbols": 307,
+      "by_category": {
+        "ue3": 299
+      },
+      "game_layer_distinct_names": 118,
+      "top_names": [
+        "AAmbientSoundSimpleSpline::PostEditChangeProperty",
+        "AAmbientSoundSpline::PostEditChangeProperty",
+        "AAmbientSoundSpline::PostEditMove",
+        "AAmbientSoundSpline::PostLoad",
+        "AAmbientSoundSplineMultiCue::PostEditChangeProperty",
+        "ASplineActor::AddConnectionTo",
+        "ASplineActor::BreakAllConnections",
+        "ASplineActor::BreakAllConnectionsFrom",
+        "ASplineActor::BreakConnectionTo",
+        "ASplineActor::ClearForSplinePathFinding",
+        "ASplineActor::EditModeSelectedDraw",
+        "ASplineActor::FindSplineComponentTo",
+        "ASplineActor::FindSplinePathTo",
+        "ASplineActor::FindTargetForComponent",
+        "ASplineActor::GetAllConnectedSplineActors",
+        "ASplineActor::GetBestConnectionInDirection",
+        "ASplineActor::GetRandomConnection",
+        "ASplineActor::GetWorldSpaceTangent",
+        "ASplineActor::IsConnectedTo",
+        "ASplineActor::PostEditChangeProperty",
+        "ASplineActor::PostEditMove",
+        "ASplineActor::PostLoad",
+        "ASplineActor::PostScriptDestroyed",
+        "ASplineActor::UpdateConnectedSplineComponents",
+        "ASplineActor::UpdateSplineComponents"
+      ]
+    },
+    "Story": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 0,
+      "substring_symbols": 53,
+      "by_category": {},
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Swim": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 5,
+      "substring_symbols": 5,
+      "by_category": {
+        "ue3": 5
+      },
+      "game_layer_distinct_names": 5,
+      "top_names": [
+        "APawn::Swim",
+        "APawn::physSwimming",
+        "APawn::startSwimming",
+        "APawn::swimMove",
+        "APawn::swimReachable"
+      ]
+    },
+    "Swing": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 37,
+      "substring_symbols": 37,
+      "by_category": {
+        "physx": 25,
+        "udk": 12
+      },
+      "game_layer_distinct_names": 2,
+      "top_names": [
+        "UUDKSkelControl_HoverboardSwing::CalculateNewBoneTransforms",
+        "UUDKSkelControl_HoverboardSwing::TickSkelControl"
+      ]
+    },
+    "Target": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 673,
+      "substring_symbols": 726,
+      "by_category": {
+        "physx": 23,
+        "scaleform": 72,
+        "udk": 14,
+        "ue3": 564
+      },
+      "game_layer_distinct_names": 330,
+      "top_names": [
+        "AGamePlayerCamera::CacheLastTargetBaseInfo",
+        "AGamePlayerCamera::execCacheLastTargetBaseInfo",
+        "AUDKPawn::GetTargetLocation",
+        "AUDKPlayerController::GetTargetAdhesionFrictionTarget",
+        "AUDKPlayerController::IsValidTargetAdhesionFrictionTarget",
+        "AUDKPlayerController::ScoreTargetAdhesionFrictionTarget",
+        "AUDKPlayerController::execGetTargetAdhesionFrictionTarget",
+        "UGameThirdPersonCamera::AdjustToFocusPointKeepingTargetInView",
+        "UGameThirdPersonCameraMode::GetTargetRelativeOriginOffset",
+        "UGameThirdPersonCameraMode::LockedToViewTarget",
+        "UGameThirdPersonCameraMode::ShouldFollowTarget",
+        "AActor::GetTargetLocation",
+        "AActor::execGetTargetLocation",
+        "ACamera::AssignViewTarget",
+        "ACamera::CheckViewTarget",
+        "ACamera::GetViewTarget",
+        "ACamera::SetViewTarget",
+        "ACamera::execCheckViewTarget",
+        "ACamera::execSetViewTarget",
+        "AController::GetViewTarget",
+        "AController::PickTarget",
+        "AController::execPickTarget",
+        "APawn::IsValidEnemyTargetFor",
+        "APawn::execIsValidEnemyTargetFor",
+        "APlayerController::GetViewTarget"
+      ]
+    },
+    "Teleport": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 74,
+      "substring_symbols": 75,
+      "by_category": {
+        "udk": 12,
+        "ue3": 62
+      },
+      "game_layer_distinct_names": 27,
+      "top_names": [
+        "AActor::GetAPortalTeleporter",
+        "AUDKTeleporterBase::TickSpecial",
+        "ANavigationPoint::CanTeleport",
+        "ANavigationPoint::execCanTeleport",
+        "APortalMarker::CanTeleport",
+        "APortalTeleporter::CanTeleport",
+        "APortalTeleporter::CreatePortalTexture",
+        "APortalTeleporter::GetAPortalTeleporter",
+        "APortalTeleporter::PostEditChangeProperty",
+        "APortalTeleporter::PostLoad",
+        "APortalTeleporter::Spawned",
+        "APortalTeleporter::TickSpecial",
+        "APortalTeleporter::TransformActor",
+        "APortalTeleporter::TransformHitLocation",
+        "APortalTeleporter::TransformVectorDir",
+        "APortalTeleporter::execCreatePortalTexture",
+        "APortalTeleporter::execTransformActor",
+        "APortalTeleporter::execTransformHitLocation",
+        "APortalTeleporter::execTransformVectorDir",
+        "ATeleporter::CanTeleport",
+        "USkeletalMeshComponent::ForceApexClothingTeleport",
+        "USkeletalMeshComponent::ForceApexClothingTeleportAndReset",
+        "USkeletalMeshComponent::execForceApexClothingTeleport",
+        "USkeletalMeshComponent::execForceApexClothingTeleportAndReset",
+        "UTeleportReachSpec::CostFor"
+      ]
+    },
+    "Tether": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 0,
+      "substring_symbols": 0,
+      "by_category": {},
+      "game_layer_distinct_names": 0,
+      "top_names": []
+    },
+    "Trace": {
+      "mode": "token-prefix",
+      "requested": false,
+      "symbols": 161,
+      "substring_symbols": 176,
+      "by_category": {
+        "physx": 4,
+        "scaleform": 76,
+        "udk": 2,
+        "ue3": 79
+      },
+      "game_layer_distinct_names": 57,
+      "top_names": [
+        "AUDKPawn::ShouldTrace",
+        "AActor::ShouldTrace",
+        "AActor::execFastTrace",
+        "AActor::execTrace",
+        "AActor::execTraceActors",
+        "AActor::execTraceAllPhysicsAssetInteractions",
+        "AActor::execTraceComponent",
+        "AInterpActor::ShouldTrace",
+        "AKActor::ShouldTrace",
+        "APawn::ShouldTrace",
+        "APhysicsVolume::ShouldTrace",
+        "UObject::execGetScriptTrace",
+        "UObject::execScriptTrace",
+        "AGameCameraBlockingVolume::ShouldTrace",
+        "AGameCrowdAgent::ShouldTrace",
+        "AUDKWeaponShield::ShouldTrace",
+        "AApexDestructibleActor::ShouldTrace",
+        "ADynamicBlockingVolume::ShouldTrace",
+        "AKAsset::ShouldTrace",
+        "ALandscapeProxy::ShouldTrace",
+        "ATerrain::ShouldTrace",
+        "ATrigger_PawnsOnly::ShouldTrace",
+        "AVolume::ShouldTrace",
+        "UAnimSet::TraceAnimationUsage",
+        "UPrimitiveComponent::OverrideTraceFlagsForNonCollisionComponentChecks"
+      ]
+    },
+    "Velocity": {
+      "mode": "token-prefix",
+      "requested": true,
+      "symbols": 352,
+      "substring_symbols": 385,
+      "by_category": {
+        "physx": 81,
+        "udk": 11,
+        "ue3": 260
+      },
+      "game_layer_distinct_names": 132,
+      "top_names": [
+        "AUDKPawn::CalcVelocity",
+        "AUDKPawn::SuggestJumpVelocity",
+        "AActor::BoundProjectileVelocity",
+        "AActor::GetAggregateBaseVelocity",
+        "AActor::GetTerminalVelocity",
+        "AActor::SuggestTossVelocity",
+        "AActor::execGetAggregateBaseVelocity",
+        "AActor::execGetTerminalVelocity",
+        "AActor::execSuggestTossVelocity",
+        "APawn::ApplyVelocityBraking",
+        "APawn::CalcVelocity",
+        "APawn::NewFallVelocity",
+        "APawn::SetMaxLandingVelocity",
+        "APawn::SuggestJumpVelocity",
+        "APawn::execSuggestJumpVelocity",
+        "APhysicsVolume::GetZoneVelocityForActor",
+        "APhysicsVolume::execGetZoneVelocityForActor",
+        "AGameCrowdAgent::ExactVelocity",
+        "AGameCrowdAgent::IsVelocityWithinConstraints",
+        "AGameCrowdAgent::UpdatePendingVelocity",
+        "AGameCrowdAgentSkeletal::UpdatePendingVelocity",
+        "AUDKJumpPad::CalculateJumpVelocity",
+        "AUDKProjectile::GetTerminalVelocity",
+        "AUDKScout::SuggestJumpVelocity",
+        "FVelocityObstacleInfo::ComputePlanes"
+      ]
+    }
+  },
+  "physics_functions": [
+    {
+      "name": "AActor::CheckStillInWorld",
+      "signature": "AActor::CheckStillInWorld()",
+      "address": "0x1006cf7c0",
+      "unit": "Engine/Src/UnActor.cpp"
+    },
+    {
+      "name": "AActor::FindBase",
+      "signature": "AActor::FindBase()",
+      "address": "0x100ad8450",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::FindSlopeRotation",
+      "signature": "AActor::FindSlopeRotation(FVector const&, FRotator const&)",
+      "address": "0x100ad8ea0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::PostNetReceiveLocation",
+      "signature": "AActor::PostNetReceiveLocation()",
+      "address": "0x1006cbb10",
+      "unit": "Engine/Src/UnActor.cpp"
+    },
+    {
+      "name": "AActor::SetBase",
+      "signature": "AActor::SetBase(AActor*, FVector, int, USkeletalMeshComponent*, FName)",
+      "address": "0x1006d0eb0",
+      "unit": "Engine/Src/UnActor.cpp"
+    },
+    {
+      "name": "AActor::SmoothHitWall",
+      "signature": "AActor::SmoothHitWall(FVector const&, AActor*)",
+      "address": "0x100ad8160",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::TwoWallAdjust",
+      "signature": "AActor::TwoWallAdjust(FVector const&, FVector&, FVector const&, FVector const&, float)",
+      "address": "0x100970d20",
+      "unit": "Engine/Src/UnNavigationHandle.cpp"
+    },
+    {
+      "name": "AActor::moveSmooth",
+      "signature": "AActor::moveSmooth(FVector const&)",
+      "address": "0x100ad7d70",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::performPhysics",
+      "signature": "AActor::performPhysics(float)",
+      "address": "0x100ad86e0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::physCustom",
+      "signature": "AActor::physCustom(float, int)",
+      "address": "0x1001a48e0",
+      "unit": "Engine/Src/WorldAttractor.cpp"
+    },
+    {
+      "name": "AActor::physFalling",
+      "signature": "AActor::physFalling(float, int)",
+      "address": "0x100ae07a0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::physInterpolating",
+      "signature": "AActor::physInterpolating(float)",
+      "address": "0x100ae5a70",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::physNavMeshWalking",
+      "signature": "AActor::physNavMeshWalking(float)",
+      "address": "0x1001a48d0",
+      "unit": "Engine/Src/WorldAttractor.cpp"
+    },
+    {
+      "name": "AActor::physProjectile",
+      "signature": "AActor::physProjectile(float, int)",
+      "address": "0x100ae2ba0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::physRigidBody",
+      "signature": "AActor::physRigidBody(float)",
+      "address": "0x100a82260",
+      "unit": "Engine/Src/UnPhysActor.cpp"
+    },
+    {
+      "name": "AActor::physSoftBody",
+      "signature": "AActor::physSoftBody(float)",
+      "address": "0x100a822a0",
+      "unit": "Engine/Src/UnPhysActor.cpp"
+    },
+    {
+      "name": "AActor::physWalking",
+      "signature": "AActor::physWalking(float, int)",
+      "address": "0x100ae2760",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::physicsRotation",
+      "signature": "AActor::physicsRotation(float, FVector)",
+      "address": "0x100ad93c0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::processHitWall",
+      "signature": "AActor::processHitWall(FCheckResult const&, float)",
+      "address": "0x100addda0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::processLanded",
+      "signature": "AActor::processLanded(FVector const&, AActor*, float, int)",
+      "address": "0x100adefb0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::setPhysics",
+      "signature": "AActor::setPhysics(unsigned char, AActor*, FVector)",
+      "address": "0x100ad8540",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AActor::stepUp",
+      "signature": "AActor::stepUp(FVector const&, FVector const&, FVector const&, FCheckResult&)",
+      "address": "0x100add770",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AApexDestructibleActor::physRigidBody",
+      "signature": "AApexDestructibleActor::physRigidBody(float)",
+      "address": "0x1002011c0",
+      "unit": "Engine/Src/NvApexDestructible.cpp"
+    },
+    {
+      "name": "AApexDestructibleActor::setPhysics",
+      "signature": "AApexDestructibleActor::setPhysics(unsigned char, AActor*, FVector)",
+      "address": "0x100201170",
+      "unit": "Engine/Src/NvApexDestructible.cpp"
+    },
+    {
+      "name": "ADoorMarker::FindBase",
+      "signature": "ADoorMarker::FindBase()",
+      "address": "0x1009f7270",
+      "unit": "Engine/Src/UnNavigationPoint.cpp"
+    },
+    {
+      "name": "ADynamicPylon::FindBase",
+      "signature": "ADynamicPylon::FindBase()",
+      "address": "0x1009ba410",
+      "unit": "Engine/Src/UnNavigationMesh.cpp"
+    },
+    {
+      "name": "AGameCrowdAgent::performPhysics",
+      "signature": "AGameCrowdAgent::performPhysics(float)",
+      "address": "0x100e33620",
+      "unit": "GameFramework/Src/GameCrowd.cpp"
+    },
+    {
+      "name": "AKActor::physRigidBody",
+      "signature": "AKActor::physRigidBody(float)",
+      "address": "0x100a84670",
+      "unit": "Engine/Src/UnPhysActor.cpp"
+    },
+    {
+      "name": "ALiftCenter::FindBase",
+      "signature": "ALiftCenter::FindBase()",
+      "address": "0x1009f5920",
+      "unit": "Engine/Src/UnNavigationPoint.cpp"
+    },
+    {
+      "name": "ANavigationPoint::FindBase",
+      "signature": "ANavigationPoint::FindBase()",
+      "address": "0x1009f4bf0",
+      "unit": "Engine/Src/UnNavigationPoint.cpp"
+    },
+    {
+      "name": "APawn::CalcVelocity",
+      "signature": "APawn::CalcVelocity(FVector&, float, float, float, int, int, int)",
+      "address": "0x100adc440",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::CalculateSlopeSlide",
+      "signature": "APawn::CalculateSlopeSlide(FVector const&, FCheckResult const&)",
+      "address": "0x100ae1280",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::MaxSpeedModifier",
+      "signature": "APawn::MaxSpeedModifier()",
+      "address": "0x100adcf30",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::NewFallVelocity",
+      "signature": "APawn::NewFallVelocity(FVector, FVector, float)",
+      "address": "0x100adf860",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::PostNetReceiveLocation",
+      "signature": "APawn::PostNetReceiveLocation()",
+      "address": "0x1006cbd50",
+      "unit": "Engine/Src/UnActor.cpp"
+    },
+    {
+      "name": "APawn::SetBase",
+      "signature": "APawn::SetBase(AActor*, FVector, int, USkeletalMeshComponent*, FName)",
+      "address": "0x1006d25d0",
+      "unit": "Engine/Src/UnActor.cpp"
+    },
+    {
+      "name": "APawn::SmoothHitWall",
+      "signature": "APawn::SmoothHitWall(FVector const&, AActor*)",
+      "address": "0x100ad81d0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::performPhysics",
+      "signature": "APawn::performPhysics(float)",
+      "address": "0x100ad8990",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::physFalling",
+      "signature": "APawn::physFalling(float, int)",
+      "address": "0x100adf900",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::physFlying",
+      "signature": "APawn::physFlying(float, int)",
+      "address": "0x100ae1710",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::physLadder",
+      "signature": "APawn::physLadder(float, int)",
+      "address": "0x100ae3120",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::physNavMeshWalking",
+      "signature": "APawn::physNavMeshWalking(float)",
+      "address": "0x10096f900",
+      "unit": "Engine/Src/UnNavigationHandle.cpp"
+    },
+    {
+      "name": "APawn::physSpider",
+      "signature": "APawn::physSpider(float, int)",
+      "address": "0x100ae4790",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::physSwimming",
+      "signature": "APawn::physSwimming(float, int)",
+      "address": "0x100ae21a0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::physWalking",
+      "signature": "APawn::physWalking(float, int)",
+      "address": "0x100ada470",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::physicsRotation",
+      "signature": "APawn::physicsRotation(float, FVector)",
+      "address": "0x100ad9000",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::processHitWall",
+      "signature": "APawn::processHitWall(FCheckResult const&, float)",
+      "address": "0x100addf50",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::processLanded",
+      "signature": "APawn::processLanded(FVector const&, AActor*, float, int)",
+      "address": "0x100adf1e0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::setPhysics",
+      "signature": "APawn::setPhysics(unsigned char, AActor*, FVector)",
+      "address": "0x100ad8c00",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::startNewPhysics",
+      "signature": "APawn::startNewPhysics(float, int)",
+      "address": "0x100ad8c30",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "APawn::stepUp",
+      "signature": "APawn::stepUp(FVector const&, FVector const&, FVector const&, FCheckResult&)",
+      "address": "0x100adcfa0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AProcBuilding::SetBase",
+      "signature": "AProcBuilding::SetBase(AActor*, FVector, int, USkeletalMeshComponent*, FName)",
+      "address": "0x100547d00",
+      "unit": "Engine/Src/ProcBuilding.cpp"
+    },
+    {
+      "name": "AProjectile::physProjectile",
+      "signature": "AProjectile::physProjectile(float, int)",
+      "address": "0x100ae2eb0",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "AProjectile::processHitWall",
+      "signature": "AProjectile::processHitWall(FCheckResult const&, float)",
+      "address": "0x100adde90",
+      "unit": "Engine/Src/UnPhysic.cpp"
+    },
+    {
+      "name": "ARB_ConstraintActor::physRigidBody",
+      "signature": "ARB_ConstraintActor::physRigidBody(float)",
+      "address": "0x100acfc70",
+      "unit": "Engine/Src/UnPhysConstraint.cpp"
+    },
+    {
+      "name": "ASVehicle::PostNetReceiveLocation",
+      "signature": "ASVehicle::PostNetReceiveLocation()",
+      "address": "0x100c90a50",
+      "unit": "Engine/Src/UnSVehicle.cpp"
+    },
+    {
+      "name": "ASVehicle::physRigidBody",
+      "signature": "ASVehicle::physRigidBody(float)",
+      "address": "0x100c90bc0",
+      "unit": "Engine/Src/UnSVehicle.cpp"
+    },
+    {
+      "name": "ASVehicle::setPhysics",
+      "signature": "ASVehicle::setPhysics(unsigned char, AActor*, FVector)",
+      "address": "0x100c90a60",
+      "unit": "Engine/Src/UnSVehicle.cpp"
+    },
+    {
+      "name": "AStaticMeshActor::SetBase",
+      "signature": "AStaticMeshActor::SetBase(AActor*, FVector, int, USkeletalMeshComponent*, FName)",
+      "address": "0x100c68480",
+      "unit": "Engine/Src/UnStaticMesh.cpp"
+    },
+    {
+      "name": "AUDKCarriedObject::PostNetReceiveLocation",
+      "signature": "AUDKCarriedObject::PostNetReceiveLocation()",
+      "address": "0x100f5e910",
+      "unit": "UDKBase/src/UDKGame.cpp"
+    },
+    {
+      "name": "AUDKKActorBreakable::physRigidBody",
+      "signature": "AUDKKActorBreakable::physRigidBody(float)",
+      "address": "0x100f5fd20",
+      "unit": "UDKBase/src/UDKGame.cpp"
+    },
+    {
+      "name": "AUDKPawn::CalcVelocity",
+      "signature": "AUDKPawn::CalcVelocity(FVector&, float, float, float, int, int, int)",
+      "address": "0x100f6bca0",
+      "unit": "UDKBase/src/UDKPawn.cpp"
+    },
+    {
+      "name": "AUDKPawn::CalculateSlopeSlide",
+      "signature": "AUDKPawn::CalculateSlopeSlide(FVector const&, FCheckResult const&)",
+      "address": "0x100f6dcd0",
+      "unit": "UDKBase/src/UDKPawn.cpp"
+    },
+    {
+      "name": "AUDKPawn::performPhysics",
+      "signature": "AUDKPawn::performPhysics(float)",
+      "address": "0x100f6bbf0",
+      "unit": "UDKBase/src/UDKPawn.cpp"
+    },
+    {
+      "name": "AUDKPawn::physFalling",
+      "signature": "AUDKPawn::physFalling(float, int)",
+      "address": "0x100f6db80",
+      "unit": "UDKBase/src/UDKPawn.cpp"
+    },
+    {
+      "name": "AUDKPawn::physicsRotation",
+      "signature": "AUDKPawn::physicsRotation(float, FVector)",
+      "address": "0x100f6e110",
+      "unit": "UDKBase/src/UDKPawn.cpp"
+    },
+    {
+      "name": "AUDKPawn::setPhysics",
+      "signature": "AUDKPawn::setPhysics(unsigned char, AActor*, FVector)",
+      "address": "0x100f6da80",
+      "unit": "UDKBase/src/UDKPawn.cpp"
+    },
+    {
+      "name": "AVehicle::performPhysics",
+      "signature": "AVehicle::performPhysics(float)",
+      "address": "0x100ce5a50",
+      "unit": "Engine/Src/UnVehicle.cpp"
+    },
+    {
+      "name": "UParticleSystemComponent::SingleLineCheck",
+      "signature": "UParticleSystemComponent::SingleLineCheck(FCheckResult&, AActor*, FVector const&, FVector const&, unsigned int, FVector const&)",
+      "address": "0x100a1d340",
+      "unit": "Engine/Src/UnParticleComponents.cpp"
+    },
+    {
+      "name": "UWorld::FarMoveActor",
+      "signature": "UWorld::FarMoveActor(AActor*, FVector const&, unsigned int, unsigned int, unsigned int)",
+      "address": "0x1008e90d0",
+      "unit": "Engine/Src/UnLevAct.cpp"
+    },
+    {
+      "name": "UWorld::MoveActor",
+      "signature": "UWorld::MoveActor(AActor*, FVector const&, FRotator const&, unsigned int, FCheckResult&)",
+      "address": "0x1008e94a0",
+      "unit": "Engine/Src/UnLevAct.cpp"
+    },
+    {
+      "name": "UWorld::MultiLineCheck",
+      "signature": "UWorld::MultiLineCheck(FMemStack&, FVector const&, FVector const&, FVector const&, unsigned int, AActor*, ULightComponent*)",
+      "address": "0x1008eb640",
+      "unit": "Engine/Src/UnLevAct.cpp"
+    },
+    {
+      "name": "UWorld::SingleLineCheck",
+      "signature": "UWorld::SingleLineCheck(FCheckResult&, AActor*, FVector const&, FVector const&, unsigned int, FVector const&, ULightComponent*)",
+      "address": "0x1008e8f10",
+      "unit": "Engine/Src/UnLevAct.cpp"
+    }
+  ],
+  "anchors": {
+    "resolved": [
+      {
+        "topic": "movement",
+        "symbol": "APawn::performPhysics",
+        "address": "0x100ad8990",
+        "signature": "APawn::performPhysics(float)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "per-tick pawn physics entry; dispatches on the Physics mode (EPhysics)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::startNewPhysics",
+        "address": "0x100ad8c30",
+        "signature": "APawn::startNewPhysics(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "re-dispatch to the phys* routine for the remaining delta time / iterations"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::physWalking",
+        "address": "0x100ada470",
+        "signature": "APawn::physWalking(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Walking ground movement: acceleration, floor tracking, ledge handling"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::physFalling",
+        "address": "0x100adf900",
+        "signature": "APawn::physFalling(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Falling airborne movement: gravity, air control, landing detection — jump and swing arcs"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::NewFallVelocity",
+        "address": "0x100adf860",
+        "signature": "APawn::NewFallVelocity(FVector, FVector, float)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "gravity integration step used by physFalling"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::CalcVelocity",
+        "address": "0x100adc440",
+        "signature": "APawn::CalcVelocity(FVector&, float, float, float, int, int, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "acceleration / friction / braking → Velocity (ground speed model)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::stepUp",
+        "address": "0x100adcfa0",
+        "signature": "APawn::stepUp(FVector const&, FVector const&, FVector const&, FCheckResult&)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "step-up over small obstacles while walking"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::processLanded",
+        "address": "0x100adf1e0",
+        "signature": "APawn::processLanded(FVector const&, AActor*, float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "landing transition (Landed event, back to PHYS_Walking)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::processHitWall",
+        "address": "0x100addf50",
+        "signature": "APawn::processHitWall(FCheckResult const&, float)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "wall impact handling (HitWall / NotifyHitWall events)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::SmoothHitWall",
+        "address": "0x100ad81d0",
+        "signature": "APawn::SmoothHitWall(FVector const&, AActor*)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "sliding along walls after an impact"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::physicsRotation",
+        "address": "0x100ad9000",
+        "signature": "APawn::physicsRotation(float, FVector)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "rotation toward DesiredRotation using RotationRate"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::setPhysics",
+        "address": "0x100ad8c00",
+        "signature": "APawn::setPhysics(unsigned char, AActor*, FVector)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "physics-mode transitions for pawns"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::CalculateSlopeSlide",
+        "address": "0x100ae1280",
+        "signature": "APawn::CalculateSlopeSlide(FVector const&, FCheckResult const&)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "slope sliding response on steep floors"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::MaxSpeedModifier",
+        "address": "0x100adcf30",
+        "signature": "APawn::MaxSpeedModifier()",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "speed scaling (walking/crouch modifiers)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::physFlying",
+        "address": "0x100ae1710",
+        "signature": "APawn::physFlying(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Flying (free 3D movement, debug/fly modes)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::physSwimming",
+        "address": "0x100ae21a0",
+        "signature": "APawn::physSwimming(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Swimming (water volumes)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::physSpider",
+        "address": "0x100ae4790",
+        "signature": "APawn::physSpider(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Spider (surface-relative movement; candidate for wall/ceiling locomotion)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::physLadder",
+        "address": "0x100ae3120",
+        "signature": "APawn::physLadder(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Ladder (constrained climbing)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APawn::GetFallDuration",
+        "address": "0x100a74ab0",
+        "signature": "APawn::GetFallDuration()",
+        "unit": "Engine/Src/UnPawn.cpp",
+        "why": "time-to-land estimate used by AI/script"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::moveSmooth",
+        "address": "0x100ad7d70",
+        "signature": "AActor::moveSmooth(FVector const&)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "collision-aware move with wall sliding used by the phys* routines"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::stepUp",
+        "address": "0x100add770",
+        "signature": "AActor::stepUp(FVector const&, FVector const&, FVector const&, FCheckResult&)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "actor-level step-up helper"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::performPhysics",
+        "address": "0x100ad86e0",
+        "signature": "AActor::performPhysics(float)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "per-tick physics entry for non-pawn actors"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::physFalling",
+        "address": "0x100ae07a0",
+        "signature": "AActor::physFalling(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "falling for non-pawn actors (projectile-like bodies)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::physProjectile",
+        "address": "0x100ae2ba0",
+        "signature": "AActor::physProjectile(float, int)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Projectile ballistic movement"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::physInterpolating",
+        "address": "0x100ae5a70",
+        "signature": "AActor::physInterpolating(float)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "PHYS_Interpolating — Matinee-driven movers / InterpActors (moving platforms)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::physRigidBody",
+        "address": "0x100a82260",
+        "signature": "AActor::physRigidBody(float)",
+        "unit": "Engine/Src/UnPhysActor.cpp",
+        "why": "PHYS_RigidBody — PhysX-simulated actors"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::setPhysics",
+        "address": "0x100ad8540",
+        "signature": "AActor::setPhysics(unsigned char, AActor*, FVector)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "physics-mode transitions for actors"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::SetBase",
+        "address": "0x1006d0eb0",
+        "signature": "AActor::SetBase(AActor*, FVector, int, USkeletalMeshComponent*, FName)",
+        "unit": "Engine/Src/UnActor.cpp",
+        "why": "attach to a moving base (riding platforms)"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AActor::FindBase",
+        "address": "0x100ad8450",
+        "signature": "AActor::FindBase()",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "floor/base detection"
+      },
+      {
+        "topic": "movement",
+        "symbol": "AWorldInfo::GetGravityZ",
+        "address": "0x100ad7b10",
+        "signature": "AWorldInfo::GetGravityZ()",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "world gravity source"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APhysicsVolume::GetGravityZ",
+        "address": "0x100ad7bf0",
+        "signature": "APhysicsVolume::GetGravityZ()",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "per-volume gravity override"
+      },
+      {
+        "topic": "movement",
+        "symbol": "APhysicsVolume::GetZoneVelocityForActor",
+        "address": "0x100ad7c10",
+        "signature": "APhysicsVolume::GetZoneVelocityForActor(AActor*)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "volume-imposed velocity (currents, wind)"
+      },
+      {
+        "topic": "collision",
+        "symbol": "UWorld::MoveActor",
+        "address": "0x1008e94a0",
+        "signature": "UWorld::MoveActor(AActor*, FVector const&, FRotator const&, unsigned int, FCheckResult&)",
+        "unit": "Engine/Src/UnLevAct.cpp",
+        "why": "swept move with collision response (FCheckResult); core of every movement step"
+      },
+      {
+        "topic": "collision",
+        "symbol": "UWorld::SingleLineCheck",
+        "address": "0x1008e8f10",
+        "signature": "UWorld::SingleLineCheck(FCheckResult&, AActor*, FVector const&, FVector const&, unsigned int, FVector const&, ULightComponent*)",
+        "unit": "Engine/Src/UnLevAct.cpp",
+        "why": "line/extent trace — what script Trace() uses (e.g. grapple target acquisition)"
+      },
+      {
+        "topic": "collision",
+        "symbol": "UWorld::MultiLineCheck",
+        "address": "0x1008eb640",
+        "signature": "UWorld::MultiLineCheck(FMemStack&, FVector const&, FVector const&, FVector const&, unsigned int, AActor*, ULightComponent*)",
+        "unit": "Engine/Src/UnLevAct.cpp",
+        "why": "multi-hit trace"
+      },
+      {
+        "topic": "collision",
+        "symbol": "UWorld::FarMoveActor",
+        "address": "0x1008e90d0",
+        "signature": "UWorld::FarMoveActor(AActor*, FVector const&, unsigned int, unsigned int, unsigned int)",
+        "unit": "Engine/Src/UnLevAct.cpp",
+        "why": "teleport/placement (respawn, checkpoints)"
+      },
+      {
+        "topic": "tick",
+        "symbol": "UWorld::Tick",
+        "address": "0x1009107a0",
+        "signature": "UWorld::Tick(ELevelTick, float)",
+        "unit": "Engine/Src/UnLevTic.cpp",
+        "why": "frame tick: actor tick groups, physics scene step"
+      },
+      {
+        "topic": "tick",
+        "symbol": "AActor::Tick",
+        "address": "0x10090a210",
+        "signature": "AActor::Tick(float, ELevelTick)",
+        "unit": "Engine/Src/UnLevTic.cpp",
+        "why": "actor tick → TickAuthoritative/TickSimulated"
+      },
+      {
+        "topic": "tick",
+        "symbol": "AActor::TickAuthoritative",
+        "address": "0x100908e50",
+        "signature": "AActor::TickAuthoritative(float)",
+        "unit": "Engine/Src/UnLevTic.cpp",
+        "why": "authoritative tick calling performPhysics"
+      },
+      {
+        "topic": "tick",
+        "symbol": "APawn::Tick",
+        "address": "0x100a78e70",
+        "signature": "APawn::Tick(float, ELevelTick)",
+        "unit": "Engine/Src/UnPawn.cpp",
+        "why": "pawn tick"
+      },
+      {
+        "topic": "tick",
+        "symbol": "APawn::TickSimulated",
+        "address": "0x1009094a0",
+        "signature": "APawn::TickSimulated(float)",
+        "unit": "Engine/Src/UnLevTic.cpp",
+        "why": "simulated-proxy pawn tick"
+      },
+      {
+        "topic": "tick",
+        "symbol": "AController::Tick",
+        "address": "0x10090a440",
+        "signature": "AController::Tick(float, ELevelTick)",
+        "unit": "Engine/Src/UnLevTic.cpp",
+        "why": "controller tick"
+      },
+      {
+        "topic": "tick",
+        "symbol": "APlayerController::Tick",
+        "address": "0x10090a760",
+        "signature": "APlayerController::Tick(float, ELevelTick)",
+        "unit": "Engine/Src/UnLevTic.cpp",
+        "why": "player controller tick (drives PlayerTick/PlayerInput in script)"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execTrace",
+        "address": "0x100b377a0",
+        "signature": "AActor::execTrace(FFrame&, void*)",
+        "unit": "Engine/Src/UnScript.cpp",
+        "why": "script Trace() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execFastTrace",
+        "address": "0x100b38400",
+        "signature": "AActor::execFastTrace(FFrame&, void*)",
+        "unit": "Engine/Src/UnScript.cpp",
+        "why": "script FastTrace() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execSetPhysics",
+        "address": "0x100ad79a0",
+        "signature": "AActor::execSetPhysics(FFrame&, void*)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "script SetPhysics() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execMove",
+        "address": "0x1007de6e0",
+        "signature": "AActor::execMove(FFrame&, void*)",
+        "unit": "Engine/Src/UnEngine.cpp",
+        "why": "script Move() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execMoveSmooth",
+        "address": "0x100ad7cb0",
+        "signature": "AActor::execMoveSmooth(FFrame&, void*)",
+        "unit": "Engine/Src/UnPhysic.cpp",
+        "why": "script MoveSmooth() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execSetLocation",
+        "address": "0x1007de620",
+        "signature": "AActor::execSetLocation(FFrame&, void*)",
+        "unit": "Engine/Src/UnEngine.cpp",
+        "why": "script SetLocation() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execSetBase",
+        "address": "0x100b35d40",
+        "signature": "AActor::execSetBase(FFrame&, void*)",
+        "unit": "Engine/Src/UnScript.cpp",
+        "why": "script SetBase() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execSetCollision",
+        "address": "0x100b35bb0",
+        "signature": "AActor::execSetCollision(FFrame&, void*)",
+        "unit": "Engine/Src/UnScript.cpp",
+        "why": "script SetCollision() native"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execSuggestTossVelocity",
+        "address": "0x1007a8d30",
+        "signature": "AActor::execSuggestTossVelocity(FFrame&, void*)",
+        "unit": "Engine/Src/UnController.cpp",
+        "why": "script SuggestTossVelocity() — ballistic launch solver"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "AActor::execCalculateMinSpeedTrajectory",
+        "address": "0x1007d9f80",
+        "signature": "AActor::execCalculateMinSpeedTrajectory(FFrame&, void*)",
+        "unit": "Engine/Src/UnEngine.cpp",
+        "why": "script CalculateMinSpeedTrajectory() — trajectory solver"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "APawn::execSuggestJumpVelocity",
+        "address": "0x1008007e0",
+        "signature": "APawn::execSuggestJumpVelocity(FFrame&, void*)",
+        "unit": "Engine/Src/UnEngine.cpp",
+        "why": "script SuggestJumpVelocity()"
+      },
+      {
+        "topic": "script-natives",
+        "symbol": "APawn::execGetFallDuration",
+        "address": "0x100800770",
+        "signature": "APawn::execGetFallDuration(FFrame&, void*)",
+        "unit": "Engine/Src/UnEngine.cpp",
+        "why": "script GetFallDuration()"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::performPhysics",
+        "address": "0x100f6bbf0",
+        "signature": "AUDKPawn::performPhysics(float)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK override of the pawn physics entry"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::physFalling",
+        "address": "0x100f6db80",
+        "signature": "AUDKPawn::physFalling(float, int)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK override of falling; how it differs from APawn::physFalling is to be established in Ghidra"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::CalcVelocity",
+        "address": "0x100f6bca0",
+        "signature": "AUDKPawn::CalcVelocity(FVector&, float, float, float, int, int, int)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK override of the velocity model (differences vs APawn::CalcVelocity to be established)"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::physicsRotation",
+        "address": "0x100f6e110",
+        "signature": "AUDKPawn::physicsRotation(float, FVector)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK override of pawn rotation"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::setPhysics",
+        "address": "0x100f6da80",
+        "signature": "AUDKPawn::setPhysics(unsigned char, AActor*, FVector)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK override of physics transitions"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::GetGravityZ",
+        "address": "0x100f6da20",
+        "signature": "AUDKPawn::GetGravityZ()",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK gravity override hook"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::CalculateSlopeSlide",
+        "address": "0x100f6dcd0",
+        "signature": "AUDKPawn::CalculateSlopeSlide(FVector const&, FCheckResult const&)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK slope-slide override"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::TickSpecial",
+        "address": "0x100f6c240",
+        "signature": "AUDKPawn::TickSpecial(float)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "UDK pawn per-tick extras"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::UpdateEyeHeight",
+        "address": "0x100f6d990",
+        "signature": "AUDKPawn::UpdateEyeHeight(float)",
+        "unit": "UDKBase/src/UDKPawn.cpp",
+        "why": "eye-height smoothing (camera bob/landing dip)"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPawn::SuggestJumpVelocity",
+        "address": "0x100f698a0",
+        "signature": "AUDKPawn::SuggestJumpVelocity(FVector&, FVector, FVector, unsigned int)",
+        "unit": "UDKBase/src/UDKPathing.cpp",
+        "why": "UDK jump solver override"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPlayerController::Tick",
+        "address": "0x100f70c00",
+        "signature": "AUDKPlayerController::Tick(float, ELevelTick)",
+        "unit": "UDKBase/src/UDKPlayerController.cpp",
+        "why": "UDK player controller tick"
+      },
+      {
+        "topic": "udk",
+        "symbol": "AUDKPlayerController::MoveWithInterpMoveTrack",
+        "address": "0x100f6fab0",
+        "signature": "AUDKPlayerController::MoveWithInterpMoveTrack(UInterpTrackMove*, UInterpTrackInstMove*, float, float)",
+        "unit": "UDKBase/src/UDKPlayerController.cpp",
+        "why": "player movement driven by a Matinee move track"
+      },
+      {
+        "topic": "camera",
+        "symbol": "ACamera::ApplyCameraModifiers",
+        "address": "0x10075f280",
+        "signature": "ACamera::ApplyCameraModifiers(float, FTPOV&)",
+        "unit": "Engine/Src/UnCamera.cpp",
+        "why": "camera modifier stack (shakes, FOV effects)"
+      },
+      {
+        "topic": "camera",
+        "symbol": "ACamera::SetViewTarget",
+        "address": "0x10075eb60",
+        "signature": "ACamera::SetViewTarget(AActor*, FViewTargetTransitionParams)",
+        "unit": "Engine/Src/UnCamera.cpp",
+        "why": "view-target switching with blend parameters"
+      },
+      {
+        "topic": "camera",
+        "symbol": "ACamera::AssignViewTarget",
+        "address": "0x10075ede0",
+        "signature": "ACamera::AssignViewTarget(AActor*, FTViewTarget&, FViewTargetTransitionParams)",
+        "unit": "Engine/Src/UnCamera.cpp",
+        "why": "view-target assignment"
+      },
+      {
+        "topic": "camera",
+        "symbol": "ACamera::PlayCameraAnim",
+        "address": "0x100760980",
+        "signature": "ACamera::PlayCameraAnim(UCameraAnim*, float, float, float, float, unsigned int, unsigned int, float, unsigned int)",
+        "unit": "Engine/Src/UnCamera.cpp",
+        "why": "camera animations"
+      },
+      {
+        "topic": "camera",
+        "symbol": "ACamera::ApplyAnimToCamera",
+        "address": "0x10075f910",
+        "signature": "ACamera::ApplyAnimToCamera(ACameraActor const*, UCameraAnimInst const*, FTPOV&)",
+        "unit": "Engine/Src/UnCamera.cpp",
+        "why": "applies a camera animation to the POV"
+      },
+      {
+        "topic": "camera",
+        "symbol": "UCameraModifier::ModifyCamera",
+        "address": "0x1007611d0",
+        "signature": "UCameraModifier::ModifyCamera(ACamera*, float, FTPOV&)",
+        "unit": "Engine/Src/UnCamera.cpp",
+        "why": "base camera modifier hook"
+      },
+      {
+        "topic": "camera",
+        "symbol": "UCameraModifier_CameraShake::UpdateCameraShake",
+        "address": "0x100761320",
+        "signature": "UCameraModifier_CameraShake::UpdateCameraShake(float, FCameraShakeInstance&, FTPOV&)",
+        "unit": "Engine/Src/UnCamera.cpp",
+        "why": "camera shake evaluation"
+      },
+      {
+        "topic": "camera",
+        "symbol": "AGamePlayerCamera::AdjustFOVForViewport",
+        "address": "0x100e29230",
+        "signature": "AGamePlayerCamera::AdjustFOVForViewport(float, APawn*) const",
+        "unit": "GameFramework/Src/GameCamera.cpp",
+        "why": "FOV correction for aspect ratio"
+      },
+      {
+        "topic": "camera",
+        "symbol": "UGameThirdPersonCamera::PlayerUpdateCamera",
+        "address": "0x100e29800",
+        "signature": "UGameThirdPersonCamera::PlayerUpdateCamera(APawn*, AGamePlayerCamera*, float, FTViewTarget&)",
+        "unit": "GameFramework/Src/GameCamera.cpp",
+        "why": "GameFramework third-person camera update"
+      },
+      {
+        "topic": "camera",
+        "symbol": "UGameThirdPersonCamera::PreventCameraPenetration",
+        "address": "0x100e2bdb0",
+        "signature": "UGameThirdPersonCamera::PreventCameraPenetration(APawn*, AGamePlayerCamera*, FVector const&, FVector&, float, float&, float, unsigned int)",
+        "unit": "GameFramework/Src/GameCamera.cpp",
+        "why": "camera collision avoidance"
+      },
+      {
+        "topic": "input",
+        "symbol": "UInput::InputKey",
+        "address": "0x10088dd00",
+        "signature": "UInput::InputKey(int, FName, EInputEvent, float, unsigned int)",
+        "unit": "Engine/Src/UnIn.cpp",
+        "why": "key event dispatch to bindings"
+      },
+      {
+        "topic": "input",
+        "symbol": "UInput::Tick",
+        "address": "0x10088e330",
+        "signature": "UInput::Tick(float)",
+        "unit": "Engine/Src/UnIn.cpp",
+        "why": "input axis accumulation per frame"
+      },
+      {
+        "topic": "input",
+        "symbol": "UPlayerInput::InputKey",
+        "address": "0x10088ee10",
+        "signature": "UPlayerInput::InputKey(int, FName, EInputEvent, float, unsigned int)",
+        "unit": "Engine/Src/UnIn.cpp",
+        "why": "player input key handling"
+      },
+      {
+        "topic": "input",
+        "symbol": "UPlayerInput::InputAxis",
+        "address": "0x10088ef10",
+        "signature": "UPlayerInput::InputAxis(int, FName, float, float, unsigned int)",
+        "unit": "Engine/Src/UnIn.cpp",
+        "why": "player input axis handling (mouse/gamepad look)"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USequence::ExecuteActiveOps",
+        "address": "0x100b6c760",
+        "signature": "USequence::ExecuteActiveOps(float, int)",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "Kismet scheduler: runs active sequence ops each tick"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USequence::UpdateOp",
+        "address": "0x100b6dec0",
+        "signature": "USequence::UpdateOp(float)",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "sequence update"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USequence::QueueSequenceOp",
+        "address": "0x100b728f0",
+        "signature": "USequence::QueueSequenceOp(USequenceOp*, unsigned int)",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "queues an op for activation"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USequence::InitializeSequence",
+        "address": "0x100b6a6a0",
+        "signature": "USequence::InitializeSequence()",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "sequence initialisation at level start"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USequence::BeginPlay",
+        "address": "0x100b6b5c0",
+        "signature": "USequence::BeginPlay()",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "sequence BeginPlay"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USequenceOp::ActivateOutputLink",
+        "address": "0x100b69160",
+        "signature": "USequenceOp::ActivateOutputLink(int)",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "fires an output link"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USequenceEvent::CheckActivate",
+        "address": "0x100b74a00",
+        "signature": "USequenceEvent::CheckActivate(AActor*, AActor*, unsigned int, TArray<int, FDefaultAllocator>*, unsigned int)",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "event activation (Touch/Used/LevelLoaded …)"
+      },
+      {
+        "topic": "kismet",
+        "symbol": "USeqAct_Latent::UpdateOp",
+        "address": "0x100b77680",
+        "signature": "USeqAct_Latent::UpdateOp(float)",
+        "unit": "Engine/Src/UnSequence.cpp",
+        "why": "latent action update"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "USeqAct_Interp::Activated",
+        "address": "0x1008a4db0",
+        "signature": "USeqAct_Interp::Activated()",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "Matinee action activation"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "USeqAct_Interp::Play",
+        "address": "0x1008a5280",
+        "signature": "USeqAct_Interp::Play(unsigned int)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "Matinee playback start"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "USeqAct_Interp::StepInterp",
+        "address": "0x1008a62f0",
+        "signature": "USeqAct_Interp::StepInterp(float, unsigned int)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "advances a Matinee by dt"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "USeqAct_Interp::UpdateInterp",
+        "address": "0x1008a76d0",
+        "signature": "USeqAct_Interp::UpdateInterp(float, unsigned int, unsigned int, unsigned int)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "evaluates all tracks at a time"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "USeqAct_Interp::UpdateOp",
+        "address": "0x1008a5670",
+        "signature": "USeqAct_Interp::UpdateOp(float)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "Matinee per-tick update"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "UInterpTrackMove::GetKeyTransformAtTime",
+        "address": "0x1008b1ce0",
+        "signature": "UInterpTrackMove::GetKeyTransformAtTime(UInterpTrackInst*, float, FVector&, FRotator&)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "move-track sampling (moving platforms, cutscene movers)"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "UInterpTrackMove::GetKeyframePosition",
+        "address": "0x1008b0d50",
+        "signature": "UInterpTrackMove::GetKeyframePosition(UInterpTrackInst*, int, float&, FVector&, FVector*, FVector*)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "move-track key position"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "UInterpTrackInstMove::CalcInitialTransform",
+        "address": "0x10089f720",
+        "signature": "UInterpTrackInstMove::CalcInitialTransform(UInterpTrack*, unsigned int)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "relative-move initial transform"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "AMatineeActor::TickSpecial",
+        "address": "0x1008a0a60",
+        "signature": "AMatineeActor::TickSpecial(float)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "replicated Matinee actor tick"
+      },
+      {
+        "topic": "matinee",
+        "symbol": "AInterpActor::TickSpecial",
+        "address": "0x1008a0ac0",
+        "signature": "AInterpActor::TickSpecial(float)",
+        "unit": "Engine/Src/UnInterpolation.cpp",
+        "why": "InterpActor (mover) tick"
+      },
+      {
+        "topic": "constraints",
+        "symbol": "ARB_ConstraintActor::InitConstraint",
+        "address": "0x100aca230",
+        "signature": "ARB_ConstraintActor::InitConstraint(AActor*, AActor*, FName, FName, float)",
+        "unit": "Engine/Src/UnPhysConstraint.cpp",
+        "why": "runtime PhysX constraint between actors"
+      },
+      {
+        "topic": "constraints",
+        "symbol": "URB_ConstraintInstance::InitConstraint",
+        "address": "0x100acab80",
+        "signature": "URB_ConstraintInstance::InitConstraint(UPrimitiveComponent*, UPrimitiveComponent*, URB_ConstraintSetup*, float, AActor*, UPrimitiveComponent*, unsigned int)",
+        "unit": "Engine/Src/UnPhysConstraint.cpp",
+        "why": "constraint instance creation"
+      },
+      {
+        "topic": "constraints",
+        "symbol": "AKActor::physRigidBody",
+        "address": "0x100a84670",
+        "signature": "AKActor::physRigidBody(float)",
+        "unit": "Engine/Src/UnPhysActor.cpp",
+        "why": "KActor rigid-body physics"
+      }
+    ],
+    "missing": [],
+    "script_events_present": [
+      "ENGINE_Landed",
+      "ENGINE_Falling",
+      "ENGINE_HitWall",
+      "ENGINE_Bump",
+      "ENGINE_Touch",
+      "ENGINE_UnTouch",
+      "ENGINE_BaseChange",
+      "ENGINE_PhysicsVolumeChange",
+      "ENGINE_MayFall",
+      "ENGINE_LongFall",
+      "ENGINE_FellOutOfWorld",
+      "ENGINE_OutsideWorldBounds",
+      "ENGINE_EncroachingOn",
+      "ENGINE_EncroachedBy",
+      "ENGINE_RanInto",
+      "ENGINE_StuckOnPawn",
+      "ENGINE_NotifyLanded",
+      "ENGINE_NotifyPostLanded",
+      "ENGINE_NotifyHitWall",
+      "ENGINE_NotifyFallingHitWall",
+      "ENGINE_NotifyJumpApex",
+      "ENGINE_NotifyBump",
+      "ENGINE_NotifyPhysicsVolumeChange",
+      "ENGINE_SetWalking",
+      "ENGINE_StartCrouch",
+      "ENGINE_EndCrouch",
+      "ENGINE_PlayerTick",
+      "ENGINE_PlayerInput",
+      "ENGINE_UpdateCamera",
+      "ENGINE_GetPlayerViewPoint",
+      "ENGINE_GetActorEyesViewPoint",
+      "ENGINE_GetFOVAngle",
+      "ENGINE_BecomeViewTarget",
+      "ENGINE_InterpolationStarted",
+      "ENGINE_InterpolationFinished",
+      "ENGINE_InterpolationChanged",
+      "ENGINE_MoverFinished",
+      "ENGINE_Activated",
+      "ENGINE_Deactivated",
+      "ENGINE_RigidBodyCollision",
+      "ENGINE_ConstraintBrokenNotify",
+      "UDKBASE_StoppedFalling",
+      "UDKBASE_StuckFalling",
+      "UDKBASE_UpdateEyeHeight",
+      "UDKBASE_PhysicsVolumeChanged"
+    ],
+    "script_events_missing": [
+      "ASAMU_*"
+    ]
+  }
+}
