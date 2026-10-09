@@ -125,8 +125,9 @@ status = "investigating"
 [[category.item]]
 id = "physics-paths"
 name = "Native physics paths reached by player/grapple script"
-status = "investigating"
-note = "48 native physics/camera anchors exported (sanitized summaries) and decompiled locally for reading."
+status = "implemented"
+evidence = "docs/reverse-engineering/NATIVE_PHYSICS.md"
+note = "Behavioural spec of native pawn physics (walking, falling, braking, gravity chain, sub-stepping) from 111 decompiled anchors, independently verified (24 claims re-checked)."
 
 [[category.item]]
 id = "rtti-vtables"
@@ -504,22 +505,26 @@ status = "not_started"
 [[category.item]]
 id = "ground-move"
 name = "Ground movement / acceleration"
-status = "not_started"
+status = "partial"
+note = "Native algorithm specified (NATIVE_PHYSICS.md section 2-3); script defaults and Rust implementation pending."
 
 [[category.item]]
 id = "air-control"
 name = "Air control"
-status = "not_started"
+status = "partial"
+note = "Native limiter specified; flag default and implementation pending."
 
 [[category.item]]
 id = "jump"
 name = "Jump"
-status = "not_started"
+status = "investigating"
+note = "Jump impulse is script-side (no native DoJump)."
 
 [[category.item]]
 id = "gravity"
 name = "Gravity"
-status = "not_started"
+status = "partial"
+note = "Source recovered (config -520 + native chain incl. 2x integrator effect); runtime implementation pending."
 
 [[category.item]]
 id = "collision-capsule"

@@ -1,0 +1,82 @@
+# Second batch of native movement-physics anchors (symbol names only).
+# Fills the gaps left by player-physics.txt so docs/reverse-engineering/
+# NATIVE_PHYSICS.md can describe the full per-tick call chain: tick entry,
+# floor/ledge helpers, landing/wall handling, gravity sources, crouch and
+# controller-side rotation helpers. Trailing '*' = prefix match.
+
+# Tick entry and dispatch
+AActor::Tick
+AActor::TickAuthoritative
+AActor::TickSimulated
+AActor::AutonomousPhysics
+APawn::Tick
+APawn::TickSpecial
+APawn::performPhysics
+APawn::PostProcessPhysics
+APawn::setPhysics
+
+# Walking helpers
+APawn::StartFalling
+APawn::checkFloor
+APawn::findNewFloor
+APawn::CheckForLedges
+APawn::CanCrouchWalk
+APawn::MaxSpeedModifier
+APawn::Crouch
+APawn::UnCrouch
+APawn::walkMove
+APawn::TestMove
+AActor::FindBase
+AActor::SearchForBaseBelow
+AActor::GetAggregateBaseVelocity
+
+# Wall / landing handling
+AActor::processHitWall
+APawn::processHitWall
+AActor::processLanded
+APawn::processLanded
+AActor::SmoothHitWall
+APawn::SmoothHitWall
+AActor::TwoWallAdjust
+AActor::GetTerminalVelocity
+AActor::BoundProjectileVelocity
+
+# Gravity sources
+APhysicsVolume::GetGravityZ
+APhysicsVolume::GetZoneVelocityForActor
+AWorldInfo::GetGravityZ
+UWorld::GetGravityZ
+UWorld::GetDefaultGravityZ
+
+# Jump helpers
+APawn::SuggestJumpVelocity
+AUDKPawn::SetHighJumpFlag
+APawn::SetHighJumpFlag
+
+# Controller-side hooks reached from pawn physics
+AController::AirControlFromWall
+AController::PostPhysFalling
+AController::PostPhysWalking
+AController::PostAirSteering
+AController::StopAtLedge
+AController::WantsLedgeCheck
+APlayerController::StopAtLedge
+APlayerController::WantsLedgeCheck
+APlayerController::FindStairRotation
+APlayerController::SmoothTargetViewRotation
+AController::UpdatePawnRotation
+AController::Tick
+APlayerController::Tick
+AUDKPlayerController::Tick
+
+# Batch 2b: helpers reached from the functions above
+APawn::ShouldCatchAir
+APawn::GetNetBuoyancy
+AActor::GetNetBuoyancy
+AActor::GetCylinderExtent
+AActor::fixedTurn
+APawn::CheckDesiredRotation
+APawn::IsHumanControlled
+AController::SetRotationRate
+AController::DesiredDirection
+UWorld::MoveActor

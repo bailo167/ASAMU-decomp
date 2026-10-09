@@ -13,6 +13,10 @@ Confidence: CONFIRMED / STRONG / TENTATIVE / UNKNOWN (see CLAUDE.md).
 
 | Game class | Native symbol evidence | Package evidence | Config evidence | Localization evidence | Likely responsibility | Confidence |
 |---|---|---|---|---|---|---|
+| `ASAMU.ASAMUGameInfo` | none | pending | `DefaultGame.ini` `DefaultGame`, `DefaultServerGame`, `DefaultGameType` | — | Game rules / mode | CONFIRMED (config) |
+| `ASAMU.ASAMUInfo` | none | pending | `DefaultMapPrefixes=(Prefix="AG",GameType="ASAMU.ASAMUInfo")` | — | Game type used by `AG-*` maps | CONFIRMED (config) |
+| `ASAMU.ASAMUPlayerController` | none (controller natives are stock `APlayerController`/`AUDKPlayerController`) | pending | `DefaultGame.ini` `PlayerControllerClassName` | — | Player input, abilities, grapple (TENTATIVE) | CONFIRMED (config) |
+| `UTGame.UTPawn` | stock natives via `AUDKPawn` | pending | `DefaultGame.ini` `[UTGame.UTPawn] Bob=0.010, bWeaponBob=true` | — | Probable base of the ASAMU player pawn | STRONG |
 | `ASAMU.ASAMUViewportClient` | none found yet | pending (expected in `Startup.upk`) | `[Engine.Engine] GameViewportClientClassName` | — | Game viewport client (UI/menus/loading glue) | CONFIRMED (name, config) |
 | `UASAMUSystemSettingsManager` | full native class: `Get/Set{Int,Float,Bool}Setting`, `SetLanguage`, `Get/SetTextureDetail`, `GetAvailableResolutions`, `SaveSystemSettings`, `ResetLastSavedSettings`, `Init` + `exec*` thunks; natives table `GasamuUASAMUSystemSettingsManagerNatives` | pending | — | — | Native settings backend for the options menu | CONFIRMED (symbols) |
 | `ASAMUSettingsManager` | none | pending | — | `[ASAMUSettingsManager]` in `ASAMU.int` | Script-side settings/options logic (localized strings) | CONFIRMED (name) |
