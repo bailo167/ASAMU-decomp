@@ -1,11 +1,13 @@
 //! asamu-inspect — inspect UE3 v868 packages from a user's own ASAMU install.
 //!
 //! Every subcommand takes an explicit path. Output is human-readable text, or
-//! JSON with `--json`. Nothing is written anywhere except by `decompress`,
-//! which requires an explicit `--out` path outside the repository (or under a
-//! git-ignored `research/` subdirectory such as `research/local/`).
+//! JSON with `--json`. Nothing is written anywhere except by `decompress` and
+//! `scripttext`, which require an explicit `--out` path outside the repository
+//! (or under a git-ignored `research/` subdirectory such as `research/local/`).
 
+mod kismet;
 mod map;
+mod objects;
 mod safety;
 
 use std::collections::BTreeSet;
@@ -79,6 +81,79 @@ enum Cmd {
         #[arg(long)]
         deep: bool,
     },
+    /// Class model: super chain, flags, properties, functions, states, enums,
+    /// consts and structs (resolves other packages in the same cooked folder).
+    Class {
+        /// Package file that contains the class (e.g. Startup.upk, Engine.u).
+        file: PathBuf,
+        /// Class path (e.g. asamu.ASAMUPawn, Actor) or bare class name.
+        class: String,
+    },
+    /// Class default object values; with --inherited, merged across the super
+    /// chain (child overrides parent).
+    Defaults {
+        /// Package file that contains the class.
+        file: PathBuf,
+        /// Class path or bare class name.
+        class: String,
+        /// Resolve inherited defaults across the super chain.
+        #[arg(long)]
+        inherited: bool,
+    },
+    /// Any object's prelude and tagged properties.
+    Props {
+        /// Package file.
+        file: PathBuf,
+        /// Object path (qualified or package-relative), or `#N` for export N (0-based).
+        object: String,
+    },
+    /// Write a class's ScriptText (original, copyrighted UnrealScript source)
+    /// to an explicit LOCAL path outside the repository or under a git-ignored
+    /// research/ subdirectory. Never commit the result.
+    Scripttext {
+        /// Package file that contains the class.
+        file: PathBuf,
+        /// Class path or bare class name.
+        class: String,
+        /// Output path.
+        #[arg(long)]
+        out: PathBuf,
+        /// Overwrite an existing output file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Exact-consumption coverage of script objects and class default objects
+    /// for every package under a cooked folder (and its Maps/ subfolder).
+    Coverage {
+        /// Cooked folder (e.g. .../CookedMac).
+        dir: PathBuf,
+        /// Also decode the prelude and tagged properties of every other export.
+        #[arg(long)]
+        all_objects: bool,
+    },
+    /// Kismet graph of a map (or summaries of every map in a cooked/Maps
+    /// folder): text summary, full graph with --json (summary with
+    /// --summary), Graphviz with --dot. Full graphs are game data: keep them
+    /// local (--out/--out-dir refuse the repo except git-ignored research/).
+    Kismet {
+        /// Map package (.asamu), or a folder of maps.
+        path: PathBuf,
+        /// Emit Graphviz DOT.
+        #[arg(long)]
+        dot: bool,
+        /// With --json, emit the publishable summary instead of the full graph.
+        #[arg(long)]
+        summary: bool,
+        /// Output file (one map).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Output folder for per-map .kismet.json/.kismet.dot/.kismet-summary.json.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+        /// Overwrite existing output files.
+        #[arg(long)]
+        force: bool,
+    },
     /// Write the uncompressed stream to an explicit path (never inside the repo
     /// except under a git-ignored research/ subdirectory such as research/local/).
     Decompress {
@@ -122,6 +197,36 @@ fn run(cli: &Cli) -> Result<()> {
         Cmd::Map { file } => cmd_map(file, cli.json),
         Cmd::Census { dir, deep } => cmd_census(dir, *deep, cli.json),
         Cmd::Decompress { file, out, force } => cmd_decompress(file, out, *force, cli.json),
+        Cmd::Class { file, class } => objects::cmd_class(file, class, cli.json),
+        Cmd::Defaults {
+            file,
+            class,
+            inherited,
+        } => objects::cmd_defaults(file, class, *inherited, cli.json),
+        Cmd::Props { file, object } => objects::cmd_props(file, object, cli.json),
+        Cmd::Scripttext {
+            file,
+            class,
+            out,
+            force,
+        } => objects::cmd_scripttext(file, class, out, *force, cli.json),
+        Cmd::Coverage { dir, all_objects } => objects::cmd_coverage(dir, *all_objects, cli.json),
+        Cmd::Kismet {
+            path,
+            dot,
+            summary,
+            out,
+            out_dir,
+            force,
+        } => kismet::cmd_kismet(&kismet::KismetArgs {
+            path,
+            dot: *dot,
+            summary: *summary,
+            out: out.as_deref(),
+            out_dir: out_dir.as_deref(),
+            force: *force,
+            json: cli.json,
+        }),
     }
 }
 
@@ -129,7 +234,7 @@ fn open(file: &Path) -> Result<Package> {
     Package::open(file).with_context(|| format!("parsing {}", file.display()))
 }
 
-fn print_json<T: Serialize>(v: &T) -> Result<()> {
+pub(crate) fn print_json<T: Serialize>(v: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
 }

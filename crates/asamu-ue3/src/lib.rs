@@ -23,13 +23,31 @@
 //! - [`tables`]: name / import / export / depends tables.
 //! - [`package`]: [`Package`], cross-checks and object resolution.
 //! - [`lzo`]: LZO1X block decompressor.
+//! - [`object`]: export payload prelude (state frame, component template,
+//!   NetIndex) and generic object decoding.
+//! - [`property`]: tagged properties and property values.
+//! - [`script`]: script object payloads (Class, State, Function, ScriptStruct,
+//!   Enum, Const, TextBuffer, `*Property`).
+//! - [`schema`]: property/struct definitions used to decode values.
+//! - [`model`]: cross-package class model and inherited class defaults.
+//! - [`flags`]: object/class/function/property/struct/state flag names.
+//! - [`coverage`]: exact-consumption coverage over real packages.
+//! - [`kismet`]: Kismet (sequence) graphs of map packages.
 
 pub mod compression;
+pub mod coverage;
 pub mod error;
+pub mod flags;
 pub mod issue;
+pub mod kismet;
 pub mod lzo;
+pub mod model;
+pub mod object;
 pub mod package;
+pub mod property;
 pub mod reader;
+pub mod schema;
+pub mod script;
 pub mod summary;
 pub mod tables;
 pub mod types;
@@ -38,7 +56,12 @@ pub mod writer;
 pub use compression::{BlockInfo, ChunkInfo, ReadOptions};
 pub use error::{Result, Ue3Error};
 pub use issue::{Issue, Severity};
+pub use model::{ClassModel, InheritedDefaults, LoadedPackage, PackageSet};
+pub use object::{DecodedObject, ObjectError, ObjectPrelude, decode_object};
 pub use package::{MAX_OUTER_DEPTH, ObjectRef, Package, Storage, TableExtents};
+pub use property::{ObjRef, Property, Value};
+pub use schema::{NoSchema, PropertyDef, PropertyType, Schema, StructDef};
+pub use script::{ScriptBody, ScriptKind, ScriptObject, decode_script_object};
 pub use summary::{
     CompressedChunk, CompressionMethod, GenerationInfo, PACKAGE_TAG, Summary, TextureAllocation,
     package_flags,
