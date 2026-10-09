@@ -98,8 +98,9 @@ name = "Binary RE"
 [[category.item]]
 id = "arch-loadcmds"
 name = "Architecture, load commands, segments"
-status = "partial"
-note = "x86_64 Mach-O, 28 load commands, PIE, unsigned (codesign). Segment map not yet documented."
+status = "verified"
+evidence = "docs/reverse-engineering/BINARY_ANALYSIS.md"
+note = "All 28 load commands and 23 sections tabulated; independently re-derived."
 
 [[category.item]]
 id = "linked-libs"
@@ -139,13 +140,16 @@ note = "Behavioural spec of native pawn physics (walking, falling, braking, grav
 [[category.item]]
 id = "rtti-vtables"
 name = "RTTI / vtable usefulness assessed"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/BINARY_ANALYSIS.md"
+note = "RTTI compiled out; 5,756 vtables; slot tables for physics; script classes use native ancestor vtables."
 
 [[category.item]]
 id = "strings-xrefs"
 name = "String → xref → function workflow"
-status = "partial"
-note = "ExportFunctionSummaries gives strings/callers/callees per function; no broad string sweep yet."
+status = "implemented"
+evidence = "docs/reverse-engineering/BINARY_ANALYSIS.md; tools/ghidra-scripts"
+note = "String census (4-byte TCHAR) + per-function string/xref export."
 
 # --------------------------------------------------------------------------
 # Symbols
@@ -479,8 +483,9 @@ note = "Every .asamu has exactly one TheWorld + PersistentLevel and the Contains
 [[category.item]]
 id = "map-list"
 name = "Map list and level order"
-status = "partial"
-note = "12 maps + per-map ASAMU class import counts; story order not yet from data."
+status = "implemented"
+evidence = "docs/reverse-engineering/SAVE.md; docs/reverse-engineering/LEVELS.md"
+note = "Story chain confirmed from WorldInfo titles/progression data."
 
 [[category.item]]
 id = "actor-census"
@@ -800,12 +805,16 @@ name = "Save/Progression"
 [[category.item]]
 id = "save-format"
 name = "Original save location and format"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/SAVE.md"
+note = "Locations, 4 files, versions, encryption and tagged layout from code; not yet checked against a real save file."
 
 [[category.item]]
 id = "progression"
 name = "Checkpoint / chapter progression"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/SAVE.md"
+note = "Story chain, checkpoints per map, unlock rules, New Game semantics recovered and verified against data."
 
 [[category.item]]
 id = "settings"
@@ -816,12 +825,14 @@ note = "Native UASAMUSystemSettingsManager + script ASAMUSettingsManager identif
 [[category.item]]
 id = "chapter-select"
 name = "Chapter select"
-status = "not_started"
+status = "partial"
+note = "Rules recovered (chapters entered); not implemented."
 
 [[category.item]]
 id = "collectibles"
 name = "Collectibles / achievements"
-status = "not_started"
+status = "partial"
+note = "25 collectibles (5 per middle chapter), extras thresholds, 15 achievements recovered; not implemented."
 
 # --------------------------------------------------------------------------
 # Importer

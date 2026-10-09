@@ -21,25 +21,25 @@
 
 | Category | Items | Implemented + verified | Verified | In progress | Completion | Verified % |
 |---|---:|---:|---:|---:|---:|---:|
-| Binary RE | 8 | 5 | 2 | 2 | 62% | 25% |
+| Binary RE | 8 | 8 | 4 | 0 | 100% | 50% |
 | Symbols | 7 | 6 | 3 | 1 | 85% | 42% |
 | UE3 Packages | 10 | 9 | 8 | 1 | 90% | 80% |
 | Compression | 6 | 6 | 6 | 0 | 100% | 100% |
 | Objects | 6 | 1 | 0 | 2 | 16% | 0% |
 | UnrealScript | 8 | 2 | 2 | 3 | 25% | 25% |
 | Kismet | 5 | 0 | 0 | 1 | 0% | 0% |
-| Maps | 7 | 1 | 1 | 3 | 14% | 14% |
+| Maps | 7 | 2 | 1 | 2 | 28% | 14% |
 | Assets | 8 | 0 | 0 | 0 | 0% | 0% |
 | Player | 9 | 2 | 0 | 5 | 22% | 0% |
 | Grapple | 8 | 0 | 0 | 4 | 0% | 0% |
 | World | 7 | 0 | 0 | 2 | 0% | 0% |
 | Rendering | 6 | 1 | 0 | 0 | 16% | 0% |
 | Audio | 5 | 0 | 0 | 0 | 0% | 0% |
-| Save/Progression | 5 | 0 | 0 | 1 | 0% | 0% |
+| Save/Progression | 5 | 2 | 0 | 3 | 40% | 0% |
 | Importer | 7 | 2 | 2 | 1 | 28% | 28% |
 | Platforms | 5 | 3 | 0 | 1 | 60% | 0% |
 | Tests | 8 | 5 | 0 | 3 | 62% | 0% |
-| **Overall** | **125** | **43** | **24** | **30** | **34%** | **19%** |
+| **Overall** | **125** | **49** | **26** | **29** | **39%** | **20%** |
 
 <!-- progress-table:end -->
 
