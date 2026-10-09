@@ -607,3 +607,214 @@ oscillator / enveloper nodes (no shipped cue reaches them), FaceFX, time dilatio
 graph-computed duration for the 16 cues that store none (no safety stop for them), and the `OnQueueSubtitles`
 delegate (not bound by the ASAMU script read). Not known: whether `FindHighestPrioritySubtitle` also moves its cursor
 past a line that has not started yet (the decompiled condition reads that way; our cursor waits, TENTATIVE).
+
+## Adaptive music
+
+How the original layers and mixes its level music, and our port. Rules are in our own words; nothing scripted or
+decompiled is reproduced. Code: `apps/asamu/src/audio/music.rs`. This supersedes the "not implemented yet" note at
+the end of "Audio runtime".
+
+Evidence:
+
+- **Script** (src): local reading, under git-ignored `research/local/`, of the `ScriptText` of
+  `ASAMUAdaptiveMusicManager`, `ASAMUAdaptiveMusicTrack`, `ASMAMUAdaptiveVolumeMultiplier`, `ASAMUBeatEventActor`,
+  `SeqAct_AddAdaptiveTracks`, `SeqAct_SetAdaptiveTrack`, `SeqAct_SetAdaptiveTrackVolumeMultiplier`,
+  `SeqAct_EditMultiplierForAllTracks`, `SeqEvent_TrackBeat`, `SeqVar_ASAMUAdaptiveMusicTrack`, `ASAMUGameInfo` and its
+  subclasses (`asamu-inspect scripttext`), plus a search of all 172 `asamu` classes for callers of the manager.
+- **Class defaults** (cdo): `asamu-inspect props <Startup.upk> asamu.Default__<class>` (and the component
+  `asamu.Default__ASAMUAdaptiveMusicTrack.AudioComponent`).
+- **Native**: `UObject::execEqualEqual_StrStr` (UnrealScript string `==`) calls `wcscmp`, while
+  `execComplementEqual_StrStr` (`~=`) calls a case-insensitive compare
+  (`otool -tV -p __ZN7UObject21execEqualEqual_StrStrER6FFramePv <ASAMU executable>`); the audio component rules of
+  "Audio runtime" above (`AdjustVolume`, `GetAdjustVolumeOnFlyMultiplier`, `Play`).
+- **Census**: local `asamu-inspect kismet --json` of the maps and the converted `cues.json` (names and numbers only).
+- **Verification pass** (verify-music, 2026-10-10; every claim of this section re-derived independently, local output
+  only): the same `ScriptText`s; `asamu-inspect calls` over all 172 `asamu` classes (bytecode; identifiers only):
+  `GetTrackFromID`, `GetVolumeMultiplier` and `RemoveVolumeMultiplier` compare with the native `EqualEqual_StrStr`
+  (#122), and no class calls `AddMultiplierToTrack`, `RemoveMultiplierFromTrack` or `AddQueuedTracks`; `otool -tV` of
+  `USequence::FindSeqObjectsByClass` and `USequence::execFindSeqObjectsByClass`; the cdos above; a fresh kismet census
+  of all 12 maps; a `--no-audio` conversion for the cue shapes; the converted Kismet graphs of the three music levels run
+  through `asamu-kismet` (test `real_converted_kismet_adds_the_shipped_tracks`). No discrepancy with the section as
+  first written; additions are marked "(verify)".
+
+### Lifecycle — CONFIRMED (src)
+
+- The game info owns one music manager, a plain object created in `InitGame`. The manager is initialised twice: in
+  `InitGame`, and in `SpawnDefaultPawnFor` right after the player pawn is spawned. Initialising runs, over every root
+  sequence of the loaded levels (nested sequences searched), the activation of each `SeqAct_AddAdaptiveTracks`
+  directly, then initialises each `SeqEvent_TrackBeat`.
+- (verify) The search results accumulate across root sequences: `FindSeqObjectsByClass` appends to the caller's array
+  without clearing it, and the exec thunk hands it the script's own local by reference (CONFIRMED native); the script
+  keeps one local for the whole loop and re-walks all of it after each root (CONFIRMED src). With n root sequences, an
+  action under the i-th (counting from 1) runs n − i + 1 times per pass, adding its tracks that often. No shipped
+  effect: every map with Kismet has exactly one root sequence (census of the 12 maps), and the one streamed sub-level
+  (TheCore, streamed into IceCave by a trigger later) has no adaptive objects, so each action runs once per pass
+  (STRONG: that no other level is in the world when the pawn spawns is inferred from the data, not traced). Beat
+  events are walked the same way, but "no beat actor yet" keeps one actor per event.
+- Adding a track needs the pawn. In the `InitGame` pass there is none, so the track specs go to a waiting list that
+  the shipped script never drains (the drain call is disabled); that pass matters only for the forced outputs below.
+  The pawn pass adds the tracks. Death does not respawn the pawn (ABILITIES.md A-DT-2), so a level adds its tracks
+  exactly once. The menu game info overrides `SpawnDefaultPawnFor`; the front-end map has no adaptive tracks anyway.
+- `SeqAct_AddAdaptiveTracks` declares no input links (cdo `InputLinks` empty; none of the 4 shipped instances adds
+  one), so only the manager runs it. Its activation adds each `TrackHolder` of `tracksToAdd` in order, then forces
+  its output 0 ("Out").
+- Nothing removes a track while the level runs.
+
+### Tracks — CONFIRMED (src) unless noted
+
+- A track is an actor spawned at the pawn and based on it, owning one audio component. It takes the holder's `ID`,
+  sets its component's cue to `trackSoundCue`, keeps `numberOfTracks` as a "number of bars" that nothing reads, and
+  plays the component at once. An ID already in use is not refused: both tracks play, and lookups find the first.
+- Component: the class's component template stores no properties (cdo), so the engine's `AudioComponent` defaults
+  apply: spatialisation allowed, no subtitle priority, not kept active when it loses its channel. The template is not
+  in the actor's component list (the class default stores only `audioComp`), so where the sound is placed is
+  TENTATIVE; it is never heard, because none of the 14 shipped track cues contains an attenuation node (CONFIRMED,
+  cue graphs).
+- All stems of a level start in the same frame. A muted stem keeps its voice (voice priority uses the node-chain
+  volume, not the component volume; "Audio runtime"), so the stems stay in step and a fade-in joins in time. There is
+  no other synchronisation: no tempo, bar or playback position is computed anywhere.
+
+### Volume multipliers — CONFIRMED (src; native where marked)
+
+- A track holds an ordered list of named multipliers (`ASMAMUAdaptiveVolumeMultiplier`: an ID and a factor; the
+  class default stores `"NONE"` and −1.0, both overwritten when one is created, cdo) and a current adjust time
+  (initially 0).
+- *Add* appends a record, even when the ID is already present. *Edit* gives the first record with that ID the new
+  value, or adds one when there is none. *Remove* drops the first record with that ID, if any. Each then stores its
+  adjust time as the current one and re-applies the volume; remove re-applies even when it removed nothing.
+- Re-applying: the volume is 1 multiplied by every factor in list order (single precision) and goes to the component
+  as `AdjustVolume(current adjust time, volume)`: a linear ramp on the component's playback clock from the last
+  completed target (initially 1) to the new one. A zero time takes effect at the next audio update; a change during
+  a ramp restarts from the last completed target, not from the level reached (CONFIRMED native, "Audio runtime"). The
+  factor multiplies with the cue's `VolumeMultiplier` (0.75 for the IceCave drums, 1.0 for the others), the sound
+  class (`ASAMU_Music` for every track) and the rest of the gain chain.
+- Track and multiplier IDs compare exactly, case included (string `==` is a `wcscmp`, CONFIRMED native).
+- Manager functions: edit by track ID (first track with that ID; with none, a log line and no change), edit on every
+  track in list order, and add / remove by track ID (silently nothing for an unknown track). No class calls add or
+  remove (search of all 172 `asamu` classes): only edits are reachable from the game.
+
+### Kismet actions — CONFIRMED (src, cdo, census)
+
+| Class (editor name) | Properties | Behaviour |
+|---|---|---|
+| `SeqAct_AddAdaptiveTracks` ("Add track") | `tracksToAdd` (`TrackHolder`: `ID`, `trackSoundCue`, `numberOfTracks`) | adds the tracks (above); forces "Out" |
+| `SeqAct_SetAdaptiveTrackVolumeMultiplier` ("Set track multiplier") | `trackID`, `multiplierID`, `Multiplier`, `adjustTime`, `trackVar` | edit by track ID; with a track variable, edit that track instead. The class declares no variable links (cdo `VariableLinks` empty) and all 28 shipped instances leave `trackVar` empty, so only the ID path runs |
+| `SeqAct_EditMultiplierForAllTracks` ("Set all tracks multiplier") | `multiplierID`, `Multiplier`, `adjustTime` | edit on every track |
+| `SeqAct_SetAdaptiveTrack` ("Adaptive Track") | variable links `Value`, `Target` (`SeqVar_ASAMUAdaptiveMusicTrack`, which holds a track) | copies a track reference from one variable to another; neither class occurs in a shipped level sequence |
+
+The two multiplier actions finish like plain actions; only `AddAdaptiveTracks` forces an output.
+
+### Beat events — CONFIRMED (src) unless noted
+
+- `SeqEvent_TrackBeat` (`trackID`, `beatAmount`; one output "Beat"; no variable links, cdo): when the manager
+  initialises it, a track with exactly that ID exists and it has no beat actor yet, it spawns an
+  `ASAMUBeatEventActor` whose period is `beatAmount` seconds. In the `InitGame` pass no track exists, so only the
+  pawn pass spawns beat actors.
+- The beat actor's state code loops forever: a latent sleep of the period (frame-quantised, GRAPPLE.md G-TM-3), then
+  the event's output 0 is forced (no activation check). The period is unrelated to the track's audio: beats continue
+  while the track is muted, after a one-shot track has finished, and for a track without a cue. A period of 0 pulses
+  every tick.
+- (verify) Frame quantisation (arithmetic from G-TM-3, CONFIRMED rules; checked in single precision): at a constant
+  tick `dt` a sleep of `p` ends on the n-th tick after the one that issued it, the smallest n with p − n·dt < dt/2, and
+  the overshoot is dropped, so the beat period is n·dt rather than p. At 60 Hz: 0.5 s → 30 ticks, 1.0 s → 60 (both
+  exact), 0.48 s → 29 ticks = 0.4833 s (120 Hz: 58 ticks, the same), 0 → every tick. The Darkcave beats therefore run
+  0.7 % slower than their 0.48 s stems (the `Sleeping` waves are 15.36 s = 32 × 0.48 s; the heartbeat 5.76 s = 12 ×
+  0.48 s): about 0.11 s of drift per `Sleeping` loop. The time-trial (4 s, beat 1.0 s), FallingRocks (96 s, 0.5 s) and
+  `MusicPart2` (102 s, 0.5 s) periods are whole numbers of ticks at 60 Hz. At the original's variable frame rate the
+  rounding varies per beat.
+
+### Census (local, all maps) — CONFIRMED
+
+Three levels use the system; every multiplier action uses the ID `Mute`, so each track ends up with one record and
+its volume is that record's value.
+
+| Level | Tracks: ID → cue (all class `ASAMU_Music`) | Multiplier actions | Beat events |
+|---|---|---|---|
+| AG-ParadiseCave | `MusicPart2` → `Sanctuary_Music.Sanctuary_Music_Part2_Cue` (one 102 s wave, no loop); `TimeTrialStart`, `TimeTrial1`…`TimeTrial5` → `Music.ASAMU_TimeTrial_Start_Cue`, `Music.ASAMU_TimeTrial_1_Cue`…`_5_Cue` (looping; `TimeTrial1` picks one of 5 waves) | 2 mute-all; 7 by ID on the time-trial stems (0 or 1, time 0) | `MusicPart2` 0.5 s, `TimeTrialStart` 1.0 s |
+| AG-Darkcave | `HeartBeat`, `Sleeping1`, `Sleeping2`, `Searching`, `Sleeping3` → `Chasms_Music.Worm.Chasms_Worm_Music_HeartBeat_Cue`, `…_Sleeping_Cue`, `…_Sleeping_Cue_2`, `…_Searching_Cue`, `…_Sleeping_Cue_3` (looping; `Searching` has a modulator) | 1 mute-all; 17 by ID (0, 0.7 or 0.8, times 0–5 s) | `Sleeping1` ×4 (0.48 s ×3, 0 ×1) |
+| AG-IceCave | `FallingRocks_Music` → `IceCave_Music.FallingRocks.FallingRocks_Music_Drums_Cue`, `FallingRocks_Inst` → `…FallingRocks_Music_Inst_Cue` (looping) | 1 mute-all; 4 by ID (0 over 1.5 s, 0.75 or 1.0 over 13 s) | `FallingRocks_Music` 0.5 s |
+
+14 tracks (13 loop forever, cooked `Duration` 10000; `MusicPart2` does not loop), 4 `AddAdaptiveTracks`, 4
+`EditMultiplierForAllTracks`, 28 `SetAdaptiveTrackVolumeMultiplier`, 7 `TrackBeat`; `numberOfTracks` is 0 in all 14
+holders. Consequences:
+
+- Every stem starts muted: each `AddAdaptiveTracks` "Out" is linked to a mute-all (`Mute`, 0, time 0), which runs in
+  the first Kismet update, before the stems' first audio update.
+- `MusicPart2` is never unmuted by any action: it plays silently for 102 s and only drives its beat event.
+- One Darkcave action names the track `Suspense`, which no action adds: it logs and changes nothing.
+
+### Our implementation
+
+- `MusicManager` (device-free, deterministic): tracks, waiting list, multipliers and the manager functions; it
+  returns `MusicEffect`s (`Play`, `AdjustVolume`, `Stop`, `TrackNotFound`, `TrackRefused`). `run_effects` plays them
+  on the `AudioEngine`: a track's cue starts as a spatialisable component at the pawn that follows it, and volume
+  changes go to `AudioEngine::adjust_volume`.
+- Guard (ours, not the original's): at most `MAX_TRACKS` = 256 tracks, and as many parked specs; a further track is
+  refused and logged (`TrackRefused`). The original appends without limit; only crafted data that re-runs
+  `AddAdaptiveTracks` could reach it (shipped maximum: 7 tracks in a level).
+- Bevy: `MusicPlugin` (registered by `AudioPlugin`) reads `MusicCommandMessage(MusicCommand)`: `AddTracks`,
+  `EditMultiplier { target: Id | All | Handle }`, `Reset`. While the converted audio loads, commands wait, at most
+  `MAX_QUEUED_COMMANDS` = 4096 (ours; beyond it the oldest multiplier edit is dropped, track additions are kept, and a
+  queued `Reset` drops what came before it). With no documents and no load running they are dropped: a load starts
+  again only with a new game, whose `StopAll` resets the music anyway, so a silent game no longer queues a level's
+  edits forever. Once the documents are in, every command of a frame applies, in order, without a cap.
+  `AudioCommand::StopAll` (the level-change command) forgets every track and waiting command; it is handled before
+  that frame's music commands, so the next level's tracks survive it. Tracks are always added with a pawn: our Kismet
+  runtime emits only the pawn-pass activation (the `InitGame` pass has no audible effect).
+- Kismet mapping: `MusicCommand::from_output` turns `Output::AdaptiveTracks { tracks }` into `AddTracks`
+  (`TrackSpec::from_holder`: each `TrackHolder`'s `ID`, `trackSoundCue`, `numberOfTracks`; the converted graphs
+  store the field as `Id`, and struct fields are looked up case-insensitively like UE3 names) and
+  `Output::AdaptiveMultiplier { track, .. }` into `MusicCommand::edit` (`track` `None` = every track); any other
+  output is not music. The existing `Output` variants suffice. `apps/asamu/src/kismet.rs` (`route_output`) still
+  carries an equivalent inline copy of this mapping; calling `from_output` there would leave one source.
+- Beat events need no call from the app: `asamu-kismet`'s `Runtime::tick` (`tick_beats`) produces them.
+- Not ported: the track-variable path and `SeqAct_SetAdaptiveTrack` (unreachable in the shipped data);
+  `SeqAct_PlayMusicTrack` (front end) is the engine's separate music-track path and is not handled here.
+
+Tests: `cargo test -p asamu audio::music` (24: 23 run, 1 ignored). Model: IDs compare exactly and the first match
+wins, edit/add/remove rules and re-application, the single-precision product order, mute-all order and unknown IDs,
+edits without tracks and stale handles, the waiting list, the track guard, the Kismet field mapping
+(`kismet_outputs_become_commands`, `Id` spelling included). Through the device-free engine (values worked out by
+hand): stems start together muted and ramp on the component clock; an edit during a ramp starts from the last
+completed target; the IceCave fade shape (mute, 15 s, drums to 1.0 with the cue's 0.75 and instruments to 0.75 over
+13 s, then both to 0 over 1.5 s: 0.375 / 0.375 half-way, 0.75 / 0.75 at the end, 0.375 / 0.375 half-way out, then 0);
+non-finite and extreme multipliers and times keep every gain finite in [0, 1]; the same command script replays
+bit-identically; tracks follow the pawn and unknown cues stay silent. Bevy: commands wait for a running load, are
+dropped when no audio can arrive, the wait queue is bounded and keeps track additions, a queued reset drops earlier
+commands, a loaded frame applies more than the queue bound, `StopAll` resets (also in the same frame as new tracks).
+Real data (`ASAMU_CONVERTED_DIR`, skip otherwise): `real_converted_adaptive_tracks_play` starts the 14 shipped tracks
+from the converted `cues.json`; `real_converted_kismet_adds_the_shipped_tracks` runs the first Kismet update of
+ParadiseCave, Darkcave and IceCave through `asamu-kismet` and checks the tracks and cues against the census;
+`real_converted_kismet_starts_the_stems_muted` (ignored until cross-check 1 is fixed) asserts that every stem is muted
+after that update. Local result (2026-10-10, kismet + `--no-audio` audio JSON converted under ignored `research/`,
+deleted afterwards): all 14 cues resolve, are `ASAMU_Music` without attenuation and still play after 2 s; the three
+levels yield exactly the census tracks (ParadiseCave in the order `MusicPart2`, then the six time-trial stems); the
+ignored test fails on `AG-ParadiseCave` `MusicPart2` (volume 1: the first update emits the two `AddTracks` and no
+edit), which is cross-check 1.
+
+### Cross-check of the Kismet runtime (`asamu-kismet`)
+
+1. CONFIRMED (src, census; reproduced through our runtime on the converted graphs): `init_adaptive_music` emits
+   `AdaptiveTracks` but does not force output 0 of the actions it runs. In the original the forced "Out" runs the
+   linked mute-all in all 4 shipped actions; without it every stem plays at full volume from level start
+   (ParadiseCave: `MusicPart2` and the six time-trial stems at once; Darkcave: all five worm stems; IceCave: both
+   FallingRocks stems). After the first update of each level our runtime has emitted only the `AdaptiveTracks`
+   outputs (2, 1, 1), no multiplier edit. Fix: force output 0 of each action after emitting (the original forces it
+   in both passes; the second impulse repeats an idempotent mute). Then un-ignore
+   `real_converted_kismet_starts_the_stems_muted`.
+2. CONFIRMED (native): beat registration matches `trackID` case-insensitively; the original compares exactly. No
+   shipped difference (every beat event's `trackID` equals a track ID exactly).
+3. TENTATIVE: the first beat comes one tick early. The beat actor exists before the first world tick; its state code
+   first runs in its first tick, which only issues the sleep, and the countdown starts with the next tick
+   (G-TM-3), while `tick_beats` counts the first tick too. Later beats have the same period in both. Hand-computed
+   (single precision, constant 60 Hz; the tick in which the sleep ends): 0.5 s: ours 30, 60, 90, original 31, 61,
+   91; 1.0 s: 60, 120 vs 61, 121; 0.48 s: 29, 58, 87 vs 30, 59, 88; 0 s: every tick from 1 vs from 2 (120 Hz: the same
+   one-tick offset). The forced output then runs in the next Kismet update in both.
+4. TENTATIVE (robustness): a `SetAdaptiveTrackVolumeMultiplier` whose `trackID` is not a string becomes `track: None`,
+   which means "every track"; the original would look up the empty ID. Every shipped instance stores a string.
+5. (verify) No shipped difference: `Graph::find_by_class` visits each action once, while the original activates the
+   actions of earlier root sequences again for every later one (Lifecycle above). Equal while a single root sequence
+   is in the world at level start, which holds for every shipped map.
+6. (verify) TENTATIVE (robustness): the runtime records a track for beat registration only when its holder has a
+   string `ID`; the original adds the track with the empty ID, which a beat event with an empty `trackID` would find.
+   Every shipped holder and beat event stores a non-empty ID.

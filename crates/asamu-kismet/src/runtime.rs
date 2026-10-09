@@ -1703,6 +1703,10 @@ impl Runtime {
                 }
             }
             self.emit(Output::AdaptiveTracks { tracks });
+            // The original activates output 0 ("Out") as part of the action; every
+            // shipped instance links it to a mute-all multiplier edit, so the stems
+            // start silent (AUDIO.md, "Adaptive music", cross-check 1).
+            self.force_output(a, 0);
         }
         for e in self.events_of(OpClass::TrackBeat) {
             let Some(node) = self.graph.node(e) else {
