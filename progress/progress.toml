@@ -18,8 +18,7 @@ current_milestone = "M9"
 [[milestone]]
 id = "M0"
 name = "Repository + analysis infrastructure"
-status = "partial"
-note = "Everything except a completed Windows CI run."
+status = "verified"
 
 [[milestone]]
 id = "M1"
@@ -974,8 +973,9 @@ note = "clippy + tests + Bevy app build."
 [[category.item]]
 id = "windows"
 name = "Windows x86_64 build in CI"
-status = "investigating"
-note = "CI job exceeded the window before cancellation; caching fix pushed."
+status = "implemented"
+evidence = ".github/workflows/ci.yml (run 37939080389: all jobs green)"
+note = "clippy + tests + Bevy app build on windows-latest."
 
 [[category.item]]
 id = "macos-arm64"
@@ -1007,20 +1007,23 @@ name = "Tests"
 [[category.item]]
 id = "ci"
 name = "Cross-platform CI (fmt, clippy, test, progress check)"
-status = "partial"
-note = "Linux and macOS arm64 full runs passed; macOS x86_64 check passed; Windows not yet completed."
+status = "verified"
+evidence = ".github/workflows/ci.yml (run 37939080389: all jobs green)"
+note = "fmt, hygiene, progress check, clippy -D warnings, tests and app build on ubuntu/windows/macos + x86_64-apple-darwin check."
 
 [[category.item]]
 id = "hygiene"
 name = "Repository hygiene check (tools/repo-hygiene)"
-status = "partial"
-note = "Implemented locally; not yet run in CI."
+status = "verified"
+evidence = ".github/workflows/ci.yml (run 37939080389: all jobs green)"
+note = "repo-hygiene runs in CI on every push."
 
 [[category.item]]
 id = "progress-check"
 name = "Progress matrix stale check"
-status = "partial"
-note = "Implemented locally; not yet run in CI."
+status = "verified"
+evidence = ".github/workflows/ci.yml (run 37939080389: all jobs green)"
+note = "progress-gen --check runs in CI on every push."
 
 [[category.item]]
 id = "synthetic-fixtures"
