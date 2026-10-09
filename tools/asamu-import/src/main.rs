@@ -21,12 +21,15 @@ use clap::{Parser, Subcommand};
 
 mod all;
 mod audio;
+mod decals;
 mod kismet;
 mod levels;
 mod lightmaps;
+mod localization;
 mod materials;
 mod matinee;
 mod meshes;
+mod particles;
 #[path = "../../asamu-inspect/src/safety.rs"]
 #[allow(dead_code)]
 mod safety;
@@ -66,6 +69,12 @@ enum Cmd {
     Kismet(kismet::Args),
     /// Export lightmaps / shadow maps for converted levels.
     Lightmaps(lightmaps::Args),
+    /// Convert particle systems.
+    Particles(particles::Args),
+    /// Convert decals.
+    Decals(decals::Args),
+    /// Export localized text from the user install.
+    Localization(localization::Args),
     /// Run every conversion end to end.
     All(all::Args),
 }
@@ -111,6 +120,9 @@ fn main() -> Result<()> {
         Cmd::Skeletal(a) => skeletal::run(&ctx, a),
         Cmd::Kismet(a) => kismet::run(&ctx, a),
         Cmd::Lightmaps(a) => lightmaps::run(&ctx, a),
+        Cmd::Particles(a) => particles::run(&ctx, a),
+        Cmd::Decals(a) => decals::run(&ctx, a),
+        Cmd::Localization(a) => localization::run(&ctx, a),
         Cmd::All(a) => all::run(&ctx, a),
     }
 }

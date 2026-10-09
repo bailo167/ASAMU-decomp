@@ -86,6 +86,7 @@ pub mod kismet_host;
 pub mod npc;
 pub mod save;
 pub mod smoke;
+pub mod timetrial;
 pub mod world;
 
 use asamu_core::{ClockError, DEFAULT_TICK_RATE_HZ, FixedClock};

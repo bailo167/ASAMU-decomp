@@ -67,12 +67,17 @@ mod audio;
 mod capture;
 mod converted;
 mod fly;
+mod gamepad;
 mod hud;
 mod kismet;
 mod lightmaps;
 mod npc;
+mod particles;
 mod post;
+mod timetrial;
 mod ui;
+mod vfx;
+mod water;
 
 use std::path::PathBuf;
 

@@ -38,9 +38,11 @@ pub mod files;
 pub mod level;
 pub mod lighting;
 pub mod lightmaps;
+pub mod localization;
 pub mod manifest;
 pub mod material_manifest;
 pub mod materials;
+pub mod particles;
 pub mod scene;
 pub mod transform;
 
