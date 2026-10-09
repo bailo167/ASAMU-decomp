@@ -182,6 +182,9 @@ struct SpawnSpec<'a> {
     sequences: &'a [&'a str],
     start: Option<StartAnim>,
     name: &'a str,
+    /// World actor id of an actor Kismet may move or hide (skeletal Matinee
+    /// actors; `crate::kismet`).
+    actor: Option<u32>,
 }
 
 fn spawn_one(
@@ -196,6 +199,7 @@ fn spawn_one(
         sequences,
         start,
         name,
+        actor,
     } = spec;
     let Some(transform) = component_transform(comp, mesh) else {
         return false;
@@ -205,7 +209,7 @@ fn spawn_one(
         .load_builder()
         .with_settings(skeletal_settings)
         .load(GltfAssetLabel::Scene(0).from_asset(gltf_path(mesh)));
-    commands.spawn((
+    let mut e = commands.spawn((
         Name::new(format!("npc {name}")),
         WorldAssetRoot(scene),
         transform,
@@ -216,6 +220,9 @@ fn spawn_one(
         },
         NpcSkin::new(kind, clips, start, transform),
     ));
+    if let Some(id) = actor {
+        e.insert(crate::kismet::KismetActor(id));
+    }
     true
 }
 
@@ -238,6 +245,7 @@ fn pawn_sequences(mesh: &SkeletalMeshInfo) -> Vec<String> {
 pub(super) fn spawn_skins(
     mut commands: Commands,
     world: Option<ResMut<NpcWorld>>,
+    sim: Option<Res<Sim>>,
     server: Res<AssetServer>,
 ) {
     let Some(mut world) = world else {
@@ -246,12 +254,15 @@ pub(super) fn spawn_skins(
     if world.skins_spawned {
         return;
     }
-    world.skins_spawned = true;
-    let world = &*world;
-    let Some(index) = &world.skeletal else {
+    let world_ref = &*world;
+    let Some(system) = world_ref.system(sim.as_deref()) else {
         return;
     };
-    let scene = world.system.scene();
+    let Some(index) = &world_ref.skeletal else {
+        world.skins_spawned = true;
+        return;
+    };
+    let scene = system.scene();
     let mut spawned = 0usize;
     let mut missing = 0usize;
     for actor in &scene.skinned {
@@ -290,6 +301,7 @@ pub(super) fn spawn_skins(
                     sequences: &seqs,
                     start,
                     name: &actor.name,
+                    actor: Some(actor.id),
                 },
             ) {
                 spawned += 1;
@@ -313,6 +325,7 @@ pub(super) fn spawn_skins(
                         sequences: &worm_sequences,
                         start: None,
                         name: &w.name,
+                        actor: None,
                     },
                 )
             {
@@ -335,6 +348,7 @@ pub(super) fn spawn_skins(
                         sequences: &refs,
                         start: None,
                         name: &m.name,
+                        actor: None,
                     },
                 ));
             }
@@ -355,12 +369,14 @@ pub(super) fn spawn_skins(
                         sequences: &refs,
                         start: None,
                         name: &v.name,
+                        actor: None,
                     },
                 ));
             }
         }
     }
     info!("skinned NPC meshes: {spawned} spawned, {missing} without a converted mesh");
+    world.skins_spawned = true;
 }
 
 /// Gives every new `AnimationPlayer` below an [`NpcSkin`] its graph and
@@ -440,8 +456,11 @@ pub(super) fn update_skin_animations(
     let Some(world) = world else {
         return;
     };
-    let rt = world.system.runtime();
-    let scene = world.system.scene();
+    let Some(system) = world.system(sim.as_deref()) else {
+        return;
+    };
+    let rt = system.runtime();
+    let scene = system.scene();
     for (mut skin, mut transform) in &mut skins {
         let (wanted, looping, seek): (Option<String>, bool, Option<f32>) = match skin.kind {
             SkinKind::Ambient => continue,

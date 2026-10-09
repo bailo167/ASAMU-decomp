@@ -132,7 +132,7 @@ Kismet entry points (src; port labels from the class defaults, cdo):
 |---|---|
 | `SeqAct_StartWorm` (`Start`) | → Idle (→ WakingUp), clears shut-down |
 | `SeqAct_ShutDownWorm` | sets shut-down; in Awake also queues the sleep. A sleeping worm then never wakes; a worm in other states finishes its current episode normally and stays asleep afterwards |
-| `SeqAct_PauseWorm` (`UnPause` = input 0, `Pause` = input 1) | sets the pause flag, which only gates the Awake check |
+| `SeqAct_PauseWorm` (`UnPause` = input 0, `Pause` = input 1) | sets the pause flag, which only gates the Awake check. Each input is checked on its own, `UnPause` first, so both inputs in one impulse leave the worm **paused** (CONFIRMED (src); the Kismet runtime now emits both, in that order — it used to emit only "unpause") |
 | `SeqAct_WormResetSleepTimer` | in Sleeping only: restarts the light-dimming counter (not the random sleep); unused by any map |
 | `SeqEvent_WormEvents` outputs | 0 `WakingUp`, 1 `Awaken`, 2 `FallingAsleep`, 3 `Alerted`, 4 `Screaming`, 5 `StoppedScreaming`, 6 `FinishedAlerted`; every instance in the level fires (when enabled) |
 
@@ -250,6 +250,14 @@ playing). Meshes: `Villagers.Meshes.{Villager,Stray}_{Adult,Child}_01`, `Maddie.
 BeautifulCity, StarHaven and Darkcave 13 of them (plus TheCore's single one) are referenced by a Matinee (`SeqAct_Interp`; animation control
 tracks not imported).
 
+**Look-at (`SeqAct_SetLookAtTarget`, `SkeletalMeshActorMATWithFollowCollision`).** The action stores a target actor
+and two offsets on the looking actor (input 0 with the target, input 1 with none). The actor's per-tick update then
+aims its head and eye `SkelControlLookAt` nodes at the **player pawn's** location plus the offsets; the stored
+target is never read, so changing or clearing it does not change where the head looks, only the offsets do.
+STRONG (local reading of the action and actor classes). `SeqAct_ToggleFollowCollision` switches the actor's
+collision between block-all-but-weapons and none; the collision component it attaches to a socket at spawn is not
+converted (our runtime applies the switch to the actor's mover collision when it has one, TENTATIVE stand-in).
+
 **Importer gap (integration item):** the scene export (`asamu-import levels`) carries each skeletal component's
 mesh but not its animation node. The runtime reads an optional component field
 
@@ -322,9 +330,11 @@ gun drives at which moment is only mapped approximately here (TENTATIVE).
 | Game side: spawn from a loaded map, tick, apply the push and the kill, route the player's handler calls, Kismet entry points, `use`, hand animation mapping and bob | `crates/asamu-game/src/npc.rs` (`NpcSystem`, `apply_worm_push`, `hand_animation`, `hand_bob_offset`) |
 | Rendering: skinned actors (Bevy skins, `AnimationPlayer`, state-driven clips), hands on an overlay camera, state gizmos | `apps/asamu/src/npc.rs`, `apps/asamu/src/npc/{skins,hands}.rs` |
 
-Wiring into `Game::tick` is documented in `crates/asamu-game/src/npc.rs` (module docs); until it lands the app
-runs the NPC system after each game tick, so the push acts one tick later than in the original, and forwards
-only kill-zone deaths to the worm (`death_notifies_npcs`, read from the game's tick reports). Our own choices
+**Wired into the game frame (2026-10-10):** `load_level_with_kismet` attaches the map's `NpcSystem` to the `Game`;
+it ticks in step 2 of the converted level's tick (with the other map actors, so the push acts in the same frame
+as in the original), its touches run with the player's, kill-zone deaths notify it and respawns restart its
+touches; its events reach Kismet through the level script (worm events, collectible pick-ups, interactions) and
+the app (progression, camera shake). Frame order and routing: `docs/INTEGRATION.md`. Our own choices
 (not original): the random generator; NPC pawns are not collision; villager movement is a straight kinematic walk
 at `GroundSpeed`; the idle stand-in animation; animation blend times; the overlay light.
 
@@ -359,5 +369,7 @@ villagers posed by their animation and the worm. CONFIRMED (test, local run).
 - Trace from the original: worm cycle timings (the awake period and the sleep delay after it, §3.3), push and
   scream timing relative to the player's physics.
 - The importer should export each skeletal component's animation node (§6) and Matinee animation tracks.
-- NPC pawn collision for the player; the worm's eye spot light and `MonsterGrowl` camera shake in the renderer.
+- NPC pawn collision for the player; the worm's eye spot light in the renderer (the growl's camera shake is a
+  placeholder shake, `apps/asamu/src/kismet.rs`).
+- Head/eye look-at controls of the skeletal Matinee actors (above) are not rendered.
 - The stock `Encompasses`, use search and `FInterpTo` natives were not re-read (TENTATIVE).

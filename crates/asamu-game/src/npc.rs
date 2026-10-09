@@ -2,56 +2,56 @@
 //! converted scene ([`asamu_world::npc`]), ticks their state machines, applies
 //! their effects on the player (the worm's push and kill) and reports events
 //! for Kismet, audio and the UI. Behaviour spec:
-//! `docs/reverse-engineering/NPCS.md`.
+//! `docs/reverse-engineering/NPCS.md`; frame order and data flow:
+//! `docs/INTEGRATION.md`.
 //!
-//! # Wiring into [`crate::Game`] (integration for the orchestrator)
+//! # Wiring into [`crate::Game`]
 //!
-//! [`NpcSystem`] is self-contained; `Game` does not own one yet. The intended
-//! calls, matching the original's frame order (GRAPPLE.md G-TM-2: map actors
-//! tick after the player's input events and before its controller and pawn):
+//! A [`NpcSystem`] attached with [`crate::Game::attach_npcs`]
+//! ([`crate::load_level_with_kismet`] attaches the map's own) runs inside the
+//! converted level's tick, in the original's frame order (GRAPPLE.md G-TM-2:
+//! map actors tick after the player's input events and before its
+//! controller and pawn):
 //!
-//! 1. Load: after `Game::load_level` / `from_loaded_map`,
-//!    `NpcSystem::from_source(&DirSource::new(dir), &map.levels, NpcOptions::default())`
-//!    (or [`NpcSystem::load_from_dir`]); time trial: `NpcOptions { time_trial: true, .. }`.
-//! 2. In `Game::tick_scene`, right after `self.objects.tick(...)` (step 2):
-//!    `let r = npcs.tick_actors(&mut self.player, dt);` — route
-//!    `r.released.kismet` through `apply_object_events` (a push can release a
-//!    grapple onto a crystal) and, when `r.kill_player`, call
-//!    `self.scene_die(DeathCause::Scripted, ..)` (what `Game::kill_player`
-//!    does); do **not** call `notify_player_killed` for that death (the worm
-//!    already handled its own `NotifyKilled`).
-//! 3. Route every player `StepEvents` (`begin_step` and `finish_step` events)
-//!    through [`NpcSystem::apply_sim_events`] (glow flowers on
-//!    `ActorGrappled`, story items on `InteractWith`). The story-item model
-//!    here supersedes `WorldObjects`' interaction count for Kismet: use
-//!    [`NpcEvent::ActorInteractedWith`] and ignore
-//!    `WorldEvent::ActorInteractedWith` to avoid double activations.
-//! 4. After the touches of step 5:
-//!    `npcs.update_touches(before, after, &self.params)` (collectibles,
-//!    foliage). After a death whose cause passes [`death_notifies_npcs`]
-//!    (kill zone or dynamic kill zone only; not `KillZ`, not scripted):
-//!    [`NpcSystem::notify_player_killed`]. After every respawn teleport:
+//! 1. Every handler call or interaction the game hands to the world objects
+//!    (input events, the player's step, the death's and the push's grapple
+//!    releases, story-mode changes) also reaches
+//!    [`NpcSystem::apply_object_event`] (glow flowers on `ActorGrappled`,
+//!    story items on `InteractWith`). The story-item model here supersedes
+//!    `WorldObjects`' interaction count for Kismet: the Kismet host uses
+//!    [`NpcEvent::ActorInteractedWith`] and ignores
+//!    `WorldEvent::ActorInteractedWith` while a system is attached.
+//! 2. Step 2 of the tick (map actors), after the movers, crystals and rocks:
+//!    [`NpcSystem::tick_actors`]; the push's grapple release goes to the
+//!    world objects, and a scream timeout starts the death sequence with
+//!    `DeathCause::Scripted` (the worm already handled its own
+//!    `NotifyKilled`).
+//! 3. Step 5 (touches): [`NpcSystem::update_touches`] along the same path
+//!    (collectibles, foliage).
+//! 4. A death whose cause passes [`death_notifies_npcs`] (kill zone or
+//!    dynamic kill zone only; not `KillZ`, not scripted) calls
+//!    [`NpcSystem::notify_player_killed`]; every respawn teleport calls
 //!    [`NpcSystem::on_player_respawned`].
-//! 5. Kismet host: `SeqAct_StartWorm` → [`NpcSystem::start_worm`],
-//!    `SeqAct_ShutDownWorm` → [`NpcSystem::shut_down_worm`],
-//!    `SeqAct_PauseWorm` (input 0 `UnPause`, 1 `Pause`) →
-//!    [`NpcSystem::pause_worm`], `SeqAct_WormResetSleepTimer` →
-//!    [`NpcSystem::worm_reset_sleep_timer`], `SeqAct_MaddieBackpack` →
-//!    [`NpcSystem::maddie_backpack`], `SeqAct_PlayMaddieBackpackAnim` →
-//!    [`NpcSystem::play_maddie_backpack_anim`]; the worm variable resolves with
-//!    [`NpcScene::actor_by_name`]. Events: [`NpcEvent::Worm`] → every
-//!    `SeqEvent_WormEvents` output `kind.output()`;
-//!    [`NpcEvent::CollectibleCollected`] → every `SeqEvent_CollectibleCollected`
-//!    output 0; [`NpcEvent::ActorInteractedWith`] → `SeqEvent_ActorInteractedWith`
-//!    (every instance counts the activation against its `MaxTriggerCount`, only
-//!    those whose originator matches fire, CONFIRMED (src)).
-//! 6. Save: [`NpcEvent::CollectibleCollected`] / [`NpcEvent::StoryItemRegistered`]
-//!    → progression hooks; snapshot restore → [`NpcSystem::set_collected`].
-//!
-//! Until then `apps/asamu`'s NPC plugin runs an `NpcSystem` next to the game
-//! (after each tick) so the NPCs act and render.
+//! 5. The tick's events are in [`crate::Game::npc_events`]; the Kismet host
+//!    ([`crate::kismet_host`]) routes [`NpcEvent::Worm`] to every
+//!    `SeqEvent_WormEvents` output `kind.output()`,
+//!    [`NpcEvent::CollectibleCollected`] to `SeqEvent_CollectibleCollected`
+//!    (and the collectible's own `SeqEvent_Touch`),
+//!    [`NpcEvent::ActorInteractedWith`] to `SeqEvent_ActorInteractedWith`
+//!    (every instance counts the activation against its `MaxTriggerCount`,
+//!    only those whose originator matches fire, CONFIRMED (src)), and the
+//!    Kismet worm actions to [`NpcSystem::start_worm`],
+//!    [`NpcSystem::shut_down_worm`] and [`NpcSystem::pause_worm`]
+//!    (`SeqAct_PauseWorm` input 0 `UnPause`, 1 `Pause`, in that order, so
+//!    both inputs in one impulse end paused).
+//! 6. Save: the app turns [`NpcEvent::CollectibleCollected`] /
+//!    [`NpcEvent::StoryItemRegistered`] into progression records
+//!    ([`collectible_save_key`], [`story_item_save_key`]); a snapshot restore
+//!    calls [`NpcSystem::set_collected`].
 
 use std::path::Path;
+
+use crate::Game;
 
 use asamu_player::grapple_gun::ReleaseReason;
 use asamu_player::pawn::PowerJumpStateName;
@@ -399,6 +399,54 @@ impl NpcSystem {
         } else {
             UseOutcome::NotInStoryMode
         }
+    }
+}
+
+/// The progression key of a collectible (SAVE.md §6.3, §9.2): its actor
+/// path relative to the map, `TheWorld.PersistentLevel.<name>`.
+#[must_use]
+pub fn collectible_save_key(def: &CollectibleDef) -> String {
+    format!("TheWorld.PersistentLevel.{}", def.name)
+}
+
+/// The progression key of an optional story item (SAVE.md §6.3): the level
+/// file name followed by the registered actor's path relative to the map, or
+/// by `None` for the stand-alone items' null parent (quirk Q5). Our format
+/// for the path part follows [`collectible_save_key`] (TENTATIVE: the
+/// original's exact string is not traced; our saves never mix with the
+/// original's).
+#[must_use]
+pub fn story_item_save_key(map: &str, item: Option<&StoryItemDef>) -> String {
+    match item {
+        Some(d) => format!("{map}TheWorld.PersistentLevel.{}", d.name),
+        None => format!("{map}None"),
+    }
+}
+
+impl Game {
+    /// Attaches an NPC system: from the next tick its actors run inside the
+    /// frame (see the [`crate::npc`] module docs). Converted levels only
+    /// (hand-made levels never tick it).
+    pub fn attach_npcs(&mut self, system: NpcSystem) {
+        self.npcs = Some(Box::new(system));
+    }
+
+    /// The attached NPC system.
+    #[must_use]
+    pub fn npcs(&self) -> Option<&NpcSystem> {
+        self.npcs.as_deref()
+    }
+
+    /// The attached NPC system, for the Kismet host and tools.
+    pub fn npcs_mut(&mut self) -> Option<&mut NpcSystem> {
+        self.npcs.as_deref_mut()
+    }
+
+    /// NPC events of the latest tick (including those raised by calls made
+    /// between ticks, e.g. Kismet's worm actions), in order.
+    #[must_use]
+    pub fn npc_events(&self) -> &[NpcEvent] {
+        &self.npc_events
     }
 }
 

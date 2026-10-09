@@ -282,6 +282,13 @@ synthetic tests. CONFIRMED
 - `IMF_World`: the base actor's matrix, or the identity when the actor is unattached.
 - `IMF_RelativeToInitial`: `InitialTM · base`, with the rows normalized.
 - CONFIRMED structure. TENTATIVE: `GetBaseMatrix` carries no scale.
+- **Correction (2026-10-10):** the engine reads the base actor's matrix again on every evaluation (the base may
+  itself be moving, e.g. a passenger on an airship), whereas `MoveInstance` stores the base matrix once when the
+  instance is built (`MoveInstance::with_base` in `asamu_ue3`, `instance_with_base` in `asamu_kismet`). An earlier
+  note here implied the stored base was used as is. The Kismet runtime replaces the stored base with the base
+  actor's current transform before each evaluation (`asamu_kismet` `interp.rs`, `with_current_base`), which matches
+  the engine. STRONG (verifier's reading of `GetMoveRefFrame` / `GetBaseMatrix`; consistent with the passenger
+  checks in KISMET_RUNTIME.md §11).
 
 **World transform (`ComputeWorldSpaceKeyTransform`).** CONFIRMED structure; TENTATIVE operation order in
 the matrix products.

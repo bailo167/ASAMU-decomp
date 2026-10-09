@@ -4,9 +4,9 @@
 //! never committed.
 //!
 //! With a converted level the screenshot waits until its assets have settled
-//! (loaded or failed), then one more second, but never longer than the
-//! `--exit-after` deadline (default 60 s when only a screenshot is asked
-//! for).
+//! (loaded or failed), then one more second (or `--screenshot-delay`
+//! seconds), but never longer than the `--exit-after` deadline (default 60 s
+//! when only a screenshot is asked for).
 //!
 //! The screenshot is rendered by a second camera into an **offscreen image**
 //! (1600 × 900) that follows the player camera, not read back from the
@@ -39,6 +39,8 @@ pub struct AutoCapture {
     pub screenshot: Option<PathBuf>,
     /// Exit after this many seconds.
     pub exit_after: Option<f32>,
+    /// Seconds after the assets settled before the screenshot (default 1).
+    pub delay: f32,
     taken_at: Option<f32>,
     settled_at: Option<f32>,
     target: Option<Handle<Image>>,
@@ -51,10 +53,20 @@ impl AutoCapture {
         Self {
             screenshot,
             exit_after,
+            delay: 1.0,
             taken_at: None,
             settled_at: None,
             target: None,
         }
+    }
+
+    /// Seconds after the assets settled before the screenshot.
+    #[must_use]
+    pub fn with_delay(mut self, delay: f32) -> Self {
+        if delay.is_finite() && delay >= 0.0 {
+            self.delay = delay;
+        }
+        self
     }
 
     fn active(&self) -> bool {
@@ -304,11 +316,13 @@ fn auto_capture(
     if let Some(path) = capture.screenshot.clone()
         && capture.taken_at.is_none()
     {
-        // Ready: assets settled one second ago (or two seconds into a run
-        // without a converted level), or the deadline is two seconds away.
+        // Ready: assets settled `delay` seconds ago (or two seconds into a
+        // run without a converted level), or the deadline is two seconds
+        // away.
+        let delay = capture.delay;
         let ready = capture
             .settled_at
-            .is_some_and(|t| now >= t + 1.0 && now >= 2.0)
+            .is_some_and(|t| now >= t + delay && now >= 2.0)
             || now >= deadline - 2.0;
         if ready {
             let fps =

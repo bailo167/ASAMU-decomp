@@ -10,8 +10,8 @@ use asamu_player::grapple_gun::ReleaseReason;
 use asamu_player::trace::TraceSample;
 use asamu_player::world::{CONTACT_SKIN, CollisionShape};
 use asamu_player::{
-    BoxWorld, InputFrame, PlayerParams, PlayerState, StepEvents, begin_step, finish_step, pawn,
-    rocket_boots,
+    BoxWorld, EventLog, InputFrame, PlayerParams, PlayerState, StepEvents, begin_step, finish_step,
+    pawn, rocket_boots,
 };
 use asamu_world::gameplay::{DeathCause, PlayerStartDef, SceneRuntime};
 use asamu_world::scene::{self, LoadedMap};
@@ -215,6 +215,9 @@ impl Game {
                 death: None,
                 pending: Vec::new(),
             })),
+            npcs: None,
+            npc_pending: Vec::new(),
+            npc_events: Vec::new(),
         })
     }
 
@@ -342,7 +345,10 @@ impl Game {
         released
     }
 
-    /// Starts (or restarts) the death sequence (A-DT-2, t = 0).
+    /// Starts (or restarts) the death sequence (A-DT-2, t = 0). A kill-zone
+    /// or dynamic-kill-zone death also reaches the NPC controllers'
+    /// `NotifyKilled` ([`crate::npc::death_notifies_npcs`]; a scripted death,
+    /// the worm's own kill and `KillZ` do not).
     pub(crate) fn scene_die(
         &mut self,
         cause: DeathCause,
@@ -353,6 +359,12 @@ impl Game {
             s.death = Some(0.0);
         }
         world_events.push(WorldEvent::PlayerDied { cause });
+        if crate::npc::death_notifies_npcs(cause)
+            && let Some(npcs) = &mut self.npcs
+        {
+            let events = npcs.notify_player_killed();
+            self.npc_pending.extend(events);
+        }
         released
     }
 
@@ -388,6 +400,10 @@ impl Game {
         }
         self.player.velocity = Vec3::ZERO;
         self.respawn_count = self.respawn_count.saturating_add(1);
+        // The NPC touches (collectibles, foliage) restart at the new place.
+        if let Some(npcs) = &mut self.npcs {
+            npcs.on_player_respawned();
+        }
         // Touches are re-evaluated at the new place (no sweep across the
         // teleport): volumes still overlapped stay touched, new overlaps
         // touch, as the engine's teleport updates touching (TENTATIVE: the
@@ -432,6 +448,9 @@ impl Game {
         self.apply_object_events(&input_events, 0, &mut world_events);
         let mut respawned = false;
         let mut died_at_respawn = None;
+        // Events raised outside the player's step (NPC push, NPC kill).
+        let mut extra = StepEvents::default();
+        let mut npc_death = None;
         if pending.dt().is_some() {
             // 2. Map-placed actors.
             let time_after = (self.clock.tick() + 1) as f64 / self.clock.tick_rate_hz();
@@ -457,6 +476,27 @@ impl Game {
                     *charged = self.objects.crystal_charged(&self.level, *id);
                 }
             }
+            // NPCs (map actors too: the worm's push and kill, collectibles'
+            // timers, villagers, story items, glow flowers).
+            let npc_tick = self
+                .npcs
+                .as_mut()
+                .map(|npcs| npcs.tick_actors(&mut self.player, dt));
+            if let Some(r) = npc_tick {
+                self.npc_pending.extend(r.events);
+                if !r.released.kismet.is_empty() || r.released.gun.released.is_some() {
+                    // A push can release the grapple onto a crystal.
+                    self.apply_object_events(&r.released, 0, &mut world_events);
+                    merge_events(&mut extra, &r.released);
+                }
+                if r.kill_player && !self.is_dying() {
+                    // The worm's scream timed out: `PlayerDied` (its own
+                    // `NotifyKilled` is already applied; scripted cause).
+                    let released = self.scene_die(DeathCause::Scripted, &mut world_events);
+                    merge_events(&mut extra, &released);
+                    npc_death = Some(DeathCause::Scripted);
+                }
+            }
             // 3. The pawn's timers: the death fade (A-DT-2).
             let fade_over = match self.scene.as_mut().and_then(|s| s.death.as_mut()) {
                 Some(count) => {
@@ -480,6 +520,9 @@ impl Game {
             &self.world,
         );
         self.apply_object_events(&events, input_events.kismet.len(), &mut world_events);
+        // Step 2's handler calls (the push's release, the scream kill's) go
+        // between the input events' and the step's own, as they happened.
+        insert_events(&mut events, input_events.kismet.len(), &extra);
         let tick = self.clock.advance_tick();
 
         // 5. Touches along the tick's path, KillZ.
@@ -497,16 +540,20 @@ impl Game {
             ),
             None => Default::default(),
         };
-        let mut died = died_at_respawn;
+        // The NPC side's touches along the same path (collectibles,
+        // foliage).
+        if let Some(npcs) = &mut self.npcs {
+            let touched = npcs.update_touches(before, after, &self.params);
+            self.npc_pending.extend(touched);
+        }
+        let mut died = died_at_respawn.or(npc_death);
         if let Some((cause, _)) = outcome.death {
             let released = self.scene_die(cause, &mut world_events);
-            events.kismet.extend(&released.kismet);
-            if released.gun.released.is_some() {
-                events.gun.released = released.gun.released;
-            }
+            merge_events(&mut events, &released);
             died = Some(cause);
         }
         self.last_events = events;
+        self.npc_events = std::mem::take(&mut self.npc_pending);
 
         let checkpoint_activated = world_events.iter().find_map(|e| match e {
             WorldEvent::CheckpointActivated { id, .. } => Some(*id),
@@ -534,6 +581,37 @@ impl Game {
     }
 }
 
+/// Appends `from`'s handler calls to `into` and takes over its grapple
+/// release.
+fn merge_events(into: &mut StepEvents, from: &StepEvents) {
+    into.kismet.extend(&from.kismet);
+    if from.gun.released.is_some() {
+        into.gun.released = from.gun.released;
+    }
+}
+
+/// Puts `extra`'s handler calls into `events` after its first `at` (the
+/// input events') and before the rest (the step's own), and takes over
+/// `extra`'s grapple release when the step itself reported none. Rebuilding
+/// the log pushes the same events, so a full log overflows exactly as
+/// appending would.
+fn insert_events(events: &mut StepEvents, at: usize, extra: &StepEvents) {
+    if !extra.kismet.is_empty() {
+        let mut merged = EventLog::new();
+        for e in events.kismet.iter().take(at) {
+            merged.push(e);
+        }
+        merged.extend(&extra.kismet);
+        for e in events.kismet.iter().skip(at) {
+            merged.push(e);
+        }
+        events.kismet = merged;
+    }
+    if events.gun.released.is_none() {
+        events.gun.released = extra.gun.released;
+    }
+}
+
 /// Copies the rocks' locations into the collision world (anchor following)
 /// and re-places their collision after a reset.
 fn sync_rock_collision(s: &SceneGame, sc: &mut SceneCollision) {
@@ -553,5 +631,57 @@ fn sync_rock_collision(s: &SceneGame, sc: &mut SceneCollision) {
             }
             slot.1 = state.location;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asamu_player::SimEvent;
+
+    fn log(events: &[SimEvent]) -> StepEvents {
+        let mut e = StepEvents::default();
+        for x in events {
+            e.kismet.push(*x);
+        }
+        e
+    }
+
+    #[test]
+    fn step_two_events_go_between_the_input_events_and_the_steps_own() {
+        // Input event (attach), then the step's landing; the push in step 2
+        // released the grapple.
+        let mut events = log(&[
+            SimEvent::PlayerGrappled { originator: None },
+            SimEvent::PlayerLanded,
+        ]);
+        let extra = log(&[
+            SimEvent::ActorUngrappled { actor: 3 },
+            SimEvent::PlayerReleasedGrapple,
+        ]);
+        insert_events(&mut events, 1, &extra);
+        assert_eq!(
+            events.kismet.iter().collect::<Vec<_>>(),
+            vec![
+                SimEvent::PlayerGrappled { originator: None },
+                SimEvent::ActorUngrappled { actor: 3 },
+                SimEvent::PlayerReleasedGrapple,
+                SimEvent::PlayerLanded,
+            ]
+        );
+        assert!(!events.kismet.overflowed());
+        // Nothing extra: unchanged.
+        let before = events;
+        insert_events(&mut events, 1, &StepEvents::default());
+        assert_eq!(events, before);
+        // A full log overflows as appending would.
+        let mut full = log(&[SimEvent::PlayerLanded; asamu_player::events::EVENT_CAPACITY]);
+        insert_events(&mut full, 0, &log(&[SimEvent::PlayerReleasedGrapple]));
+        assert!(full.kismet.overflowed());
+        assert_eq!(full.kismet.len(), asamu_player::events::EVENT_CAPACITY);
+        assert_eq!(
+            full.kismet.iter().next(),
+            Some(SimEvent::PlayerReleasedGrapple)
+        );
     }
 }

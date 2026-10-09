@@ -33,7 +33,14 @@ use asamu_game::TickReport;
 use asamu_game::save::{Achievement, ChapterId, FRONT_END_MAP, PlayMode, SaveSession, SaveStore};
 use bevy::prelude::*;
 
+pub(crate) use flow::{LoadedLevel, load_level};
 pub(crate) use settings::UserSettings;
+pub(crate) use strings::UiStrings;
+
+/// The menu flow's update systems (the Kismet router runs before them, so a
+/// transition or save string of a tick is handled in the same frame).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct UiFlowSet;
 
 /// How the app was launched (inserted by `main.rs`; the default is the
 /// graybox with the main menu shown).
@@ -181,16 +188,13 @@ pub(crate) struct Play {
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct GameTick(pub TickReport);
 
-// Integration points for the Kismet / world workstreams (written by them,
-// handled in `flow`). See docs/UI_AND_SAVES.md "Integration".
+// Integration points written by the Kismet router (`crate::kismet`) and
+// handled in `flow`. See docs/UI_AND_SAVES.md "Integration" and
+// docs/INTEGRATION.md.
 
 /// An `ASAMUCollectible` was picked up; `key` = its actor path relative to
 /// the map (e.g. `TheWorld.PersistentLevel.ASAMUCollectible_3`).
 #[derive(Message, Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "integration point: written by the world workstream"
-)]
 pub(crate) struct CollectibleFound {
     /// Actor path relative to the map.
     pub key: String,
@@ -199,10 +203,6 @@ pub(crate) struct CollectibleFound {
 /// An optional story item registered itself (`<level file name><parent
 /// path or None>`, SAVE.md §6.3).
 #[derive(Message, Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "integration point: written by the world workstream"
-)]
 pub(crate) struct StoryItemFound {
     /// Story-item key.
     pub key: String,
@@ -210,13 +210,11 @@ pub(crate) struct StoryItemFound {
 
 /// Kismet `SeqAct_UnlockASAMUAchievement` (or another unlock).
 #[derive(Message, Clone, Copy, Debug)]
-#[allow(dead_code, reason = "integration point: written by the Kismet host")]
 pub(crate) struct AchievementEarned(pub Achievement);
 
 /// Kismet `SeqAct_EditOrAddSaveString` (the general save is rewritten).
 /// Reads (`SeqAct_GetSaveStringValue`) use [`Saves`] directly.
 #[derive(Message, Clone, Debug)]
-#[allow(dead_code, reason = "integration point: written by the Kismet host")]
 pub(crate) struct SaveStringEdited {
     /// Flag id.
     pub id: String,
@@ -226,37 +224,23 @@ pub(crate) struct SaveStringEdited {
 
 /// Kismet `SeqAct_SetGameFinished` (Epilogue): unlocks time trial.
 #[derive(Message, Clone, Copy, Debug)]
-#[allow(dead_code, reason = "integration point: written by the Kismet host")]
 pub(crate) struct GameFinished;
 
 /// Kismet `SeqAct_StartTimeTrial` (ignored while the stopwatch runs).
 #[derive(Message, Clone, Copy, Debug)]
-#[allow(dead_code, reason = "integration point: written by the Kismet host")]
 pub(crate) struct TimeTrialStart;
 
 /// Kismet `SeqAct_EndTimeTrial`: stops the stopwatch and records the time.
 #[derive(Message, Clone, Copy, Debug)]
-#[allow(dead_code, reason = "integration point: written by the Kismet host")]
 pub(crate) struct TimeTrialEnd;
 
 /// Kismet console command `open <map>` (story chain): the next map loads
 /// with the current snapshot (checkpoint table and abilities carry over);
 /// `ASAMUFrontEndMap` returns to the main menu.
 #[derive(Message, Clone, Debug)]
-#[allow(dead_code, reason = "integration point: written by the Kismet host")]
 pub(crate) struct OpenMap {
     /// Map package name.
     pub map: String,
-}
-
-/// A snapshot was applied at the level start: the Kismet host fires every
-/// `SaveGameState_SeqEvent_SavedGameStateLoaded` with this index (−1 = no
-/// checkpoint stored for this chapter; SAVE.md §4.3).
-#[derive(Message, Clone, Copy, Debug)]
-#[allow(dead_code, reason = "integration point: read by the Kismet host")]
-pub(crate) struct SnapshotLoaded {
-    /// Checkpoint index.
-    pub checkpoint_index: i32,
 }
 
 /// Menus and UI: main menu, pause, settings, chapter select, collectibles.
@@ -287,7 +271,6 @@ impl Plugin for UiPlugin {
             .add_message::<TimeTrialStart>()
             .add_message::<TimeTrialEnd>()
             .add_message::<OpenMap>()
-            .add_message::<SnapshotLoaded>()
             .add_observer(menus::on_activate)
             .add_systems(Startup, (setup, notify::spawn_hud).chain())
             .add_systems(
@@ -303,7 +286,8 @@ impl Plugin for UiPlugin {
                     menus::style_buttons,
                     menus::update_loading_status,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(UiFlowSet),
             )
             .add_systems(
                 Update,
@@ -323,13 +307,14 @@ impl Plugin for UiPlugin {
 
 /// A run started straight into a converted level (`--level`, `main.rs`):
 /// the same level start as a menu load — the (in-memory) save session's
-/// story level start, the snapshot (none: −1) and [`SnapshotLoaded`] for the
-/// Kismet host — so such runs see the original's "save loaded" event too.
+/// story level start, the snapshot (none: −1) and the level script's
+/// start-save index and save strings — so such runs see the original's
+/// "save loaded" event too.
 pub(crate) fn start_direct_level(
     game: &mut asamu_game::Game,
+    script: Option<&mut asamu_game::LevelScript>,
     saves: &mut Saves,
     play: &mut Play,
-    loaded: &mut MessageWriter<SnapshotLoaded>,
 ) {
     let Some(map) = game.map_name().map(str::to_owned) else {
         return;
@@ -338,8 +323,8 @@ pub(crate) fn start_direct_level(
     if let Err(e) = result {
         warn!("save failed: {e}");
     }
-    if let Some(checkpoint_index) = index {
-        loaded.write(SnapshotLoaded { checkpoint_index });
+    if let Some(script) = script {
+        flow::prepare_script(script, &saves.0, index);
     }
     *play = Play {
         chapter: start.chapter,

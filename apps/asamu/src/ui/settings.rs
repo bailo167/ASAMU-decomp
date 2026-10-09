@@ -4,8 +4,9 @@
 //! and offers the conversions `main.rs` uses for the camera FOV and mouse
 //! look.
 //!
-//! Music / SFX / voice volumes and the subtitle switch are read by the audio
-//! workstream from [`UserSettings`] ([`UserSettings::group_volume`]).
+//! The audio module applies the music / SFX / voice volumes as the sound
+//! classes' own volumes (`Music`, `SFX`, `Voice`) and drops the subtitle line
+//! while subtitles are off; the master volume is Bevy's global volume (here).
 
 use std::path::{Path, PathBuf};
 

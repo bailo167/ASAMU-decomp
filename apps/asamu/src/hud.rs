@@ -3,9 +3,10 @@
 //! ability state) and a subtitle area (bottom centre).
 //!
 //! The original's HUD and menus are Scaleform movies (not ported); this is a
-//! functional stand-in. The subtitle area is a placeholder: nothing feeds it
-//! yet (narration and subtitles are a later phase), it shows whatever
-//! [`Subtitle`] holds and hides itself when that is `None`.
+//! functional stand-in. The audio module writes the subtitle line
+//! ([`Subtitle`]; narration and Kismet sounds) and the box hides itself when
+//! it is `None` (or when subtitles are off in the settings). Kismet hides the
+//! crosshair and the ability panel (`crate::kismet`).
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
@@ -21,6 +22,10 @@ pub struct Crosshair;
 /// Bottom-left ability panel text.
 #[derive(Component)]
 pub struct HudAbilities;
+
+/// The ability panel's box (hidden with the HUD by Kismet).
+#[derive(Component)]
+pub struct AbilityPanel;
 
 /// The subtitle box (shown only while [`Subtitle`] is `Some`).
 #[derive(Component)]
@@ -102,6 +107,7 @@ fn spawn_hud(mut commands: Commands, style: Res<HudStyle>) {
         )],
     ));
     commands.spawn((
+        AbilityPanel,
         Node {
             position_type: PositionType::Absolute,
             left: px(12),

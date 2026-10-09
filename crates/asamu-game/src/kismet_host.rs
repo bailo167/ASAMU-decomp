@@ -15,8 +15,15 @@
 //! 4. the **game tick** runs ([`Game::tick`]: the player's input events, map
 //!    actors, controller/pawn, touches);
 //! 5. the tick's events (touches, grapple, landing, boosts, interactions,
-//!    the death sequence's reset) are handed to the interpreter, which
-//!    queues the matching Kismet events for the next update.
+//!    the death sequence's reset, the NPC events: worm, collectibles, story
+//!    items) are handed to the interpreter, which queues the matching Kismet
+//!    events for the next update.
+//!
+//! Between 2 and 4 the update's game-side outputs that act on the NPCs run
+//! at once, as the original's actions call the worm controller
+//! synchronously: `SeqAct_StartWorm` / `ShutDownWorm` / `PauseWorm` →
+//! [`crate::npc::NpcSystem`], `SeqAct_ToggleFollowCollision` → the actor's
+//! mover collision. Every output is still returned to the app.
 //!
 //! Frame order (KISMET_RUNTIME.md §1): the original updates the game
 //! sequence once per frame in `UWorld::Tick` just before the first actor
@@ -62,6 +69,7 @@ use asamu_world::{WorldEvent, rotation};
 use glam::Vec3;
 use thiserror::Error;
 
+use crate::npc::{NpcEvent, NpcOptions, NpcSystem};
 use crate::{Game, GameError, TickReport};
 
 /// Distance of the downward sweep that finds the base mover, UU.
@@ -89,6 +97,27 @@ pub struct ScriptedTick {
     /// Presentation outputs of this frame's Kismet update (audio, narration,
     /// UI, level transitions), in emission order.
     pub outputs: Vec<Output>,
+    /// The NPC events of the game tick ([`Game::npc_events`]).
+    pub npc_events: Vec<NpcEvent>,
+}
+
+/// How [`load_level_with_kismet_options`] starts a converted level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelOptions {
+    /// Spawn the map's NPCs and story actors ([`NpcSystem`]) into the game.
+    pub npcs: bool,
+    /// The time-trial game type (`ASAMUGameInfoTimeTrial`): Kismet's
+    /// `IsTimeTrial` reads it, collectibles are hidden and do not collide.
+    pub time_trial: bool,
+}
+
+impl Default for LevelOptions {
+    fn default() -> Self {
+        Self {
+            npcs: true,
+            time_trial: false,
+        }
+    }
 }
 
 /// A moving actor's collision.
@@ -130,6 +159,11 @@ pub struct LevelScript {
     by_world: BTreeMap<u32, Vec<ActorRef>>,
     movers: BTreeMap<u32, MoverBody>,
     spawn_in_story: bool,
+    host_errors: Vec<String>,
+    /// `(SeqAct_Interp node, lower-case group name)` → the first bound
+    /// actor's path (director cuts name the group whose actor becomes the
+    /// view target).
+    group_actors: BTreeMap<(usize, String), String>,
 }
 
 fn world_id(map: &LoadedMap, a: &ActorInfo) -> Option<u32> {
@@ -270,14 +304,27 @@ fn prepare_movers(
 
 /// Loads a converted map (as [`Game::load_level`]) together with its
 /// Kismet and Matinee exports (`asamu-import kismet`, `asamu-import
-/// matinee`). The script is `None` when the map has no Kismet export; the
-/// game then keeps the level-start ability table.
+/// matinee`) and its NPCs ([`LevelOptions::default`]). The script is `None`
+/// when the map has no Kismet export; the game then keeps the level-start
+/// ability table.
 ///
 /// # Errors
 /// Missing or malformed converted data.
 pub fn load_level_with_kismet(
     converted_dir: impl AsRef<Path>,
     map: &str,
+) -> Result<(Game, Option<LevelScript>), LevelScriptError> {
+    load_level_with_kismet_options(converted_dir, map, LevelOptions::default())
+}
+
+/// [`load_level_with_kismet`] with explicit [`LevelOptions`].
+///
+/// # Errors
+/// Missing or malformed converted data.
+pub fn load_level_with_kismet_options(
+    converted_dir: impl AsRef<Path>,
+    map: &str,
+    options: LevelOptions,
 ) -> Result<(Game, Option<LevelScript>), LevelScriptError> {
     let dir = converted_dir.as_ref();
     let mut loaded = scene::load_map_from_dir(dir, map)?;
@@ -296,9 +343,21 @@ pub fn load_level_with_kismet(
         .as_ref()
         .map(|s| prepare_movers(&mut loaded, s))
         .unwrap_or_default();
+    let levels = loaded.levels.clone();
     let mut game =
         Game::from_loaded_map(loaded, PlayerParams::asamu_original(), DEFAULT_TICK_RATE_HZ)?;
-    let script = scripts.map(|s| LevelScript::attach(&mut game, s, movers));
+    if options.npcs {
+        let npc_options = NpcOptions {
+            time_trial: options.time_trial,
+            ..NpcOptions::default()
+        };
+        game.attach_npcs(NpcSystem::load_from_dir(dir, &levels, npc_options));
+    }
+    let script = scripts.map(|s| {
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        script.runtime.set_time_trial(options.time_trial);
+        script
+    });
     Ok((game, script))
 }
 
@@ -317,12 +376,15 @@ impl LevelScript {
         movers: BTreeMap<u32, MoverBody>,
     ) -> LevelScript {
         // Undo the level-start ability table: the pawn's script state as a
-        // fresh start, so the map's Kismet decides.
+        // fresh start, so the map's Kismet decides; the table is dropped so a
+        // save snapshot applied later (`Game::apply_snapshot`) does not put it
+        // back over the snapshot's abilities.
         if game.params.pawn.is_some() {
             let mut fresh = PlayerState::new(game.player.position, game.player.yaw);
             pawn::start(&mut fresh, &game.params);
             game.player.script = fresh.script;
         }
+        game.level.abilities = asamu_world::LevelAbilities::default();
         let graph = std::sync::Arc::new(scripts.graph);
         let mut ids = Vec::with_capacity(graph.actors.len());
         let mut by_world: BTreeMap<u32, Vec<ActorRef>> = BTreeMap::new();
@@ -346,6 +408,15 @@ impl LevelScript {
             .as_ref()
             .map(|s| s.map.levels.iter().map(|l| l.offset).collect())
             .unwrap_or_default();
+        let mut group_actors = BTreeMap::new();
+        for (node, a) in &scripts.matinee.actions {
+            for b in &a.bindings {
+                let name = b.group.as_deref().unwrap_or(&b.label).to_ascii_lowercase();
+                if let Some(path) = b.targets.iter().find_map(|t| t.object.clone()) {
+                    group_actors.entry((*node, name)).or_insert(path);
+                }
+            }
+        }
         LevelScript {
             runtime: Runtime::new(graph, std::sync::Arc::new(scripts.matinee)),
             level_offsets,
@@ -353,7 +424,55 @@ impl LevelScript {
             by_world,
             movers,
             spawn_in_story: false,
+            host_errors: Vec::new(),
+            group_actors,
         }
+    }
+
+    /// The world actor id of the actor at object `path` (graph actor table).
+    #[must_use]
+    pub fn actor_id_by_path(&self, path: &str) -> Option<u32> {
+        self.runtime
+            .graph()
+            .actor_by_path(path)
+            .and_then(|r| self.world_id(r))
+    }
+
+    /// The current transform of the graph actor at object `path`: Matinee's
+    /// (or attachment's) latest, else its placement; sub-level offset
+    /// included. `None` for actors outside the actor table.
+    #[must_use]
+    pub fn actor_transform_by_path(&self, path: &str) -> Option<(Vec3, [i32; 3])> {
+        let r = self.runtime.graph().actor_by_path(path)?;
+        let (location, rotation) = self.runtime.actor_transform(r)?;
+        let offset = self
+            .world_id(r)
+            .and_then(|id| self.level_offsets.get((id >> 16) as usize).copied())
+            .unwrap_or(Vec3::ZERO);
+        Some((Vec3::from_array(location) + offset, rotation))
+    }
+
+    /// The placement of world actor `id` in the actor table (location with
+    /// the sub-level offset, rotation): where Matinee starts moving it from.
+    #[must_use]
+    pub fn actor_placement(&self, id: u32) -> Option<(Vec3, [i32; 3])> {
+        let r = *self.actor_refs(id).first()?;
+        let a = self.runtime.graph().actor(r)?;
+        let offset = self
+            .level_offsets
+            .get((id >> 16) as usize)
+            .copied()
+            .unwrap_or(Vec3::ZERO);
+        Some((Vec3::from_array(a.location) + offset, a.rotation))
+    }
+
+    /// The actor bound to Matinee group `group` of `SeqAct_Interp` `node`
+    /// (case-insensitive group name), as an object path.
+    #[must_use]
+    pub fn matinee_group_actor(&self, node: usize, group: &str) -> Option<&str> {
+        self.group_actors
+            .get(&(node, group.to_ascii_lowercase()))
+            .map(String::as_str)
     }
 
     /// The interpreter.
@@ -434,7 +553,7 @@ impl LevelScript {
         let base = self.base_mover(game);
         let base_before =
             base.and_then(|id| self.movers.get(&id).map(|m| (id, m.location, m.rotation)));
-        // 2. Kismet.
+        // 2. Kismet, then its game-side outputs on the NPCs.
         {
             let mut host = GameHost {
                 game,
@@ -443,6 +562,8 @@ impl LevelScript {
             };
             self.runtime.tick(dt, &mut host);
         }
+        let mut outputs = self.runtime.take_outputs();
+        self.apply_game_outputs(game, &outputs);
         // 3. Carry the player.
         if let Some((id, loc0, rot0)) = base_before
             && let Some(m) = self.movers.get(&id)
@@ -461,12 +582,82 @@ impl LevelScript {
         // 4. The game tick.
         let was_story = game.in_story_mode();
         let report = game.tick(input)?;
-        // 5. Events for the next Kismet update.
+        // 5. Events for the next Kismet update. (Event activation only
+        // queues ops, so this rarely emits anything; whatever it emits is
+        // applied and returned like the update's own.)
         self.feed(game, &report, was_story);
+        let late = self.runtime.take_outputs();
+        self.apply_game_outputs(game, &late);
+        outputs.extend(late);
         Some(ScriptedTick {
             report,
-            outputs: self.runtime.take_outputs(),
+            outputs,
+            npc_events: game.npc_events().to_vec(),
         })
+    }
+
+    /// The world actor id an object path names (graph actor table first,
+    /// then the NPC scene's names).
+    fn actor_id_of(&self, game: &Game, path: &str) -> Option<u32> {
+        self.runtime
+            .graph()
+            .actor_by_path(path)
+            .and_then(|r| self.world_id(r))
+            .or_else(|| game.npcs().and_then(|n| n.scene().actor_by_name(path)))
+    }
+
+    /// The outputs whose original actions act on game actors at once: the
+    /// worm controller and the follow-collision actors.
+    fn apply_game_outputs(&mut self, game: &mut Game, outputs: &[Output]) {
+        for o in outputs {
+            match o {
+                Output::Worm { action, worm } => {
+                    let Some(id) = worm.as_deref().and_then(|p| self.actor_id_of(game, p)) else {
+                        continue;
+                    };
+                    let Some(npcs) = game.npcs_mut() else {
+                        continue;
+                    };
+                    let known = match *action {
+                        "start" => npcs.start_worm(id),
+                        "shutdown" => npcs.shut_down_worm(id),
+                        "pause" => npcs.pause_worm(id, true),
+                        "unpause" => npcs.pause_worm(id, false),
+                        _ => false,
+                    };
+                    if !known {
+                        self.note(format!("worm action {action} on unknown worm {worm:?}"));
+                    }
+                }
+                Output::FollowCollision {
+                    actor: Some(path),
+                    enable,
+                } => {
+                    // `EnableCollision`: block-all-but-weapons or none. Only
+                    // collision the converted scene has (a mover body's
+                    // static-mesh parts) changes; the socket-attached
+                    // collision component of these skeletal actors is not
+                    // converted (TENTATIVE stand-in).
+                    if let Some(id) = self.actor_id_of(game, path) {
+                        set_body_collision(game, &mut self.movers, id, *enable);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Host-side problems (kept with the interpreter's own, capped).
+    fn note(&mut self, message: String) {
+        if self.host_errors.len() < asamu_kismet::runtime::MAX_ERRORS {
+            self.host_errors.push(message);
+        }
+    }
+
+    /// Problems the host met routing outputs (unknown worm, ...).
+    #[must_use]
+    pub fn host_errors(&self) -> &[String] {
+        &self.host_errors
     }
 
     fn base_mover(&self, game: &Game) -> Option<u32> {
@@ -516,7 +707,10 @@ impl LevelScript {
                         self.runtime.touch(r, false);
                     }
                 }
-                WorldEvent::ActorInteractedWith { id } => {
+                // With an NPC system the story-item model reports the
+                // interaction (below); the world objects' count would double
+                // it.
+                WorldEvent::ActorInteractedWith { id } if game.npcs().is_none() => {
                     for r in self.refs(id) {
                         self.runtime.actor_interacted_with(r);
                     }
@@ -530,6 +724,47 @@ impl LevelScript {
                 }
                 WorldEvent::PlayerRespawned => self.runtime.player_died(),
                 _ => {}
+            }
+        }
+        for e in game.npc_events() {
+            match *e {
+                NpcEvent::Worm { kind, .. } => self.runtime.worm_event(kind.output()),
+                NpcEvent::CollectibleCollected { id } => {
+                    // The pick-up is the player's touch of the collectible:
+                    // its own `SeqEvent_Touch` (the engine's touch
+                    // notification) and the game's collected event.
+                    for r in self.refs(id) {
+                        self.runtime.touch(r, true);
+                    }
+                    self.runtime.collectible_collected();
+                }
+                NpcEvent::ActorInteractedWith { originator } => {
+                    if let Some(r) = self.refs(originator).first().copied() {
+                        self.runtime.actor_interacted_with(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Turns a mover body's collision on (blocking) or off.
+fn set_body_collision(
+    game: &mut Game,
+    movers: &mut BTreeMap<u32, MoverBody>,
+    id: u32,
+    blocks: bool,
+) {
+    let Some(body) = movers.get_mut(&id) else {
+        return;
+    };
+    body.hidden_collision = !blocks;
+    if let Some(sc) = &mut game.world.scene {
+        for (i, _) in &body.parts {
+            if let Some(inst) = sc.dynamic.get_mut(*i) {
+                inst.info.blocks_pawn = blocks;
+                inst.info.blocks_traces = blocks;
             }
         }
     }
@@ -584,18 +819,7 @@ impl GameHost<'_> {
     }
 
     fn set_body_collision(&mut self, id: u32, blocks: bool) {
-        let Some(body) = self.movers.get_mut(&id) else {
-            return;
-        };
-        body.hidden_collision = !blocks;
-        if let Some(sc) = &mut self.game.world.scene {
-            for (i, _) in &body.parts {
-                if let Some(inst) = sc.dynamic.get_mut(*i) {
-                    inst.info.blocks_pawn = blocks;
-                    inst.info.blocks_traces = blocks;
-                }
-            }
-        }
+        set_body_collision(self.game, self.movers, id, blocks);
     }
 }
 
@@ -1152,6 +1376,390 @@ mod tests {
         assert_eq!(run(), run());
     }
 
+    /// The lift map's game with a worm (actor 7) and a collectible (actor 8)
+    /// around the player start attached, and `nodes` as its Kismet.
+    fn npc_game(nodes: &str) -> (Game, LevelScript) {
+        use crate::npc::defs::{CollectibleDef, NpcCylinder, WormLight, WormParams};
+        use crate::npc::{NpcScene, WormDef};
+        let (mut map, _) = lift_map();
+        let s = scripts(
+            graph(
+                nodes,
+                r#"[{"path": "T.TheWorld.PersistentLevel.Worm", "name": "Worm", "class": "asamu.ASAMUNPC_WormPawn",
+                     "kind": "pawn", "package": "T", "slot": 7},
+                    {"path": "T.TheWorld.PersistentLevel.Gem", "name": "Gem", "class": "asamu.ASAMUCollectible",
+                     "kind": "collectible", "package": "T", "slot": 8}]"#,
+            ),
+            MatineeSet::default(),
+        );
+        let movers = prepare_movers(&mut map, &s);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let scene = NpcScene {
+            worms: vec![WormDef {
+                id: 7,
+                name: "Worm".into(),
+                location: Vec3::new(5000.0, 0.0, 0.0),
+                rotation: [0; 3],
+                look_targets: Vec::new(),
+                light: WormLight::default(),
+                params: WormParams::ORIGINAL,
+                meshes: Vec::new(),
+            }],
+            collectibles: vec![CollectibleDef {
+                id: 8,
+                level: "T".into(),
+                name: "Gem".into(),
+                location: Vec3::new(0.0, 0.0, 96.0),
+                trigger: NpcCylinder {
+                    center: Vec3::new(0.0, 0.0, 96.0),
+                    radius: 60.0,
+                    half_height: 60.0,
+                },
+            }],
+            ..NpcScene::default()
+        };
+        game.attach_npcs(NpcSystem::new(scene, NpcOptions::default()));
+        let script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        (game, script)
+    }
+
+    /// The lift map's game (no Kismet) with a worm 1,000 UU west of the
+    /// player start, a scream volume around everything and a kill zone
+    /// (actor 20) on the floor far away; the worm is started and the game
+    /// ticked until it screams.
+    fn screaming_worm_game() -> Game {
+        use crate::npc::defs::{NpcHull, WormLight, WormParams, WormVolumeDef, WormVolumeRole};
+        use crate::npc::{NpcScene, WormDef, WormStateName};
+        use asamu_world::gameplay::{Hull, TouchVolumeDef, VolumeKind};
+        let (mut map, _) = lift_map();
+        let (lo, hi) = (
+            Vec3::new(2900.0, 2900.0, -1000.0),
+            Vec3::new(3100.0, 3100.0, -800.0),
+        );
+        map.actors.volumes.push(TouchVolumeDef {
+            id: 20,
+            name: "ASAMUKillZone_0".into(),
+            class: "asamu.ASAMUKillZone".into(),
+            kind: VolumeKind::KillZone,
+            hulls: vec![Hull {
+                planes: vec![
+                    (DVec3::X, f64::from(hi.x)),
+                    (DVec3::NEG_X, -f64::from(lo.x)),
+                    (DVec3::Y, f64::from(hi.y)),
+                    (DVec3::NEG_Y, -f64::from(lo.y)),
+                    (DVec3::Z, f64::from(hi.z)),
+                    (DVec3::NEG_Z, -f64::from(lo.z)),
+                ],
+                min: lo,
+                max: hi,
+            }],
+            enabled: true,
+        });
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let scene = NpcScene {
+            worms: vec![WormDef {
+                id: 7,
+                name: "Worm".into(),
+                location: Vec3::new(-1000.0, 0.0, 96.0),
+                rotation: [0; 3],
+                look_targets: Vec::new(),
+                light: WormLight::default(),
+                params: WormParams::ORIGINAL,
+                meshes: Vec::new(),
+            }],
+            worm_volumes: vec![WormVolumeDef {
+                id: 21,
+                name: "ASAMUWormScreamVolume_0".into(),
+                role: WormVolumeRole::Scream,
+                hulls: vec![NpcHull::from_box(Vec3::splat(-5000.0), Vec3::splat(5000.0))],
+            }],
+            ..NpcScene::default()
+        };
+        game.attach_npcs(NpcSystem::new(scene, NpcOptions::default()));
+        game.start();
+        assert!(game.npcs_mut().unwrap().start_worm(7));
+        // The worm notices only a moving player: walk in small circles on
+        // the platform.
+        for i in 0..1200u16 {
+            let a = f32::from(i) * 0.05;
+            let p = game.player_mut();
+            p.position.x = 100.0 * a.cos();
+            p.position.y = 100.0 * a.sin();
+            p.velocity = Vec3::ZERO;
+            game.tick(&InputFrame::default()).unwrap();
+            if game.npcs().unwrap().runtime().worms[0].state == WormStateName::Screaming {
+                return game;
+            }
+        }
+        panic!("the worm never screamed");
+    }
+
+    #[test]
+    fn npcs_act_inside_the_game_frame() {
+        use crate::npc::{WormEventKind, WormStateName};
+        use asamu_world::gameplay::DeathCause;
+        let is_worm =
+            |e: &NpcEvent, k: WormEventKind| matches!(e, NpcEvent::Worm { kind, .. } if *kind == k);
+        // The push acts in the frame the worm ticks in: the player is moved
+        // away from the worm by that frame's physics (no input).
+        let mut game = screaming_worm_game();
+        let mut pushed = false;
+        for _ in 0..600 {
+            let x0 = game.player().position.x;
+            game.tick(&InputFrame::default()).unwrap();
+            if game.player().velocity.x > 0.0 && game.player().position.x > x0 {
+                pushed = true;
+                break;
+            }
+        }
+        assert!(
+            pushed,
+            "the scream pushes the player away within Game::tick"
+        );
+        // The scream times out: the worm's kill is that frame's death
+        // (scripted cause), reported with the worm's own stop.
+        // (The player is put back on the platform every frame, so the pushes
+        // do not throw it off the map.)
+        let mut killed = false;
+        for i in 0..3600u16 {
+            let a = f32::from(i) * 0.05;
+            let p = game.player_mut();
+            p.position = Vec3::new(100.0 * a.cos(), 100.0 * a.sin(), 96.15);
+            p.velocity = Vec3::ZERO;
+            let r = game.tick(&InputFrame::default()).unwrap();
+            if r.died.is_some() {
+                assert_eq!(r.died, Some(DeathCause::Scripted));
+                assert!(
+                    game.npc_events()
+                        .iter()
+                        .any(|e| is_worm(e, WormEventKind::StoppedScreaming)),
+                    "{:?}",
+                    game.npc_events()
+                );
+                killed = true;
+                break;
+            }
+        }
+        assert!(killed, "the scream timed out and killed");
+
+        // A kill-zone death reaches the worm's `NotifyKilled`: it stops
+        // screaming in that frame.
+        let mut game = screaming_worm_game();
+        let p = game.player_mut();
+        p.position = Vec3::new(3000.0, 3000.0, -1000.0 + 46.0);
+        p.velocity = Vec3::ZERO;
+        let r = game.tick(&InputFrame::default()).unwrap();
+        assert_eq!(r.died, Some(DeathCause::KillZone));
+        assert!(
+            game.npc_events()
+                .iter()
+                .any(|e| is_worm(e, WormEventKind::StoppedScreaming)),
+            "{:?}",
+            game.npc_events()
+        );
+        assert_eq!(
+            game.npcs().unwrap().runtime().worms[0].state,
+            WormStateName::Sleeping
+        );
+
+        // A scripted death (Kismet's `PlayerDied`, F7) does not.
+        let mut game = screaming_worm_game();
+        game.kill_player();
+        game.tick(&InputFrame::default()).unwrap();
+        assert!(
+            !game
+                .npc_events()
+                .iter()
+                .any(|e| is_worm(e, WormEventKind::StoppedScreaming)),
+            "{:?}",
+            game.npc_events()
+        );
+        assert_eq!(
+            game.npcs().unwrap().runtime().worms[0].state,
+            WormStateName::Screaming
+        );
+    }
+
+    #[test]
+    fn worm_actions_reach_the_npcs_and_worm_events_reach_kismet() {
+        // Level start → StartWorm → PauseWorm with both inputs in one
+        // impulse (UnPause, then Pause: the worm ends paused). The worm's
+        // `WakingUp` event fires the level's `SeqEvent_WormEvents` output 0,
+        // which sets the grapple limit to 4.
+        let nodes = format!(
+            r#"[
+                {{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3, 4, 5]}},
+                {{"id": 1, "class": "Engine.SeqEvent_LevelLoaded", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "Loaded and Visible", "links": [{{"op": 2, "input": 0}}]}}],
+                  "event": {{"max_trigger_count": 1}}}},
+                {{"id": 2, "class": "asamu.SeqAct_StartWorm", "kind": "action", "parent": 0,
+                  "inputs": [{{"desc": "Start"}}],
+                  "outputs": [{{"desc": "Out", "links": [{{"op": 3, "input": 0}}, {{"op": 3, "input": 1}}]}}],
+                  "params": {{"wormPawn": {{"$obj": "T.TheWorld.PersistentLevel.Worm"}}}}}},
+                {{"id": 3, "class": "asamu.SeqAct_PauseWorm", "kind": "action", "parent": 0,
+                  "inputs": [{{"desc": "UnPause"}}, {{"desc": "Pause"}}], "outputs": [{{"desc": "Out"}}],
+                  "params": {{"wormPawn": {{"$obj": "T.TheWorld.PersistentLevel.Worm"}}}}}},
+                {{"id": 4, "class": "asamu.SeqEvent_WormEvents", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "WakingUp", "links": [{{"op": 5, "input": 0}}]}}, {{"desc": "Awaken"}},
+                              {{"desc": "FallingAsleep"}}, {{"desc": "Alerted"}}, {{"desc": "Screaming"}},
+                              {{"desc": "StoppedScreaming"}}, {{"desc": "FinishedAlerted"}}],
+                  "event": {{"max_trigger_count": 0}}}},
+                {}
+            ]"#,
+            action(
+                5,
+                "asamu.SeqAct_SetMaxGrapples",
+                &["In"],
+                None,
+                r#"{"Grapples": 4}"#
+            ),
+        );
+        let (mut game, mut script) = npc_game(&nodes);
+        let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+        let worm: Vec<&str> = t
+            .outputs
+            .iter()
+            .filter_map(|o| match o {
+                Output::Worm { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(worm, vec!["start", "unpause", "pause"]);
+        let w = &game.npcs().unwrap().runtime().worms[0];
+        assert!(w.paused, "both inputs in one impulse end paused");
+        assert!(
+            script.host_errors().is_empty(),
+            "{:?}",
+            script.host_errors()
+        );
+        // The start's events are reported with the next NPC tick; Kismet
+        // sees them in the update after.
+        for _ in 0..3 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        assert_eq!(game.player().script.gun.max_grapples, 4);
+        assert!(
+            script.runtime().errors().is_empty(),
+            "{:?}",
+            script.runtime().errors()
+        );
+    }
+
+    #[test]
+    fn pause_worm_inputs_on_their_own() {
+        // Start → PauseWorm A with "Pause" only (input 1) → PauseWorm B with
+        // "UnPause" only (input 0): each emits only its own input's action,
+        // in that order, and the worm ends unpaused.
+        let nodes = r#"[
+            {"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3, 4]},
+            {"id": 1, "class": "Engine.SeqEvent_LevelLoaded", "kind": "event", "parent": 0,
+              "outputs": [{"desc": "Loaded and Visible", "links": [{"op": 2, "input": 0}]}],
+              "event": {"max_trigger_count": 1}},
+            {"id": 2, "class": "asamu.SeqAct_StartWorm", "kind": "action", "parent": 0,
+              "inputs": [{"desc": "Start"}],
+              "outputs": [{"desc": "Out", "links": [{"op": 3, "input": 1}]}],
+              "params": {"wormPawn": {"$obj": "T.TheWorld.PersistentLevel.Worm"}}},
+            {"id": 3, "class": "asamu.SeqAct_PauseWorm", "kind": "action", "parent": 0,
+              "inputs": [{"desc": "UnPause"}, {"desc": "Pause"}],
+              "outputs": [{"desc": "Out", "links": [{"op": 4, "input": 0}]}],
+              "params": {"wormPawn": {"$obj": "T.TheWorld.PersistentLevel.Worm"}}},
+            {"id": 4, "class": "asamu.SeqAct_PauseWorm", "kind": "action", "parent": 0,
+              "inputs": [{"desc": "UnPause"}, {"desc": "Pause"}], "outputs": [{"desc": "Out"}],
+              "params": {"wormPawn": {"$obj": "T.TheWorld.PersistentLevel.Worm"}}}
+        ]"#;
+        let (mut game, mut script) = npc_game(nodes);
+        let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+        let worm: Vec<&str> = t
+            .outputs
+            .iter()
+            .filter_map(|o| match o {
+                Output::Worm { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(worm, vec!["start", "pause", "unpause"]);
+        assert!(!game.npcs().unwrap().runtime().worms[0].paused);
+        assert!(
+            script.host_errors().is_empty(),
+            "{:?}",
+            script.host_errors()
+        );
+    }
+
+    #[test]
+    fn a_collected_collectible_fires_its_kismet_events() {
+        // The player starts inside the collectible's trigger: the pick-up's
+        // `SeqEvent_CollectibleCollected` sets 2 grapples, the collectible's
+        // own touch event sets nothing else but counts.
+        let nodes = format!(
+            r#"[
+                {{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3]}},
+                {{"id": 1, "class": "asamu.SeqEvent_CollectibleCollected", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "Out", "links": [{{"op": 2, "input": 0}}]}}],
+                  "event": {{"max_trigger_count": 0}}}},
+                {},
+                {{"id": 3, "class": "Engine.SeqEvent_Touch", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "Touched"}}, {{"desc": "UnTouched"}}, {{"desc": "Empty"}}],
+                  "event": {{"originator": "T.TheWorld.PersistentLevel.Gem", "max_trigger_count": 0}}}}
+            ]"#,
+            action(
+                2,
+                "asamu.SeqAct_SetMaxGrapples",
+                &["In"],
+                None,
+                r#"{"Grapples": 2}"#
+            ),
+        );
+        let (mut game, mut script) = npc_game(&nodes);
+        let mut collected = false;
+        for _ in 0..4 {
+            let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+            collected |= t
+                .npc_events
+                .iter()
+                .any(|e| matches!(e, NpcEvent::CollectibleCollected { id: 8 }));
+        }
+        assert!(collected);
+        assert!(game.npcs().unwrap().runtime().collectibles[0].collected);
+        assert_eq!(game.player().script.gun.max_grapples, 2);
+        assert_eq!(
+            script.runtime().activate_count(3),
+            1,
+            "the collectible's touch"
+        );
+        assert_eq!(
+            crate::npc::collectible_save_key(&game.npcs().unwrap().scene().collectibles[0]),
+            "TheWorld.PersistentLevel.Gem"
+        );
+    }
+
+    #[test]
+    fn level_options_and_the_ability_table_under_kismet() {
+        // With a script the level-start table is dropped, so a snapshot's
+        // abilities are not overwritten by it.
+        let (mut game, _script) = npc_game(
+            r#"[{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": []}]"#,
+        );
+        assert_eq!(
+            game.level().abilities,
+            asamu_world::LevelAbilities::default()
+        );
+        let snap = crate::save::Snapshot {
+            abilities: Some(crate::save::Abilities {
+                max_grapples: 3,
+                rocket_boots: true,
+                grapple_enabled: true,
+            }),
+            ..crate::save::Snapshot::default()
+        };
+        game.apply_snapshot(&snap);
+        assert_eq!(game.player().script.gun.max_grapples, 3);
+        assert!(game.player().script.boots.enabled);
+        let o = LevelOptions::default();
+        assert!(o.npcs && !o.time_trial);
+    }
+
     /// What happened in a 600-tick run of a converted map.
     #[derive(Debug, Default)]
     struct RunSummary {
@@ -1409,6 +2017,77 @@ mod tests {
                 passengers.len()
             );
         }
+    }
+
+    /// Gated on converted data: AG-Darkcave's worm, started by its Kismet
+    /// (a touch volume's `SeqAct_StartWorm`), wakes up in the game's NPC
+    /// system and its `WakingUp` event reaches the level's
+    /// `SeqEvent_WormEvents`.
+    #[test]
+    fn converted_darkcave_worm_wakes_through_kismet() {
+        let Some(dir) = converted_dir() else {
+            eprintln!("SKIP: ASAMU_CONVERTED_DIR with converted Kismet not set");
+            return;
+        };
+        let Ok((mut game, Some(mut script))) = load_level_with_kismet(&dir, "AG-Darkcave") else {
+            eprintln!("SKIP: AG-Darkcave not converted");
+            return;
+        };
+        game.start();
+        script.tick(&mut game, &InputFrame::default()).unwrap();
+        let npcs = game.npcs().expect("NPCs attached");
+        assert_eq!(npcs.scene().worms.len(), 1, "one worm");
+        assert_eq!(
+            npcs.runtime().worms[0].state,
+            crate::npc::WormStateName::Disabled
+        );
+        let g = script.runtime().graph().clone();
+        let volumes = touches_reaching(&g, asamu_kismet::OpClass::StartWorm, |_| true);
+        assert!(!volumes.is_empty(), "touch volumes start the worm");
+        script.runtime_mut().touch(volumes[0], true);
+        let mut woke = false;
+        for _ in 0..120 {
+            let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+            woke |= t.npc_events.iter().any(|e| {
+                matches!(
+                    e,
+                    NpcEvent::Worm {
+                        kind: crate::npc::WormEventKind::WakingUp,
+                        ..
+                    }
+                )
+            });
+        }
+        assert!(woke, "the worm woke up");
+        assert_ne!(
+            game.npcs().unwrap().runtime().worms[0].state,
+            crate::npc::WormStateName::Disabled
+        );
+        // The ops behind the enabled worm events' `WakingUp` output ran.
+        let linked: Vec<usize> = g
+            .nodes
+            .iter()
+            .filter(|n| n.class == asamu_kismet::OpClass::WormEvents && n.enabled)
+            .filter_map(|n| n.outputs.first())
+            .flat_map(|o| o.links.iter().map(|(t, _)| *t))
+            .collect();
+        assert!(!linked.is_empty());
+        assert!(
+            linked
+                .iter()
+                .any(|t| script.runtime().activate_count(*t) > 0),
+            "SeqEvent_WormEvents fired its WakingUp output"
+        );
+        assert!(
+            script.host_errors().is_empty(),
+            "{:?}",
+            script.host_errors()
+        );
+        assert!(
+            script.runtime().errors().is_empty(),
+            "{:?}",
+            script.runtime().errors()
+        );
     }
 
     /// Gated on converted data (`ASAMU_CONVERTED_DIR` with `levels`,

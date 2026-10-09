@@ -89,8 +89,10 @@ caps sizes and drops broken links with a warning.
 | Events raised by actors during their ticks (touches, grapple, landing, deaths) queue Kismet work that runs in the next frame's update. | Activation only queues ops; execution happens in `ExecuteActiveOps` (§2). | CONFIRMED |
 | The frame's input events (fire, boost presses) are processed before `UWorld::Tick`. | Stock engine flow, as assumed by GRAPPLE.md G-TM-2. | STRONG |
 
-**Ours** (`LevelScript::tick`): Kismet update → carry a based player (§6) → `Game::tick` (input events, map
-actors, controller and pawn, touches) → hand the tick's events to the interpreter for the next update. The
+**Ours** (`LevelScript::tick`): Kismet update → the update's worm and follow-collision outputs applied to the
+game at once (the original's actions call those actors synchronously) → carry a based player (§6) → `Game::tick`
+(input events, map actors including the NPCs, controller and pawn, touches) → hand the tick's events to the
+interpreter for the next update (whole-frame table: `docs/INTEGRATION.md` §2). The
 one deviation: `Game::tick` begins with the input events, so Kismet runs just before them rather than just
 after. An input event therefore sees this frame's Kismet effects one frame early. Impact TENTATIVE (small;
 trace parity needed).
@@ -357,7 +359,9 @@ a fresh start) and the map's Kismet decides.
 narration, tutorials, crosshair, cinematic mode, HUD, camera (target, fade, shake, animation, Matinee
 cuts/fades), music and sound modes, adaptive music, menus, achievements, time trial, game finished, NPC look-at
 and worm control, actor toggled/hidden/destroyed. `LevelScript::tick` returns them with the tick report
-(`ScriptedTick`). `TickReport` itself is unchanged.
+(`ScriptedTick`, which also carries the frame's NPC events). `TickReport` itself is unchanged. The worm actions and
+`SeqAct_ToggleFollowCollision` act on the game inside the same tick (`LevelScript::apply_game_outputs`); where every
+other output goes in the app: `docs/INTEGRATION.md` §4.
 
 ## 9. What the shipped maps do at level start
 
@@ -445,12 +449,15 @@ queued activations per sequence (4,096), pending attractor pads (1,024) and narr
 
 - Behavioural parity: traces of the original running the same sequences (the order of same-frame events, the
   first frames of a level).
-- Animation-driven events (`SeqEvent_AnimNotify`), worm events and credits need the NPC, animation and UI
-  systems to call the runtime's API.
-- Cinematic mode does not yet block player input in the game (only an output).
+- Animation-driven events (`SeqEvent_AnimNotify`) need the animation side to call `Runtime::anim_notify`. (Worm
+  events now come from the game's NPC system and the credits' end from the app's credits screen,
+  `docs/INTEGRATION.md`.)
+- Cinematic mode blocks player input in the app (`apps/asamu` `fixed_tick`; the mapping of the stock flags to
+  movement, turning and buttons is TENTATIVE).
 - `bSequenceNeedsPublishing` is exported as false.
 - UE3 basing and encroachment for movers (§6); soft attachment is treated as hard (2 actors).
 - `SeqAct_ToggleAttractor`'s `Finished` needs the world to report a pad's end (`Runtime::attractor_finished`);
   no shipped action links that output, so nothing waits on it.
-- `SeqEvent_CollectibleCollected` needs the collectible system to call `Runtime::collectible_collected`.
+- `SeqEvent_CollectibleCollected`: the game's NPC system reports pick-ups and the host calls
+  `Runtime::collectible_collected` (and the collectible's own touch event); see `docs/INTEGRATION.md` §5.
 - Adaptive-music beat timing assumes every track named by `AddAdaptiveTracks` exists at level start.

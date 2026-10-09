@@ -124,6 +124,9 @@ pub struct ConvertedLevel {
     pub settings: RenderSettings,
     /// Eye height above a player start (UU), for the initial camera.
     pub eye_height: f32,
+    /// Show every streamed sub-level regardless of the game
+    /// (`--all-sublevels`); the plan always contains them.
+    pub force_all_sublevels: bool,
     /// Phase.
     pub phase: Option<LevelPhase>,
     /// Asset progress: (loaded, failed, total).
@@ -168,6 +171,45 @@ impl ConvertedLevel {
 pub struct LevelEntity {
     /// Owning UE3 actor slot.
     pub actor_slot: usize,
+    /// Plan level of the actor (0 = the persistent level, then the merged
+    /// sub-levels; names in [`RenderLevels`]).
+    pub level: usize,
+}
+
+/// The levels of the spawned plan, by plan level index: package names and
+/// whether each is always loaded (the others are streamed by Kismet and
+/// shown only while the game has them streamed in, unless `force_all`).
+#[derive(Resource, Debug, Clone, Default)]
+pub struct RenderLevels {
+    /// Package name per plan level.
+    pub names: Vec<String>,
+    /// Always loaded (the persistent level and `LevelStreamingAlwaysLoaded`).
+    pub always_loaded: Vec<bool>,
+    /// Show every sub-level regardless of the game (`--all-sublevels`).
+    pub force_all: bool,
+}
+
+impl RenderLevels {
+    /// The levels of `plan`.
+    #[must_use]
+    pub fn of_plan(plan: &LevelPlan, force_all: bool) -> Self {
+        let mut names = vec![plan.scene.package.clone()];
+        let mut always_loaded = vec![true];
+        for sub in &plan.scene.merged_levels {
+            always_loaded.push(
+                plan.scene
+                    .streaming_levels
+                    .iter()
+                    .any(|s| s.package.eq_ignore_ascii_case(sub) && s.always_loaded()),
+            );
+            names.push(sub.clone());
+        }
+        Self {
+            names,
+            always_loaded,
+            force_all,
+        }
+    }
 }
 
 /// Marker on the level BSP meshes.
@@ -352,6 +394,7 @@ fn poll_planning(
         &plan,
         &settings,
     );
+    commands.insert_resource(RenderLevels::of_plan(&plan, level.force_all_sublevels));
     ambient.brightness = plan.ambient;
     ambient.color = Color::WHITE;
     start.0 = plan.start().map(|(loc, yaw, pitch)| {
@@ -626,6 +669,7 @@ fn spawn_plan(
             transform,
             LevelEntity {
                 actor_slot: d.actor_slot,
+                level: plan.scene.meshes.get(d.instance).map_or(0, |m| m.level),
             },
         ));
         let translucent = !matches!(m.blend, BlendMode::Opaque | BlendMode::Masked { .. });

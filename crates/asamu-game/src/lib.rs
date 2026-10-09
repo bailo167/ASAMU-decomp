@@ -64,11 +64,28 @@
 //! Matinee movers come from the map's Kismet instead of the level-start
 //! table, and [`ScriptedTick::outputs`] carries the presentation events
 //! (audio, narration, UI, level transitions) for the app.
+//!
+//! # NPCs
+//!
+//! [`load_level_with_kismet`] also spawns the map's NPCs and story actors
+//! ([`npc::NpcSystem`], [`Game::attach_npcs`]); they tick inside the
+//! converted level's frame (step 2, with the other map actors), their touches
+//! run with the player's (step 5), and their events
+//! ([`Game::npc_events`]) reach Kismet through the host. The whole frame
+//! order and data flow, app included: `docs/INTEGRATION.md`.
+//!
+//! # Smoke runs
+//!
+//! [`smoke`] drives converted maps end to end (Kismet, NPCs, a deterministic
+//! pseudo-random input script) and follows the story chain of level
+//! transitions; `examples/smoke.rs` and the ignored `tests/smoke.rs` run it on
+//! the user's converted data.
 
 mod converted;
 pub mod kismet_host;
 pub mod npc;
 pub mod save;
+pub mod smoke;
 pub mod world;
 
 use asamu_core::{ClockError, DEFAULT_TICK_RATE_HZ, FixedClock};
@@ -91,9 +108,17 @@ use asamu_world::{
     WorldObjects, graybox_test_level,
 };
 
+/// The Kismet runtime the level scripts run on (re-exported for the app:
+/// [`asamu_kismet::Output`], [`asamu_kismet::KValue`]).
+pub use asamu_kismet;
+/// The world crate (re-exported for the app: world events, scene data).
+pub use asamu_world;
 pub use converted::{DEATH_FADE_DOWN_TIME, SCENE_RANDOM_SEED};
 use glam::Vec3;
-pub use kismet_host::{LevelScript, LevelScriptError, ScriptedTick, load_level_with_kismet};
+pub use kismet_host::{
+    LevelOptions, LevelScript, LevelScriptError, ScriptedTick, load_level_with_kismet,
+    load_level_with_kismet_options,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 pub use world::{GameWorld, SceneCollision};
@@ -279,6 +304,13 @@ pub struct Game {
     recording: Option<Trace>,
     /// Converted-level state (`None` for hand-made levels).
     scene: Option<Box<converted::SceneGame>>,
+    /// NPCs and story actors ([`npc::NpcSystem`]), ticked inside the frame
+    /// (see [`Game::attach_npcs`]).
+    npcs: Option<Box<npc::NpcSystem>>,
+    /// NPC events raised since the latest tick's report was built.
+    npc_pending: Vec<npc::NpcEvent>,
+    /// NPC events of the latest tick, in order.
+    npc_events: Vec<npc::NpcEvent>,
 }
 
 impl Game {
@@ -308,6 +340,9 @@ impl Game {
             last_events: StepEvents::default(),
             recording: None,
             scene: None,
+            npcs: None,
+            npc_pending: Vec::new(),
+            npc_events: Vec::new(),
         })
     }
 
@@ -492,6 +527,14 @@ impl Game {
             self.objects.apply(&self.level, object_event, out);
             if let Some(scene) = &mut self.scene {
                 scene.apply_rock_event(object_event, out);
+            }
+            // Glow flowers and story items (the NPC side's handler calls;
+            // converted levels only: hand-made levels never report them).
+            if self.scene.is_some()
+                && let Some(npcs) = &mut self.npcs
+            {
+                let events = npcs.apply_object_event(object_event);
+                self.npc_pending.extend(events);
             }
         }
     }

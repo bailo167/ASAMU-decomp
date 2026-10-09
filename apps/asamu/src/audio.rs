@@ -19,18 +19,29 @@
 //! - the subtitle line goes to the HUD's subtitle box
 //!   ([`crate::hud::Subtitle`]).
 //!
-//! Kismet integration (for the orchestrator): write
-//! [`AudioCommandMessage`]s (`SeqAct_PlaySound` with its action node in
-//! `node`, `SeqAct_SetSoundMode`, `SeqAct_Toggle` on ambient sounds). The
-//! narrator has two mutually exclusive paths: the Kismet runtime's own
-//! narrator queue (`asamu-kismet`, timed by the fixed simulation tick)
-//! drives the sound with `NarratorPlay` / `NarratorStop`; a host without it
-//! uses this engine's queue (`NarratorAddLine` / `NarratorRemoveLine`),
-//! whose timers run on the frame time, and reads
-//! [`AudioFeedbackMessage`]s (narrator started / line finished / finished).
+//! Kismet integration: `crate::kismet` writes [`AudioCommandMessage`]s
+//! (`SeqAct_PlaySound` with its action node in `node`, `SeqAct_SetSoundMode`,
+//! `SeqAct_Toggle` on ambient sounds) and [`music::MusicCommandMessage`]s
+//! (adaptive music). The narrator has two mutually exclusive paths: the
+//! Kismet runtime's own narrator queue (`asamu-kismet`, timed by the fixed
+//! simulation tick) drives the sound with `NarratorPlay` / `NarratorStop` —
+//! the path the game uses; a host without it uses this engine's queue
+//! (`NarratorAddLine` / `NarratorRemoveLine`), whose timers run on the frame
+//! time, and reads [`AudioFeedbackMessage`]s (narrator started / line
+//! finished / finished).
+//!
+//! A new game (a level loaded, from the menu or a Kismet `open`) stops every
+//! sound (`AudioCommand::StopAll`, which also resets the adaptive music),
+//! restarts the gameplay observer and reloads the level's ambient sounds;
+//! the converted documents load again if they were not available before.
+//! The settings' music / SFX / voice volumes are the sound classes' own
+//! volumes (`set_class_volume` on `Music`, `SFX`, `Voice`, children of
+//! `Master` in the shipped class tree); the master volume stays Bevy's
+//! global volume (`ui::settings`). With subtitles off no line is shown.
 
 mod backend;
 mod gameplay;
+pub mod music;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +57,7 @@ use bevy::transform::TransformSystems;
 use crate::Sim;
 use crate::converted::ConvertedLevel;
 use crate::hud::Subtitle;
+use crate::ui::UserSettings;
 
 pub use gameplay::GameplayAudio;
 
@@ -81,6 +93,8 @@ pub struct AudioRuntime {
     /// The subtitle line this module last wrote to the HUD (other writers
     /// are left alone while the line does not change).
     last_subtitle: Option<String>,
+    /// Music / SFX / voice volumes last given to the sound classes.
+    class_volumes: Option<[f32; 3]>,
 }
 
 impl Default for AudioRuntime {
@@ -95,6 +109,7 @@ impl Default for AudioRuntime {
             listener: UeVec3::ZERO,
             queued: Vec::new(),
             last_subtitle: None,
+            class_volumes: None,
         }
     }
 }
@@ -133,11 +148,14 @@ impl Plugin for AudioPlugin {
             .add_message::<AudioFeedbackMessage>()
             .init_resource::<AudioRuntime>()
             .init_resource::<backend::VoiceSet>()
+            .add_plugins(music::MusicPlugin)
             .add_systems(Startup, start_library_load)
             .add_systems(
                 Update,
                 (
+                    reset_for_new_game,
                     poll_library_load,
+                    apply_class_volumes,
                     start_level_ambient,
                     apply_audio_commands,
                     backend::attach_listener,
@@ -163,7 +181,11 @@ fn audio_dir(level: Option<&ConvertedLevel>) -> Option<PathBuf> {
 }
 
 fn start_library_load(mut runtime: ResMut<AudioRuntime>, level: Option<Res<ConvertedLevel>>) {
-    let Some(dir) = audio_dir(level.as_deref()) else {
+    begin_library_load(&mut runtime, level.as_deref());
+}
+
+fn begin_library_load(runtime: &mut AudioRuntime, level: Option<&ConvertedLevel>) {
+    let Some(dir) = audio_dir(level) else {
         info!(
             "audio: no converted audio (run `asamu-import --out <dir> audio`); the game is silent"
         );
@@ -174,6 +196,43 @@ fn start_library_load(mut runtime: ResMut<AudioRuntime>, level: Option<Res<Conve
         AsyncComputeTaskPool::get()
             .spawn(async move { AudioLibrary::load(&dir).map_err(|e| e.to_string()) }),
     );
+}
+
+/// A new game: every sound stops (the adaptive music resets on the same
+/// command), and the documents load again when they were missing.
+fn reset_for_new_game(
+    mut runtime: ResMut<AudioRuntime>,
+    sim: Option<Res<Sim>>,
+    level: Option<Res<ConvertedLevel>>,
+    mut commands: MessageWriter<AudioCommandMessage>,
+) {
+    if !sim.is_some_and(|s| s.is_added()) {
+        return;
+    }
+    commands.write(AudioCommandMessage(AudioCommand::StopAll));
+    if runtime.library.is_none() && runtime.load.is_none() {
+        begin_library_load(&mut runtime, level.as_deref());
+    }
+}
+
+/// The settings' group volumes on the sound classes (once the documents are
+/// in, and whenever they change).
+fn apply_class_volumes(mut runtime: ResMut<AudioRuntime>, user: Option<Res<UserSettings>>) {
+    let Some(user) = user else {
+        return;
+    };
+    if runtime.library.is_none() {
+        return;
+    }
+    let s = &user.settings;
+    let want = [s.music_volume, s.sfx_volume, s.voice_volume];
+    if runtime.class_volumes == Some(want) {
+        return;
+    }
+    for (class, volume) in ["Music", "SFX", "Voice"].into_iter().zip(want) {
+        runtime.set_class_volume(class, volume);
+    }
+    runtime.class_volumes = Some(want);
 }
 
 fn poll_library_load(mut runtime: ResMut<AudioRuntime>, mut voices: ResMut<backend::VoiceSet>) {
@@ -234,10 +293,42 @@ fn apply_audio_commands(
     let rt = &mut *runtime;
     rt.queued.extend(commands.read().map(|c| c.0.clone()));
     let Some(lib) = rt.library.clone() else {
+        let loading = rt.load.is_some();
+        trim_waiting_commands(&mut rt.queued, loading);
         return;
     };
     for c in std::mem::take(&mut rt.queued) {
         rt.engine.apply(&lib, &c, rt.listener);
+        if c == AudioCommand::StopAll {
+            // A new level: the observer starts over and the level's ambient
+            // sounds start again.
+            rt.gameplay = GameplayAudio::default();
+            rt.ambient_loaded_for = None;
+        }
+    }
+}
+
+/// Most audio commands kept while the documents load (ours; a level's
+/// Kismet issues a few hundred at most before they arrive).
+pub(crate) const MAX_WAITING_COMMANDS: usize = 4096;
+
+/// The commands kept while the documents are not loaded: nothing plays
+/// without them, so a level change (`StopAll`) drops what came before it;
+/// with no load running (no converted audio, or a failed load) nothing can
+/// arrive until a new game starts a load (and sends its own `StopAll`), so
+/// every command is dropped; the queue never holds more than
+/// [`MAX_WAITING_COMMANDS`] (the oldest go first).
+fn trim_waiting_commands(queued: &mut Vec<AudioCommand>, loading: bool) {
+    if !loading {
+        queued.clear();
+        return;
+    }
+    if let Some(i) = queued.iter().rposition(|c| *c == AudioCommand::StopAll) {
+        queued.drain(..=i);
+    }
+    if queued.len() > MAX_WAITING_COMMANDS {
+        let excess = queued.len() - MAX_WAITING_COMMANDS;
+        queued.drain(..excess);
     }
 }
 
@@ -263,6 +354,7 @@ fn update_audio(
     sim: Option<Res<Sim>>,
     camera: Query<&Transform, (With<crate::PlayerCamera>, Without<backend::VoiceEntity>)>,
     subtitle: Option<ResMut<Subtitle>>,
+    user: Option<Res<UserSettings>>,
     mut feedback: MessageWriter<AudioFeedbackMessage>,
     mut voice_query: backend::VoiceQuery,
     mut commands: Commands,
@@ -287,10 +379,17 @@ fn update_audio(
     for f in &frame.feedback {
         feedback.write(AudioFeedbackMessage(f.clone()));
     }
-    if frame.subtitle != rt.last_subtitle {
-        rt.last_subtitle.clone_from(&frame.subtitle);
+    // Subtitles off in the settings: no line.
+    let line = if user.as_ref().is_none_or(|u| u.settings.subtitles) {
+        frame.subtitle.clone()
+    } else {
+        None
+    };
+    if line != rt.last_subtitle {
+        debug!("subtitle: {line:?}");
+        rt.last_subtitle.clone_from(&line);
         if let Some(mut subtitle) = subtitle {
-            subtitle.0.clone_from(&frame.subtitle);
+            subtitle.0 = line;
         }
     }
     // Bevy applies its global volume (the options menu's master volume)
@@ -307,5 +406,37 @@ fn update_audio(
             &mut commands,
             &mut audio_assets,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stop(node: u64) -> AudioCommand {
+        AudioCommand::StopSound {
+            cue: String::new(),
+            fade_out_time: 0.0,
+            node: Some(node),
+        }
+    }
+
+    #[test]
+    fn waiting_commands_are_bounded_and_dropped_without_a_load() {
+        // While loading: a level change drops what came before it.
+        let mut q = vec![stop(1), AudioCommand::StopAll, stop(2), stop(3)];
+        trim_waiting_commands(&mut q, true);
+        assert_eq!(q, vec![stop(2), stop(3)]);
+        // The queue keeps the newest `MAX_WAITING_COMMANDS`.
+        let total = MAX_WAITING_COMMANDS as u64 + 10;
+        let mut q: Vec<AudioCommand> = (0..total).map(stop).collect();
+        trim_waiting_commands(&mut q, true);
+        assert_eq!(q.len(), MAX_WAITING_COMMANDS);
+        assert_eq!(q.first(), Some(&stop(10)));
+        assert_eq!(q.last(), Some(&stop(total - 1)));
+        // No load running: nothing can play them.
+        let mut q = vec![stop(1), stop(2)];
+        trim_waiting_commands(&mut q, false);
+        assert!(q.is_empty());
     }
 }

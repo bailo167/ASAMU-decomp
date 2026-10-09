@@ -554,16 +554,36 @@ impl Runtime {
                 }
                 self.force_output(op, 0);
             }
-            OpClass::PauseWorm | OpClass::StartWorm | OpClass::ShutDownWorm => {
+            OpClass::StartWorm | OpClass::ShutDownWorm => {
                 let worm = self.obj_path(&self.prop(op, "wormPawn"));
-                let action = match class {
-                    OpClass::StartWorm => "start",
-                    OpClass::ShutDownWorm => "shutdown",
-                    _ if self.impulse(op, 0) => "unpause",
-                    _ => "pause",
+                let action = if class == OpClass::StartWorm {
+                    "start"
+                } else {
+                    "shutdown"
                 };
                 if worm.is_some() {
                     self.emit(Output::Worm { action, worm });
+                }
+                self.force_output(op, 0);
+            }
+            OpClass::PauseWorm => {
+                // Input 0 `UnPause`, then input 1 `Pause`, each checked on
+                // its own: both in one impulse leave the worm paused.
+                // CONFIRMED (src).
+                let worm = self.obj_path(&self.prop(op, "wormPawn"));
+                if worm.is_some() {
+                    if self.impulse(op, 0) {
+                        self.emit(Output::Worm {
+                            action: "unpause",
+                            worm: worm.clone(),
+                        });
+                    }
+                    if self.impulse(op, 1) {
+                        self.emit(Output::Worm {
+                            action: "pause",
+                            worm,
+                        });
+                    }
                 }
                 self.force_output(op, 0);
             }

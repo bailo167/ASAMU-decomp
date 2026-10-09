@@ -11,11 +11,15 @@
 //! - **Converted original level** (`--converted DIR --level NAME`, see
 //!   [`converted`]): renders a level from the user-local output of
 //!   `asamu-import` (scene JSON, glTF meshes, DDS textures, materials when
-//!   converted). The level's game (`asamu_game::Game::load_level`: triangle
-//!   collision and the gameplay actors) loads on a background task; once it
-//!   is ready the simulation drives the first-person camera exactly as in
-//!   the graybox. Until then, when it fails, or with `--fly`, a render-only
-//!   fly camera ([`fly`]) is used.
+//!   converted). The level's game with its Kismet and NPCs
+//!   (`asamu_game::load_level_with_kismet_options`: triangle collision, the
+//!   gameplay actors, the level script, Matinee movers, NPCs) loads on a
+//!   background task; once it is ready the simulation drives the
+//!   first-person camera exactly as in the graybox, and every fixed tick runs
+//!   `LevelScript::tick` (Kismet, then the game frame) whose outputs
+//!   [`kismet`] turns into sound, UI, camera and rendering changes
+//!   (`docs/INTEGRATION.md`). Until then, when it fails, or with `--fly`, a
+//!   render-only fly camera ([`fly`]) is used.
 //!
 //! The render scale is the presentation convention (50 UU per render unit);
 //! the simulation stays in UU.
@@ -64,6 +68,7 @@ mod capture;
 mod converted;
 mod fly;
 mod hud;
+mod kismet;
 mod lightmaps;
 mod npc;
 mod post;
@@ -77,7 +82,7 @@ use asamu_core::coords::{
 };
 use asamu_core::glam as sim_glam;
 use asamu_core::units::uu_per_s_to_presentation_m_per_s;
-use asamu_game::{Game, GameState};
+use asamu_game::{Game, GameState, LevelScript};
 use asamu_player::{
     Aim, BootsStateName, GrappleState, InputFrame, MovementModelKind, PawnStateName,
 };
@@ -125,7 +130,7 @@ fn banner(game: &Game) -> String {
             })
             .unwrap_or_else(|| "no grapple gun".to_owned());
         let abilities = if game.scene_map().is_some() {
-            "converted level: level-start abilities from the map's data, triangle collision"
+            "converted level: abilities, story mode and movers from the map's Kismet, NPCs, triangle collision"
         } else {
             "graybox abilities: everything on, 3 grapples (test configuration)"
         };
@@ -179,8 +184,10 @@ const USAGE: &str = "usage: asamu [options]\n\
     chapter select; saves in the user data directory, ASAMU_SAVE_DIR overrides it)\n  \
     --level NAME            start straight in this level, e.g. AG-Workshop (saves stay in memory)\n  \
     --fly                   render-only fly camera (no collision)\n  \
-    --all-sublevels         also show sub-levels Kismet streams in later (e.g. TheCore in AG-IceCave)\n  \
-    --camera X,Y,Z[,YAW,PITCH]  start the fly camera at a UE3 position (UU), yaw/pitch in degrees\n  \
+    --all-sublevels         always show sub-levels Kismet streams in later (e.g. TheCore in AG-IceCave;\n                          \
+    by default they show while the level script has them streamed in)\n  \
+    --camera X,Y,Z[,YAW,PITCH]  start the fly camera at a UE3 position (UU), yaw/pitch in degrees;\n                          \
+    with gameplay, a debug teleport of the player's eye there at the start\n  \
     --light-scale F         multiply converted light intensities (approximation, default 1)\n  \
     --light-shadows N       point/spot lights with shadow maps (default 4)\n  \
     --no-shadows            no directional light shadows\n  \
@@ -190,6 +197,7 @@ const USAGE: &str = "usage: asamu [options]\n\
     unattended runs:\n  \
     --no-menu               graybox: skip the main menu (click to play)\n  \
     --screenshot PATH       save a screenshot once the level has loaded (keep it local)\n  \
+    --screenshot-delay S    seconds after the assets settled before the screenshot (default 1)\n  \
     --exit-after SECONDS    quit after this many seconds\n  \
     --walk SECONDS          start playing at once and hold forward for this simulated time";
 
@@ -217,6 +225,7 @@ struct Cli {
     fog: bool,
     normal_maps: bool,
     screenshot: Option<PathBuf>,
+    screenshot_delay: f32,
     exit_after: Option<f32>,
     walk: f32,
     no_menu: bool,
@@ -237,6 +246,7 @@ impl Default for Cli {
             fog: true,
             normal_maps: false,
             screenshot: None,
+            screenshot_delay: 1.0,
             exit_after: None,
             walk: 0.0,
             no_menu: false,
@@ -320,6 +330,13 @@ fn parse_cli(
             "--no-fog" => cli.fog = false,
             "--normal-maps" => cli.normal_maps = true,
             "--screenshot" => cli.screenshot = Some(PathBuf::from(value("--screenshot")?)),
+            "--screenshot-delay" => {
+                let v = parse_f32("--screenshot-delay", &value("--screenshot-delay")?)?;
+                if v < 0.0 {
+                    return Err("--screenshot-delay must not be negative".to_owned());
+                }
+                cli.screenshot_delay = v;
+            }
             "--exit-after" => {
                 let v = parse_f32("--exit-after", &value("--exit-after")?)?;
                 if v <= 0.0 {
@@ -361,6 +378,9 @@ impl Cli {
 #[derive(Resource)]
 pub(crate) struct Sim {
     game: Game,
+    /// The converted level's Kismet (`None`: graybox, or a map without a
+    /// Kismet export, which then keeps the level-start ability table).
+    script: Option<LevelScript>,
     /// First banner line (configuration and parameter provenance).
     banner: String,
     /// Collision-centre position before / after the latest tick (UU).
@@ -378,12 +398,20 @@ impl Sim {
         let eye = game.eye_position();
         Self {
             game,
+            script: None,
             banner,
             prev_position: position,
             curr_position: position,
             prev_eye: eye,
             curr_eye: eye,
         }
+    }
+
+    /// The level script that drives this game (builder style).
+    #[must_use]
+    fn with_script(mut self, script: Option<LevelScript>) -> Self {
+        self.script = script;
+        self
     }
 
     fn snap_interpolation(&mut self) {
@@ -464,6 +492,7 @@ fn add_default_plugins(app: &mut App, title: &str) {
         lightmaps::LightmapPlugin,
         npc::NpcPlugin,
         post::PostPlugin,
+        kismet::KismetPlugin,
     ));
 }
 
@@ -492,10 +521,10 @@ fn run_graybox(cli: &Cli) -> AppExit {
             brightness: 400.0,
             ..default()
         })
-        .insert_resource(capture::AutoCapture::new(
-            cli.screenshot.clone(),
-            cli.exit_after,
-        ))
+        .insert_resource(
+            capture::AutoCapture::new(cli.screenshot.clone(), cli.exit_after)
+                .with_delay(cli.screenshot_delay),
+        )
         .add_systems(Startup, (spawn_level, spawn_camera_and_light))
         // The main menu first (graybox: New Game plays the test level),
         // except for unattended runs.
@@ -556,20 +585,21 @@ impl Default for LevelGizmos {
     }
 }
 
-/// The converted level's [`Game`], loaded on the async pool.
+/// The converted level's [`Game`] and level script, loaded on the async
+/// pool.
 #[derive(Resource)]
 struct GameLoad {
     /// Converted directory and level to load (`None` with `--fly`).
     request: Option<(PathBuf, String)>,
-    task: Option<bevy::tasks::Task<Result<Game, String>>>,
+    task: Option<bevy::tasks::Task<Result<ui::LoadedLevel, String>>>,
 }
 
 fn start_game_load(mut load: ResMut<GameLoad>) {
     if let Some((root, name)) = load.request.take() {
-        load.task = Some(
-            bevy::tasks::AsyncComputeTaskPool::get()
-                .spawn(async move { Game::load_level(&root, &name).map_err(|e| e.to_string()) }),
-        );
+        load.task =
+            Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+                ui::load_level(&root, &name, asamu_game::save::PlayMode::Story)
+            }));
     }
 }
 
@@ -580,7 +610,7 @@ fn poll_game_load(
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
     mut saves: ResMut<ui::Saves>,
     mut play: ResMut<ui::Play>,
-    mut loaded: MessageWriter<ui::SnapshotLoaded>,
+    camera_override: Res<CameraOverrideRes>,
 ) {
     let Some(task) = load.task.as_mut() else {
         return;
@@ -590,7 +620,7 @@ fn poll_game_load(
     };
     load.task = None;
     match result {
-        Ok(game) => {
+        Ok((game, mut script)) => {
             let banner = banner(&game);
             info!("gameplay collision loaded: the simulation drives the camera");
             // The loader tolerates missing pieces (e.g. meshes not converted:
@@ -608,13 +638,31 @@ fn poll_game_load(
             let mut game = game;
             // The level start of the (in-memory) save session, as a menu
             // load does: chapter, snapshot, "save loaded" for Kismet.
-            ui::start_direct_level(&mut game, &mut saves, &mut play, &mut loaded);
+            ui::start_direct_level(&mut game, script.as_mut(), &mut saves, &mut play);
+            if let Some(c) = camera_override.0 {
+                // Debug teleport (`--camera` with gameplay): the eye at the
+                // given point, falling from there.
+                let eye = game.params().camera.eye_height.value;
+                let player = game.player_mut();
+                player.position = sim_glam::Vec3::from_array(c.position) - sim_glam::Vec3::Z * eye;
+                player.yaw = c.yaw_degrees.to_radians();
+                player.pitch = c.pitch_degrees.to_radians();
+                player.velocity = sim_glam::Vec3::ZERO;
+                player.grounded = false;
+                player.pawn.force_floor_check = true;
+                info!("debug teleport to {:?}", c.position);
+            }
+            if script.is_none() {
+                warn!(
+                    "no converted Kismet for this level (run `asamu-import kismet` and `matinee`)"
+                );
+            }
             // Already captured the mouse in fly mode: start playing at once.
             if cursor.grab_mode != CursorGrabMode::None {
                 game.start();
             }
             commands.insert_resource(Time::<Fixed>::from_hz(game.clock().tick_rate_hz()));
-            commands.insert_resource(Sim::new(game, banner));
+            commands.insert_resource(Sim::new(game, banner).with_script(script));
         }
         Err(e) => {
             warn!("could not load the converted level for gameplay ({e}); staying in fly mode");
@@ -652,9 +700,11 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
     let params = asamu_player::PlayerParams::asamu_original();
     let eye_height = params.camera.eye_height.value;
     let lights = LightMapping::default();
+    // Every sub-level is planned; the ones Kismet streams show while the
+    // game has them streamed in (`kismet::sync_actor_render`).
     let options = PlanOptions {
         scale: SCALE,
-        all_sublevels: cli.all_sublevels,
+        all_sublevels: true,
         lights: LightMapping {
             point_lumens_per_brightness_m2: lights.point_lumens_per_brightness_m2 * cli.light_scale,
             directional_lux_per_brightness: lights.directional_lux_per_brightness * cli.light_scale,
@@ -698,16 +748,17 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         .insert_resource(hud::HudStyle {
             info_color: Color::srgb(0.92, 0.92, 0.88),
         })
-        .insert_resource(capture::AutoCapture::new(
-            cli.screenshot.clone(),
-            cli.exit_after,
-        ))
+        .insert_resource(
+            capture::AutoCapture::new(cli.screenshot.clone(), cli.exit_after)
+                .with_delay(cli.screenshot_delay),
+        )
         .insert_resource(converted::ConvertedLevel {
             dir,
             level,
             options,
             settings,
             eye_height,
+            force_all_sublevels: cli.all_sublevels,
             phase: None,
             progress: (0, 0, 0),
         })
@@ -951,6 +1002,7 @@ fn cursor_and_pause(
     mut sim: ResMut<Sim>,
     mut pending: ResMut<PendingInput>,
     mut level_gizmos: ResMut<LevelGizmos>,
+    presentation: Option<Res<kismet::Presentation>>,
 ) {
     let grabbed = cursor.grab_mode != CursorGrabMode::None;
     if !grabbed && mouse.just_pressed(MouseButton::Left) {
@@ -968,7 +1020,10 @@ fn cursor_and_pause(
     if !grabbed {
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    // `SeqAct_DisablePauseMenu` (TheCore, during the credits): Esc does
+    // nothing.
+    let pause_allowed = presentation.as_ref().is_none_or(|p| p.pause_menu);
+    if keys.just_pressed(KeyCode::Escape) && pause_allowed {
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
         sim.game.pause();
@@ -978,8 +1033,14 @@ fn cursor_and_pause(
     // R (debug) and F7 (the original's QuickLoad: restart from the
     // checkpoint) respawn.
     if keys.just_pressed(KeyCode::KeyR) || keys.just_pressed(KeyCode::F7) {
-        sim.game.respawn();
-        sim.snap_interpolation();
+        if sim.game.scene_map().is_some() {
+            // The original's quick load: the death sequence, then the latest
+            // checkpoint (Kismet sees the `PlayerDied` event).
+            sim.game.kill_player();
+        } else {
+            sim.game.respawn();
+            sim.snap_interpolation();
+        }
     }
     // F2 (debug): story mode, which the original toggles from Kismet.
     if keys.just_pressed(KeyCode::F2) {
@@ -1082,6 +1143,7 @@ fn axis(keys: &ButtonInput<KeyCode>, positive: [KeyCode; 2], negative: [KeyCode;
 }
 
 /// One simulation tick per fixed step.
+#[allow(clippy::too_many_arguments)]
 fn fixed_tick(
     mut sim: ResMut<Sim>,
     mut pending: ResMut<PendingInput>,
@@ -1089,6 +1151,8 @@ fn fixed_tick(
     mouse: Res<ButtonInput<MouseButton>>,
     mut walk: ResMut<ScriptedWalk>,
     mut reports: MessageWriter<ui::GameTick>,
+    mut frames: MessageWriter<kismet::KismetFrame>,
+    presentation: Option<Res<kismet::Presentation>>,
 ) {
     // `--walk`: start at once and hold forward for the given simulated time.
     let scripted = walk.0 > 0.0;
@@ -1101,7 +1165,7 @@ fn fixed_tick(
     if scripted {
         walk.0 -= 1.0 / sim.game.clock().tick_rate_hz() as f32;
     }
-    let input = InputFrame {
+    let mut input = InputFrame {
         move_forward: if scripted {
             1.0
         } else {
@@ -1125,9 +1189,41 @@ fn fixed_tick(
         power_jump_held: mouse.pressed(MouseButton::Right),
         use_pressed: std::mem::take(&mut pending.use_key),
     };
+    // Cinematic mode (`SeqAct_ToggleCinematicMode`): the flags it sets block
+    // movement, turning and buttons while active.
+    if let Some(p) = &presentation {
+        let (movement, turning, buttons) = p.input_allowed();
+        if !movement {
+            input.move_forward = 0.0;
+            input.move_right = 0.0;
+        }
+        if !turning {
+            input.look_yaw_delta = 0.0;
+            input.look_pitch_delta = 0.0;
+        }
+        if !buttons {
+            input.jump_pressed = false;
+            input.jump_held = false;
+            input.grapple_held = false;
+            input.sprint_held = false;
+            input.power_jump_held = false;
+            input.use_pressed = false;
+        }
+    }
     let before = sim.game.player().position;
     let eye_before = sim.game.eye_position();
-    if let Some(report) = sim.game.tick(&input) {
+    let Sim { game, script, .. } = &mut *sim;
+    let report = match script.as_mut() {
+        Some(script) => script.tick(game, &input).map(|t| {
+            frames.write(kismet::KismetFrame {
+                outputs: t.outputs,
+                npc_events: t.npc_events,
+            });
+            t.report
+        }),
+        None => game.tick(&input),
+    };
+    if let Some(report) = report {
         // Checkpoint saves and the time-trial rules (`ui::flow`).
         reports.write(ui::GameTick(report));
         sim.prev_position = before;
@@ -1146,10 +1242,15 @@ fn fixed_tick(
             info!("hard landing at {:.0} uu/s", landing.velocity_z);
         }
         if report.events.use_requested {
-            info!("use (story mode): the original interacts through the fire button");
+            // `ASAMUPlayerController.Use`: the stock use search only finds
+            // actors with a `SeqEvent_Used` (none in the shipped maps);
+            // story interactables use the fire button (GRAPPLE.md G-AC-0).
+            if let Some(npcs) = sim.game.npcs() {
+                debug!("use: {:?}", npcs.use_action(sim.game.player()));
+            }
         }
         for event in report.world.iter() {
-            info!("world: {event:?}");
+            debug!("world: {event:?}");
         }
         if let Some(fire) = report.events.gun.fire {
             info!("grapple fire: {fire:?}");
@@ -1159,11 +1260,14 @@ fn fixed_tick(
 
 /// Places the camera at the interpolated eye position with the simulation's
 /// view rotation (plus look input not yet consumed by a tick).
+#[allow(clippy::too_many_arguments)]
 fn sync_camera(
     sim: Res<Sim>,
     pending: Res<PendingInput>,
     fixed: Res<Time<Fixed>>,
     settings: Res<ui::UserSettings>,
+    time: Res<Time>,
+    presentation: Option<Res<kismet::Presentation>>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&mut Transform, &mut Projection), With<PlayerCamera>>,
 ) {
@@ -1177,6 +1281,20 @@ fn sync_camera(
     let pitch = (player.pitch + pending.look_pitch).clamp(-max_pitch, max_pitch);
     transform.translation = to_render(eye);
     transform.rotation = bevy_quat(ue_view_to_bevy_rotation(yaw, pitch));
+    if let Some(p) = &presentation {
+        // Kismet's view target (a Matinee director cut, `SetCameraTarget`):
+        // the camera sits at that actor (its FOV is not exported; the
+        // player's is kept).
+        if let Some((location, rotation)) = kismet::view_override(&sim, p) {
+            transform.translation = to_render(location);
+            let yaw = asamu_core::rotator::rotator_units_to_radians(rotation[1]);
+            let pitch = asamu_core::rotator::rotator_units_to_radians(
+                asamu_core::rotator::normalize_rotator_axis(rotation[0]),
+            );
+            transform.rotation = bevy_quat(ue_view_to_bevy_rotation(yaw, pitch));
+        }
+        transform.translation += kismet::shake_offset(p, time.elapsed_secs());
+    }
 
     // The FOV is horizontal (UE3 convention); Bevy's perspective FOV is
     // vertical. The story-mode zoom changes the run-time FOV; the user's FOV

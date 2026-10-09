@@ -84,14 +84,19 @@ Sources:
      title logo and opens AG-ParadiseCave.
    - 6 narrator lines, 19 Matinee actions; no Kismet checkpoint triggers.
 2. **ParadiseCave (Sanctuary).**
-   - At level start: rocket boots are disabled, and the grapple limit is set to 2 on one path.
+   - At level start: rocket boots are disabled. The limit-2 action on a level-start path sits behind
+     `SeqCond_IsPIE` "Yes" (play-in-editor only) and never runs in the shipped game: a fresh start has limit 0
+     (CONFIRMED by evaluating the conditions, [KISMET_RUNTIME.md](KISMET_RUNTIME.md) §9; earlier listed as a
+     level-start limit).
    - A touch volume enables the grapple (the first `ToggleGrapple` in the game). Touch volumes also set the
      limit to 1 on one path and to 2 on another.
    - 1 Kismet checkpoint trigger, 10 narrator lines and 30 tutorial pop-up actions.
    - A touch trigger at the exit opens AG-BeautifulCity.
 3. **BeautifulCity (Village).**
-   - At level start, or on a save-state load: the grapple is enabled and rocket boots are disabled. The
-     limit is set to 2 on one path and to 3 on another, which a touch can also reach.
+   - At level start: the grapple is enabled, rocket boots are disabled and the limit is 2, all through
+     `SaveGameState_SeqEvent_SavedGameStateLoaded`, which fires at every level start (index −1 without a save of
+     the level), not through a level-loaded path (CONFIRMED, KISMET_RUNTIME.md §9). The limit 3 comes from a
+     touch; the `IsTimeTrial` "Yes" path applies only to time trials.
    - 1 checkpoint trigger and 11 narrator lines. This is the first map with `SeqEvent_AnimNotify` events
      (24).
    - Touches relayed by a remote event open AG-DarkCave.
@@ -105,8 +110,9 @@ Sources:
 5. **StarHaven.**
    - At level start: the grapple is enabled and the limit is 3.
    - Rocket boots are enabled for the first time in the story, by an interaction and a touch in a cutscene
-     sub-sequence. A third enable sits on a level-start path (TENTATIVE: for loads straight into the
-     map).
+     sub-sequence. The third enable on a level-start path sits behind `SeqCond_IsPIE` "Yes" (play-in-editor
+     only) and never runs in the shipped game (CONFIRMED, KISMET_RUNTIME.md §9; earlier read as TENTATIVE "for
+     loads straight into the map").
    - 3 checkpoint triggers and 1 checkpoint enable; 30 narrator lines, the most of any map.
    - 10 prefab instances (moving crane and wheel winches and an airship), 57 Matinee actions.
    - A touch volume opens AG-IceCave.
@@ -136,10 +142,21 @@ Sources:
   `TheWorld` and a `Level` export `TheWorld.PersistentLevel`. CONFIRMED (this was STRONG before the object
   decoder; now verified through `asamu-inspect map` and the Kismet roots, whose outer is the `Level`).
 
+### Level-start abilities on a fresh story start (corrected)
+
+The hard-coded table `asamu_world::level_start_abilities` (used only for maps without a converted Kismet export)
+followed the per-path reading above. Evaluating the conditions with the Kismet runtime corrects it
+(KISMET_RUNTIME.md §9, CONFIRMED on converted data): ParadiseCave starts with limit 0 (the table's 2 is an
+editor-only `IsPIE` path), StarHaven starts without boots (the table's boots-on is an editor-only `IsPIE` path),
+BeautifulCity's limit 2 comes from the saved-game-state-loaded event. With a level script attached
+(`asamu_game::load_level_with_kismet`) the table is not used at all. Whole-chain check: `docs/INTEGRATION.md` §8
+follows every story transition from AG-Workshop to AG-Epilogue on converted data.
+
 ## Open items
 
-- Conditions in milestone traces are not evaluated, so "at level start" is per path, not per playthrough.
-  A behavioural trace from the original game would settle which branch runs on a fresh story start.
+- Milestone traces (`asamu-inspect kismet`) do not evaluate conditions, so their "at level start" is per path;
+  the runtime's evaluation (above) settles the fresh-start branches. A behavioural trace from the original game
+  would still confirm the frame-level order.
 - Some console commands issued at level start (`SaveLevelTwo/Three/Four`, `CanGrapple`, `CannotGrapple`,
   `ThreeGrapples`, `TGCD`) have no handler in the shipped build (STRONG, [KISMET.md](KISMET.md)). Saving
   progress and ability state therefore comes from script (the save system and the Kismet ability

@@ -201,12 +201,19 @@ thresholds CONFIRMED (cdo); impulse factor CONFIRMED (src+bc)]:
 | Normal landing camera anim (`NormalLand`) otherwise | yes, cosmetic | no | no |
 | Impulse `(0, 0, 4·V.z)` to a `DynamicSMActor` floor at the pawn location | yes | no | no |
 | `V.z < −200`: eye-smoothing baseline := current Z (the stock landing dip never starts: the controller's `LandingShake` is the stock "false") | yes | no | no |
-| `V.z ≤ −500`: landing sound + grunt + Kismet `SeqEvent_PlayerLanded` (only if the pawn actor is not hidden); extra cue if `V.z < −2500` (else if `< −1250`) | yes | yes | no |
+| `V.z ≤ −500`: landing sound + grunt + Kismet `SeqEvent_PlayerLanded` (only if the pawn actor is not hidden); the extra cue paths (`V.z < −2500`, else `< −1250`) play **nothing** in ASAMU (see below) | yes | yes | no |
 | `V.z ≤ −500`: `BaseEyeHeight` reset to 38 | yes | no | no |
 | Falling damage / stock UT horizontal ×0.1 landing slowdown | **never** (empty override / disabled) | never | never |
 | Physics → Walking (native, health > 0) | yes | yes | yes |
 
 The `NotLandable` check is the first thing the normal handler does; the story handler has no such check.
+
+**Correction (2026-10-10): the hard-landing extra cue plays nothing.** After the normal landing sound the landing
+handler picks one extra sound by speed: below `−MaxFallSpeed` (−2500) the sound group's falling-damage landing
+sound, whose ASAMU override (`ASAMUSoundGroup`) has an empty body; else below `−0.5·MaxFallSpeed` (−1250) the sound
+group's stock land sound, which no ASAMU class default sets. Neither makes a sound. An earlier version of the table
+listed an extra cue for `V.z < −2500` / `< −1250` as if it sounded. STRONG (local reading of `ASAMUPawn` and
+`ASAMUSoundGroup` and of the class defaults; the runtime plays only the normal landing sound and grunt).
 The tag name occurs in the IceCave and StarHaven name tables.
 → Rust: `on_landed(normal, floor) -> LandingOutcome` with the `NotLandable` early-out first; `asamu-game`
 receives the event and sound triggers.

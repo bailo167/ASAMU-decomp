@@ -6,18 +6,21 @@
 //! a Kismet `open`): the running simulation is removed, the render plan is
 //! rebuilt when the map differs from the one shown (the level's entities
 //! are despawned and `converted.rs` spawns the new plan when it is ready),
-//! and the map's [`Game`] loads on the async pool. When it is ready the save
-//! session decides the level start ([`asamu_game::save::SaveSession::begin_level`]:
-//! chapter unlock + chapter pointer in story mode), the snapshot is applied
-//! at the spawn ([`Game::apply_snapshot`]: abilities, checkpoint table,
-//! reset to the latest checkpoint), the game starts and the mouse is
-//! captured.
+//! and the map's [`Game`] with its Kismet and NPCs
+//! ([`asamu_game::load_level_with_kismet_options`]) loads on the async pool.
+//! When it is ready the save session decides the level start
+//! ([`asamu_game::save::SaveSession::begin_level`]: chapter unlock + chapter
+//! pointer in story mode), the snapshot is applied at the spawn
+//! ([`Game::apply_snapshot`]: abilities, checkpoint table, reset to the
+//! latest checkpoint), the level script learns the loaded checkpoint index
+//! (`SavedGameStateLoaded`) and the Kismet save strings
+//! ([`prepare_script`]), the game starts and the mouse is captured.
 
 use asamu_assets::LevelPlan;
 use asamu_game::save::{
     Achievement, ChapterId, Extra, FRONT_END_MAP, PlayMode, checkpoint_saved, format_trial_time,
 };
-use asamu_game::{Game, GameState};
+use asamu_game::{Game, GameState, LevelOptions, LevelScript, load_level_with_kismet_options};
 use bevy::ecs::system::SystemParam;
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
@@ -28,7 +31,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use super::notify::{TimeTrialClock, Toasts};
 use super::{
     AchievementEarned, CollectibleFound, GameFinished, GameTick, OpenMap, Play, SaveStringEdited,
-    Saves, Screen, SnapshotLoaded, StoryItemFound, TimeTrialEnd, TimeTrialStart, UiLaunch, UiState,
+    Saves, Screen, StoryItemFound, TimeTrialEnd, TimeTrialStart, UiLaunch, UiState,
 };
 use crate::converted::{ConvertedLevel, LevelBsp, LevelEntity, LevelLight, LevelPhase};
 use crate::{PendingInput, PlayerCamera, Sim};
@@ -67,10 +70,27 @@ pub(crate) fn open_target(map: &str) -> &str {
     map.split_once('?').map_or(map, |(m, _)| m).trim()
 }
 
+/// A loaded converted map: the game and its level script.
+pub(crate) type LoadedLevel = (Game, Option<LevelScript>);
+
+/// Loads a converted map with its Kismet and NPCs (time trial: the
+/// time-trial game type).
+pub(crate) fn load_level(
+    root: &std::path::Path,
+    map: &str,
+    mode: PlayMode,
+) -> Result<LoadedLevel, String> {
+    let options = LevelOptions {
+        time_trial: mode == PlayMode::TimeTrial,
+        ..LevelOptions::default()
+    };
+    load_level_with_kismet_options(root, map, options).map_err(|e| e.to_string())
+}
+
 /// A converted map's game loading on the async pool.
 #[derive(Resource, Default)]
 pub(crate) struct LevelLoad {
-    task: Option<Task<Result<Game, String>>>,
+    task: Option<Task<Result<LoadedLevel, String>>>,
     /// Map and mode being loaded.
     pending: Option<(String, PlayMode)>,
 }
@@ -196,10 +216,9 @@ impl FlowCtx<'_, '_> {
         }
         let root = dir.root().to_path_buf();
         let game_name = name.clone();
-        self.load.task =
-            Some(AsyncComputeTaskPool::get().spawn(async move {
-                Game::load_level(&root, &game_name).map_err(|e| e.to_string())
-            }));
+        self.load.task = Some(
+            AsyncComputeTaskPool::get().spawn(async move { load_level(&root, &game_name, mode) }),
+        );
         info!("loading {name} ({mode:?})");
         self.load.pending = Some((name, mode));
         self.state.message = None;
@@ -245,6 +264,7 @@ pub(crate) fn run_flow(mut requests: MessageReader<FlowRequest>, mut ctx: FlowCt
                 };
                 if let Some(game) = fresh_graybox(&sim.game) {
                     sim.game = game;
+                    sim.script = None;
                     sim.snap_interpolation();
                     sim.game.start();
                     info!("graybox test level started");
@@ -328,6 +348,20 @@ pub(crate) fn level_start(
     (start, result, loaded)
 }
 
+/// The level script's side of a level start: the checkpoint index the
+/// saved-game-state events receive (`None`: no event, time trial), and the
+/// Kismet save strings kept in the general save (the original keeps them in
+/// `GeneralSave.bin` across maps).
+pub(crate) fn prepare_script(
+    script: &mut LevelScript,
+    saves: &asamu_game::save::SaveSession,
+    index: Option<i32>,
+) {
+    let rt = script.runtime_mut();
+    rt.set_start_save_index(index);
+    rt.set_save_strings(saves.general.flags.clone());
+}
+
 /// Finishes a level load: save-session level start, snapshot, start.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn poll_level_load(
@@ -338,7 +372,6 @@ pub(crate) fn poll_level_load(
     mut state: ResMut<UiState>,
     mut clock: ResMut<TimeTrialClock>,
     mut toasts: ResMut<Toasts>,
-    mut loaded: MessageWriter<SnapshotLoaded>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut pending_input: Option<ResMut<PendingInput>>,
 ) {
@@ -352,8 +385,8 @@ pub(crate) fn poll_level_load(
     let Some((map, mode)) = load.pending.take() else {
         return;
     };
-    let mut game = match result {
-        Ok(game) => game,
+    let (mut game, mut script) = match result {
+        Ok(loaded) => loaded,
         Err(e) => {
             warn!("could not load {map}: {e}");
             state.open_with(Screen::Main, format!("Could not load {map}: {e}"));
@@ -374,8 +407,8 @@ pub(crate) fn poll_level_load(
         warn!("save failed: {e}");
         toasts.push(format!("Could not write the save: {e}"));
     }
-    if let Some(checkpoint_index) = loaded_index {
-        loaded.write(SnapshotLoaded { checkpoint_index });
+    if let Some(script) = script.as_mut() {
+        prepare_script(script, &saves.0, loaded_index);
     }
     game.start();
     info!(
@@ -390,7 +423,7 @@ pub(crate) fn poll_level_load(
     *clock = TimeTrialClock::default();
     let banner = crate::banner(&game);
     commands.insert_resource(Time::<Fixed>::from_hz(game.clock().tick_rate_hz()));
-    commands.insert_resource(Sim::new(game, banner));
+    commands.insert_resource(Sim::new(game, banner).with_script(script));
     state.close();
     set_grab(&mut cursor, true);
     if let Some(p) = pending_input.as_mut() {
