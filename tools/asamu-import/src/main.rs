@@ -19,8 +19,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod all;
 mod audio;
+mod kismet;
 mod levels;
+mod lightmaps;
 mod materials;
 mod matinee;
 mod meshes;
@@ -59,6 +62,12 @@ enum Cmd {
     Matinee(matinee::Args),
     /// Convert skeletal meshes and animations.
     Skeletal(skeletal::Args),
+    /// Export per-map Kismet graphs for the runtime.
+    Kismet(kismet::Args),
+    /// Export lightmaps / shadow maps for converted levels.
+    Lightmaps(lightmaps::Args),
+    /// Run every conversion end to end.
+    All(all::Args),
 }
 
 /// Default user-local output directory (no extra crates): per-OS data dir + `asamu-decomp/converted`.
@@ -100,5 +109,8 @@ fn main() -> Result<()> {
         Cmd::Audio(a) => audio::run(&ctx, a),
         Cmd::Matinee(a) => matinee::run(&ctx, a),
         Cmd::Skeletal(a) => skeletal::run(&ctx, a),
+        Cmd::Kismet(a) => kismet::run(&ctx, a),
+        Cmd::Lightmaps(a) => lightmaps::run(&ctx, a),
+        Cmd::All(a) => all::run(&ctx, a),
     }
 }

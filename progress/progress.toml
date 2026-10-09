@@ -427,8 +427,9 @@ note = "All property exports decode exactly incl. PropertyFlags."
 [[category.item]]
 id = "bytecode-presence"
 name = "Bytecode presence determined empirically"
-status = "partial"
-note = "ScriptText TextBuffers present for all 583 classes (source shipped, local-only); bytecode format not yet introspected."
+status = "verified"
+evidence = "docs/reverse-engineering/BYTECODE.md"
+note = "Bytecode present for all 12,801 scripts and decoded exactly; ScriptText source also shipped (local-only)."
 
 [[category.item]]
 id = "disasm"
@@ -498,6 +499,11 @@ note = "Per-level milestones and transitions; conditions not evaluated."
 # Maps
 # --------------------------------------------------------------------------
 
+
+[[category.item]]
+id = "runtime"
+name = "Kismet runtime (events, actions, conditions, variables used by ASAMU)"
+status = "not_started"
 [[category]]
 id = "maps"
 name = "Maps"
@@ -808,6 +814,21 @@ status = "not_started"
 # Rendering
 # --------------------------------------------------------------------------
 
+
+[[category.item]]
+id = "npcs"
+name = "NPCs (Maddie, villagers, backpack Maddie)"
+status = "not_started"
+
+[[category.item]]
+id = "worm"
+name = "Worm AI"
+status = "not_started"
+
+[[category.item]]
+id = "interactables"
+name = "Interactables, collectibles and story items in levels"
+status = "not_started"
 [[category]]
 id = "rendering"
 name = "Rendering"
@@ -839,6 +860,16 @@ name = "Lighting / lightmaps"
 status = "partial"
 note = "Point/spot/directional lights mapped approximately; baked lightmaps (LightMapTexture2D) not used yet."
 
+
+[[category.item]]
+id = "lightmaps"
+name = "Baked lightmaps / shadow maps"
+status = "not_started"
+
+[[category.item]]
+id = "skinned-render"
+name = "Skinned meshes + animation playback (hands, NPCs)"
+status = "not_started"
 [[category.item]]
 id = "post"
 name = "Post-processing, fog, sky"
@@ -1087,3 +1118,13 @@ name = "Trace replay harness"
 status = "implemented"
 evidence = "crates/asamu-player/src/trace.rs (record_run, compare); tests/slice.rs"
 note = "Replay + per-field max/mean/RMS diff with first divergence. No original traces exist yet."
+
+[[category.item]]
+id = "trace-capture"
+name = "Original-game trace capture tooling (Windows oracle)"
+status = "not_started"
+
+[[category.item]]
+id = "parity-suite"
+name = "Trace-replay parity suite against original traces"
+status = "not_started"

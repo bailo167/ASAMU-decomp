@@ -35,6 +35,7 @@ pub mod abilities;
 pub mod collision;
 pub mod fixtures;
 pub mod gameplay;
+pub mod npc;
 pub mod objects;
 pub mod rotation;
 pub mod scene;

@@ -45,6 +45,7 @@ pub mod flags;
 pub mod issue;
 pub mod kismet;
 pub mod level;
+pub mod lightmap;
 pub mod lzo;
 pub mod material;
 pub mod matinee;

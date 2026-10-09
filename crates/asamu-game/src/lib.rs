@@ -54,6 +54,9 @@
 //! level-start abilities apply ([`asamu_world::level_start_abilities`]).
 
 mod converted;
+pub mod kismet_host;
+pub mod npc;
+pub mod save;
 pub mod world;
 
 use asamu_core::{ClockError, DEFAULT_TICK_RATE_HZ, FixedClock};

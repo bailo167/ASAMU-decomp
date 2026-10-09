@@ -338,6 +338,7 @@ name = "asamu-game"
 version = "0.0.1"
 dependencies = [
  "asamu-core",
+ "asamu-kismet",
  "asamu-player",
  "asamu-world",
  "glam 0.34.1",
@@ -381,6 +382,17 @@ dependencies = [
  "sha2",
  "tempfile",
  "walkdir",
+]
+
+[[package]]
+name = "asamu-kismet"
+version = "0.0.1"
+dependencies = [
+ "asamu-core",
+ "glam 0.34.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

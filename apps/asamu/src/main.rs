@@ -53,10 +53,14 @@
 //! 30, `LookRightScale` 300, `LookUpScale` −250) is not ported because its
 //! exact formula is not specified yet.
 
+mod audio;
 mod capture;
 mod converted;
 mod fly;
 mod hud;
+mod lightmaps;
+mod npc;
+mod ui;
 
 use std::path::PathBuf;
 
@@ -441,7 +445,13 @@ fn add_default_plugins(app: &mut App, title: &str) {
         }),
         ..default()
     }))
-    .add_plugins((hud::HudPlugin, capture::CapturePlugin));
+    .add_plugins((hud::HudPlugin, capture::CapturePlugin))
+    .add_plugins((
+        audio::AudioPlugin,
+        ui::UiPlugin,
+        lightmaps::LightmapPlugin,
+        npc::NpcPlugin,
+    ));
 }
 
 fn run_graybox(cli: &Cli) -> AppExit {
