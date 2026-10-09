@@ -36,6 +36,7 @@ pub mod error;
 pub mod files;
 pub mod level;
 pub mod lighting;
+pub mod lightmaps;
 pub mod manifest;
 pub mod material_manifest;
 pub mod materials;
