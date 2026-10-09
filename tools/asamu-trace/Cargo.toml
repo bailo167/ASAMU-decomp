@@ -1,0 +1,24 @@
+[package]
+name = "asamu-trace"
+description = "Behavioural trace tooling: convert recordings from the original game, replay them through our simulation and compare"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+asamu-core.workspace = true
+asamu-player.workspace = true
+asamu-game.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

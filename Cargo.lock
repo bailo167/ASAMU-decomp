@@ -430,6 +430,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "asamu-trace"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "asamu-core",
+ "asamu-game",
+ "asamu-player",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "asamu-ue3"
 version = "0.0.1"
 dependencies = [

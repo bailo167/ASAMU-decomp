@@ -66,6 +66,7 @@ mod fly;
 mod hud;
 mod lightmaps;
 mod npc;
+mod post;
 mod ui;
 
 use std::path::PathBuf;
@@ -462,6 +463,7 @@ fn add_default_plugins(app: &mut App, title: &str) {
         ui::UiPlugin,
         lightmaps::LightmapPlugin,
         npc::NpcPlugin,
+        post::PostPlugin,
     ));
 }
 
