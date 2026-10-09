@@ -857,14 +857,17 @@ note = "Approximate PBR from materials.json; neutral fallback for missing textur
 [[category.item]]
 id = "lighting"
 name = "Lighting / lightmaps"
-status = "partial"
-note = "Point/spot/directional lights mapped approximately; baked lightmaps (LightMapTexture2D) not used yet."
+status = "implemented"
+evidence = "apps/asamu; docs/reverse-engineering/LIGHTMAPS.md"
+note = "Baked lighting from original lightmaps + dynamic lights not baked; approximations documented."
 
 
 [[category.item]]
 id = "lightmaps"
 name = "Baked lightmaps / shadow maps"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/LIGHTMAPS.md; apps/asamu/src/lightmaps.rs"
+note = "Original baked light/shadow maps decoded (24,628 components exact) and applied; directional lightmaps approximated."
 
 [[category.item]]
 id = "skinned-render"
@@ -879,8 +882,9 @@ note = "Sky/fog/ambient approximation only; no original post-process chain."
 [[category.item]]
 id = "hud"
 name = "HUD / subtitles / menus"
-status = "partial"
-note = "Crosshair, grapple count, abilities, subtitle area; menus and Scaleform UI not replaced yet."
+status = "implemented"
+evidence = "apps/asamu/src/ui; apps/asamu/src/hud.rs; docs/UI_AND_SAVES.md"
+note = "Main/pause/settings/chapter-select menus, HUD, collectibles counter (functional replacement, not visual clone)."
 
 # --------------------------------------------------------------------------
 # Audio
@@ -931,27 +935,29 @@ name = "Save/Progression"
 id = "save-format"
 name = "Original save location and format"
 status = "implemented"
-evidence = "docs/reverse-engineering/SAVE.md"
-note = "Locations, 4 files, versions, encryption and tagged layout from code; not yet checked against a real save file."
+evidence = "docs/reverse-engineering/SAVE.md; crates/asamu-game/src/save.rs"
+note = "Original format documented; our compatible-semantics format implemented (original import out of scope)."
 
 [[category.item]]
 id = "progression"
 name = "Checkpoint / chapter progression"
 status = "implemented"
-evidence = "docs/reverse-engineering/SAVE.md"
-note = "Story chain, checkpoints per map, unlock rules, New Game semantics recovered and verified against data."
+evidence = "crates/asamu-game/src/save.rs; docs/reverse-engineering/SAVE.md"
+note = "Snapshot/progression/general save semantics incl. New Game/Continue."
 
 [[category.item]]
 id = "settings"
 name = "System settings (UASAMUSystemSettingsManager)"
-status = "partial"
-note = "Native UASAMUSystemSettingsManager + script ASAMUSettingsManager identified."
+status = "implemented"
+evidence = "apps/asamu/src/ui; docs/UI_AND_SAVES.md"
+note = "Settings persisted; defaults match the shipped ini (CONFIRMED)."
 
 [[category.item]]
 id = "chapter-select"
 name = "Chapter select"
-status = "partial"
-note = "Rules recovered (chapters entered); not implemented."
+status = "implemented"
+evidence = "apps/asamu/src/ui; crates/asamu-game/src/save.rs"
+note = "Chapters entered per SAVE.md; loads converted maps."
 
 [[category.item]]
 id = "collectibles"
