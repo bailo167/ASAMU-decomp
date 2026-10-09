@@ -546,8 +546,9 @@ note = "1,204 brush components; kill zones, triggers, blocking/physics volumes a
 [[category.item]]
 id = "loc-packages"
 name = "Per-map localization packages (_LOC_INT)"
-status = "partial"
-note = "All _LOC_INT packages parse; contents undecoded."
+status = "implemented"
+evidence = "docs/reverse-engineering/AUDIO.md; crates/asamu-ue3/tests/sound_real_data.rs"
+note = "_LOC_* packages decoded for subtitles/localized waves."
 
 # --------------------------------------------------------------------------
 # Assets
@@ -597,7 +598,9 @@ note = "kDOP/collision triangles, BSP and volume hulls extracted; runtime collis
 [[category.item]]
 id = "audio-assets"
 name = "Audio (SoundNodeWave)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/AUDIO.md; crates/asamu-ue3/tests/sound_real_data.rs"
+note = "852 waves consumed exactly; Ogg streams valid; independent checker agreed."
 
 [[category.item]]
 id = "transforms-lights"
@@ -838,17 +841,21 @@ name = "Audio"
 [[category.item]]
 id = "decode"
 name = "Audio data decode (local conversion)"
-status = "not_started"
+status = "implemented"
+evidence = "tools/asamu-import/src/audio.rs"
+note = "Ogg passthrough export (Bevy audio feature includes Vorbis)."
 
 [[category.item]]
 id = "cues"
 name = "Sound cues / attenuation"
-status = "not_started"
+status = "partial"
+note = "SoundCue graphs decoded/exported; runtime cue evaluation and attenuation not implemented."
 
 [[category.item]]
 id = "narration"
 name = "Narrator / voice + subtitles"
-status = "not_started"
+status = "partial"
+note = "Subtitle data per wave decoded (14 languages); narration playback/subtitle UI not implemented."
 
 [[category.item]]
 id = "music"
