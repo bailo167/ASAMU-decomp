@@ -31,6 +31,7 @@
 //! the graybox app. It is a presentation convention, not a recovered fact;
 //! the simulation stays in UU and never sees render coordinates.
 
+pub mod audio;
 pub mod bsp;
 pub mod error;
 pub mod files;

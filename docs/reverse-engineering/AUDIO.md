@@ -341,3 +341,269 @@ Safety and determinism of the writer (tests in `tools/asamu-import/src/audio.rs`
   native audio code or recorded traces: UNKNOWN / not attempted.
 - Music: ASAMU plays music through cues of class `ASAMU_Music` placed as ambient sounds or triggered by Kismet; a
   dedicated music manager was not looked for here.
+
+## Audio runtime
+
+How the original plays what the sections above decode, and how our runtime reproduces it. Rules are written in our own
+words; nothing decompiled or scripted is reproduced. Code: `crates/asamu-assets/src/audio.rs` (device-free evaluator,
+classes and modes, narrator, subtitles, ambient actors, `AudioCommand`), `apps/asamu/src/audio.rs` with
+`apps/asamu/src/audio/{backend,gameplay}.rs` (Bevy playback, gameplay events).
+
+Evidence sources:
+
+- **Native**: the unstripped Mac executable, read locally with the committed Ghidra script
+  (`tools/ghidra-scripts/DecompileToLocal.java`, output in git-ignored `research/decompiled/`) for these symbols:
+  `ParseNodes` of every `USoundNode*` class, `NotifyWaveInstanceFinished` of the looping, concatenator and ambient
+  nodes, `GetDuration`, `USoundNode::CalculateAttenuatedVolume` and its helper `AttenuationEval`,
+  `USoundNode::CalculateLPFComponent`, `USoundCue::CalculateMaxAudibleDistance`, `UAudioComponent::{Play, Stop,
+  FadeIn, FadeOut, AdjustVolume, UpdateWaveInstances}`, `FAudioComponentSavedState::Set`,
+  `FWaveInstance::NotifyFinished`, `USoundNode::ResetWaveInstances`, `UAudioDevice::{GetSortedActiveWaveInstances,
+  ApplySoundMode, ApplyClassAdjusters, RecurseIntoSoundClasses, RecursiveApplyAdjuster, Interpolate}`,
+  `FALSoundSource::{Init, Update}`, `FSoundSource::SetStereoBleed`, `FSubtitleManager::QueueSubtitles`,
+  `AActor::{SetTimer, UpdateTimers}`. Float constants were read from the binary's data at the addresses those
+  functions load (a throwaway Mach-O segment reader).
+- **Native, second pass** (verify-audio-runtime, 2026-10-10; same script, local output only):
+  `USoundNodeWave::HandleStart`, `UAudioComponent::Cleanup`, `UAudioDevice::StopSources`,
+  `FSoundSource::Stop`, `FSubtitleManager::{FindHighestPrioritySubtitle, DisplaySubtitles}`,
+  `USoundNode{Attenuation, Ambient, Looping, DistanceCrossFade}::MaxAudibleDistance`,
+  `USoundCue::{IsAudible, CalculateMaxAudibleDistance, GetCueDuration}`, `UWorld::{Tick, GetAudioTimeSeconds}`; the
+  `ParseNodes` of the wave, attenuation, random, mixer, modulator, looping, delay, concatenator, cross-fade, ambient
+  and non-looping ambient nodes, their `NotifyWaveInstanceFinished`, `UAudioComponent::{Play, Stop, FadeIn, FadeOut,
+  UpdateWaveInstances}` and `FALSoundSource::{Update, IsFinished}` re-read against our code. Every constant of the attenuation
+  curves, the source update and the voice selection was re-read independently from the binary with our own
+  segment reader (1, −1, 0.25, 0.02, 10, 20, 1.25, 0.4, 2.0, 1e-4 as a double, 10000, 524288): all agree.
+- **Class models / defaults** (`asamu-inspect class|defaults`, CONFIRMED): property order of the sound nodes (every
+  range pair is declared `Min` then `Max`), the `SoundDistanceModel` and `ESoundDistanceCalc` enum orders, struct
+  defaults (`AmbientSoundSlot`, `DistanceDatum`, `SoundClassProperties`), `Engine.Default__AudioComponent` (fade stop
+  times −1, targets 1, `bAllowSpatialization` true, no `SubtitlePriority`), `Engine.Default__AmbientSoundSimpleToggleable`
+  (`FadeInDuration` 1, `FadeInVolumeLevel` 1, `FadeOutDuration` 1, `bAutoPlay` false), `asamu.ASAMUSoundGroup`
+  (footstep / jump / landing / hard-landing tables by physical material), and the cue references of `ASAMUPawn`,
+  `GrappleGun`, `ASAMUPowerJump`, `ASAMURocketBoots`, `ASAMURechargeCrystal`, `ASAMUGlowFlower`.
+- **Config**: `BaseEngine.ini` `[ALAudio.ALAudioDevice] MaxChannels=32` (CONFIRMED).
+- **Script** (local reading under git-ignored `research/`; STRONG): `ASAMUNarratorManager`, `SeqAct_NarratorLine`,
+  `ASAMUSoundGroup`, `ASAMUPawn`, `GrappleGun`, `ASAMUPowerJump`, `ASAMURocketBoots`, `ASAMURechargeCrystal`,
+  `ASAMUGlowFlower`, and the engine's `PlayerController` (`ClientHearSound`, `Kismet_ClientPlaySound`) and
+  `AmbientSoundSimpleToggleable`.
+- **Kismet census** (local `asamu-inspect kismet --json`, numbers only): 101 `SeqAct_NarratorLine` (delay 1.0 in 86,
+  0 in 11, 1.5/2.0/2.5 in the rest; `removeAllOtherCues` never set; volume 1.0 in 83, 0.8 in 18), 214 engine
+  `SeqAct_PlaySound`, 12 `SeqAct_SetSoundMode` (`ASAMU_FadeIn`, `ASAMU_SFX_Ducking`, `ASAMU_TheCore_Music`, the two
+  `ASAMU_Epilogue_*`, `ASAMU_Default`).
+
+### Component model — CONFIRMED (native)
+
+A playing cue is an audio component. Every audio update the component adds the frame time to its playback time,
+resets its working values (volume 1, pitch 1, high-frequency gain 1, not spatialised, no loop notification, no
+notification hook, finished = true) and walks the cue graph from `FirstNode`. Each node multiplies or overrides the
+working values and then visits its children; wave leaves create or refresh a **wave instance** keyed by the wave, the
+parent node and the child index. A wave instance that has not finished takes a snapshot of the working values, is
+marked started, clears its "hook already notified" flag and clears the component's "finished"; a finished one is left
+alone. When the walk leaves "finished" set, the component stops. Node state that must persist (a random choice, a
+modulator's draw, a loop counter, a delay's start) is kept per component and node, with a "needs initialisation" flag
+set when the component starts. Stopping a component (`Cleanup`) kills its subtitles, frees its wave instances and node
+state, and resets its playback time to 0 and its fades to the defaults.
+
+The engine walks a node once per path that reaches it (no shared-node bookkeeping), so a crafted graph that shares
+nodes costs 2^depth visits; no shipped cue shares a node. Our evaluator stops after 4096 node visits per instance and
+update (a guard for crafted data only).
+
+Per node:
+
+| Node | Behaviour |
+|---|---|
+| Attenuation | Only if the component allows spatialisation: distance from the source to the listener (full 3-D, or one axis for the three `InfiniteXX` distance types); `bAttenuate` multiplies the volume by the curve below; `bAttenuateWithLPF` sets the high-frequency gain (1 inside `LPFRadiusMin`, 0 from `LPFRadiusMax`, linear between); `bSpatialize` is OR-ed in; `OmniRadius` copied. Without spatialisation it only clears the spatialise flag. Then all children. |
+| Random | Once per play (or after a loop re-initialises it): sum the weights (without replacement: of the inputs not used yet), draw `r = frand · sum`, walk the inputs subtracting each weight until `r ≤ weight` (without replacement the input must also be unused; it is then marked used). The used list lives **on the node**, shared by every component, and resets (keeping only the latest choice) when every input has been used. Quirk kept: used inputs leave the sum but are still subtracted during the walk, which biases the next choice. An empty input chosen plays nothing (the grunt cues rely on this). Clears loop notification. |
+| Mixer | Every non-empty input with the volume times `InputVolume[i]`; the working values are saved and restored around each input. Clears loop notification. |
+| Modulator | Once per play: volume, then pitch, each `f · (Min − Max) + Max`; multiplies both. |
+| ModulatorContinuous | Every update: volume and pitch from the distributions (a named float parameter of the component mapped through `MinInput/MaxInput → MinOutput/MaxOutput`; mapping details TENTATIVE). |
+| Looping | Once per play: a remaining count `trunc(f · (Min − Max) + Max)`; while indefinite or the count is positive it becomes the notification hook and sets loop notification. |
+| Delay | Clears loop notification; once per play draws the delay and remembers the playback time; children only once the delay has passed, otherwise it keeps the component alive. |
+| Concatenator | Plays input `index` (starting at 0) with its `InputVolume`; becomes the hook unless on the last input; each finished wave advances the index. |
+| DistanceCrossFade | Every input with a gain from its distance window: linear fade-in between the two fade-in distances, full `Volume` between fade-in end and fade-out start, linear fade-out after, silence outside. Clears loop notification. |
+| WaveParam | The wave set on the component under `WaveParameterName`, else the children. |
+| Wave | Multiplies the wave's own `Volume` and `Pitch`, then the wave instance as above. The wave's `bLoopingSound` is **not read**: looping comes only from the graph (STRONG; the wave parse ignores it, other readers were not searched). |
+| Ambient (inline node of `AmbientSoundSimple*`) | Once per play: volume, pitch in their ranges. Every update: always the 3-D distance (it ignores the component's spatialisation switch), the curve, LPF, spatialise; it becomes the hook and plays **every** slot at once with `VolumeScale` / `PitchScale`, each looping forever at the source. Slot weights are unused. |
+| AmbientNonLoop | Once per play and after each sound: volume, pitch, a delay, then one slot by weight (cumulative weight ≥ `f · sum`, else the last). Keeps the component alive; plays the slot's wave when the delay has passed. The toggle variant stops the component after one sound. |
+
+Attenuation curves (`AttenuationEval`, constants read from the binary; re-verified by the second pass, and by
+hand-computed values in `attenuation_curves_match_hand_computed_values`): silence from `RadiusMax` on, full volume up
+to `RadiusMin`; between them, with `t = (d − min)/(max − min)`: linear `1 − t`; logarithmic `ln(d/max)/ln(min/max)`
+(scale 0.25 instead when `min` = 0, i.e. `−0.25 · ln(d/max)`), capped at 1; inverse `0.02 · (max/d) · (max/min)`
+(`max/min` read as 1 when `min` = 0), capped at 1; log-reverse `1 − ln(1/(1 − d/max)) / −ln(min/max)` (the same 0.25
+scale when `min` = 0), floored at 0; natural sound `10^(t · dBAttenuationAtMax / 20)`. An unknown enum value applies
+no curve. (This settles the open question above about the curves.)
+
+Audible distance (`USoundCue::CalculateMaxAudibleDistance`, CONFIRMED): the largest value any node of the graph
+reports; attenuation and ambient nodes report `RadiusMax`, a cross-fade node its largest `FadeInDistanceEnd` /
+`FadeOutDistanceEnd`, and a **looping node `WORLD_MAX` (524288)**, so a cue containing a looping node is always
+audible; 0 becomes `WORLD_MAX`. `IsAudible` (sounds played by other actors) compares the squared distance with it.
+Correction (verify-audio-runtime): the first version of the runtime ignored looping nodes and used
+`FadeInDistanceStart`.
+
+Loops and wave ends (`NotifyFinished` and the hooks): a wave instance that finishes is marked finished and its hook
+node is told. A looping node (count left) waits until every started wave under it has finished, then counts down,
+re-initialises the nodes it currently reaches (new random choice, new modulator draw, new delay) and restarts those
+waves; a finite loop therefore plays `count + 1` times, matching the cooked duration rule `(LoopCountMax + 1) ·
+child`. A wave reached from a looping node through only attenuation/modulator nodes loops seamlessly at the source and
+notifies at each wrap. The ambient node keeps its slots looping.
+
+Component volume and voices: final gain = node-chain volume × component `VolumeMultiplier` × cue `VolumeMultiplier` ×
+fade-in × fade-out × adjust-volume × sound-class volume, then ×1.25 for waves of exactly two channels of a class with
+non-zero `StereoBleed` (every class), clamped to [0, 1] by the source; final pitch = node-chain pitch × component and
+cue pitch multipliers × class pitch, clamped to **[0.4, 2.0]** by the source. A wave instance takes a voice only if
+its priority (node-chain volume, +1 for `bAlwaysPlay` classes, + the class's radio-filter volume, which is non-zero
+only for the unused `DialogRadio` class) exceeds 0.0001; the 32 highest priorities play. A component whose cue
+duration (`GetCueDuration`: the cooked `Duration`, or the graph's when none is stored) is below 10000 is stopped once
+it has played longer than duration / 0.4. `Play` is refused when the cue already plays `MaxConcurrentPlayCount`
+times. Stereo waves are never spatialised (the wave parse warns about it).
+
+Losing a voice (CONFIRMED, `StopSources` and `FSoundSource::Stop`): a source whose wave instance is no longer among
+the voices is stopped, and stopping a source marks its wave instance finished and notifies the hook node (unless it
+was already notified), so a one-shot that drops out (its channel taken, attenuated to nothing, its branch no longer
+parsed) does not come back; a looping node restarts its subtree, an ambient node keeps its slot alive. Wave instances
+that did not make the 32-channel cut are marked finished at once (without notification) unless they loop forever at
+the source (ambient slots) or their component has `bShouldRemainActiveIfDropped`, which is set in the
+`AmbientSound` component template (CONFIRMED, cdo; inherited by the subclasses' components, STRONG). Correction
+(verify-audio-runtime): the first version of the runtime let every dropped wave wait for a channel and restart.
+
+Fades: `FadeIn(d, v)` ramps the fade-in multiplier to `v` over `d` and calls `Play`, unless a fade-out is running,
+which it reverses from the current level without restarting. `Play` on a component that is still playing restarts it
+**and resets the fade values**, so `FadeIn` on a playing component (no fade-out running) restarts at full volume
+(CONFIRMED, `Play`); on a stopped component the fade applies from playback time 0 (`Cleanup` reset it). `FadeOut(d,
+v)` ramps down (or, while fading in, from the current level) and the component **stops** when the fade-out ends; a
+negative duration stops at once.
+
+Sound classes and modes: effective class values multiply volume and pitch down the tree from `Master` (`SFX`, `Music`,
+`Voice` at 0.8 each in the game) and inherit `bIsUISound` / `bIsMusic`; a class outside the tree gives no class factor.
+`SetSoundMode` with a name that is not a loaded mode changes nothing (CONFIRMED); setting the mode already active
+changes nothing.
+A mode applies its adjusters (multiplying; `bApplyToChildren` reaches every descendant) and interpolates linearly
+from the current values, starting after `InitialDelay` over `FadeInTime`; a mode with a non-negative `Duration`
+returns to the base mode after it, over its `FadeOutTime`; a mode with a negative duration becomes the base. Which
+mode is the base at start-up is not set in the shipped config (our runtime starts with none: TENTATIVE). While the
+game is paused only `bIsUISound` classes advance.
+
+Subtitles (CONFIRMED, `USoundNodeWave::HandleStart`, `FSubtitleManager::{QueueSubtitles,
+FindHighestPrioritySubtitle}`): when a **wave instance is created** (whether or not it gets a voice) for a wave with
+lines, on a component with a non-zero `SubtitlePriority` and subtitles not suppressed, its lines are queued **keyed by
+that wave instance**, with start times offset by the audio clock and the wave's own `Duration` (not scaled by pitch;
+a line later than that is clamped to it), plus an empty line at the end; lines with a negative time are kept as
+stored. The audio clock (`GetAudioTimeSeconds`) is a `WorldInfo` time that `UWorld::Tick` advances by the raw frame
+time **only while the game is not paused**. Each entry keeps a cursor that moves on when the next line has started (so
+in the 2 shipped lists that are not in time order, a line followed by an earlier one is skipped); an entry is dropped
+when its cursor reaches the end marker; the shown line is the highest-priority entry whose current line has started;
+a stopping component kills its entries. Ties resolve to the most recent queue in our runtime (TENTATIVE: the engine
+keeps whichever entry its hash set visits last). Only the narrator component (priority 10000, script) and Kismet
+`SeqAct_PlaySound` components (10000, engine script) have a priority; ambient sounds and gameplay sounds keep 0 and
+show no subtitles. Corrections (verify-audio-runtime): the first version queued when a voice started (again after a
+lost voice), keyed by component, scaled the duration by the pitch, timed lines on real time (they ran on while
+paused) and could pick a higher-priority entry whose line had not started.
+
+Spatialisation of gameplay sounds (engine script, STRONG): a sound the pawn plays on itself (it is the view target)
+is not spatialised at all, so attenuation nodes do nothing for it; sounds of other actors — including the grapple
+gun, the power-jump and rocket-boots actors attached to the pawn — are heard from their location.
+
+### Narrator — STRONG (script) with native timer rules
+
+The narrator keeps a FIFO of lines (id, cue, volume, delay, Kismet node). Adding to an empty queue fires
+`SeqEvent_NarratorEvents` "StartedNarrating" and plays the line at once — its delay is unused. A line ends on a timer
+of the cue's cooked `Duration` (not the audio): its action's "FinishedLine" output fires, the line is removed, and
+the next line starts after **its** delay; when none is left "FinishedNarrating" fires. Quirks kept: a timer of 0
+seconds never fires (CONFIRMED, native timers drop rate-0 timers), so a queued line with delay 0 stalls the queue;
+removing the playing line stops its audio at once but not its end timer, which later ends the next line before it
+played; "remove all other cues" skips the playing line (its loop stops before index 0); removing a line removes
+**every queued line equal to it** (id, cue, volume, delay and node: the same Kismet action fired twice); the delayed
+start plays the cue noted when the previous line ended, at the volume of the line first in the queue by then, with an
+end timer of that line's cue duration (an emptied queue gives volume 0 and no end timer).
+
+Timers (CONFIRMED, `AActor::UpdateTimers`): every count grows by the actor's frame time first (after world time
+dilation, which the runtime does not model), then in order a rate-0 timer is removed unfired and a timer fires once its count **exceeds** its rate; a timer set while another
+fires starts at 0 and is not advanced in that tick. Correction (verify-audio-runtime): the first version fired at
+equality and advanced a delayed start in the tick that set it (each delay ran one frame short).
+
+The Kismet runtime (`asamu-kismet`, `narrator.rs`) has its own port of this queue on the simulation tick; with it the
+audio side only plays and stops the narrator sound (`NarratorPlay` / `NarratorStop`, below). The two queues must not
+both run.
+
+### Gameplay sounds — STRONG (script), cues CONFIRMED (cdo)
+
+| Moment | Cue(s) (`asamu_assets::audio::gameplay_cues`) |
+|---|---|
+| Jump from the ground (not a power jump) | material jump cue + `TheHand_Jump_Grunt_Cue` |
+| Landing with `V.z ≤ −500` (`normalLandSoundVelocityThreshold`) | material landing cue (hard-landing table when `V.z < −2000`) + `TheHand_Land_Grunt_Cue` |
+| Footstep: walk-bob phase `trunc(π/2 + 9·BobTime/π)` changes while walking faster than 10 UU/s | material footstep cue; sprinting adds `Sprinting_Rustle_Cue` and `Footsteps_Rock_Srpinting_Cue` |
+| Pawn enters `FallingState` / `HasLanded` | wind loop `Player_Falling_Wind_Cue` starts / stops; float parameter `FallingWindParam = abs(V.x + V.y + V.z)` every 0.1 s (until the parameter is set the cue's continuous modulator reads its constant, 0: silent) |
+| Grapple fire fails | `GrapplingGun_Fail_Cue` |
+| Grapple attaches | `GrapplingGun_Decal_Cue` at the hit, `GrapplingGun_Beam_Start_Cue`, beam loop `GrapplingGun_Beam_Cue` faded in over 0.5 s; while attached `GrapplingBeamParam = fMaxDistance − distance` |
+| Grapple releases | `GrapplingGun_Beam_Stop_Cue`, beam faded out over 0.2 s |
+| Charged crystal grappled | `GrapplingGun_Recharged_Cue` and `Crystal_Drained_Cue` at the crystal |
+| Power jump: charging / charged / fired / cancelled | charge loop in (0.1 s) / light cue, charge out (0.2 s), static loop in (0.1 s) / jump sounds + `PowerJump_Jump_Cue` (+ `PowerLeap_Jump_Cue` for a leap), static out (0.6 s) / both out (0.3 s) |
+| Rocket boots: start / boost / landing cancels / exhausted | `RocketBoots_Charge_Cue` / `RocketBoots_Blast_Cue` (`FadeIn(0, 1)` on its component: reverses a running fade-out) / blast out (0.2 s) + `RocketBoots_Stopped_Cue` / `RocketBoots_Exhausted_Cue` |
+| Player dies | `Death_Blackout_Cue`, sound mode `ASAMU_Death`, `ASAMU_Default` again 0.3 + 0.6 s later |
+
+Material tables: a known physical material selects its entry and is remembered; an unknown or empty one reuses the
+remembered entry (rock at start). Landing and hard landing share one remembered index (an index valid only in the
+longer table gives no hard-landing sound; kept). The converted collision has no physical materials yet, so the
+runtime always uses the remembered (rock) entries. Goat-mode variants and the workshop-mode jump suppression are not
+ported. The pawn's `Release` → `FallingState` hand-over after 1 s is not modelled by the simulation; the runtime
+emulates it for the wind (TENTATIVE).
+
+### Runtime (our implementation)
+
+- `AudioLibrary::load(<converted>/audio)` reads the five documents (bounded, format/version checked, manifest file
+  paths validated); `read_wave_file` reads one `.ogg` and validates the whole container (`validate_ogg_vorbis`: every
+  page in bounds with a correct checksum, one logical stream from BOS to EOS with consecutive sequence numbers, the
+  three Vorbis headers with a sane identification header) before Bevy decodes it.
+- `AudioEngine::update(&lib, listener_uu, dt)` evaluates every instance and returns the voices (loudest first, at
+  most 32) with final gain, pitch, spatial flag, position, loop flag; plus Kismet feedback and the subtitle line.
+  Deterministic for a seed (`UeRand`, the engine's LCG).
+- Ambient actors (`ambient.json`): `load_ambient` starts the auto-playing actors of the map; spline actors are heard
+  from the closest point of their polyline (TENTATIVE: the engine's virtual speakers are not ported); multi-cue
+  splines play their cue with the slot's volume scale (TENTATIVE); toggleable actors follow Kismet `SeqAct_Toggle`
+  (on / off / toggle, with their fades; addressed by object name or path; the plain `AmbientSound` has no toggle
+  handler). Ambient components remain active when they lose their channel (above). The toggleable actors' checkpoint
+  record (`bCurrentlyPlaying`) is not saved yet.
+- Bevy: distance attenuation is the original's; Bevy only pans (voices placed half a unit from the listener, ears one
+  unit apart, so Bevy's own falloff never applies). The distance low-pass filter is computed but not applied.
+  Without an audio device Bevy plays nothing (`bevy_audio` warns and its playback system does not run; our voice
+  entities simply never get sinks); the engine, subtitles and Kismet feedback still run.
+- Bevy unwraps the decoder it creates (`bevy_audio` 0.20 `AudioSource::decoder`), so the IO task also opens the
+  decoder once inside `catch_unwind` and refuses a stream it cannot open. A voice whose audio finishes loading late
+  starts part-way in, except looping voices (Bevy applies the start offset inside the repeat, which would cut every
+  repetition).
+- Measured (local, all 768 converted waves through Bevy's decoder without an audio device): 625 decode to exactly the
+  final-granule frame count, the other 143 differ by at most 34.5 ms (the same files and cause as the FFmpeg note
+  above, STRONG). This replaces the UNKNOWN above about Bevy's trimming.
+- Kismet API: `apps/asamu/src/audio.rs` `AudioCommandMessage(asamu_assets::audio::AudioCommand)` in,
+  `AudioFeedbackMessage(asamu_assets::audio::AudioFeedback)` out; commands: `PlaySound` / `StopSound` (optional
+  `node`: the `SeqAct_PlaySound` action, so a stop affects exactly that action's sounds), `NarratorAddLine` /
+  `NarratorRemoveLine` (our queue; optional `node`), `NarratorPlay` / `NarratorStop` (one line now, for the Kismet
+  runtime's narrator queue), `SetSoundMode`, `ToggleAmbient`, `StopAll`.
+
+Tests: `cargo test -p asamu-assets --lib audio` (67: synthetic cues for every node, curves, fades, voice limit,
+modes, narrator quirks, subtitles, ambient actors, hostile graphs, Ogg validation, and hand-computed cases whose
+expected values were worked out independently from the formulas and the engine's random generator — random choices
+with and without replacement, modulator draws, loop counts, delays, ambient slot choice, attenuation values; plus
+`real_converted_audio_evaluates`, which validates every converted audio file and runs every converted cue and ambient
+set when `ASAMU_CONVERTED_DIR` points at a converted directory and skips otherwise) and `cargo test -p asamu audio`
+(gameplay events on the graybox; `real_converted_waves_decode` decodes converted `.ogg` files through the runtime's
+load path and Bevy's decoder, the first 64 or every file with `ASAMU_AUDIO_DECODE_ALL=1`).
+
+Real-data result (local, 2026-10-10): 768 files validated; all 572 cues evaluate; 504 produce voices within 4 s at
+300 UU and 510 within 12 s. The silent ones: 8 cues without a first node (the 4 class-default inline cues, the 3
+worm loops of `Dark_Cave_worm` and the front end's `NoSoundCue`); 43
+ambient nodes and 2 attenuation nodes whose `RadiusMax` is under 300 UU; 2 `SoundNodeWaveParam` cues with no wave
+set; delays longer than the run; the continuous modulator of the falling wind before its parameter is set; and cues
+whose random choice picked an empty input (the grunts by design). Looping over a random node with empty inputs stops
+the component for good when an empty input is chosen (no wave clears "finished" and nothing notifies the loop): the
+Workshop `Wood_Creak_Cue` (4 of 7 inputs empty) and the epilogue tuba/cello music (1 of 2) — the original's behaviour
+under the confirmed node rules (STRONG), kept.
+
+Updates to the open questions above: the attenuation curves are now CONFIRMED (this section); `bLoopingSound` is not
+read when a wave plays (STRONG); Bevy's decoded lengths are measured (above); a music system exists in script
+(`ASAMUAdaptiveMusicManager`, `ASAMUAdaptiveMusicTrack`, Kismet `SeqAct_AddAdaptiveTracks` /
+`SeqAct_SetAdaptiveTrackVolumeMultiplier` / `SeqEvent_TrackBeat`) and is **not** implemented yet; music placed as
+ambient sounds plays. Not ported: reverb volumes and interior settings, occlusion, the radio filter, Doppler /
+oscillator / enveloper nodes (no shipped cue reaches them), FaceFX, time dilation of the narrator timers, the
+graph-computed duration for the 16 cues that store none (no safety stop for them), and the `OnQueueSubtitles`
+delegate (not bound by the ASAMU script read). Not known: whether `FindHighestPrioritySubtitle` also moves its cursor
+past a line that has not started yet (the decompiled condition reads that way; our cursor waits, TENTATIVE).
