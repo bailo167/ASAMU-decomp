@@ -10,7 +10,7 @@
 >
 > **Current state: pre-alpha research. Not playable.**
 
-**Current milestone:** M7 — Rust/Bevy player controller (M1, M3, M4 verified; M2, M5 implemented; M0 awaits a green Windows CI run)
+**Current milestone:** M9 — First original level imported/playable (importer converts textures, meshes and level scenes; player runs original physics, grapple and abilities with recovered values)
 
 ## Progress
 
@@ -26,20 +26,20 @@
 | UE3 Packages | 10 | 9 | 8 | 1 | 90% | 80% |
 | Compression | 6 | 6 | 6 | 0 | 100% | 100% |
 | Objects | 6 | 6 | 3 | 0 | 100% | 50% |
-| UnrealScript | 8 | 6 | 4 | 1 | 75% | 50% |
+| UnrealScript | 8 | 7 | 5 | 1 | 87% | 62% |
 | Kismet | 5 | 5 | 0 | 0 | 100% | 0% |
-| Maps | 7 | 4 | 2 | 2 | 57% | 28% |
-| Assets | 8 | 0 | 0 | 0 | 0% | 0% |
-| Player | 9 | 2 | 0 | 7 | 22% | 0% |
-| Grapple | 8 | 0 | 0 | 7 | 0% | 0% |
-| World | 7 | 0 | 0 | 2 | 0% | 0% |
+| Maps | 7 | 6 | 2 | 1 | 85% | 28% |
+| Assets | 8 | 4 | 3 | 1 | 50% | 37% |
+| Player | 9 | 9 | 0 | 0 | 100% | 0% |
+| Grapple | 8 | 8 | 0 | 0 | 100% | 0% |
+| World | 7 | 0 | 0 | 3 | 0% | 0% |
 | Rendering | 6 | 1 | 0 | 0 | 16% | 0% |
 | Audio | 5 | 0 | 0 | 0 | 0% | 0% |
 | Save/Progression | 5 | 2 | 0 | 3 | 40% | 0% |
-| Importer | 7 | 2 | 2 | 1 | 28% | 28% |
+| Importer | 7 | 5 | 3 | 2 | 71% | 42% |
 | Platforms | 5 | 3 | 0 | 1 | 60% | 0% |
 | Tests | 8 | 5 | 0 | 3 | 62% | 0% |
-| **Overall** | **125** | **66** | **33** | **28** | **52%** | **26%** |
+| **Overall** | **125** | **91** | **38** | **16** | **72%** | **30%** |
 
 <!-- progress-table:end -->
 

@@ -9,7 +9,7 @@
 
 schema = 1
 title = "ASAMU-decomp — reimplementation progress"
-current_milestone = "M7"
+current_milestone = "M9"
 
 # --------------------------------------------------------------------------
 # Milestones
@@ -50,18 +50,20 @@ note = "Bytecode disassembly still pending."
 [[milestone]]
 id = "M6"
 name = "Original-data importer"
-status = "not_started"
+status = "partial"
+note = "Textures, meshes and level scenes convert; materials, audio, skeletal, matinee pending."
 
 [[milestone]]
 id = "M7"
 name = "Rust/Bevy player controller"
-status = "partial"
-note = "Deterministic sim + graybox app with placeholder physics; native physics spec recovered, faithful port pending."
+status = "implemented"
+note = "Original physics + values + pawn script layer; parity needs original traces."
 
 [[milestone]]
 id = "M8"
 name = "Grapple behavioural parity"
-status = "not_started"
+status = "partial"
+note = "Grapple implemented from spec with real values; awaiting original traces."
 
 [[milestone]]
 id = "M9"
@@ -431,7 +433,9 @@ note = "ScriptText TextBuffers present for all 583 classes (source shipped, loca
 [[category.item]]
 id = "disasm"
 name = "Minimal bytecode introspection (not bulk decompilation)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/BYTECODE.md; crates/asamu-ue3/tests/bytecode_real_data.rs"
+note = "12,801/12,801 scripts decode exactly; token numbers match executable GNatives registrations."
 
 [[category.item]]
 id = "movement-script"
@@ -522,8 +526,9 @@ note = "Per-map class census and gameplay actor instances."
 [[category.item]]
 id = "player-starts"
 name = "PlayerStart / checkpoint candidates"
-status = "partial"
-note = "109 checkpoints and Kismet checkpoint triggers counted; transforms not yet extracted."
+status = "implemented"
+evidence = "docs/reverse-engineering/LEVEL_FORMAT.md"
+note = "PlayerStart and 109 checkpoints with transforms extracted."
 
 [[category.item]]
 id = "streaming"
@@ -535,7 +540,9 @@ note = "TheCore streamed into IceCave; Freds_place always-loaded sub-level of Be
 [[category.item]]
 id = "volumes"
 name = "Triggers, volumes, kill zones"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/LEVEL_FORMAT.md"
+note = "1,204 brush components; kill zones, triggers, blocking/physics volumes as hulls/polygons."
 
 [[category.item]]
 id = "loc-packages"
@@ -554,12 +561,16 @@ name = "Assets"
 [[category.item]]
 id = "textures"
 name = "Textures (Texture2D + .tfc caches)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/TEXTURES.md; crates/asamu-ue3/tests/texture_real_data.rs"
+note = "8,920 textures / 73,783 mips match an independent decoder; texel CRCs agree."
 
 [[category.item]]
 id = "static-meshes"
 name = "Static meshes"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/MESHES.md; crates/asamu-ue3/tests/staticmesh_real_data.rs"
+note = "1,512/1,512 meshes consumed exactly and matched field-for-field."
 
 [[category.item]]
 id = "skeletal-meshes"
@@ -574,12 +585,15 @@ status = "not_started"
 [[category.item]]
 id = "materials"
 name = "Material parameters"
-status = "not_started"
+status = "partial"
+note = "Material references per mesh section exported; material parameters/expressions not decoded."
 
 [[category.item]]
 id = "collision"
 name = "Collision geometry"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/MESHES.md; docs/reverse-engineering/LEVEL_FORMAT.md"
+note = "kDOP/collision triangles, BSP and volume hulls extracted; runtime collision not yet built from them."
 
 [[category.item]]
 id = "audio-assets"
@@ -589,7 +603,9 @@ status = "not_started"
 [[category.item]]
 id = "transforms-lights"
 name = "Level transforms and lights"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/LEVEL_FORMAT.md; crates/asamu-ue3/tests/level_real_data.rs"
+note = "30,284 actor LocalToWorld matrices and 3,437 light components re-derived independently."
 
 # --------------------------------------------------------------------------
 # Player
@@ -609,20 +625,23 @@ note = "Pure fixed-step step(); byte-identical determinism tests; NaN/dt guards.
 [[category.item]]
 id = "ground-move"
 name = "Ground movement / acceleration"
-status = "partial"
-note = "Native CalcVelocity/braking/walking ported (Ue3PawnMovement); real AccelRate/GroundSpeed/friction defaults pending."
+status = "implemented"
+evidence = "crates/asamu-player; docs/PARITY.md"
+note = "Native physics port with original values (GroundSpeed 440, AccelRate 2048, friction 8). Not trace-verified."
 
 [[category.item]]
 id = "air-control"
 name = "Air control"
-status = "partial"
-note = "Native air-control limiter ported; flag default and AirControl value pending."
+status = "implemented"
+evidence = "crates/asamu-player; docs/PARITY.md"
+note = "Native limiter with original AirControl 0.3 -> 0.35 after first landing, bLimitFallAccel true."
 
 [[category.item]]
 id = "jump"
 name = "Jump"
-status = "investigating"
-note = "Jump impulse is script-side (no native DoJump)."
+status = "implemented"
+evidence = "crates/asamu-player; docs/PARITY.md"
+note = "JumpZ 1000 + releasable-jump damping x0.7 per ABILITIES.md."
 
 [[category.item]]
 id = "gravity"
@@ -634,26 +653,30 @@ note = "Native gravity chain + 2x falling integrator ported; DefaultGravityZ=-52
 [[category.item]]
 id = "collision-capsule"
 name = "Collision dimensions"
-status = "partial"
-note = "Recovered: radius 21, half-height 44 (UTPawn template). Runtime still uses placeholders."
+status = "implemented"
+evidence = "crates/asamu-player; docs/PARITY.md"
+note = "Cylinder radius 21 / half-height 44 (UTPawn template)."
 
 [[category.item]]
 id = "camera"
 name = "Camera"
-status = "partial"
-note = "First-person view math + graybox camera; original camera behaviour not yet recovered."
+status = "implemented"
+evidence = "crates/asamu-player; docs/PARITY.md"
+note = "Eye height smoothing, bob, previous-frame view for aims."
 
 [[category.item]]
 id = "fov"
 name = "FOV"
-status = "partial"
-note = "Settings FOV 90 recovered; camera behaviour from ABILITIES.md pending."
+status = "implemented"
+evidence = "crates/asamu-player; docs/PARITY.md"
+note = "FOV 90 (settings), zoom 90->50."
 
 [[category.item]]
 id = "input-map"
 name = "Input bindings (DefaultInput.ini)"
-status = "partial"
-note = "DefaultInput.ini bindings and PlayerInput constants recorded in GAMEPLAY_LEADS.md; not yet implemented in runtime."
+status = "implemented"
+evidence = "apps/asamu/src/main.rs; docs/PARITY.md"
+note = "DefaultInput.ini actions; mouse-look scaling formula not ported (documented deviation)."
 
 # --------------------------------------------------------------------------
 # Grapple
@@ -666,49 +689,58 @@ name = "Grapple"
 [[category.item]]
 id = "targeting"
 name = "Target acquisition"
-status = "partial"
-note = "Placeholder raycast targeting in runtime; original acquisition rules not yet recovered."
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "Trace rules from GRAPPLE.md, range 5000. Not trace-verified."
 
 [[category.item]]
 id = "range"
 name = "Grapple distance"
-status = "partial"
-note = "fMaxDistance 5000 recovered; runtime still placeholder."
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "fMaxDistance 5000 (exact boundary tested). Not trace-verified."
 
 [[category.item]]
 id = "attach-rules"
 name = "Attachment rules"
-status = "partial"
-note = "Placeholder: grapple-able surfaces in range with occlusion. Original rules unknown."
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "Grapple-able surface rules, crystals, falling rocks. Not trace-verified."
 
 [[category.item]]
 id = "pull"
 name = "Grapple acceleration / pull"
-status = "partial"
-note = "fGrappleAccel 2000, fGrappleMaxSpeed 10000, release distance 200 recovered; runtime pending."
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "Pull dt*1e7/d, fGrappleAccel/MaxSpeed values. Not trace-verified."
 
 [[category.item]]
 id = "swing"
 name = "Constraint / swing behaviour"
-status = "partial"
-note = "Placeholder rope constraint + pull. Original swing physics unknown."
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "Grappling-state physics per GRAPPLE.md. Not trace-verified."
 
 [[category.item]]
 id = "release"
 name = "Release momentum"
-status = "partial"
-note = "Release preserves velocity exactly (tested); original release behaviour unverified."
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "Release at 200 uu, 0.05 s instant release, button/landing paths. Not trace-verified."
 
 [[category.item]]
 id = "max-speed"
 name = "Maximum speed"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "2000 cap on 3-D speed while attached. Not trace-verified."
 
 [[category.item]]
 id = "abilities"
 name = "Suit ability progression / unlocks"
-status = "partial"
-note = "Per-level grapple limits (0..3) and rocket-boot unlock (StarHaven) recovered from Kismet."
+status = "implemented"
+evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
+note = "Grapple budget/recharge, power jump/leap, rocket boots, per-level unlock state. Not trace-verified."
 
 # --------------------------------------------------------------------------
 # World
@@ -743,7 +775,8 @@ note = "Graybox kill_z respawn; original death/reset rules unknown."
 [[category.item]]
 id = "moving-platforms"
 name = "Moving platforms (interpolation)"
-status = "not_started"
+status = "partial"
+note = "Movers ticked in game loop (graybox); Matinee data not decoded."
 
 [[category.item]]
 id = "level-streaming"
@@ -899,22 +932,29 @@ note = "asamu-inspect decompress writes uncompressed streams to an explicit loca
 [[category.item]]
 id = "mesh-convert"
 name = "Mesh conversion"
-status = "not_started"
+status = "verified"
+evidence = "tools/asamu-import/src/meshes.rs; docs/reverse-engineering/MESHES.md"
+note = "glTF export; positions/UVs/indices bit-identical to an independent decoder for all 902 LODs."
 
 [[category.item]]
 id = "texture-convert"
 name = "Texture conversion"
-status = "not_started"
+status = "implemented"
+evidence = "tools/asamu-import/src/textures.rs"
+note = "DDS (+PNG preview) export with manifest; user-local only."
 
 [[category.item]]
 id = "level-convert"
 name = "Level conversion"
-status = "not_started"
+status = "implemented"
+evidence = "tools/asamu-import/src/levels.rs; docs/reverse-engineering/LEVEL_FORMAT.md"
+note = "Scene JSON + BSP/volume geometry for all maps."
 
 [[category.item]]
 id = "import-cli"
 name = "asamu-import end-to-end CLI"
-status = "not_started"
+status = "partial"
+note = "textures/meshes/levels subcommands exist; no single end-to-end import yet."
 
 # --------------------------------------------------------------------------
 # Platforms
