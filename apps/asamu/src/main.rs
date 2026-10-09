@@ -48,10 +48,16 @@
 //! keys move, R respawn, F2 toggle story mode, F3 cycle the grapple capacity
 //! (0/1/2/3/unlimited), F4 toggle the rocket boots, F6 activate the attractor
 //! pad (stand-ins for the original's Kismet actions), F9 start/stop trace
-//! recording, Esc release the mouse (pauses). Mouse sensitivity is an app
-//! setting: the original's `PlayerInput` look scaling (`MouseSensitivity`
-//! 30, `LookRightScale` 300, `LookUpScale` −250) is not ported because its
-//! exact formula is not specified yet.
+//! recording, Esc pauses (pause menu). Mouse sensitivity is an app
+//! setting (settings menu): the original's `PlayerInput` look scaling
+//! (`MouseSensitivity` 30, `LookRightScale` 300, `LookUpScale` −250) is not
+//! ported because its exact formula is not specified yet.
+//!
+//! Menus and saves ([`ui`], `docs/UI_AND_SAVES.md`): the app starts in the
+//! main menu (graybox: New Game plays the test level; converted data without
+//! `--level`: New Game / Continue / chapter select load the chapters, with
+//! saves in the user data directory); `--level`, `--walk`, `--screenshot`
+//! and `--no-menu` skip it.
 
 mod audio;
 mod capture;
@@ -168,8 +174,9 @@ const USAGE: &str = "usage: asamu [options]\n\
     \n\
     converted original level (output of `asamu-import textures/meshes/levels [materials]`):\n  \
     --converted DIR         converted data directory (default: the importer's default output\n                          \
-    directory, or ASAMU_CONVERTED_DIR)\n  \
-    --level NAME            level to load, e.g. AG-Workshop (lists the available levels if missing)\n  \
+    directory, or ASAMU_CONVERTED_DIR); without --level: main menu (New Game, Continue,\n                          \
+    chapter select; saves in the user data directory, ASAMU_SAVE_DIR overrides it)\n  \
+    --level NAME            start straight in this level, e.g. AG-Workshop (saves stay in memory)\n  \
     --fly                   render-only fly camera (no collision)\n  \
     --all-sublevels         also show sub-levels Kismet streams in later (e.g. TheCore in AG-IceCave)\n  \
     --camera X,Y,Z[,YAW,PITCH]  start the fly camera at a UE3 position (UU), yaw/pitch in degrees\n  \
@@ -180,6 +187,7 @@ const USAGE: &str = "usage: asamu [options]\n\
     --normal-maps           use converted normal maps (unverified convention)\n\
     \n\
     unattended runs:\n  \
+    --no-menu               graybox: skip the main menu (click to play)\n  \
     --screenshot PATH       save a screenshot once the level has loaded (keep it local)\n  \
     --exit-after SECONDS    quit after this many seconds\n  \
     --walk SECONDS          start playing at once and hold forward for this simulated time";
@@ -210,6 +218,7 @@ struct Cli {
     screenshot: Option<PathBuf>,
     exit_after: Option<f32>,
     walk: f32,
+    no_menu: bool,
 }
 
 impl Default for Cli {
@@ -229,6 +238,7 @@ impl Default for Cli {
             screenshot: None,
             exit_after: None,
             walk: 0.0,
+            no_menu: false,
         }
     }
 }
@@ -323,6 +333,7 @@ fn parse_cli(
                 }
                 cli.walk = v;
             }
+            "--no-menu" => cli.no_menu = true,
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?} (try --help)")),
         }
@@ -483,7 +494,13 @@ fn run_graybox(cli: &Cli) -> AppExit {
             cli.screenshot.clone(),
             cli.exit_after,
         ))
-        .add_systems(Startup, (spawn_level, spawn_camera_and_light));
+        .add_systems(Startup, (spawn_level, spawn_camera_and_light))
+        // The main menu first (graybox: New Game plays the test level),
+        // except for unattended runs.
+        .insert_resource(ui::UiLaunch {
+            show_menu: !cli.no_menu && cli.walk == 0.0 && cli.screenshot.is_none(),
+            ..ui::UiLaunch::default()
+        });
     add_simulation(&mut app, game, banner);
     app.insert_resource(ScriptedWalk(cli.walk));
     app.run()
@@ -510,7 +527,7 @@ fn add_simulation_systems(app: &mut App) {
             RunFixedMainLoop,
             (cursor_and_pause, gather_input)
                 .chain()
-                .run_if(resource_exists::<Sim>)
+                .run_if(resource_exists::<Sim>.and_then(ui::gameplay_input_enabled))
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         )
         .add_systems(FixedUpdate, fixed_tick.run_if(resource_exists::<Sim>))
@@ -559,6 +576,9 @@ fn poll_game_load(
     mut commands: Commands,
     mut load: ResMut<GameLoad>,
     cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    mut saves: ResMut<ui::Saves>,
+    mut play: ResMut<ui::Play>,
+    mut loaded: MessageWriter<ui::SnapshotLoaded>,
 ) {
     let Some(task) = load.task.as_mut() else {
         return;
@@ -584,6 +604,9 @@ fn poll_game_load(
             }
             println!("{banner}");
             let mut game = game;
+            // The level start of the (in-memory) save session, as a menu
+            // load does: chapter, snapshot, "save loaded" for Kismet.
+            ui::start_direct_level(&mut game, &mut saves, &mut play, &mut loaded);
             // Already captured the mouse in fly mode: start playing at once.
             if cursor.grab_mode != CursorGrabMode::None {
                 game.start();
@@ -598,21 +621,16 @@ fn poll_game_load(
 }
 
 fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
-    let Some(level) = cli.level.clone() else {
-        let levels = dir.list_levels();
-        if levels.is_empty() {
-            eprintln!(
-                "no converted levels in {} (run `asamu-import --out <dir> levels --map <name>` \
-                 plus `textures` and `meshes`)",
-                dir.levels_dir().display()
-            );
-        } else {
-            eprintln!(
-                "choose a level with --level; converted levels in {}: {}",
-                dir.levels_dir().display(),
-                levels.join(", ")
-            );
-        }
+    let levels = dir.list_levels();
+    // Without --level the run starts in the main menu, with a converted
+    // level (the original's front end when available) rendered behind it.
+    let menu = cli.level.is_none();
+    let Some(level) = cli.level.clone().or_else(|| ui::menu_backdrop(&levels)) else {
+        eprintln!(
+            "no converted levels in {} (run `asamu-import --out <dir> levels --map <name>` \
+             plus `textures` and `meshes`)",
+            dir.levels_dir().display()
+        );
         return AppExit::error();
     };
     // Bevy resolves relative asset roots against the executable's directory:
@@ -650,8 +668,14 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
     // Gameplay: the level's game (triangle collision, gameplay actors) loads
     // on the async pool; until it is ready (or with --fly) the camera flies.
     let game_load = GameLoad {
-        request: (!cli.fly).then(|| (dir.root().to_path_buf(), level.clone())),
+        request: (!cli.fly && !menu).then(|| (dir.root().to_path_buf(), level.clone())),
         task: None,
+    };
+    let launch = ui::UiLaunch {
+        converted: Some(dir.clone()),
+        levels,
+        show_menu: menu,
+        saves: menu,
     };
     println!(
         "ASAMU-decomp: converted level {level} from {} (local data derived from your own install)",
@@ -688,6 +712,7 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         .insert_resource(CameraOverrideRes(cli.camera))
         .insert_resource(LevelGizmos(false))
         .insert_resource(game_load)
+        .insert_resource(launch)
         .add_plugins((converted::ConvertedLevelPlugin, fly::FlyCameraPlugin))
         .add_systems(Startup, (spawn_converted_camera, start_game_load))
         .add_systems(
@@ -1026,15 +1051,17 @@ fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     sim: Res<Sim>,
+    settings: Res<ui::UserSettings>,
     mut pending: ResMut<PendingInput>,
 ) {
     if cursor.grab_mode == CursorGrabMode::None || sim.game.state() != GameState::Playing {
         return;
     }
     // Screen +x (right) turns right (+yaw in UE3 convention); screen +y (down)
-    // looks down (−pitch).
-    pending.look_yaw += motion.delta.x * MOUSE_RADIANS_PER_COUNT;
-    pending.look_pitch -= motion.delta.y * MOUSE_RADIANS_PER_COUNT;
+    // looks down (−pitch); the user's sensitivity and invert apply.
+    let (yaw_scale, pitch_scale) = settings.look_scale();
+    pending.look_yaw += motion.delta.x * yaw_scale;
+    pending.look_pitch -= motion.delta.y * pitch_scale;
     if keys.just_pressed(KeyCode::Space) {
         pending.jump = true;
     }
@@ -1059,6 +1086,7 @@ fn fixed_tick(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut walk: ResMut<ScriptedWalk>,
+    mut reports: MessageWriter<ui::GameTick>,
 ) {
     // `--walk`: start at once and hold forward for the given simulated time.
     let scripted = walk.0 > 0.0;
@@ -1098,6 +1126,8 @@ fn fixed_tick(
     let before = sim.game.player().position;
     let eye_before = sim.game.eye_position();
     if let Some(report) = sim.game.tick(&input) {
+        // Checkpoint saves and the time-trial rules (`ui::flow`).
+        reports.write(ui::GameTick(report));
         sim.prev_position = before;
         sim.curr_position = sim.game.player().position;
         sim.prev_eye = eye_before;
@@ -1131,6 +1161,7 @@ fn sync_camera(
     sim: Res<Sim>,
     pending: Res<PendingInput>,
     fixed: Res<Time<Fixed>>,
+    settings: Res<ui::UserSettings>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&mut Transform, &mut Projection), With<PlayerCamera>>,
 ) {
@@ -1146,10 +1177,13 @@ fn sync_camera(
     transform.rotation = bevy_quat(ue_view_to_bevy_rotation(yaw, pitch));
 
     // The FOV is horizontal (UE3 convention); Bevy's perspective FOV is
-    // vertical. The story-mode zoom changes the run-time FOV.
+    // vertical. The story-mode zoom changes the run-time FOV; the user's FOV
+    // setting shifts it.
     if let Projection::Perspective(perspective) = projection.as_mut() {
         let aspect = (window.width() / window.height().max(1.0)).max(0.1);
-        let horizontal = sim.game.fov().to_radians();
+        let horizontal = settings
+            .view_fov_degrees(sim.game.fov(), params.camera.fov_degrees.value)
+            .to_radians();
         perspective.fov = 2.0 * ((horizontal * 0.5).tan() / aspect).atan();
     }
 }
@@ -1477,6 +1511,13 @@ mod tests {
         );
         assert!(parse_cli(args(&[]), Some("bogus")).is_err());
         assert!(parse_cli(args(&["--help"]), None).unwrap().is_none());
+        assert!(!cli.no_menu);
+        assert!(
+            parse_cli(args(&["--no-menu"]), None)
+                .unwrap()
+                .unwrap()
+                .no_menu
+        );
     }
 
     #[test]
