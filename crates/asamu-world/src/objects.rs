@@ -335,6 +335,44 @@ pub enum WorldEvent {
         /// Interactable id.
         id: u32,
     },
+    /// The player began touching a trigger, trigger volume or kill zone
+    /// (`Touch`; Kismet `SeqEvent_Touch`). Converted levels only.
+    Touch {
+        /// Actor id.
+        id: u32,
+    },
+    /// The player stopped touching it (`UnTouch`).
+    UnTouch {
+        /// Actor id.
+        id: u32,
+    },
+    /// A checkpoint was activated (`ActivateCheckpoint`, A-CP-2).
+    CheckpointActivated {
+        /// Checkpoint actor id.
+        id: u32,
+        /// Its `checkpointIndex`.
+        index: i32,
+    },
+    /// The activation made `index` the level's latest checkpoint; the
+    /// original saves the game here (A-CP-3).
+    CheckpointSaved {
+        /// `checkpointIndex`.
+        index: i32,
+    },
+    /// A falling-when-grappled rock was grappled and starts its fall
+    /// (G-WO-4).
+    RockReleased {
+        /// Rock actor id.
+        id: u32,
+    },
+    /// The player died: start of the death sequence (A-DT-2, t = 0).
+    PlayerDied {
+        /// Why.
+        cause: crate::gameplay::DeathCause,
+    },
+    /// The death sequence reset the player at the latest checkpoint (A-DT-2,
+    /// t = 0.3 s; Kismet `SeqEvent_PlayerDied`).
+    PlayerRespawned,
 }
 
 /// The handler calls and interactions the grapple gun reports (a

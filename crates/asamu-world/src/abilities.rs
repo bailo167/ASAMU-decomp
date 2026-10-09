@@ -10,10 +10,11 @@
 //! [`LevelAbilities`] is what a level applies when it starts. There is no
 //! Kismet runtime yet, so a level states it directly: the hand-made graybox
 //! uses [`LevelAbilities::graybox_test`] (everything on, 3 grapples) — a
-//! **test configuration**, not an original level's state. Which of a map's
-//! Kismet actions fire at level start is per path and partly TENTATIVE
-//! (LEVELS.md), so no per-map start state is derived here; the actions
-//! themselves are listed in [`ORIGINAL_ABILITY_ACTIONS`] (CONFIRMED values).
+//! **test configuration**, not an original level's state. Converted maps
+//! use [`level_start_abilities`], the actions on each map's level-start
+//! Kismet paths (which path fires on a fresh story start is partly
+//! TENTATIVE, LEVELS.md); the actions themselves are listed in
+//! [`ORIGINAL_ABILITY_ACTIONS`] (CONFIRMED values).
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,13 @@ pub struct LevelAbilities {
     /// `EnableRocketBoots(enable)` at level start (`None`: no action, the
     /// boots stay disabled).
     pub rocket_boots: Option<bool>,
+    /// `SeqAct_ToggleGrapple` at level start (`EnableGrapple`, a one-shot
+    /// latch, G-IN-4; `None`: no action).
+    #[serde(default)]
+    pub grapple_enabled: Option<bool>,
+    /// `SeqAct_ToggleStoryMode` at level start (`None`: no action).
+    #[serde(default)]
+    pub story_mode: Option<bool>,
 }
 
 impl Default for LevelAbilities {
@@ -35,6 +43,8 @@ impl Default for LevelAbilities {
         Self {
             max_grapples: None,
             rocket_boots: None,
+            grapple_enabled: None,
+            story_mode: None,
         }
     }
 }
@@ -48,7 +58,61 @@ impl LevelAbilities {
         Self {
             max_grapples: Some(3),
             rocket_boots: Some(true),
+            grapple_enabled: None,
+            story_mode: None,
         }
+    }
+}
+
+/// The ability state a converted map applies at load, taken from the
+/// "at level start" Kismet paths of `LEVELS.md` / `KISMET.md` as for a load
+/// straight into the map (level select). The action values are CONFIRMED
+/// (map decode); which path fires on a fresh story start is TENTATIVE
+/// (LEVELS.md "Open items"): ParadiseCave's limit of 2 and StarHaven's boots
+/// sit on level-start paths that a fresh start may not take (there the
+/// grapple and the boots are unlocked by later touch/cutscene sequences),
+/// and BeautifulCity's start limit is taken as 2 (its 3 is also reachable by
+/// a touch). Workshop and Epilogue switch story mode on at level start.
+/// Maps without an entry (menus, `TheCore`, which streams into IceCave)
+/// apply nothing.
+#[must_use]
+pub fn level_start_abilities(map: &str) -> LevelAbilities {
+    let is = |m: &str| map.eq_ignore_ascii_case(m);
+    let none = LevelAbilities::default();
+    if is("AG-Workshop") || is("AG-Epilogue") {
+        LevelAbilities {
+            story_mode: Some(true),
+            ..none
+        }
+    } else if is("AG-ParadiseCave") {
+        LevelAbilities {
+            max_grapples: Some(2),
+            rocket_boots: Some(false),
+            ..none
+        }
+    } else if is("AG-BeautifulCity") {
+        LevelAbilities {
+            max_grapples: Some(2),
+            rocket_boots: Some(false),
+            grapple_enabled: Some(true),
+            ..none
+        }
+    } else if is("AG-Darkcave") {
+        LevelAbilities {
+            max_grapples: Some(3),
+            rocket_boots: Some(false),
+            grapple_enabled: Some(true),
+            ..none
+        }
+    } else if is("AG-StarHaven") || is("AG-IceCave") {
+        LevelAbilities {
+            max_grapples: Some(3),
+            rocket_boots: Some(true),
+            grapple_enabled: Some(true),
+            ..none
+        }
+    } else {
+        none
     }
 }
 
@@ -149,12 +213,36 @@ mod tests {
             LevelAbilities::default(),
             LevelAbilities {
                 max_grapples: None,
-                rocket_boots: None
+                rocket_boots: None,
+                grapple_enabled: None,
+                story_mode: None,
             }
         );
         let g = LevelAbilities::graybox_test();
         assert_eq!(g.max_grapples, Some(3));
         assert_eq!(g.rocket_boots, Some(true));
+    }
+
+    #[test]
+    fn level_start_table_uses_only_values_the_maps_set() {
+        for a in ORIGINAL_ABILITY_ACTIONS {
+            let start = level_start_abilities(a.map);
+            if let Some(n) = start.max_grapples {
+                assert!(a.set_max_grapples.contains(&n), "{}", a.map);
+            }
+            if start.rocket_boots == Some(true) {
+                assert!(a.rocket_boots_enable > 0, "{}", a.map);
+            }
+            if start.rocket_boots == Some(false) {
+                assert!(a.rocket_boots_disable > 0, "{}", a.map);
+            }
+            if start.grapple_enabled == Some(true) {
+                assert!(a.toggle_grapple > 0, "{}", a.map);
+            }
+        }
+        assert_eq!(level_start_abilities("ag-icecave").max_grapples, Some(3));
+        assert_eq!(level_start_abilities("TheCore"), LevelAbilities::default());
+        assert_eq!(level_start_abilities("AG-Workshop").story_mode, Some(true));
     }
 
     #[test]

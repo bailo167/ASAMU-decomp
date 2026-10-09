@@ -31,11 +31,30 @@
 //! Graybox behaviour (ours, not the original's): touching a checkpoint volume
 //! makes its spawn the respawn point; falling below the level's `kill_z`
 //! respawns the player at the active checkpoint, or at `player_start` if none
-//! is active. The original's checkpoint and death rules are specified in
-//! `docs/reverse-engineering/ABILITIES.md` §11 and not ported yet; with the
-//! script layer, a respawn already follows the original's player reset
-//! (A-DT-2: teleport, velocity 0, spawn rotation, story mode exited; the
-//! script state and the physics mode are kept), but without the 0.3 s fade.
+//! is active. With the script layer, a respawn follows the original's player
+//! reset (A-DT-2: teleport, velocity 0, spawn rotation, story mode exited;
+//! the script state and the physics mode are kept), without the 0.3 s fade.
+//!
+//! # Converted (original) levels
+//!
+//! [`Game::load_level`] loads a map converted by `asamu-import` from the
+//! user's own install ([`asamu_world::scene`]): triangle collision
+//! ([`GameWorld`], [`world::SceneCollision`]), the streamed sub-levels, and
+//! the gameplay actors with the original's rules ([`asamu_world::gameplay`]):
+//! the player spawns at the `PlayerStart` (A-CP-5), checkpoints activate on
+//! touch and respawns use the checkpoint list's lookup (A-CP-1..4), kill
+//! zones, dynamic kill zones and `KillZ` start the death sequence (A-DT-1/2:
+//! grapple released and story mode left at once, the pawn keeps simulating
+//! for `playerDiedFadeDownTime` 0.3 s, then the falling-when-grappled rocks
+//! reset and the player is teleported to the latest checkpoint's spawn with
+//! its rotation and zero velocity), triggers and trigger volumes report
+//! touches, recharge crystals, glow flowers, interactables and attractor pads
+//! run on [`WorldObjects`], falling rocks on the scene runtime, movers stay
+//! where they are placed (Matinee is not imported yet), and the map's
+//! level-start abilities apply ([`asamu_world::level_start_abilities`]).
+
+mod converted;
+pub mod world;
 
 use asamu_core::{ClockError, DEFAULT_TICK_RATE_HZ, FixedClock};
 use asamu_player::grapple::{self, Aim};
@@ -50,13 +69,18 @@ use asamu_player::{
     BoxWorld, InputFrame, MovementModelKind, PlayerParams, PlayerState, SimEvent, StepEvents,
     Trace, TraceMeta, begin_step, finish_step, pawn,
 };
+use asamu_world::gameplay::DeathCause;
+use asamu_world::scene::SceneError;
 use asamu_world::{
     Level, LevelError, ObjectEvent, PrimitiveKind, SpawnPoint, SurfaceTag, WorldEvent,
     WorldObjects, graybox_test_level,
 };
+
+pub use converted::{DEATH_FADE_DOWN_TIME, SCENE_RANDOM_SEED};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+pub use world::{GameWorld, SceneCollision};
 
 /// Top-level game state (skeleton).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,13 +106,19 @@ pub enum GameError {
     /// The tick rate is invalid.
     #[error("invalid clock: {0}")]
     Clock(#[from] ClockError),
+    /// A converted level could not be loaded.
+    #[error("cannot load the converted level: {0}")]
+    Scene(#[from] SceneError),
+    /// The converted level has no `PlayerStart`.
+    #[error("the converted level has no PlayerStart")]
+    NoPlayerStart,
 }
 
 /// World-object events of one tick (fixed capacity so [`TickReport`] stays
 /// `Copy`; a full log drops further events and sets `overflowed`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldEventLog {
-    items: [Option<WorldEvent>; 8],
+    items: [Option<WorldEvent>; 16],
     len: u8,
     /// An event was dropped because the log was full.
     pub overflowed: bool,
@@ -134,12 +164,19 @@ pub struct TickReport {
     pub tick: u64,
     /// Player simulation events.
     pub events: StepEvents,
-    /// The player fell below `kill_z` and was respawned.
+    /// The player was respawned this tick (hand-made levels: fell below
+    /// `kill_z`; converted levels: the death sequence's reset at
+    /// `DEATH_FADE_DOWN_TIME`).
     pub respawned: bool,
     /// Id of a checkpoint activated this tick.
     pub checkpoint_activated: Option<u32>,
-    /// World-object events (crystals, interactions).
+    /// World-object events (crystals, interactions; converted levels also
+    /// touches, checkpoints, deaths, respawns).
     pub world: WorldEventLog,
+    /// A death sequence started this tick (converted levels; also when the
+    /// respawn point itself is inside a kill zone).
+    #[serde(default)]
+    pub died: Option<DeathCause>,
 }
 
 /// The surface the player simulation sees for a level primitive.
@@ -214,7 +251,7 @@ pub fn box_world_with_objects(level: &Level, objects: Option<&WorldObjects>) -> 
 pub struct Game {
     state: GameState,
     level: Level,
-    world: BoxWorld,
+    world: GameWorld,
     params: PlayerParams,
     movement: MovementModelKind,
     clock: FixedClock,
@@ -224,6 +261,8 @@ pub struct Game {
     respawn_count: u32,
     last_events: StepEvents,
     recording: Option<Trace>,
+    /// Converted-level state (`None` for hand-made levels).
+    scene: Option<Box<converted::SceneGame>>,
 }
 
 impl Game {
@@ -236,7 +275,7 @@ impl Game {
         params.validate()?;
         let clock = FixedClock::new(tick_rate_hz)?;
         let objects = WorldObjects::new(&level);
-        let world = box_world_with_objects(&level, Some(&objects));
+        let world = GameWorld::from_boxes(box_world_with_objects(&level, Some(&objects)));
         let mut player = spawn_state(&world, &params, &level.player_start);
         apply_level_abilities(&mut player, &level);
         Ok(Self {
@@ -252,6 +291,7 @@ impl Game {
             respawn_count: 0,
             last_events: StepEvents::default(),
             recording: None,
+            scene: None,
         })
     }
 
@@ -343,6 +383,9 @@ impl Game {
         if self.state != GameState::Playing {
             return None;
         }
+        if self.scene.is_some() {
+            return Some(self.tick_scene(input));
+        }
         let dt = self.clock.dt();
         let mut world_events = Vec::new();
         // 1. Input events (G-IN-5, G-TM-2): the fire trace sees the map
@@ -365,7 +408,7 @@ impl Game {
                 &mut self.player.velocity,
                 &mut world_events,
             );
-            self.world = box_world_with_objects(&self.level, Some(&self.objects));
+            self.world.boxes = box_world_with_objects(&self.level, Some(&self.objects));
         }
         // 3. Controller, pawn, power jump, rocket boots, gun.
         let mut events = finish_step(
@@ -416,6 +459,7 @@ impl Game {
             respawned,
             checkpoint_activated,
             world,
+            died: None,
         })
     }
 
@@ -430,6 +474,9 @@ impl Game {
                 _ => continue,
             };
             self.objects.apply(&self.level, object_event, out);
+            if let Some(scene) = &mut self.scene {
+                scene.apply_rock_event(object_event, out);
+            }
         }
     }
 
@@ -442,6 +489,13 @@ impl Game {
     /// reproduce.
     pub fn respawn(&mut self) {
         let mut world_events = Vec::new();
+        if self.scene.is_some() {
+            // Converted levels: the original's player reset at the latest
+            // checkpoint, at once (no fade; the `ResetPlayer` path).
+            self.release_for_death(&mut world_events);
+            let _ = self.scene_reset_player(&mut world_events);
+            return;
+        }
         self.respawn_with_reason("manual", &mut world_events);
     }
 
@@ -492,9 +546,17 @@ impl Game {
         released
     }
 
-    /// Where [`Self::respawn`] would place the player.
+    /// Where [`Self::respawn`] would place the player (converted levels:
+    /// `feet` is the teleport target of the pawn's centre, see
+    /// [`Self::scene_respawn_point`]).
     #[must_use]
     pub fn respawn_point(&self) -> SpawnPoint {
+        if let Some((location, rotation)) = self.scene_respawn_point() {
+            return SpawnPoint {
+                feet: location,
+                yaw: asamu_world::rotation::units_to_radians(rotation[1]),
+            };
+        }
         self.active_checkpoint
             .and_then(|i| self.level.checkpoints.get(i))
             .map_or(self.level.player_start, |c| c.spawn)
@@ -670,9 +732,10 @@ impl Game {
         &self.level
     }
 
-    /// The collision world built from the level.
+    /// The collision world (boxes of hand-made levels; triangle collision of
+    /// converted levels).
     #[must_use]
-    pub fn world(&self) -> &BoxWorld {
+    pub fn world(&self) -> &GameWorld {
         &self.world
     }
 
@@ -688,9 +751,13 @@ impl Game {
         &self.clock
     }
 
-    /// Id of the active checkpoint.
+    /// Id of the active checkpoint (converted levels: the checkpoint the
+    /// respawn uses, once one has been registered).
     #[must_use]
     pub fn active_checkpoint(&self) -> Option<u32> {
+        if let Some(scene) = &self.scene {
+            return scene.active_checkpoint();
+        }
         self.active_checkpoint
             .and_then(|i| self.level.checkpoints.get(i))
             .map(|c| c.id)
@@ -710,7 +777,8 @@ impl Game {
 }
 
 /// Applies the level's ability state at level start (the original's
-/// Kismet actions; `asamu_world::abilities`).
+/// Kismet actions; `asamu_world::abilities`). Story mode, which needs the
+/// parameters, is applied by [`Game::load_level`].
 pub fn apply_level_abilities(player: &mut PlayerState, level: &Level) {
     if let Some(n) = level.abilities.max_grapples {
         grapple_gun::set_max_grapples(player, n);
@@ -718,12 +786,19 @@ pub fn apply_level_abilities(player: &mut PlayerState, level: &Level) {
     if let Some(enable) = level.abilities.rocket_boots {
         rocket_boots::enable_rocket_boots(player, enable);
     }
+    if let Some(enable) = level.abilities.grapple_enabled {
+        grapple_gun::enable_grapple(player, enable);
+    }
 }
 
 /// A player state standing on `spawn` (snapped to the floor when there is one
 /// just below the feet point).
 #[must_use]
-pub fn spawn_state(world: &BoxWorld, params: &PlayerParams, spawn: &SpawnPoint) -> PlayerState {
+pub fn spawn_state<W: asamu_player::CollisionWorld + ?Sized>(
+    world: &W,
+    params: &PlayerParams,
+    spawn: &SpawnPoint,
+) -> PlayerState {
     let lift = params.movement.capsule_half_height.value + CONTACT_SKIN;
     let mut s = PlayerState::new(spawn.feet + Vec3::Z * lift, spawn.yaw);
     place_on_floor(&mut s, &params.movement, world, 4.0 * CONTACT_SKIN);
@@ -1138,7 +1213,7 @@ mod tests {
         let g = Game::graybox().unwrap();
         let level = g.level();
         assert_eq!(
-            g.world().boxes.len(),
+            g.world().boxes.boxes.len(),
             level.static_boxes.len()
                 + level.grapple_points.len()
                 + level.movers.len()
@@ -1146,9 +1221,10 @@ mod tests {
                 + level.flowers.len()
                 + level.interactables.len()
         );
-        assert!(g.world().ground.is_none());
+        assert!(g.world().boxes.ground.is_none());
+        assert!(g.world().scene.is_none());
         assert!(matches!(g.aim(), Aim::OutOfRange | Aim::Blocked { .. }));
         // Movers report their location for the grapple anchor (G-AT-8).
-        assert_eq!(g.world().actors.len(), level.movers.len());
+        assert_eq!(g.world().boxes.actors.len(), level.movers.len());
     }
 }

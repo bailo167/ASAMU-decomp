@@ -1,25 +1,47 @@
 //! Runtime world representation: levels, checkpoints, grapple points,
-//! grapple-reactive objects and the ability state a level sets.
+//! grapple-reactive objects, the ability state a level sets, and levels
+//! converted from the user's original install.
 //!
 //! This crate holds plain data (no Bevy, no UE3 parsing) plus the run-time
 //! state machines of map-placed gameplay actors ([`objects`]: recharge
 //! crystals, glow flowers, movers, interactables, attractor pads) and the
-//! per-level ability state ([`abilities`]). Levels converted from the
-//! user's original install will eventually be produced by the importer into
-//! this form; today the only level is [`graybox_test_level`], which is
-//! **hand-made test geometry, not original content**.
+//! per-level ability state ([`abilities`]).
+//!
+//! Two kinds of level exist:
+//!
+//! - [`graybox_test_level`]: **hand-made test geometry, not original
+//!   content** (axis-aligned boxes, [`Level`]).
+//! - Converted levels: [`scene::load_map`] reads what `asamu-import levels`
+//!   and `asamu-import meshes --collision` wrote to a user-local directory
+//!   (never the repository) and builds triangle collision
+//!   ([`collision`]: a two-level BVH over static-mesh kDOP triangles, BSP
+//!   and blocking-volume hulls, with exact swept-cylinder and ray queries)
+//!   and the gameplay actors with the original's rules ([`gameplay`]:
+//!   player start, checkpoints, kill zones, triggers, falling rocks).
+//!   [`rotation`] holds the UE3 transform math for actors that move;
+//!   [`fixtures`] writes synthetic converted data for tests.
 //!
 //! Conventions: UE3 axes (X forward, Y right, Z up), distances in Unreal
-//! units (UU), yaw in radians (UE3 convention, + turns right).
+//! units (UU), yaw in radians (UE3 convention, + turns right) unless a field
+//! says it holds rotator units.
+
+use std::collections::BTreeSet;
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod abilities;
+pub mod collision;
+pub mod fixtures;
+pub mod gameplay;
 pub mod objects;
+pub mod rotation;
+pub mod scene;
 
-pub use abilities::{KismetAbilityActions, LevelAbilities, ORIGINAL_ABILITY_ACTIONS};
+pub use abilities::{
+    KismetAbilityActions, LevelAbilities, ORIGINAL_ABILITY_ACTIONS, level_start_abilities,
+};
 pub use objects::{
     Attractor, GlowFlower, Interactable, Mover, MoverPath, ObjectEvent, RechargeCrystal,
     WorldEvent, WorldObjects,
@@ -313,13 +335,13 @@ impl Level {
             Ok(())
         };
         check_spawn(&self.player_start, "player_start".into())?;
-        let mut ids: Vec<u32> = Vec::with_capacity(self.checkpoints.len());
+        // Sets, not lists: converted levels hold thousands of objects.
+        let mut ids: BTreeSet<u32> = BTreeSet::new();
         for c in &self.checkpoints {
             let what = format!("checkpoint {}", c.id);
-            if ids.contains(&c.id) {
+            if !ids.insert(c.id) {
                 return Err(LevelError::DuplicateCheckpoint(c.id));
             }
-            ids.push(c.id);
             if !(finite3(c.min) && finite3(c.max)) {
                 return Err(LevelError::NonFinite { what });
             }
@@ -333,12 +355,11 @@ impl Level {
 
     fn validate_objects(&self) -> Result<(), LevelError> {
         let bad = |id: u32, what: &'static str| Err(LevelError::BadObject { id, what });
-        let mut ids: Vec<u32> = Vec::new();
+        let mut ids: BTreeSet<u32> = BTreeSet::new();
         let mut claim = |id: u32| -> Result<(), LevelError> {
-            if ids.contains(&id) {
+            if !ids.insert(id) {
                 return Err(LevelError::DuplicateObjectId(id));
             }
-            ids.push(id);
             Ok(())
         };
         for c in &self.crystals {
