@@ -60,6 +60,8 @@ toml = "=1.1.8"
 sha2 = "=0.11.0"
 walkdir = "=2.5.0"
 cpp_demangle = "=0.5.1"
+object = { version = "=0.40.0", default-features = false, features = ["read_core", "macho", "std"] }
+tempfile = "=3.27.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
