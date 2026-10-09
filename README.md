@@ -10,7 +10,7 @@
 >
 > **Current state: pre-alpha research. Not playable.**
 
-**Current milestone:** M4 — Import/export/object recovery (M1 inventory and M3 package reader verified; M0 awaits a green Windows CI run)
+**Current milestone:** M7 — Rust/Bevy player controller (M1, M3, M4 verified; M2, M5 implemented; M0 awaits a green Windows CI run)
 
 ## Progress
 
@@ -22,16 +22,16 @@
 | Category | Items | Implemented + verified | Verified | In progress | Completion | Verified % |
 |---|---:|---:|---:|---:|---:|---:|
 | Binary RE | 8 | 8 | 4 | 0 | 100% | 50% |
-| Symbols | 7 | 6 | 3 | 1 | 85% | 42% |
+| Symbols | 7 | 7 | 4 | 0 | 100% | 57% |
 | UE3 Packages | 10 | 9 | 8 | 1 | 90% | 80% |
 | Compression | 6 | 6 | 6 | 0 | 100% | 100% |
-| Objects | 6 | 1 | 0 | 2 | 16% | 0% |
-| UnrealScript | 8 | 2 | 2 | 3 | 25% | 25% |
-| Kismet | 5 | 0 | 0 | 1 | 0% | 0% |
-| Maps | 7 | 2 | 1 | 2 | 28% | 14% |
+| Objects | 6 | 6 | 3 | 0 | 100% | 50% |
+| UnrealScript | 8 | 6 | 4 | 1 | 75% | 50% |
+| Kismet | 5 | 5 | 0 | 0 | 100% | 0% |
+| Maps | 7 | 4 | 2 | 2 | 57% | 28% |
 | Assets | 8 | 0 | 0 | 0 | 0% | 0% |
-| Player | 9 | 2 | 0 | 5 | 22% | 0% |
-| Grapple | 8 | 0 | 0 | 4 | 0% | 0% |
+| Player | 9 | 2 | 0 | 7 | 22% | 0% |
+| Grapple | 8 | 0 | 0 | 7 | 0% | 0% |
 | World | 7 | 0 | 0 | 2 | 0% | 0% |
 | Rendering | 6 | 1 | 0 | 0 | 16% | 0% |
 | Audio | 5 | 0 | 0 | 0 | 0% | 0% |
@@ -39,7 +39,7 @@
 | Importer | 7 | 2 | 2 | 1 | 28% | 28% |
 | Platforms | 5 | 3 | 0 | 1 | 60% | 0% |
 | Tests | 8 | 5 | 0 | 3 | 62% | 0% |
-| **Overall** | **125** | **49** | **26** | **29** | **39%** | **20%** |
+| **Overall** | **125** | **66** | **33** | **28** | **52%** | **26%** |
 
 <!-- progress-table:end -->
 

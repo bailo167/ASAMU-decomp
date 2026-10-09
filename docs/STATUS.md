@@ -2,6 +2,22 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-09/10 — Session 1 (overnight): object decoder, defaults, Kismet, behaviour specs, save, binary
+
+**Done**
+- Object payload decoder + class model (all 70,946 script objects and 2,521 CDOs consume exactly; independent
+  Python decoder agrees). `asamu-inspect class/defaults/props/coverage/kismet/scripttext`.
+- Real gameplay defaults with provenance (`DEFAULTS.md`, `data/defaults/`): pawn GroundSpeed 440, AccelRate 2048,
+  JumpZ 1000, AirControl 0.3, MaxStepHeight 26, WalkableFloorZ 0.78, collision 21/44, eye 38, bLimitFallAccel true;
+  GrappleGun range 5000, accel 2000, max speed 10000, release distance 200. Script layout = native layout.
+- Kismet graphs for all 12 maps (0 dangling links); level order confirmed from data; per-level grapple limits.
+- `GRAPPLE.md`, `ABILITIES.md` behaviour specs; `SAVE.md`; complete `BINARY_ANALYSIS.md`; faithful native physics
+  port `Ue3PawnMovement` (177 tests).
+- Disk filled once (per-agent cargo target dirs); cleaned. Agents now share a target dir.
+
+**Next**: Phase 3 gameplay port (real params, jump/sprint/landing, grapple, power jump, rocket boots) and Phase 4
+importer foundations (textures, static meshes, level actors) in parallel; bytecode introspection.
+
 ## 2026-10-09 — Session 1 (continued): package reader, ASAMU.u found, symbol map
 
 **Done**

@@ -719,7 +719,14 @@ Declaration-order consistency with stock UE3/UDK classes is used as a supporting
 | +0x1FC/+0x200/+0x204 | RotationRate | FRotator | read by SetRotationRate (AI) and actor rotation | STRONG |
 | +0x208 | PendingTouch | Actor* | PostTouch chain at end of performPhysics | STRONG |
 
-### 7.2 Pawn (APawn fields start at +0x250)
+### 7.2 Pawn (sizeof(AActor) = 0x248; APawn's first field is the `IInterface_Speaker` vtable pointer at +0x248)
+
+> **Cross-validated (CONFIRMED, see DEFAULTS.md):** computing native offsets from the script property layout
+> reproduces every offset in this section and all 1,447 native class sizes. Names below that were marked
+> STRONG/TENTATIVE are therefore confirmed by layout where DEFAULTS.md lists them (e.g. `AirControl` +0x35C,
+> `WalkableFloorZ` +0x258, `CustomGravityScaling` UDKPawn+0x5A4, `bLimitFallAccel` = bit 51 of +0x298, default
+> `true`). Additional fields named by layout: Pawn+0x500 `FailedLandingCount`, UDKPawn+0x788
+> `StartedFallingTime`, Pawn bit 59 `bNeedsBaseTickedFirst`, Actor bit 59 `bCollideActors`.
 
 | Offset | Hypothesised name | Type | Evidence | Conf. |
 |---|---|---|---|---|

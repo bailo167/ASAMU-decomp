@@ -9,7 +9,7 @@
 
 schema = 1
 title = "ASAMU-decomp — reimplementation progress"
-current_milestone = "M4"
+current_milestone = "M7"
 
 # --------------------------------------------------------------------------
 # Milestones
@@ -39,12 +39,13 @@ status = "verified"
 [[milestone]]
 id = "M4"
 name = "Import/export/object recovery"
-status = "investigating"
+status = "verified"
 
 [[milestone]]
 id = "M5"
 name = "Kismet/script structural recovery"
-status = "investigating"
+status = "implemented"
+note = "Bytecode disassembly still pending."
 
 [[milestone]]
 id = "M6"
@@ -204,8 +205,9 @@ note = "1,330 compilation units via debug map."
 [[category.item]]
 id = "package-correlation"
 name = "Symbol ↔ package export correlation"
-status = "partial"
-note = "Class-level map in CORRELATION.md; property-level layout correlation pending."
+status = "verified"
+evidence = "docs/reverse-engineering/DEFAULTS.md"
+note = "Script property layout = native field layout (105 offsets, 1,447 class sizes)."
 
 # --------------------------------------------------------------------------
 # UE3 Packages
@@ -352,29 +354,37 @@ note = "Super chains from export SuperIndex."
 [[category.item]]
 id = "property-tags"
 name = "Tagged property serialization"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/OBJECT_FORMAT.md; crates/asamu-ue3/tests/objects_real_data.rs"
+note = "All tags of 202,685 exports decode; independent strict Python decoder agreed."
 
 [[category.item]]
 id = "defaults"
 name = "Class default objects (gameplay defaults)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/DEFAULTS.md; docs/reverse-engineering/data/defaults"
+note = "2,521 CDOs consume exactly; script layout reproduces 1,447/1,447 native class sizes."
 
 [[category.item]]
 id = "structs-enums"
 name = "Struct / enum / const definitions"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/OBJECT_FORMAT.md; crates/asamu-ue3/tests/objects_real_data.rs"
+note = "ScriptStruct/Enum/Const layouts confirmed by exact consumption; 31 binary structs identified."
 
 [[category.item]]
 id = "cross-package"
 name = "Cross-package import → export resolution"
-status = "partial"
-note = "Imports resolve to names/paths; cross-package object loading not implemented."
+status = "implemented"
+evidence = "crates/asamu-ue3/src/model.rs"
+note = "Class model resolves inheritance and defaults across packages by name."
 
 [[category.item]]
 id = "object-summary"
 name = "Sanitized per-object metadata summaries"
-status = "partial"
-note = "asamu-inspect objects/map give per-object metadata; payloads undecoded."
+status = "implemented"
+evidence = "tools/asamu-inspect (class, defaults, props, coverage)"
+note = "Native data tails of 42,026 exports (textures, meshes, levels) not yet decoded."
 
 # --------------------------------------------------------------------------
 # UnrealScript
@@ -401,14 +411,16 @@ note = "All 172 classes + inheritance from export tables."
 [[category.item]]
 id = "functions"
 name = "Functions, states, native/scripted flags"
-status = "partial"
-note = "922 functions + 62 states enumerated by name; flags/natives undecoded."
+status = "verified"
+evidence = "docs/reverse-engineering/OBJECT_FORMAT.md; crates/asamu-ue3/tests/objects_real_data.rs"
+note = "All 922 asamu functions + 62 states decode exactly incl. flags/native indices; native indices match the executable."
 
 [[category.item]]
 id = "properties"
 name = "Script properties and flags"
-status = "partial"
-note = "~2,800 properties enumerated by name/type; flags/defaults undecoded."
+status = "verified"
+evidence = "docs/reverse-engineering/OBJECT_FORMAT.md; crates/asamu-ue3/tests/objects_real_data.rs"
+note = "All property exports decode exactly incl. PropertyFlags."
 
 [[category.item]]
 id = "bytecode-presence"
@@ -424,12 +436,16 @@ status = "not_started"
 [[category.item]]
 id = "movement-script"
 name = "Player movement logic understood"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/ABILITIES.md"
+note = "Spec of jump/sprint/landing/power jump/rocket boots/death; adversarially re-checked."
 
 [[category.item]]
 id = "grapple-script"
 name = "Grapple logic understood"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/GRAPPLE.md"
+note = "Spec of targeting/attach/Grappling forces/release/counts; adversarially re-checked."
 
 # --------------------------------------------------------------------------
 # Kismet
@@ -442,28 +458,37 @@ name = "Kismet"
 [[category.item]]
 id = "sequence-objects"
 name = "Sequence object enumeration per map"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/KISMET.md; crates/asamu-ue3/tests/kismet_real_data.rs"
+note = "All 12 maps: 3,504 objects, 0 decode failures, 0 dangling links."
 
 [[category.item]]
 id = "links"
 name = "Input/output/variable/event links"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/KISMET.md; crates/asamu-ue3/tests/kismet_real_data.rs"
+note = "All 12 maps: 3,504 objects, 0 decode failures, 0 dangling links."
 
 [[category.item]]
 id = "custom-classes"
 name = "ASAMU-custom sequence classes"
-status = "partial"
-note = "49 SeqAct_* + 20 SeqEvent_* + 1 SeqCond_* ASAMU classes enumerated."
+status = "implemented"
+evidence = "docs/reverse-engineering/KISMET.md; crates/asamu-ue3/tests/kismet_real_data.rs"
+note = "Usage of every ASAMU SeqAct/SeqEvent per map."
 
 [[category.item]]
 id = "graph-export"
 name = "Sanitized JSON/DOT graph export (local only)"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/KISMET.md; crates/asamu-ue3/tests/kismet_real_data.rs"
+note = "All 12 maps: 3,504 objects, 0 decode failures, 0 dangling links."
 
 [[category.item]]
 id = "flow-summary"
 name = "Per-level flow summaries"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/LEVELS.md; docs/reverse-engineering/KISMET.md"
+note = "Per-level milestones and transitions; conditions not evaluated."
 
 # --------------------------------------------------------------------------
 # Maps
@@ -483,25 +508,29 @@ note = "Every .asamu has exactly one TheWorld + PersistentLevel and the Contains
 [[category.item]]
 id = "map-list"
 name = "Map list and level order"
-status = "implemented"
-evidence = "docs/reverse-engineering/SAVE.md; docs/reverse-engineering/LEVELS.md"
-note = "Story chain confirmed from WorldInfo titles/progression data."
+status = "verified"
+evidence = "docs/reverse-engineering/LEVELS.md"
+note = "Level order confirmed three ways: GameInfo.LevelFileNames, ASAMULevels enum, Kismet transitions."
 
 [[category.item]]
 id = "actor-census"
 name = "Actor class census per map"
-status = "partial"
-note = "asamu-inspect map gives per-map class census; not yet summarised in LEVELS.md."
+status = "implemented"
+evidence = "docs/reverse-engineering/data/defaults/map_instances.json; tools/asamu-inspect map"
+note = "Per-map class census and gameplay actor instances."
 
 [[category.item]]
 id = "player-starts"
 name = "PlayerStart / checkpoint candidates"
-status = "not_started"
+status = "partial"
+note = "109 checkpoints and Kismet checkpoint triggers counted; transforms not yet extracted."
 
 [[category.item]]
 id = "streaming"
 name = "Streaming levels"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/LEVELS.md"
+note = "TheCore streamed into IceCave; Freds_place always-loaded sub-level of BeautifulCity."
 
 [[category.item]]
 id = "volumes"
@@ -605,7 +634,8 @@ note = "Native gravity chain + 2x falling integrator ported; DefaultGravityZ=-52
 [[category.item]]
 id = "collision-capsule"
 name = "Collision dimensions"
-status = "not_started"
+status = "partial"
+note = "Recovered: radius 21, half-height 44 (UTPawn template). Runtime still uses placeholders."
 
 [[category.item]]
 id = "camera"
@@ -616,7 +646,8 @@ note = "First-person view math + graybox camera; original camera behaviour not y
 [[category.item]]
 id = "fov"
 name = "FOV"
-status = "not_started"
+status = "partial"
+note = "Settings FOV 90 recovered; camera behaviour from ABILITIES.md pending."
 
 [[category.item]]
 id = "input-map"
@@ -641,7 +672,8 @@ note = "Placeholder raycast targeting in runtime; original acquisition rules not
 [[category.item]]
 id = "range"
 name = "Grapple distance"
-status = "not_started"
+status = "partial"
+note = "fMaxDistance 5000 recovered; runtime still placeholder."
 
 [[category.item]]
 id = "attach-rules"
@@ -652,7 +684,8 @@ note = "Placeholder: grapple-able surfaces in range with occlusion. Original rul
 [[category.item]]
 id = "pull"
 name = "Grapple acceleration / pull"
-status = "not_started"
+status = "partial"
+note = "fGrappleAccel 2000, fGrappleMaxSpeed 10000, release distance 200 recovered; runtime pending."
 
 [[category.item]]
 id = "swing"
@@ -674,7 +707,8 @@ status = "not_started"
 [[category.item]]
 id = "abilities"
 name = "Suit ability progression / unlocks"
-status = "not_started"
+status = "partial"
+note = "Per-level grapple limits (0..3) and rocket-boot unlock (StarHaven) recovered from Kismet."
 
 # --------------------------------------------------------------------------
 # World
