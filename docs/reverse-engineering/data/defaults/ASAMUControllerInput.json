@@ -1,0 +1,21 @@
+{
+  "cdo_sources": [
+    {"class":"Core.Object","own_tags":0},
+    {"class":"asamu.ASAMUControllerInput","own_tags":1}
+  ],
+  "class": "asamu.ASAMUControllerInput",
+  "class_flags": ["Compiled","Config","Parsed"],
+  "component_templates": {},
+  "config_files": ["ASAMU/Config/DefaultController.ini"],
+  "config_keys_without_property": [],
+  "config_name": "Controller",
+  "properties": [
+    {"confidence":"STRONG","config":{"config_name":"Controller","file":"ASAMU/Config/DefaultController.ini","key":"ControllerSensitivity","raw":["1.0"],"section":"asamu.ASAMUControllerInput"},"declared_in":"asamu.ASAMUControllerInput","flags":["Config"],"name":"ControllerSensitivity","source":"config","type":"float","value":1.0},
+    {"confidence":"STRONG","declared_in":"asamu.ASAMUControllerInput","name":"PC","source":"zero","type":"ASAMUPlayerController","value":null},
+    {"confidence":"STRONG","declared_in":"asamu.ASAMUControllerInput","name":"G","source":"zero","type":"ASAMUGameInfo","value":null}
+  ],
+  "property_count_listed": 3,
+  "property_count_omitted_zero_inherited": 13,
+  "schema": "asamu-decomp/gameplay-defaults/v1",
+  "super_chain": ["Core.Object"]
+}

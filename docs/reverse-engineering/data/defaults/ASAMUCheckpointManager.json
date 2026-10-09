@@ -1,0 +1,20 @@
+{
+  "cdo_sources": [
+    {"class":"Core.Object","own_tags":0},
+    {"class":"asamu.ASAMUCheckpointManager","own_tags":0}
+  ],
+  "class": "asamu.ASAMUCheckpointManager",
+  "class_flags": ["Compiled","Parsed"],
+  "component_templates": {},
+  "config_files": [],
+  "config_keys_without_property": [],
+  "config_name": "None",
+  "properties": [
+    {"confidence":"STRONG","declared_in":"asamu.ASAMUCheckpointManager","name":"latestCompletedCheckpointPerLevel","source":"zero","type":"array<int>","value":[]},
+    {"confidence":"STRONG","declared_in":"asamu.ASAMUCheckpointManager","name":"checkpoints","source":"zero","type":"array<ASAMUCheckpoint>","value":[]}
+  ],
+  "property_count_listed": 2,
+  "property_count_omitted_zero_inherited": 13,
+  "schema": "asamu-decomp/gameplay-defaults/v1",
+  "super_chain": ["Core.Object"]
+}

@@ -1,0 +1,38 @@
+{
+  "cdo_sources": [
+    {"class":"Core.Object","own_tags":0},
+    {"class":"Engine.SequenceObject","own_tags":4},
+    {"class":"Engine.SequenceOp","own_tags":10},
+    {"class":"Engine.SequenceAction","own_tags":4},
+    {"class":"asamu.SeqAct_SetPawnSize","own_tags":4}
+  ],
+  "class": "asamu.SeqAct_SetPawnSize",
+  "class_flags": ["Compiled","Parsed"],
+  "component_templates": {},
+  "config_files": [],
+  "config_keys_without_property": [],
+  "config_name": "None",
+  "properties": [
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceObject","name":"ObjName","native_offset":"0x078","source":"cdo","type":"string","value":"Set Pawn Size","value_from":"asamu.SeqAct_SetPawnSize"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceObject","name":"ObjCategory","native_offset":"0x088","source":"cdo","type":"string","value":"ASAMU","value_from":"asamu.SeqAct_SetPawnSize"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceObject","name":"ObjColor","native_offset":"0x0A8","source":"inherited","type":"Color","value":{"A":255,"B":255,"G":0,"R":255},"value_from":"Engine.SequenceAction"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceObject","name":"bDeletable","native_bit":0,"native_offset":"0x0C0","source":"inherited","type":"bool","value":true,"value_from":"Engine.SequenceObject"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceObject","flags":["Edit"],"name":"bSuppressAutoComment","native_bit":4,"native_offset":"0x0C0","source":"inherited","type":"bool","value":true,"value_from":"Engine.SequenceObject"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","name":"bAutoActivateOutputLinks","native_bit":4,"native_offset":"0x0D8","source":"inherited","type":"bool","value":true,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","flags":["Transient"],"name":"bPendingVarConnectorRecalc","native_bit":8,"native_offset":"0x0D8","source":"inherited","type":"bool","value":true,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","flags":["Transient"],"name":"bPendingInputConnectorRecalc","native_bit":9,"native_offset":"0x0D8","source":"inherited","type":"bool","value":true,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","flags":["Transient"],"name":"bPendingOutputConnectorRecalc","native_bit":10,"native_offset":"0x0D8","source":"inherited","type":"bool","value":true,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","flags":["Transient"],"name":"LastActivatedInputLink","native_offset":"0x0E8","source":"inherited","type":"int","value":-1,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","flags":["Transient"],"name":"LastActivatedOutputLink","native_offset":"0x0EC","source":"inherited","type":"int","value":-1,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","name":"InputLinks","native_offset":"0x0F0","source":"cdo","type":"array<SeqOpInputLink>","value":[{"ActivateDelay":0.0,"DrawY":0,"LinkDesc":"Make Adult","LinkedOp":null,"OverrideDelta":0,"QueuedActivations":0,"bClampedMax":false,"bClampedMin":false,"bDisabled":false,"bDisabledPIE":false,"bHasImpulse":false,"bHidden":false,"bMoving":false},{"ActivateDelay":0.0,"DrawY":0,"LinkDesc":"Make Child","LinkedOp":null,"OverrideDelta":0,"QueuedActivations":0,"bClampedMax":false,"bClampedMin":false,"bDisabled":false,"bDisabledPIE":false,"bHasImpulse":false,"bHidden":false,"bMoving":false}],"value_from":"asamu.SeqAct_SetPawnSize"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","name":"OutputLinks","native_offset":"0x100","source":"inherited","type":"array<SeqOpOutputLink>","value":[{"ActivateDelay":0.0,"DrawY":0,"LinkDesc":"Out","LinkedOp":null,"Links":[],"OverrideDelta":0,"PIEActivationTime":0.0,"bClampedMax":false,"bClampedMin":false,"bDisabled":false,"bDisabledPIE":false,"bHasImpulse":false,"bHidden":false,"bIsActivated":false,"bMoving":false}],"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","name":"VariableLinks","native_offset":"0x110","source":"cdo","type":"array<SeqVarLink>","value":[],"value_from":"asamu.SeqAct_SetPawnSize"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","flags":["Transient"],"name":"PlayerIndex","native_offset":"0x130","source":"inherited","type":"int","value":-1,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceOp","flags":["Transient"],"name":"GamepadID","native_offset":"0x134","source":"inherited","type":"byte","value":255,"value_from":"Engine.SequenceOp"},
+    {"confidence":"CONFIRMED","declared_in":"Engine.SequenceAction","name":"bCallHandler","native_bit":0,"native_offset":"0x148","source":"inherited","type":"bool","value":true,"value_from":"Engine.SequenceAction"}
+  ],
+  "property_count_listed": 17,
+  "property_count_omitted_zero_inherited": 41,
+  "schema": "asamu-decomp/gameplay-defaults/v1",
+  "super_chain": ["Engine.SequenceAction","Engine.SequenceOp","Engine.SequenceObject","Core.Object"]
+}
