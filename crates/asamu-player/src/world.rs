@@ -1,5 +1,7 @@
-//! Collision interface used by the simulation, and a simple deterministic
-//! implementation ([`BoxWorld`]) for tests and the graybox prototype.
+//! Collision interface used by the simulation, and simple deterministic
+//! implementations: [`BoxWorld`] (axis-aligned boxes + ground plane) for tests
+//! and the graybox prototype, and [`SlopeWorld`] (a `BoxWorld` plus inclined
+//! solid half-spaces, for slope tests of the native-physics port).
 //!
 //! # Shape: an upright cylinder standing in for the "capsule"
 //!
@@ -441,6 +443,166 @@ impl BoxWorld {
     }
 }
 
+/// A solid half-space: every point `p` with `normal · p < offset` is solid.
+/// `normal` is the unit surface normal pointing out of the solid. Used for
+/// sloped floors and walls in tests ([`SlopeWorld`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HalfSpace {
+    /// Unit outward normal.
+    pub normal: Vec3,
+    /// Plane offset: the surface is `normal · p = offset`.
+    pub offset: f32,
+    /// Whether the grapple can attach to it.
+    pub grapple_able: bool,
+}
+
+impl HalfSpace {
+    /// The half-space bounded by the plane through `point` with outward
+    /// `normal` (normalized here; a zero/non-finite normal yields `None`).
+    #[must_use]
+    pub fn through_point(normal: Vec3, point: Vec3, grapple_able: bool) -> Option<Self> {
+        let n = normal.normalize_or_zero();
+        (n != Vec3::ZERO && point.is_finite()).then(|| Self {
+            normal: n,
+            offset: n.dot(point),
+            grapple_able,
+        })
+    }
+
+    /// A ramp rising along +X whose surface passes through `point` and whose
+    /// normal has exactly the Z component `normal_z` (`(0, 1]`): normal
+    /// `(-sqrt(1 - z²), 0, z)`. `None` for `normal_z` outside `(0, 1]`.
+    #[must_use]
+    pub fn ramp_x(normal_z: f32, point: Vec3, grapple_able: bool) -> Option<Self> {
+        if !(normal_z > 0.0 && normal_z <= 1.0) || !point.is_finite() {
+            return None;
+        }
+        let normal = Vec3::new(-(1.0 - normal_z * normal_z).sqrt(), 0.0, normal_z);
+        Some(Self {
+            normal,
+            offset: normal.dot(point),
+            grapple_able,
+        })
+    }
+
+    /// Distance from the plane to the centre of an upright cylinder resting
+    /// on it (support distance of the cylinder along `-normal`).
+    fn support(&self, shape: CollisionShape) -> f32 {
+        let n = self.normal;
+        shape.radius * (n.x * n.x + n.y * n.y).sqrt() + shape.half_height * n.z.abs()
+    }
+
+    /// Ray `origin + t·d` (t ∈ [0, 1]) against the plane pushed out by
+    /// `support`.
+    fn cast(&self, origin: Vec3, d: Vec3, support: f32) -> Option<Candidate> {
+        let n = self.normal;
+        let f0 = n.dot(origin) - self.offset - support;
+        if f0 < 0.0 {
+            return Some(Candidate {
+                t: 0.0,
+                normal: n,
+                depth: -f0,
+                inside: true,
+            });
+        }
+        let dn = n.dot(d);
+        if dn >= 0.0 {
+            return None;
+        }
+        let t = -f0 / dn;
+        (t <= 1.0).then_some(Candidate {
+            t: t.max(0.0),
+            normal: n,
+            depth: 0.0,
+            inside: false,
+        })
+    }
+}
+
+/// A [`BoxWorld`] plus solid half-spaces (exact upright-cylinder sweeps
+/// against inclined planes). The solid is the union of all primitives; ties
+/// keep the box-world hit, then the earlier half-space.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SlopeWorld {
+    /// Boxes and optional ground plane.
+    pub boxes: BoxWorld,
+    /// Inclined solids.
+    pub half_spaces: Vec<HalfSpace>,
+}
+
+impl SlopeWorld {
+    /// Wraps a box world (no half-spaces yet).
+    #[must_use]
+    pub fn new(boxes: BoxWorld) -> Self {
+        Self {
+            boxes,
+            half_spaces: Vec::new(),
+        }
+    }
+
+    /// Adds a half-space (builder style).
+    #[must_use]
+    pub fn with_half_space(mut self, h: HalfSpace) -> Self {
+        self.half_spaces.push(h);
+        self
+    }
+
+    /// `true` if the shape centred at `position` overlaps any solid
+    /// (touching counts as not overlapping).
+    #[must_use]
+    pub fn overlaps(&self, position: Vec3, shape: CollisionShape) -> bool {
+        self.boxes.overlaps(position, shape)
+            || self
+                .half_spaces
+                .iter()
+                .any(|h| h.normal.dot(position) - h.offset - h.support(shape) < 0.0)
+    }
+}
+
+impl CollisionWorld for SlopeWorld {
+    fn sweep_capsule(&self, start: Vec3, end: Vec3, shape: CollisionShape) -> Option<Hit> {
+        let d = end - start;
+        let length = d.length();
+        if !(length.is_finite() && start.is_finite()) || length < MIN_MOVE {
+            return None;
+        }
+        let mut best = self.boxes.sweep_capsule(start, end, shape);
+        for h in &self.half_spaces {
+            if let Some(c) = h
+                .cast(start, d, h.support(shape))
+                .and_then(|c| blocking(c, d))
+            {
+                let hit = make_hit(start, d, length, c, h.grapple_able);
+                if best.is_none_or(|b| hit.time < b.time) {
+                    best = Some(hit);
+                }
+            }
+        }
+        best
+    }
+
+    fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<Hit> {
+        let mut best = self.boxes.raycast(origin, direction, max_distance);
+        let dir = direction.normalize_or_zero();
+        if !(origin.is_finite() && max_distance.is_finite())
+            || max_distance <= 0.0
+            || dir == Vec3::ZERO
+        {
+            return best;
+        }
+        let d = dir * max_distance;
+        for h in &self.half_spaces {
+            if let Some(c) = h.cast(origin, d, 0.0) {
+                let hit = make_hit(origin, d, max_distance, c, h.grapple_able);
+                if best.is_none_or(|b| hit.time < b.time) {
+                    best = Some(hit);
+                }
+            }
+        }
+        best
+    }
+}
+
 fn make_hit(origin: Vec3, d: Vec3, length: f32, c: Candidate, grapple_able: bool) -> Hit {
     let t = c.t.clamp(0.0, 1.0);
     Hit {
@@ -785,6 +947,81 @@ mod tests {
         assert!(!b.contains(Vec3::new(0.0, 1.9, 0.0)));
         let c = Aabb::from_center_half_extents(Vec3::ONE, Vec3::new(-1.0, 1.0, 1.0));
         assert_eq!(c.min, Vec3::ZERO);
+    }
+
+    #[test]
+    fn half_space_sweeps_land_on_the_slope_with_its_normal() {
+        let ramp = HalfSpace::ramp_x(0.8, Vec3::ZERO, false).unwrap();
+        assert_eq!(ramp.normal.z, 0.8);
+        assert!((ramp.normal.length() - 1.0).abs() < 1e-6);
+        let w = SlopeWorld::new(BoxWorld::new()).with_half_space(ramp);
+        // Dropping straight down onto the slope at x = 100: the surface is at
+        // z = 100·tanθ (tanθ = 0.6/0.8 = 0.75); the cylinder rests on its rim.
+        let x = 100.0;
+        let h = w
+            .sweep_capsule(Vec3::new(x, 0.0, 1000.0), Vec3::new(x, 0.0, -1000.0), SHAPE)
+            .unwrap();
+        assert_eq!(h.normal, ramp.normal);
+        assert!(!h.start_penetrating);
+        let rest = SHAPE.radius * 0.6 + SHAPE.half_height * 0.8;
+        let expected_z = x * 0.75 + rest / 0.8;
+        assert!(
+            (h.position.z - expected_z).abs() < 1e-2,
+            "{h:?} vs {expected_z}"
+        );
+        assert!(!w.overlaps(h.position + Vec3::Z * CONTACT_SKIN, SHAPE));
+        assert!(w.overlaps(h.position - Vec3::Z, SHAPE));
+        // Moving away from the plane is never blocked, even from inside.
+        let inside = h.position - Vec3::Z;
+        assert!(
+            w.sweep_capsule(inside, inside + Vec3::Z * 5.0, SHAPE)
+                .is_none()
+        );
+        let blocked = w
+            .sweep_capsule(inside, inside - Vec3::Z * 5.0, SHAPE)
+            .unwrap();
+        assert!(blocked.start_penetrating && blocked.time == 0.0);
+        // Rays.
+        let r = w
+            .raycast(Vec3::new(0.0, 0.0, 100.0), Vec3::NEG_Z, 1000.0)
+            .unwrap();
+        assert!((r.position.z).abs() < 1e-3, "{r:?}");
+        assert!(
+            w.raycast(Vec3::new(0.0, 0.0, 100.0), Vec3::Z, 1000.0)
+                .is_none()
+        );
+        assert!(HalfSpace::ramp_x(0.0, Vec3::ZERO, false).is_none());
+        assert!(HalfSpace::ramp_x(1.5, Vec3::ZERO, false).is_none());
+        assert!(HalfSpace::through_point(Vec3::ZERO, Vec3::ZERO, false).is_none());
+    }
+
+    #[test]
+    fn slope_world_takes_the_earliest_primitive() {
+        let w = SlopeWorld::new(BoxWorld::new().with_ground(0.0, false)).with_half_space(
+            HalfSpace::through_point(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(500.0, 0.0, 0.0), true)
+                .unwrap(),
+        );
+        // Horizontal sweep hits the vertical half-space wall (x = 500).
+        let h = w
+            .sweep_capsule(
+                Vec3::new(0.0, 0.0, 50.0),
+                Vec3::new(1000.0, 0.0, 50.0),
+                SHAPE,
+            )
+            .unwrap();
+        assert_eq!(h.normal, Vec3::NEG_X);
+        assert!((h.position.x - 480.0).abs() < 1e-3);
+        assert!(h.grapple_able);
+        // Downward sweep hits the ground first.
+        let h = w
+            .sweep_capsule(
+                Vec3::new(0.0, 0.0, 100.0),
+                Vec3::new(0.0, 0.0, -100.0),
+                SHAPE,
+            )
+            .unwrap();
+        assert_eq!(h.normal, Vec3::Z);
+        assert!(!h.grapple_able);
     }
 
     /// Exhaustive-ish check that the cylinder sweep never ends inside a box:

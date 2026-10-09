@@ -5,6 +5,11 @@
 //! [`Game::tick`]. The Bevy app calls `tick` from its fixed-update schedule;
 //! tests call it directly. Everything here is deterministic.
 //!
+//! The locomotion model is selectable ([`Game::with_movement_model`]); the
+//! default is still [`MovementModelKind::Placeholder`], and
+//! [`MovementModelKind::Ue3Pawn`] runs the port of the original's native pawn
+//! physics.
+//!
 //! Graybox behaviour (ours, not the original's): touching a checkpoint volume
 //! makes its spawn the respawn point; falling below the level's `kill_z`
 //! respawns the player at the active checkpoint, or at `player_start` if none
@@ -17,7 +22,8 @@ use asamu_player::params::ParamError;
 use asamu_player::trace::TraceSample;
 use asamu_player::world::{Aabb, CONTACT_SKIN, SolidBox};
 use asamu_player::{
-    BoxWorld, InputFrame, PlayerParams, PlayerState, StepEvents, Trace, TraceMeta, step,
+    BoxWorld, InputFrame, MovementModelKind, PlayerParams, PlayerState, StepEvents, Trace,
+    TraceMeta, step_with,
 };
 use asamu_world::{Level, LevelError, SpawnPoint, graybox_test_level};
 use glam::Vec3;
@@ -86,6 +92,7 @@ pub struct Game {
     level: Level,
     world: BoxWorld,
     params: PlayerParams,
+    movement: MovementModelKind,
     clock: FixedClock,
     player: PlayerState,
     active_checkpoint: Option<usize>,
@@ -110,6 +117,7 @@ impl Game {
             level,
             world,
             params,
+            movement: MovementModelKind::default(),
             clock,
             player,
             active_checkpoint: None,
@@ -130,6 +138,24 @@ impl Game {
             PlayerParams::default(),
             DEFAULT_TICK_RATE_HZ,
         )
+    }
+
+    /// Selects the locomotion model (builder style).
+    #[must_use]
+    pub fn with_movement_model(mut self, model: MovementModelKind) -> Self {
+        self.movement = model;
+        self
+    }
+
+    /// Selects the locomotion model for subsequent ticks.
+    pub fn set_movement_model(&mut self, model: MovementModelKind) {
+        self.movement = model;
+    }
+
+    /// The locomotion model in use.
+    #[must_use]
+    pub fn movement_model(&self) -> MovementModelKind {
+        self.movement
     }
 
     /// Current state.
@@ -174,7 +200,8 @@ impl Game {
         if self.state != GameState::Playing {
             return None;
         }
-        let events = step(
+        let events = step_with(
+            &self.movement,
             &mut self.player,
             input,
             &self.params,
@@ -254,6 +281,8 @@ impl Game {
             Some(self.clock.tick_rate_hz() as f32),
         );
         meta.notes.push("recorded by asamu-game".to_owned());
+        meta.notes
+            .push(format!("movement model: {}", self.movement.name()));
         let mut trace = Trace::new(meta);
         trace.samples.push(TraceSample::capture(
             self.clock.tick(),
@@ -549,6 +578,53 @@ mod tests {
             "{:?}",
             trace.meta.notes
         );
+    }
+
+    #[test]
+    fn ue3_pawn_model_is_selectable_and_deterministic() {
+        let g = Game::graybox().unwrap();
+        assert_eq!(g.movement_model(), MovementModelKind::Placeholder);
+        let run = || {
+            let mut g = Game::graybox()
+                .unwrap()
+                .with_movement_model(MovementModelKind::Ue3Pawn);
+            assert_eq!(g.movement_model(), MovementModelKind::Ue3Pawn);
+            g.start();
+            g.start_recording();
+            let start = *g.player();
+            // Settle, then walk forward on the start platform.
+            for _ in 0..30 {
+                let r = g.tick(&InputFrame::default()).unwrap();
+                assert!(!r.respawned);
+            }
+            let settled = *g.player();
+            assert!(settled.grounded);
+            // Native walking hovers 2.15 uu above the floor.
+            let floor_z =
+                start.position.z - g.params().movement.capsule_half_height.value - CONTACT_SKIN;
+            let hover =
+                settled.position.z - floor_z - g.params().movement.capsule_half_height.value;
+            assert!((hover - 2.15).abs() < 1e-3, "hover {hover}");
+            for i in 0..240 {
+                let mut input = forward();
+                input.jump_pressed = i % 60 == 0;
+                g.tick(&input).unwrap();
+                assert!(g.player().is_finite());
+            }
+            let trace = g.stop_recording().unwrap();
+            assert!(
+                trace
+                    .meta
+                    .notes
+                    .iter()
+                    .any(|n| n == "movement model: ue3_pawn")
+            );
+            trace.to_jsonl_string().unwrap()
+        };
+        assert_eq!(run(), run());
+        let mut g = Game::graybox().unwrap();
+        g.set_movement_model(MovementModelKind::Ue3Pawn);
+        assert_eq!(g.movement_model(), MovementModelKind::Ue3Pawn);
     }
 
     #[test]

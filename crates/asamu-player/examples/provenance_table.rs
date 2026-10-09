@@ -6,10 +6,9 @@
 fn main() {
     let params = asamu_player::PlayerParams::default();
     print!("{}", params.provenance_markdown_table());
-    if params.all_placeholders() {
-        println!(
-            "\nAll {} parameters are placeholders.",
-            params.provenance_report().len()
-        );
-    }
+    println!(
+        "\n{} of {} parameters are placeholders.",
+        params.placeholder_names().len(),
+        params.provenance_report().len()
+    );
 }

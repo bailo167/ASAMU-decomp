@@ -21,8 +21,9 @@ use thiserror::Error;
 
 use crate::grapple::GrappleState;
 use crate::input::InputFrame;
+use crate::movement::{MovementModel, PlaceholderMovement};
 use crate::params::PlayerParams;
-use crate::sim::{PlayerState, step};
+use crate::sim::{PlayerState, step_with};
 use crate::world::CollisionWorld;
 
 /// Value of [`TraceMeta::format`].
@@ -489,9 +490,31 @@ fn validate_sample(s: &TraceSample, previous: &mut Option<u64>) -> Result<(), Tr
 
 /// Runs the simulation over `inputs` from `initial` and records a runtime
 /// trace: one sample for the initial state (tick 0, neutral input) and one per
-/// input (ticks 1..=n).
+/// input (ticks 1..=n). Uses the default ([`PlaceholderMovement`]) model.
 #[must_use]
 pub fn record_run<W: CollisionWorld + ?Sized>(
+    meta: TraceMeta,
+    initial: &PlayerState,
+    inputs: &[InputFrame],
+    params: &PlayerParams,
+    world: &W,
+    dt: f32,
+) -> Trace {
+    record_run_with(
+        &PlaceholderMovement,
+        meta,
+        initial,
+        inputs,
+        params,
+        world,
+        dt,
+    )
+}
+
+/// [`record_run`] with an explicit locomotion model.
+#[must_use]
+pub fn record_run_with<M: MovementModel, W: CollisionWorld + ?Sized>(
+    model: &M,
     meta: TraceMeta,
     initial: &PlayerState,
     inputs: &[InputFrame],
@@ -510,7 +533,7 @@ pub fn record_run<W: CollisionWorld + ?Sized>(
         fov,
     ));
     for (i, input) in inputs.iter().enumerate() {
-        step(&mut state, input, params, world, dt);
+        step_with(model, &mut state, input, params, world, dt);
         let tick = i as u64 + 1;
         trace.samples.push(TraceSample::capture(
             tick,

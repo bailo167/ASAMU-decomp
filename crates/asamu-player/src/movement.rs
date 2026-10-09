@@ -25,20 +25,21 @@
 //!   collide-and-slide move with step-up while walking, then a floor probe
 //!   that snaps to walkable floors and detects landing / walking off ledges.
 //!
-//! # Expected original behaviour (TENTATIVE)
+//! # The original's model
 //!
-//! The original's player movement is expected to be stock UE3 native Pawn
-//! physics (`physWalking` / `physFalling` / `CalcVelocity` in the engine's
-//! native code) driven by ASAMU script parameters, with the grapple
-//! implemented in UnrealScript. That expectation is **TENTATIVE** (see
-//! `docs/reverse-engineering/GAMEPLAY_LEADS.md`). A faithful reimplementation
-//! would be a new [`MovementModel`] implementation; nothing else in the
-//! simulation needs to change.
+//! The original moves the player with the stock UE3/UDK native pawn physics
+//! (`APawn::physWalking`, `AUDKPawn::physFalling`, `AUDKPawn::CalcVelocity`,
+//! see `docs/reverse-engineering/NATIVE_PHYSICS.md`), parameterised by script
+//! defaults. That port is [`crate::ue3_movement::Ue3PawnMovement`], a second
+//! [`MovementModel`]; [`MovementModelKind`] selects between the two at run
+//! time. [`crate::sim::step`] still defaults to [`PlaceholderMovement`].
 
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 use crate::params::MovementParams;
 use crate::sim::{PlayerState, StepEvents};
+use crate::ue3_movement::Ue3PawnMovement;
 use crate::world::{CONTACT_SKIN, CollisionShape, CollisionWorld, MIN_MOVE};
 
 /// Maximum collide-and-slide iterations per move. Implementation detail of
@@ -64,8 +65,9 @@ pub struct LocomotionIntent {
 /// A locomotion model: integrates velocity and moves the player through the
 /// world for one tick.
 ///
-/// Implementations may only modify `state.position`, `state.velocity` and
-/// `state.grounded`, must be deterministic, and must not use global state.
+/// Implementations may only modify `state.position`, `state.velocity`,
+/// `state.grounded` and `state.pawn` (model bookkeeping), must be
+/// deterministic, and must not use global state.
 pub trait MovementModel {
     /// Advances locomotion by `dt` seconds. `external_accel` (UU/s²) is added
     /// on top of the model's own forces (used for the grapple pull).
@@ -85,6 +87,57 @@ pub trait MovementModel {
 /// The documented PLACEHOLDER locomotion model (see module docs).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlaceholderMovement;
+
+/// Run-time choice of locomotion model (implements [`MovementModel`] by
+/// dispatching to the selected model).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovementModelKind {
+    /// [`PlaceholderMovement`] (current default).
+    #[default]
+    Placeholder,
+    /// [`Ue3PawnMovement`], the port of the original's native pawn physics.
+    Ue3Pawn,
+}
+
+impl MovementModelKind {
+    /// Stable machine-friendly name (`"placeholder"` / `"ue3_pawn"`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Placeholder => "placeholder",
+            Self::Ue3Pawn => "ue3_pawn",
+        }
+    }
+}
+
+impl MovementModel for MovementModelKind {
+    fn advance<W: CollisionWorld + ?Sized>(
+        &self,
+        state: &mut PlayerState,
+        intent: &LocomotionIntent,
+        external_accel: Vec3,
+        params: &MovementParams,
+        world: &W,
+        dt: f32,
+        events: &mut StepEvents,
+    ) {
+        match self {
+            Self::Placeholder => PlaceholderMovement.advance(
+                state,
+                intent,
+                external_accel,
+                params,
+                world,
+                dt,
+                events,
+            ),
+            Self::Ue3Pawn => {
+                Ue3PawnMovement.advance(state, intent, external_accel, params, world, dt, events)
+            }
+        }
+    }
+}
 
 /// The collision shape described by `params`.
 #[must_use]

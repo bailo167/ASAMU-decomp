@@ -55,6 +55,7 @@ use crate::grapple::{self, GrappleEvent, GrappleState};
 use crate::input::InputFrame;
 use crate::movement::{LocomotionIntent, MovementModel, PlaceholderMovement};
 use crate::params::PlayerParams;
+use crate::ue3_movement::PawnPhysicsState;
 use crate::world::CollisionWorld;
 
 /// Complete simulation state of the player. All values in UE3 axes / UU.
@@ -74,6 +75,13 @@ pub struct PlayerState {
     pub grapple: GrappleState,
     /// Grapple button level on the previous tick (press-edge detection).
     pub grapple_was_held: bool,
+    /// Native-physics bookkeeping carried between ticks by
+    /// [`crate::ue3_movement::Ue3PawnMovement`] (floor normal, base,
+    /// force-floor-check). Ignored by [`PlaceholderMovement`]. Not part of
+    /// the trace format, so replaying a trace from a recorded sample starts
+    /// from the default (unbased) value.
+    #[serde(default)]
+    pub pawn: PawnPhysicsState,
 }
 
 impl PlayerState {
@@ -119,6 +127,7 @@ impl PlayerState {
             && self.velocity.is_finite()
             && self.yaw.is_finite()
             && self.pitch.is_finite()
+            && self.pawn.floor.is_finite()
             && grapple_ok
     }
 }

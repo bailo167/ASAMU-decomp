@@ -1,10 +1,14 @@
 //! Movement, grapple and camera parameters.
 //!
-//! # Every default here is a PLACEHOLDER
+//! # Almost every default here is a PLACEHOLDER
 //!
-//! No gameplay constant has been recovered from *A Story About My Uncle* and
-//! wired into this crate yet (see `docs/reverse-engineering/GAMEPLAY_LEADS.md`).
-//! The defaults below were chosen by us so the graybox prototype is playable;
+//! Only one gameplay value recovered from *A Story About My Uncle* is wired
+//! into this crate: [`MovementParams::world_gravity_z`] (`DefaultGravityZ`
+//! from the original's `ASAMU/Config/DefaultGame.ini`, provenance
+//! [`Provenance::Config`]). Everything else is still a placeholder (see
+//! `docs/reverse-engineering/GAMEPLAY_LEADS.md` and
+//! `docs/reverse-engineering/NATIVE_PHYSICS.md` section 9.1).
+//! The placeholder defaults below were chosen by us so the graybox prototype is playable;
 //! they are **not** values from the original game and were not deliberately
 //! taken from stock UE3/UDK defaults either. If one happens to coincide with
 //! an engine default, that coincidence is **not** evidence about ASAMU. Each
@@ -26,6 +30,21 @@ use thiserror::Error;
 fn ph<T>(value: T, note: &str) -> Param<T> {
     Param::placeholder(value, note)
 }
+
+/// Original config file holding `[Engine.WorldInfo] DefaultGravityZ`
+/// (relative to the game's `Contents/Resources` directory; no user paths).
+pub const DEFAULT_GRAVITY_CONFIG_FILE: &str = "ASAMU/Config/DefaultGame.ini";
+
+/// Config key of the original's default world gravity.
+pub const DEFAULT_GRAVITY_CONFIG_KEY: &str = "Engine.WorldInfo.DefaultGravityZ";
+
+/// `DefaultGravityZ` from the original's `ASAMU/Config/DefaultGame.ini`
+/// (`[Engine.WorldInfo] DefaultGravityZ=-520.0`, overriding the engine's
+/// `BaseGame.ini` value). CONFIRMED (config bytes; read by
+/// `AWorldInfo::GetGravityZ @ 0x100AD7B10` via WorldInfo+0x600, see
+/// `docs/reverse-engineering/NATIVE_PHYSICS.md` 4.1). Per-map overrides
+/// (WorldInfo `GlobalGravityZ`/`WorldGravityZ`, GravityVolumes) are UNKNOWN.
+pub const CONFIG_DEFAULT_GRAVITY_Z: f32 = -520.0;
 
 /// Ground/air locomotion parameters (consumed by the movement model).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,6 +72,31 @@ pub struct MovementParams {
     pub max_fall_speed: Param<f32>,
     /// Minimum floor-normal Z for a surface to count as walkable, `(0, 1]`.
     pub walkable_floor_z: Param<f32>,
+    /// World gravity along Z in UU/s² used by
+    /// [`crate::ue3_movement::Ue3PawnMovement`] (UE3 `WorldInfo` gravity:
+    /// `GlobalGravityZ` when non-zero, else `DefaultGravityZ`). The
+    /// placeholder model uses [`Self::gravity_z`] instead.
+    pub world_gravity_z: Param<f32>,
+    /// Pawn gravity multiplier (UE3 `UDKPawn.CustomGravityScaling`, final
+    /// factor of `AUDKPawn::GetGravityZ`).
+    pub custom_gravity_scaling: Param<f32>,
+    /// Physics-volume ground friction (UE3 `PhysicsVolume.GroundFriction`):
+    /// walking turning friction, braking factor `2·friction`, slope slide.
+    pub ground_friction: Param<f32>,
+    /// Physics-volume terminal velocity (UE3 `PhysicsVolume.TerminalVelocity`),
+    /// a 3-D speed clamp applied after each falling sub-step, UU/s.
+    pub terminal_velocity: Param<f32>,
+    /// Pawn flag (Pawn+0x298 bit 51, hypothesis `bLimitFallAccel`) that
+    /// enables the air-acceleration limiter (`AccelRate · AirControl`).
+    pub limit_fall_accel: Param<bool>,
+    /// UE3 `UDKPawn.SlopeBoostFriction`: 0 disables the clamp that stops a
+    /// falling slide from gaining height ("slope boosting"); any other value
+    /// keeps the clamp on surfaces without a physical material (all surfaces
+    /// of our collision worlds).
+    pub slope_boost_friction: Param<f32>,
+    /// UE3 `Pawn.MovementSpeedModifier`: final factor of `MaxSpeedModifier`,
+    /// which scales the walking speed cap (not the acceleration).
+    pub movement_speed_modifier: Param<f32>,
 }
 
 impl Default for MovementParams {
@@ -60,8 +104,9 @@ impl Default for MovementParams {
         Self {
             gravity_z: ph(
                 -1000.0,
-                "graybox placeholder; replace with the original's effective gravity \
-                 (lead: WorldInfo/zone gravity settings, TENTATIVE) or a measured trace",
+                "graybox placeholder used only by PlaceholderMovement (the UE3 pawn model uses \
+                 movement.world_gravity_z x movement.custom_gravity_scaling, doubled in effect by \
+                 the falling refinement)",
             ),
             max_ground_speed: ph(
                 450.0,
@@ -75,8 +120,8 @@ impl Default for MovementParams {
             ),
             braking_deceleration: ph(
                 3000.0,
-                "graybox placeholder; replace with the original's ground braking/friction \
-                 behaviour (native walking physics + pawn defaults, TENTATIVE)",
+                "graybox placeholder used only by PlaceholderMovement (the original brakes with \
+                 2 x ground friction, see movement.ground_friction)",
             ),
             air_control: ph(
                 0.25,
@@ -105,13 +150,50 @@ impl Default for MovementParams {
             ),
             max_fall_speed: ph(
                 4000.0,
-                "graybox placeholder; it is UNKNOWN whether the original caps fall speed at all \
-                 (lead: terminal velocity in physics volumes, TENTATIVE)",
+                "graybox placeholder used only by PlaceholderMovement (the original clamps the \
+                 3-D falling speed to movement.terminal_velocity)",
             ),
             walkable_floor_z: ph(
                 0.7,
                 "graybox placeholder; replace with the original's walkable-slope threshold \
                  (lead: WalkableFloorZ, TENTATIVE)",
+            ),
+            world_gravity_z: Param::new(
+                CONFIG_DEFAULT_GRAVITY_Z,
+                Provenance::Config {
+                    file: DEFAULT_GRAVITY_CONFIG_FILE.to_owned(),
+                    key: DEFAULT_GRAVITY_CONFIG_KEY.to_owned(),
+                },
+            ),
+            custom_gravity_scaling: ph(
+                1.0,
+                "graybox placeholder (neutral factor); replace with the ASAMU pawn default \
+                 (lead: UDKPawn CustomGravityScaling, TENTATIVE)",
+            ),
+            ground_friction: ph(
+                6.0,
+                "graybox placeholder; replace with the PhysicsVolume ground friction of the \
+                 original maps (lead: PhysicsVolume GroundFriction, TENTATIVE)",
+            ),
+            terminal_velocity: ph(
+                4000.0,
+                "graybox placeholder (same number as movement.max_fall_speed); replace with the \
+                 original's PhysicsVolume terminal velocity (lead: TerminalVelocity, TENTATIVE)",
+            ),
+            limit_fall_accel: ph(
+                true,
+                "graybox placeholder; the default of the air-acceleration limit flag (Pawn+0x298 \
+                 bit 51) is UNKNOWN (lead: bLimitFallAccel in pawn defaults, TENTATIVE)",
+            ),
+            slope_boost_friction: ph(
+                0.5,
+                "graybox placeholder (only zero vs non-zero matters without physical materials); \
+                 replace with the ASAMU pawn default (lead: UDKPawn SlopeBoostFriction, TENTATIVE)",
+            ),
+            movement_speed_modifier: ph(
+                1.0,
+                "graybox placeholder (neutral factor); replace with the ASAMU pawn default \
+                 (lead: Pawn MovementSpeedModifier, TENTATIVE)",
             ),
         }
     }
@@ -391,6 +473,54 @@ impl PlayerParams {
         );
         num(
             &mut out,
+            "movement.world_gravity_z",
+            &m.world_gravity_z,
+            "uu/s^2",
+            "World gravity along Z for the UE3 pawn model",
+        );
+        num(
+            &mut out,
+            "movement.custom_gravity_scaling",
+            &m.custom_gravity_scaling,
+            "factor",
+            "Pawn gravity multiplier (UE3 pawn model)",
+        );
+        num(
+            &mut out,
+            "movement.ground_friction",
+            &m.ground_friction,
+            "1/s",
+            "Ground friction (UE3 pawn model)",
+        );
+        num(
+            &mut out,
+            "movement.terminal_velocity",
+            &m.terminal_velocity,
+            "uu/s",
+            "3-D speed clamp while falling (UE3 pawn model)",
+        );
+        choice(
+            &mut out,
+            "movement.limit_fall_accel",
+            &m.limit_fall_accel,
+            "Air-acceleration limiter enabled (UE3 pawn model)",
+        );
+        num(
+            &mut out,
+            "movement.slope_boost_friction",
+            &m.slope_boost_friction,
+            "friction",
+            "0 = falling slides may gain height (UE3 pawn model)",
+        );
+        num(
+            &mut out,
+            "movement.movement_speed_modifier",
+            &m.movement_speed_modifier,
+            "factor",
+            "Walking speed-cap multiplier (UE3 pawn model)",
+        );
+        num(
+            &mut out,
             "grapple.max_range",
             &g.max_range,
             "uu",
@@ -453,8 +583,8 @@ impl PlayerParams {
         out
     }
 
-    /// `true` if every parameter is still a placeholder (true for the
-    /// defaults; becomes false as soon as one value is recovered).
+    /// `true` if every parameter is still a placeholder (false for the
+    /// defaults since `movement.world_gravity_z` was recovered from config).
     #[must_use]
     pub fn all_placeholders(&self) -> bool {
         self.provenance_report()
@@ -556,6 +686,18 @@ impl PlayerParams {
             v > 0.0 && v <= 1.0,
             "in (0, 1]",
         )?;
+        let v = m.world_gravity_z.value;
+        check("movement.world_gravity_z", v, v <= 0.0, "<= 0")?;
+        let v = m.custom_gravity_scaling.value;
+        check("movement.custom_gravity_scaling", v, v >= 0.0, ">= 0")?;
+        let v = m.ground_friction.value;
+        check("movement.ground_friction", v, v >= 0.0, ">= 0")?;
+        let v = m.terminal_velocity.value;
+        check("movement.terminal_velocity", v, v > 0.0, "> 0")?;
+        let v = m.slope_boost_friction.value;
+        check("movement.slope_boost_friction", v, v >= 0.0, ">= 0")?;
+        let v = m.movement_speed_modifier.value;
+        check("movement.movement_speed_modifier", v, v >= 0.0, ">= 0")?;
         let v = g.max_range.value;
         check("grapple.max_range", v, v > 0.0, "> 0")?;
         let v = g.pull_acceleration.value;
@@ -626,11 +768,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_all_placeholders_with_notes() {
+    fn defaults_are_placeholders_with_notes_except_recovered_config() {
         let params = PlayerParams::default();
-        assert!(params.all_placeholders());
+        assert!(!params.all_placeholders());
         let report = params.provenance_report();
-        assert_eq!(params.placeholder_names().len(), report.len());
+        assert_eq!(params.placeholder_names().len(), report.len() - 1);
         for e in &report {
             match &e.provenance {
                 Provenance::Placeholder { note } => {
@@ -640,18 +782,30 @@ mod tests {
                         e.name
                     );
                 }
-                other => panic!("{} has non-placeholder default {other}", e.name),
+                Provenance::Config { file, key } => {
+                    assert_eq!(e.name, "movement.world_gravity_z");
+                    assert_eq!(file, "ASAMU/Config/DefaultGame.ini");
+                    assert_eq!(key, "Engine.WorldInfo.DefaultGravityZ");
+                    assert_eq!(e.value, "-520");
+                }
+                other => panic!("{} has unexpected default provenance {other}", e.name),
             }
             assert!(!e.unit.is_empty() && !e.description.is_empty() && !e.value.is_empty());
         }
         let table = params.provenance_markdown_table();
         assert_eq!(table.lines().count(), report.len() + 2);
         assert!(table.contains("`grapple.rope_mode` | inelastic |"));
+        assert!(table.contains("`movement.limit_fall_accel` | true |"));
+        assert!(table.contains(
+            "`movement.world_gravity_z` | -520 | uu/s^2 | config | config \
+             ASAMU/Config/DefaultGame.ini Engine.WorldInfo.DefaultGravityZ |"
+        ));
     }
 
     #[test]
-    fn recovering_one_value_flips_all_placeholders() {
+    fn recovering_a_value_removes_it_from_placeholder_names() {
         let mut params = PlayerParams::default();
+        let before = params.placeholder_names().len();
         params.movement.gravity_z.set(
             -1.0,
             Provenance::MeasuredTrace {
@@ -659,6 +813,7 @@ mod tests {
             },
         );
         assert!(!params.all_placeholders());
+        assert_eq!(params.placeholder_names().len(), before - 1);
         assert!(
             !params
                 .placeholder_names()
@@ -684,6 +839,19 @@ mod tests {
         let mut p = PlayerParams::default();
         p.movement.step_height.value = 1000.0;
         assert!(p.validate().is_err());
+        let bad: [fn(&mut PlayerParams); 6] = [
+            |p| p.movement.world_gravity_z.value = 1.0,
+            |p| p.movement.custom_gravity_scaling.value = f32::NAN,
+            |p| p.movement.ground_friction.value = -0.5,
+            |p| p.movement.terminal_velocity.value = 0.0,
+            |p| p.movement.slope_boost_friction.value = f32::INFINITY,
+            |p| p.movement.movement_speed_modifier.value = -1.0,
+        ];
+        for (i, tweak) in bad.iter().enumerate() {
+            let mut p = PlayerParams::default();
+            tweak(&mut p);
+            assert!(p.validate().is_err(), "tweak {i}");
+        }
     }
 
     #[test]
