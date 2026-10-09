@@ -984,8 +984,9 @@ note = "Byte-for-byte reproducible; 21 hashes spot-checked with shasum."
 [[category.item]]
 id = "decompress-cache"
 name = "Local decompressed package cache"
-status = "partial"
-note = "asamu-inspect decompress writes uncompressed streams to an explicit local path; no managed cache yet."
+status = "implemented"
+evidence = "tools/asamu-import/src/all"
+note = "Bounded decompressed-package cache tied to the importer build; identical output hashes with/without cache."
 
 [[category.item]]
 id = "mesh-convert"
@@ -1011,8 +1012,9 @@ note = "Scene JSON + BSP/volume geometry for all maps."
 [[category.item]]
 id = "import-cli"
 name = "asamu-import end-to-end CLI"
-status = "partial"
-note = "textures/meshes/levels subcommands exist; no single end-to-end import yet."
+status = "implemented"
+evidence = "tools/asamu-import/src/all.rs; docs/PLAYING.md"
+note = "asamu-import all: inventory check, all stages, resumable manifests; real run 13,108 files / 2.2 GB."
 
 # --------------------------------------------------------------------------
 # Platforms
@@ -1053,7 +1055,9 @@ note = "cargo check --target x86_64-apple-darwin."
 [[category.item]]
 id = "release-packaging"
 name = "Release packaging"
-status = "not_started"
+status = "implemented"
+evidence = ".github/workflows/release.yml; docs/PLAYING.md"
+note = "Tag-triggered draft release builds for 4 targets; not yet exercised by a tag."
 
 # --------------------------------------------------------------------------
 # Tests
@@ -1122,7 +1126,8 @@ note = "Replay + per-field max/mean/RMS diff with first divergence. No original 
 [[category.item]]
 id = "trace-capture"
 name = "Original-game trace capture tooling (Windows oracle)"
-status = "not_started"
+status = "partial"
+note = "Plan and schema in docs/TRACE_CAPTURE.md (field offsets cross-checked); no recorder built yet."
 
 [[category.item]]
 id = "parity-suite"
