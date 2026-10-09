@@ -1,12 +1,15 @@
-//! Flag bit names for object, class, function, property, struct and state
-//! flags as stored in UE3 v868 export payloads.
+//! Flag bit names for object, export, name-table, class, function, property,
+//! struct and state flags as stored in UE3 v868 packages.
 //!
 //! The *positions* and *raw values* are read from the shipped packages
 //! (CONFIRMED). The *names* follow UE3 engine conventions; their confidence is
-//! recorded per group in `docs/reverse-engineering/OBJECT_FORMAT.md`. Names
-//! whose meaning is corroborated by observed behaviour (for example the
-//! parameter/return-value bits on function locals, or the struct flags that
-//! decide binary serialization) are STRONG; the rest are TENTATIVE.
+//! recorded per group in `docs/reverse-engineering/OBJECT_FORMAT.md` and, for
+//! object/export/name/package flags, in
+//! `docs/reverse-engineering/PACKAGE_ANALYSIS.md`. Names whose meaning is
+//! corroborated by observed behaviour (for example the parameter/return-value
+//! bits on function locals, or the struct flags that decide binary
+//! serialization) or by the original executable's loader code are STRONG; the
+//! rest are TENTATIVE.
 
 /// Conventional names of the bits set in `value`; unknown bits are reported
 /// as one hexadecimal remainder.
@@ -27,42 +30,109 @@ pub fn describe(value: u64, names: &[(u64, &str)]) -> Vec<String> {
 }
 
 /// `EObjectFlags` (64-bit, export table `ObjectFlags`).
+///
+/// Evidence summary (details in PACKAGE_ANALYSIS.md, "Object, export and name
+/// flags"): every stored value of all 202,685 exports lies inside
+/// [`LOAD_KEEP_MASK`], the mask the original loader keeps when it creates an
+/// export (CONFIRMED). The three load-context bits are matched against a mask
+/// the loader builds from its client/server/editor globals (CONFIRMED).
 pub mod object {
-    /// `RF_ClassDefaultObject`: the object is a class default object (`Default__X`).
+    /// `RF_Protected`. STRONG: set on exactly the member properties whose
+    /// UnrealScript declaration carries the `protected` specifier (204 of 204
+    /// with a parsed declaration; no property without it). 211 exports.
+    pub const PROTECTED: u64 = 0x0000_0000_0000_0100;
+    /// `RF_ClassDefaultObject`: the object is a class default object
+    /// (`Default__X`). STRONG: exactly the 2,521 `Default__` exports; the
+    /// original level/world serializers skip their "mark the package as a
+    /// map" step for objects with this bit.
     pub const CLASS_DEFAULT_OBJECT: u64 = 0x0000_0000_0000_0200;
     /// `RF_ArchetypeObject`: the object is an archetype (template).
     pub const ARCHETYPE_OBJECT: u64 = 0x0000_0000_0000_0400;
-    /// `RF_Transactional`.
+    /// `RF_LocalizedResource`. TENTATIVE name; the bit is part of the loader's
+    /// keep-mask but never set in a shipped export.
+    pub const LOCALIZED_RESOURCE: u64 = 0x0000_0000_0008_0000;
+    /// `RF_Transactional`. TENTATIVE (102,095 exports, mostly map actors and
+    /// components).
     pub const TRANSACTIONAL: u64 = 0x0000_0001_0000_0000;
-    /// `RF_Public`.
+    /// `RF_Public`: the object may be bound by imports from other packages.
+    /// STRONG: the original import verifier only binds an import to an export
+    /// that has this bit, and every one of the 10,259 cross-package imports
+    /// that resolve to an export of another shipped package (same path and
+    /// class) points at an export with it. New packages are allocated with it.
     pub const PUBLIC: u64 = 0x0000_0004_0000_0000;
-    /// `RF_LoadForClient`.
+    /// `RF_TagExp`: temporary "referenced by the package being saved" mark.
+    /// Never on exports; the saver writes it into every name-table entry (see
+    /// [`super::name`]).
+    pub const TAG_EXP: u64 = 0x0000_0010_0000_0000;
+    /// `RF_Obsolete`. TENTATIVE name; in the loader keep-mask, never observed.
+    pub const OBSOLETE: u64 = 0x0000_0020_0000_0000;
+    /// `RF_PerObjectLocalized`. TENTATIVE name: 877 exports (all 852
+    /// `SoundNodeWave`s); 873 of them have a class with `CLASS_Localized`.
+    pub const PER_OBJECT_LOCALIZED: u64 = 0x0000_0100_0000_0000;
+    /// `RF_Suppress`: log-suppression mark; only seen on name-table entries
+    /// (see [`super::name::SUPPRESS`]).
+    pub const SUPPRESS: u64 = 0x0000_1000_0000_0000;
+    /// `RF_LoadForClient`. CONFIRMED meaning: the loader creates an export only
+    /// when its flags intersect a context mask that contains this bit when the
+    /// engine runs as a client.
     pub const LOAD_FOR_CLIENT: u64 = 0x0001_0000_0000_0000;
-    /// `RF_LoadForServer`.
+    /// `RF_LoadForServer`. CONFIRMED meaning: as [`LOAD_FOR_CLIENT`], for the
+    /// server context.
     pub const LOAD_FOR_SERVER: u64 = 0x0002_0000_0000_0000;
-    /// `RF_LoadForEdit`.
+    /// `RF_LoadForEdit`. CONFIRMED meaning: as [`LOAD_FOR_CLIENT`], for the
+    /// editor context. Set on every shipped export.
     pub const LOAD_FOR_EDIT: u64 = 0x0004_0000_0000_0000;
-    /// `RF_Standalone`.
+    /// `RF_Standalone`. TENTATIVE (assets: textures, meshes, materials, sounds,
+    /// classes).
     pub const STANDALONE: u64 = 0x0008_0000_0000_0000;
-    /// `RF_NotForClient`.
+    /// `RF_NotForClient`. TENTATIVE name; always together with
+    /// [`NOT_FOR_SERVER`] on 3,315 editor-only objects (`TextBuffer`,
+    /// `InterpCurveEdSetup`, `Brush`, `Model`, `Polys`, `MetaData`, ...), none
+    /// of which has [`LOAD_FOR_CLIENT`] or [`LOAD_FOR_SERVER`].
     pub const NOT_FOR_CLIENT: u64 = 0x0010_0000_0000_0000;
-    /// `RF_NotForServer`.
+    /// `RF_NotForServer`. TENTATIVE name; see [`NOT_FOR_CLIENT`].
     pub const NOT_FOR_SERVER: u64 = 0x0020_0000_0000_0000;
-    /// `RF_NotForEdit`.
+    /// `RF_NotForEdit`. TENTATIVE name; in the loader keep-mask, never observed.
     pub const NOT_FOR_EDIT: u64 = 0x0040_0000_0000_0000;
     /// `RF_HasStack`: the payload starts with a script state frame.
     /// STRONG: exactly the exports carrying this bit start with the
     /// `FStateFrame` layout documented in `object.rs`.
     pub const HAS_STACK: u64 = 0x0200_0000_0000_0000;
-    /// `RF_Native`.
+    /// `RF_Native`. STRONG: on `Class` exports it is set exactly when the
+    /// class's `ClassFlags` has `CLASS_Native` (1,652 with both, 869 with
+    /// neither, no mixed case); it occurs on no other kind of export.
     pub const NATIVE: u64 = 0x0400_0000_0000_0000;
+
+    /// Bits the original loader keeps from a stored `ObjectFlags` value when
+    /// it creates the export (read from the executable's export-creation
+    /// code; CONFIRMED). Every shipped export's flags lie inside it.
+    pub const LOAD_KEEP_MASK: u64 = 0x067F_0125_0008_0700;
+
+    /// Load-context bits of a game process that is both client and server
+    /// (a standalone game).
+    pub const LOAD_CONTEXT_GAME: u64 = LOAD_FOR_CLIENT | LOAD_FOR_SERVER;
+
+    /// True when the original standalone game would create this export at
+    /// load time: its flags intersect the client/server load context.
+    /// 16,730 shipped exports carry only [`LOAD_FOR_EDIT`] (editor-only
+    /// helpers such as sprite, arrow and light-radius components, the cooked
+    /// away `Distribution*` objects and `ScriptText` buffers) and are skipped.
+    pub fn loaded_in_game(object_flags: u64) -> bool {
+        object_flags & LOAD_CONTEXT_GAME != 0
+    }
 
     /// (bit, conventional name) pairs.
     pub const NAMES: &[(u64, &str)] = &[
+        (PROTECTED, "Protected"),
         (CLASS_DEFAULT_OBJECT, "ClassDefaultObject"),
         (ARCHETYPE_OBJECT, "ArchetypeObject"),
+        (LOCALIZED_RESOURCE, "LocalizedResource"),
         (TRANSACTIONAL, "Transactional"),
         (PUBLIC, "Public"),
+        (TAG_EXP, "TagExp"),
+        (OBSOLETE, "Obsolete"),
+        (PER_OBJECT_LOCALIZED, "PerObjectLocalized"),
+        (SUPPRESS, "Suppress"),
         (LOAD_FOR_CLIENT, "LoadForClient"),
         (LOAD_FOR_SERVER, "LoadForServer"),
         (LOAD_FOR_EDIT, "LoadForEdit"),
@@ -73,6 +143,120 @@ pub mod object {
         (HAS_STACK, "HasStack"),
         (NATIVE, "Native"),
     ];
+}
+
+/// `EExportFlags` (export table `ExportFlags`).
+pub mod export {
+    /// `EF_ForcedExport`: the object belongs to another package and was
+    /// copied ("forced") into this file by the cooker. STRONG: the original
+    /// loader counts these in a global named `GForcedExportCount` and creates
+    /// a top-level forced export as a top-level package of its own name
+    /// (initialized from the export entry) instead of inside the file's
+    /// package. Data: set on exactly the 62,169 exports that lie inside
+    /// a forced top-level `Package` export (CONFIRMED correlation). The only
+    /// value other than 0 that occurs.
+    pub const FORCED_EXPORT: u32 = 0x0000_0001;
+    /// `EF_ScriptPatcherExport`. TENTATIVE name; the async loader skips its
+    /// precache step for exports with this bit. Never observed.
+    pub const SCRIPT_PATCHER_EXPORT: u32 = 0x0000_0002;
+    /// `EF_MemberFieldPatchPending`. TENTATIVE name; the loader sets object
+    /// flag `0x200000` on struct objects created from exports with this bit.
+    /// Never observed.
+    pub const MEMBER_FIELD_PATCH_PENDING: u32 = 0x0000_0004;
+
+    /// (bit, conventional name) pairs.
+    pub const NAMES: &[(u64, &str)] = &[
+        (FORCED_EXPORT as u64, "ForcedExport"),
+        (SCRIPT_PATCHER_EXPORT as u64, "ScriptPatcherExport"),
+        (MEMBER_FIELD_PATCH_PENDING as u64, "MemberFieldPatchPending"),
+    ];
+}
+
+/// Name-table entry flags (`FNameEntry` flags, an `EObjectFlags` value).
+pub mod name {
+    use super::object;
+
+    /// The value the original saver writes into every name it references:
+    /// `TagExp | LoadForClient | LoadForServer | LoadForEdit` (CONFIRMED in the
+    /// executable's save code; all 77,358 shipped name entries carry it).
+    pub const SAVED: u64 =
+        object::TAG_EXP | object::LOAD_FOR_CLIENT | object::LOAD_FOR_SERVER | object::LOAD_FOR_EDIT;
+    /// `RF_Suppress`: the name was a suppressed log category in the cooking
+    /// session. CONFIRMED correlation: set on exactly the 51 name entries
+    /// whose text is in the effective `Suppress=` list of the shipped engine
+    /// configuration (the base list minus the game's `-Suppress=` removals).
+    pub const SUPPRESS: u64 = object::SUPPRESS;
+
+    /// (bit, conventional name) pairs.
+    pub const NAMES: &[(u64, &str)] = &[
+        (object::TAG_EXP, "TagExp"),
+        (SUPPRESS, "Suppress"),
+        (object::LOAD_FOR_CLIENT, "LoadForClient"),
+        (object::LOAD_FOR_SERVER, "LoadForServer"),
+        (object::LOAD_FOR_EDIT, "LoadForEdit"),
+    ];
+}
+
+/// `PackageSource`: the summary field the original loader compares with a
+/// checksum of the package's base file name.
+///
+/// CONFIRMED: for all 42 shipped packages `Summary::package_source` equals
+/// `package_source_crc` of the file name without directory and extension
+/// (e.g. `AG-Workshop`, `Startup_LOC_INT`). The loader sets
+/// `PKG_NoExportAllowed` on a package whose value matches and otherwise flags
+/// "user-created content loaded".
+pub mod package_source {
+    /// CRC-32 with polynomial `0x04C11DB7`, MSB first, initial value and final
+    /// XOR `0xFFFFFFFF` (the table the engine uses for its string CRCs).
+    const fn table() -> [u32; 256] {
+        let mut t = [0u32; 256];
+        let mut i = 0usize;
+        while i < 256 {
+            let mut c = (i as u32) << 24;
+            let mut k = 0;
+            while k < 8 {
+                c = if c & 0x8000_0000 != 0 {
+                    (c << 1) ^ 0x04C1_1DB7
+                } else {
+                    c << 1
+                };
+                k += 1;
+            }
+            t[i] = c;
+            i += 1;
+        }
+        t
+    }
+
+    const TABLE: [u32; 256] = table();
+
+    /// The checksum the original loader computes for a package base name:
+    /// each character is upper-cased and fed as a 16-bit code unit, low byte
+    /// first. Returns `None` for names with non-ASCII characters (the
+    /// engine's upper-casing of those is not reproduced; every shipped name is
+    /// ASCII) and `Some(0)` for an empty name, as the engine does.
+    pub fn package_source_crc(base_name: &str) -> Option<u32> {
+        if !base_name.is_ascii() {
+            return None;
+        }
+        if base_name.is_empty() {
+            return Some(0);
+        }
+        let bytes = base_name
+            .bytes()
+            .flat_map(|b| u16::from(b.to_ascii_uppercase()).to_le_bytes());
+        Some(crc32(bytes))
+    }
+
+    /// The plain CRC over a byte sequence (CRC-32/BZIP2 parameters).
+    pub fn crc32(bytes: impl IntoIterator<Item = u8>) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for byte in bytes {
+            let idx = usize::from(crc.to_be_bytes()[0] ^ byte);
+            crc = (crc << 8) ^ TABLE[idx];
+        }
+        !crc
+    }
 }
 
 /// `EClassFlags` (`UClass::ClassFlags`).
@@ -469,5 +653,53 @@ mod tests {
             vec!["0x8000000000000000"]
         );
         assert!(describe(0, class::NAMES).is_empty());
+        assert_eq!(
+            describe(name::SAVED | name::SUPPRESS, name::NAMES),
+            vec![
+                "TagExp",
+                "Suppress",
+                "LoadForClient",
+                "LoadForServer",
+                "LoadForEdit"
+            ]
+        );
+        assert_eq!(describe(0x9, export::NAMES), vec!["ForcedExport", "0x8"]);
+    }
+
+    #[test]
+    fn object_flag_masks_are_consistent() {
+        // Every named object bit except the save-time marks lies in the
+        // loader keep-mask, and the mask holds no unnamed bit.
+        let mut named = 0u64;
+        for &(bit, _) in object::NAMES {
+            assert_eq!(bit.count_ones(), 1);
+            named |= bit;
+            if bit != object::TAG_EXP && bit != object::SUPPRESS {
+                assert_ne!(bit & object::LOAD_KEEP_MASK, 0, "{bit:#x}");
+            }
+        }
+        assert_eq!(object::LOAD_KEEP_MASK & !named, 0);
+        assert_eq!(name::SAVED, 0x0007_0010_0000_0000);
+        assert!(object::loaded_in_game(object::LOAD_FOR_CLIENT));
+        assert!(object::loaded_in_game(object::LOAD_FOR_SERVER));
+        assert!(!object::loaded_in_game(
+            object::LOAD_FOR_EDIT | object::PUBLIC
+        ));
+    }
+
+    #[test]
+    fn package_source_crc_vectors() {
+        use package_source::{crc32, package_source_crc};
+        // Published CRC-32/BZIP2 check value.
+        assert_eq!(crc32(*b"123456789"), 0xFC89_1918);
+        assert_eq!(package_source_crc(""), Some(0));
+        assert_eq!(package_source_crc("caf\u{e9}"), None);
+        // Case-insensitive, as the engine upper-cases before hashing.
+        assert_eq!(package_source_crc("core"), package_source_crc("CORE"));
+        assert_ne!(package_source_crc("Core"), package_source_crc("Engine"));
+        // Values of two shipped packages (summary `PackageSource`, a public
+        // 32-bit checksum of the file name, not game content).
+        assert_eq!(package_source_crc("Core"), Some(0xC082_C6B6));
+        assert_eq!(package_source_crc("AG-Workshop"), Some(0x2365_3D5E));
     }
 }

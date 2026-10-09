@@ -41,54 +41,88 @@ pub const MAX_SUMMARY_PREFIX: u64 = 64 * 1024 * 1024;
 
 /// UE3 `EPackageFlags` bit values.
 ///
-/// The names follow UE3 engine conventions. Unless noted, the mapping is
-/// TENTATIVE for this game: only the bits whose presence correlates with
-/// observable package properties are corroborated (see PACKAGE_ANALYSIS.md).
+/// The names follow UE3 engine conventions. Confidence per bit is recorded in
+/// PACKAGE_ANALYSIS.md ("Package flags"): it combines correlations across the
+/// 42 shipped packages with the code of the original executable that tests or
+/// sets each bit (loader, saver, net and download code; local Ghidra reading,
+/// nothing copied). "CONFIRMED meaning" = the executable's behaviour for the
+/// bit is read directly and agrees with the data; the UE3 *name* itself is
+/// then STRONG. Only nine bits occur in shipped summaries.
 pub mod package_flags {
-    /// `PKG_AllowDownload`.
+    /// `PKG_AllowDownload`. Observed on 32 packages. The original code sets it
+    /// on every newly created package and clears it on the GUID-cache package
+    /// (`GuidCache.upk` is one of the 10 without it). Meaning (download
+    /// permission) TENTATIVE.
     pub const ALLOW_DOWNLOAD: u32 = 0x0000_0001;
-    /// `PKG_ClientOptional`.
+    /// `PKG_ClientOptional`. STRONG: the download code lets a client skip a
+    /// package file with this bit. Never observed.
     pub const CLIENT_OPTIONAL: u32 = 0x0000_0002;
-    /// `PKG_ServerSideOnly`.
+    /// `PKG_ServerSideOnly`. CONFIRMED meaning: objects whose outermost package
+    /// has the bit get no net index, and a forced-export package with no net
+    /// objects receives it at load. Data: set on all 17 packages whose
+    /// generation `NetObjectCount` is 0 and on the 3 shader caches (whose save
+    /// path sets it explicitly); 8,365 of 8,365 checked objects of such
+    /// packages store `NetIndex = -1`.
     pub const SERVER_SIDE_ONLY: u32 = 0x0000_0004;
     /// `PKG_Cooked`. Set on every shipped package except the three
-    /// `RefShaderCache-*` packages.
+    /// `RefShaderCache-*` packages. STRONG: the loader switches its archive to
+    /// cooked-data mode when the bit is set, and many cooked-only paths test it.
     pub const COOKED: u32 = 0x0000_0008;
-    /// `PKG_Unsecure`.
+    /// `PKG_Unsecure`. TENTATIVE; never observed.
     pub const UNSECURE: u32 = 0x0000_0010;
-    /// `PKG_SavedWithNewerVersion`.
+    /// `PKG_SavedWithNewerVersion`. STRONG: the loader sets it (warning once)
+    /// when a package's engine version is newer than the running engine's.
+    /// Never observed.
     pub const SAVED_WITH_NEWER_VERSION: u32 = 0x0000_0020;
-    /// `PKG_Need`.
+    /// `PKG_Need`. TENTATIVE; never observed.
     pub const NEED: u32 = 0x0000_8000;
-    /// `PKG_Compiling`.
+    /// `PKG_Compiling`. TENTATIVE: import verification stops early for a
+    /// package with this bit. Never observed.
     pub const COMPILING: u32 = 0x0001_0000;
-    /// `PKG_ContainsMap`. Corroborated: set on exactly the `.asamu` map packages.
+    /// `PKG_ContainsMap`. CONFIRMED meaning: the world and level serializers
+    /// set it on their outermost package when saving; set on exactly the 12
+    /// `.asamu` map packages.
     pub const CONTAINS_MAP: u32 = 0x0002_0000;
-    /// `PKG_Trash`.
+    /// `PKG_Trash`. STRONG: the loader never copies it from a file and sets it
+    /// when the file path contains `__Trashcan`. Never observed.
     pub const TRASH: u32 = 0x0004_0000;
-    /// `PKG_DisallowLazyLoading`.
+    /// `PKG_DisallowLazyLoading`. STRONG: the loader disables lazy loading for
+    /// a package with this bit (except cooked packages in the editor).
+    /// Observed on 37.
     pub const DISALLOW_LAZY_LOADING: u32 = 0x0008_0000;
-    /// `PKG_PlayInEditor`.
+    /// `PKG_PlayInEditor`. TENTATIVE (tested by level-streaming and
+    /// dirty-marking code); never observed.
     pub const PLAY_IN_EDITOR: u32 = 0x0010_0000;
-    /// `PKG_ContainsScript`. Corroborated: set on exactly the `.u` script packages.
+    /// `PKG_ContainsScript`. Corroborated: set on exactly the `.u` script
+    /// packages and on the `asamu`/`UTGame` package exports in `Startup.upk`;
+    /// the code never marks such packages dirty. STRONG.
     pub const CONTAINS_SCRIPT: u32 = 0x0020_0000;
-    /// `PKG_ContainsDebugInfo`.
+    /// `PKG_ContainsDebugInfo`. TENTATIVE; never observed.
     pub const CONTAINS_DEBUG_INFO: u32 = 0x0040_0000;
-    /// `PKG_RequireImportsAlreadyLoaded`.
+    /// `PKG_RequireImportsAlreadyLoaded`. STRONG: the loader skips import
+    /// verification for a package with this bit, and the editor clears it on
+    /// load. Observed on 35.
     pub const REQUIRE_IMPORTS_ALREADY_LOADED: u32 = 0x0080_0000;
-    /// `PKG_SelfContainedLighting`.
+    /// `PKG_SelfContainedLighting`. TENTATIVE; never observed.
     pub const SELF_CONTAINED_LIGHTING: u32 = 0x0100_0000;
-    /// `PKG_StoreCompressed`. Corroborated: set exactly when CompressionFlags != 0.
+    /// `PKG_StoreCompressed`. CONFIRMED: set exactly when CompressionFlags != 0,
+    /// and the loader installs the compressed-chunk map only when it is set.
     pub const STORE_COMPRESSED: u32 = 0x0200_0000;
-    /// `PKG_StoreFullyCompressed`.
+    /// `PKG_StoreFullyCompressed`. TENTATIVE (tested by the saver); never
+    /// observed.
     pub const STORE_FULLY_COMPRESSED: u32 = 0x0400_0000;
-    /// `PKG_ContainsInlinedShaders`.
+    /// `PKG_ContainsInlinedShaders`. TENTATIVE; never observed.
     pub const CONTAINS_INLINED_SHADERS: u32 = 0x0800_0000;
-    /// `PKG_ContainsFaceFXData`.
+    /// `PKG_ContainsFaceFXData`. CONFIRMED meaning: the loader sets it in
+    /// memory when an export's class is `FaceFXAsset` or `FaceFXAnimSet`.
+    /// Never stored in a shipped summary.
     pub const CONTAINS_FACEFX_DATA: u32 = 0x1000_0000;
-    /// `PKG_NoExportAllowed`.
+    /// `PKG_NoExportAllowed`. CONFIRMED meaning: the loader sets it on a
+    /// package whose summary `PackageSource` equals the checksum of its base
+    /// file name (true for all 42 shipped packages; see
+    /// [`crate::flags::package_source`]). Stored in 27 summaries.
     pub const NO_EXPORT_ALLOWED: u32 = 0x2000_0000;
-    /// `PKG_StrippedSource`.
+    /// `PKG_StrippedSource`. TENTATIVE; never observed.
     pub const STRIPPED_SOURCE: u32 = 0x4000_0000;
 
     /// (bit, conventional UE3 name) pairs, low bit first.
@@ -267,7 +301,8 @@ pub struct Summary {
     pub compression_flags: u32,
     /// Compressed chunk table (empty for uncompressed packages).
     pub compressed_chunks: Vec<CompressedChunk>,
-    /// Package source checksum.
+    /// Package source checksum: the CRC of the package's base file name
+    /// (see [`crate::flags::package_source`]).
     pub package_source: u32,
     /// Additional packages to cook (map packages naming their sublevels).
     pub additional_packages_to_cook: Vec<String>,
