@@ -24,3 +24,20 @@ Milestone status lives in `progress/progress.toml`; this file explains each mile
 `walk → jump → grapple target → grapple → swing/accelerate → release → preserve momentum → land`
 
 Proven in a deterministic simulation first (no rendering), then wired into Bevy.
+
+## Execution plan to 100% (living; update as phases land)
+
+Each phase runs as parallel workstreams with an adversarial verification pass; results are merged in small
+commits with tracker updates.
+
+| Phase | Workstreams | Unlocks |
+|---|---|---|
+| 1 ✅ | UE3 reader + LZO, symbol map, locator/inventory, native physics spec, deterministic player slice | M1, M2, M3 |
+| 2 (running) | Object payload decoder (tagged properties, UClass/UFunction/UProperty), grapple + abilities behaviour specs, native physics port, class defaults, Kismet graphs | M4, M5, real constants |
+| 2b (running) | Binary RE completion (load commands, RTTI, strings), save/progression format | Binary RE, Save |
+| 3 | Gameplay port: real defaults wired into `Ue3PawnMovement`; grapple (`GrappleGun` + `Grappling` state); power jump; rocket boots; sprint/story speed; camera/FOV/eye height; falling damage; kill zones, death, checkpoints; input layer per `DefaultInput.ini` | M7, M8 (pending traces) |
+| 4 | Asset importer: Texture2D + TFC (DXT → PNG/KTX2), static meshes (+LODs, sections, materials), collision (BSP `Model`, static-mesh collision, volumes), level actor placement (StaticMeshActor, InterpActor, lights, PlayerStart, triggers) → user-local converted format; Bevy loaders | M6, M9 |
+| 5 | Kismet runtime subset (events/actions/conditions/variables used by ASAMU), Matinee/interp movers, level streaming, story sequencing, narration + subtitles, audio (SoundNodeWave/SoundCue), music manager | M10 |
+| 6 | Skeletal meshes/animations (hands, Maddie, worm, villagers), NPC behaviour, UI (Bevy replacements for Scaleform menus/HUD), save/progression, time trial, collectibles/achievements | M11 |
+| 7 | Behavioural parity: trace capture on the original (Windows) + replay suite; regression traces per level | M12 |
+| 8 | Release packaging for Windows/Linux/macOS (arm64 + x86_64), importer UX | M13 |
