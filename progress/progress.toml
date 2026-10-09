@@ -503,7 +503,9 @@ note = "Per-level milestones and transitions; conditions not evaluated."
 [[category.item]]
 id = "runtime"
 name = "Kismet runtime (events, actions, conditions, variables used by ASAMU)"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-kismet; docs/reverse-engineering/KISMET_RUNTIME.md"
+note = "97/97 op classes present in data implemented; 10 maps x 3,000 ticks without errors. Not trace-verified."
 [[category]]
 id = "maps"
 name = "Maps"
@@ -795,8 +797,9 @@ note = "Kill zones + KillZ death sequence with respawn after 18 ticks at latest 
 [[category.item]]
 id = "moving-platforms"
 name = "Moving platforms (interpolation)"
-status = "partial"
-note = "Matinee decoded with exact curve evaluation (MATINEE.md); runtime movers not yet driven by it."
+status = "implemented"
+evidence = "crates/asamu-kismet; docs/reverse-engineering/KISMET_RUNTIME.md"
+note = "Matinee movers + attached actors + player basing; 267/267 positions match direct curve evaluation."
 
 [[category.item]]
 id = "level-streaming"
@@ -808,7 +811,9 @@ note = "Freds_place always with BeautifulCity; TheCore streamed on request."
 [[category.item]]
 id = "story-sequencing"
 name = "Story sequencing"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-kismet; docs/reverse-engineering/KISMET_RUNTIME.md"
+note = "Level-start abilities, checkpoints, narrator lines, transitions driven by the original Kismet graphs."
 
 # --------------------------------------------------------------------------
 # Rendering
