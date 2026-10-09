@@ -108,7 +108,9 @@ note = "otool -L: SDL2, OpenAL, Steam API, libstdc++, Cocoa/Carbon/OpenGL/IOKit.
 [[category.item]]
 id = "ghidra-project"
 name = "Headless Ghidra import preserving original symbols"
-status = "not_started"
+status = "implemented"
+evidence = "tools/ghidra-scripts/README.md"
+note = "Headless import + auto-analysis of the unstripped Mach-O (647 s); original symbol names preserved; project in git-ignored research/ghidra."
 
 [[category.item]]
 id = "native-registration"
@@ -123,7 +125,8 @@ status = "investigating"
 [[category.item]]
 id = "physics-paths"
 name = "Native physics paths reached by player/grapple script"
-status = "not_started"
+status = "investigating"
+note = "48 native physics/camera anchors exported (sanitized summaries) and decompiled locally for reading."
 
 [[category.item]]
 id = "rtti-vtables"
@@ -536,7 +539,8 @@ status = "not_started"
 [[category.item]]
 id = "input-map"
 name = "Input bindings (DefaultInput.ini)"
-status = "not_started"
+status = "partial"
+note = "DefaultInput.ini bindings and PlayerInput constants recorded in GAMEPLAY_LEADS.md; not yet implemented in runtime."
 
 # --------------------------------------------------------------------------
 # Grapple

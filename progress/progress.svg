@@ -20,7 +20,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 </style>
 <rect class="bg" x="0.5" y="0.5" width="979" height="746" rx="8"/>
 <text class="ttl" x="24" y="38">ASAMU-decomp — reimplementation progress</text>
-<text class="sub" x="24" y="62">Completion 0% (0 of 125 items implemented or verified) · Verified 0% (0) · Current milestone: M0 — Repository + analysis infrastructure</text>
+<text class="sub" x="24" y="62">Completion 0% (1 of 125 items implemented or verified) · Verified 0% (0) · Current milestone: M0 — Repository + analysis infrastructure</text>
 <text class="muted" x="24" y="84">Generated from progress/progress.toml by tools/progress-gen. Completion = (implemented + verified) / total; floored.</text>
 <text class="lbl" x="24" y="117">Milestones</text>
 <g><title>M0 — Repository + analysis infrastructure: Partial</title><rect class="c partial-o" x="206.5" y="104.5" width="17" height="17" rx="2"/><path class="partial-f" d="M206 104h9v18h-9z"/></g>
@@ -54,13 +54,13 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <text class="lbl" x="24" y="158">Binary RE</text>
 <g><title>Binary RE / Architecture, load commands, segments — Partial — x86_64 Mach-O, 28 load commands, PIE, unsigned (codesign). Segment map not yet documented.</title><rect class="c partial-o" x="206.5" y="145.5" width="17" height="17" rx="2"/><path class="partial-f" d="M206 145h9v18h-9z"/></g>
 <g><title>Binary RE / Linked frameworks and bundled middleware — Partial — otool -L: SDL2, OpenAL, Steam API, libstdc++, Cocoa/Carbon/OpenGL/IOKit.</title><rect class="c partial-o" x="229.5" y="145.5" width="17" height="17" rx="2"/><path class="partial-f" d="M229 145h9v18h-9z"/></g>
-<rect class="c not_started" x="252.5" y="145.5" width="17" height="17" rx="2"><title>Binary RE / Headless Ghidra import preserving original symbols — Not started</title></rect>
+<rect class="c implemented" x="252" y="145" width="18" height="18" rx="2"><title>Binary RE / Headless Ghidra import preserving original symbols — Implemented — Headless import + auto-analysis of the unstripped Mach-O (647 s); original symbol names preserved; project in git-ignored research/ghidra.</title></rect>
 <rect class="c investigating" x="275" y="145" width="18" height="18" rx="2"><title>Binary RE / UE3 native class registration (AutoInitializeRegistrants*) — Investigating</title></rect>
 <rect class="c investigating" x="298" y="145" width="18" height="18" rx="2"><title>Binary RE / ASAMU-specific native code identified — Investigating</title></rect>
-<rect class="c not_started" x="321.5" y="145.5" width="17" height="17" rx="2"><title>Binary RE / Native physics paths reached by player/grapple script — Not started</title></rect>
+<rect class="c investigating" x="321" y="145" width="18" height="18" rx="2"><title>Binary RE / Native physics paths reached by player/grapple script — Investigating — 48 native physics/camera anchors exported (sanitized summaries) and decompiled locally for reading.</title></rect>
 <rect class="c not_started" x="344.5" y="145.5" width="17" height="17" rx="2"><title>Binary RE / RTTI / vtable usefulness assessed — Not started</title></rect>
 <rect class="c not_started" x="367.5" y="145.5" width="17" height="17" rx="2"><title>Binary RE / String → xref → function workflow — Not started</title></rect>
-<text class="pct" x="830" y="158">0%</text><text class="muted" x="876" y="158">0/8 · ✓0</text>
+<text class="pct" x="830" y="158">12%</text><text class="muted" x="876" y="158">1/8 · ✓0</text>
 <text class="lbl" x="24" y="189">Symbols</text>
 <rect class="c investigating" x="206" y="176" width="18" height="18" rx="2"><title>Symbols / Symbol table census (total/defined/undefined/local) — Investigating</title></rect>
 <rect class="c not_started" x="229.5" y="176.5" width="17" height="17" rx="2"><title>Symbols / C++ demangling coverage — Not started</title></rect>
@@ -143,7 +143,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <rect class="c not_started" x="321.5" y="424.5" width="17" height="17" rx="2"><title>Player / Collision dimensions — Not started</title></rect>
 <rect class="c not_started" x="344.5" y="424.5" width="17" height="17" rx="2"><title>Player / Camera — Not started</title></rect>
 <rect class="c not_started" x="367.5" y="424.5" width="17" height="17" rx="2"><title>Player / FOV — Not started</title></rect>
-<rect class="c not_started" x="390.5" y="424.5" width="17" height="17" rx="2"><title>Player / Input bindings (DefaultInput.ini) — Not started</title></rect>
+<g><title>Player / Input bindings (DefaultInput.ini) — Partial — DefaultInput.ini bindings and PlayerInput constants recorded in GAMEPLAY_LEADS.md; not yet implemented in runtime.</title><rect class="c partial-o" x="390.5" y="424.5" width="17" height="17" rx="2"/><path class="partial-f" d="M390 424h9v18h-9z"/></g>
 <text class="pct" x="830" y="437">0%</text><text class="muted" x="876" y="437">0/9 · ✓0</text>
 <text class="lbl" x="24" y="468">Grapple</text>
 <rect class="c not_started" x="206.5" y="455.5" width="17" height="17" rx="2"><title>Grapple / Target acquisition — Not started</title></rect>
@@ -215,13 +215,13 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,san
 <g><title>Verified</title><rect class="c verified" x="24" y="710" width="18" height="18" rx="2"/><path class="mark" d="M27 719l4 4l7 -8"/></g>
 <text class="muted" x="48" y="721">Verified (0)</text>
 <rect class="c implemented" x="154" y="710" width="18" height="18" rx="2"><title>Implemented</title></rect>
-<text class="muted" x="178" y="721">Implemented (0)</text>
+<text class="muted" x="178" y="721">Implemented (1)</text>
 <g><title>Partial</title><rect class="c partial-o" x="305.5" y="710.5" width="17" height="17" rx="2"/><path class="partial-f" d="M305 710h9v18h-9z"/></g>
-<text class="muted" x="329" y="721">Partial (5)</text>
+<text class="muted" x="329" y="721">Partial (6)</text>
 <rect class="c investigating" x="428" y="710" width="18" height="18" rx="2"><title>Investigating</title></rect>
-<text class="muted" x="452" y="721">Investigating (12)</text>
+<text class="muted" x="452" y="721">Investigating (13)</text>
 <g><title>Blocked</title><rect class="c blocked" x="600" y="710" width="18" height="18" rx="2"/><path class="mark" d="M605 715l8 8M613 715l-8 8"/></g>
 <text class="muted" x="624" y="721">Blocked (0)</text>
 <rect class="c not_started" x="723.5" y="710.5" width="17" height="17" rx="2"><title>Not started</title></rect>
-<text class="muted" x="747" y="721">Not started (108)</text>
+<text class="muted" x="747" y="721">Not started (105)</text>
 </svg>

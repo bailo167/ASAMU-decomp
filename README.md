@@ -21,7 +21,7 @@
 
 | Category | Items | Implemented + verified | Verified | In progress | Completion | Verified % |
 |---|---:|---:|---:|---:|---:|---:|
-| Binary RE | 8 | 0 | 0 | 4 | 0% | 0% |
+| Binary RE | 8 | 1 | 0 | 5 | 12% | 0% |
 | Symbols | 7 | 0 | 0 | 3 | 0% | 0% |
 | UE3 Packages | 10 | 0 | 0 | 2 | 0% | 0% |
 | Compression | 6 | 0 | 0 | 1 | 0% | 0% |
@@ -30,7 +30,7 @@
 | Kismet | 5 | 0 | 0 | 0 | 0% | 0% |
 | Maps | 7 | 0 | 0 | 2 | 0% | 0% |
 | Assets | 8 | 0 | 0 | 0 | 0% | 0% |
-| Player | 9 | 0 | 0 | 0 | 0% | 0% |
+| Player | 9 | 0 | 0 | 1 | 0% | 0% |
 | Grapple | 8 | 0 | 0 | 0 | 0% | 0% |
 | World | 7 | 0 | 0 | 0 | 0% | 0% |
 | Rendering | 6 | 0 | 0 | 1 | 0% | 0% |
@@ -39,7 +39,7 @@
 | Importer | 7 | 0 | 0 | 0 | 0% | 0% |
 | Platforms | 5 | 0 | 0 | 0 | 0% | 0% |
 | Tests | 8 | 0 | 0 | 2 | 0% | 0% |
-| **Overall** | **125** | **0** | **0** | **17** | **0%** | **0%** |
+| **Overall** | **125** | **1** | **0** | **19** | **0%** | **0%** |
 
 <!-- progress-table:end -->
 
