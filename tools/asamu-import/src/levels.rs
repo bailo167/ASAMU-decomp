@@ -16,6 +16,16 @@
 //!   binary for viewing, converted to glTF axes (`(y, z, -x)`, unscaled UU).
 //! - `manifest.json` — per-map counts and streaming relationships.
 //!
+//! The scene JSON also carries an additive `atmosphere` block ([`Atmosphere`],
+//! after every field of the scene itself): the effective properties of the
+//! height-fog and fog-volume components (which live on component subobjects
+//! the actor list does not describe), the fog volumes' material parameters,
+//! and the engine's default post-process chain (`DefaultPostProcessName` from
+//! the game config, with each effect's effective properties). World and
+//! volume post-process settings are already in the actors' `params`
+//! (`WorldInfo.DefaultPostProcessSettings`, `PostProcessVolume.Settings`).
+//! See `docs/reverse-engineering/POST_FOG_SKY.md`.
+//!
 //! All of this is derived from copyrighted game data: keep it local and do
 //! not redistribute it.
 
@@ -25,8 +35,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use asamu_ue3::bsp::TriangleMesh;
-use asamu_ue3::level::{self, BspGeometry, Scene, SceneOptions};
+use asamu_ue3::level::{self, BspGeometry, ParamValue, Scene, SceneOptions};
 use asamu_ue3::model::{LoadedPackage, PackageSet};
+use asamu_ue3::{Property, Schema, Value};
 use serde::Serialize;
 
 use crate::safety;
@@ -65,13 +76,15 @@ pub struct Args {
     force: bool,
 }
 
-/// Cooked package folder and root of the install.
-fn install_dirs(ctx: &crate::Ctx) -> Result<(PathBuf, PathBuf)> {
+/// Cooked package folder, root of the install, and the config files that
+/// may name the default post-process chain (most specific first).
+fn install_dirs(ctx: &crate::Ctx) -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
     let install = match &ctx.original {
         Some(p) => asamu_locate::from_original_dir(p)?,
         None => asamu_locate::locate()?,
     };
-    Ok((install.cooked_dir, install.root))
+    let configs = engine_config_files(&install.config_dir, &install.engine_dir);
+    Ok((install.cooked_dir, install.root, configs))
 }
 
 /// Map package files in `maps_dir`, optionally filtered by stem.
@@ -403,6 +416,430 @@ pub fn glb(meshes: &[(&str, &TriangleMesh)]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// ------------------------------------------------------------ atmosphere
+
+/// `version` of the scene's `atmosphere` block.
+pub const ATMOSPHERE_VERSION: u32 = 1;
+/// Archetype chains followed when resolving component values.
+const MAX_ARCHETYPE_DEPTH: usize = 16;
+/// Effects read from one post-process chain (the shipped chains hold five).
+const MAX_CHAIN_EFFECTS: usize = 64;
+/// Fog components exported per map (the shipped maps hold at most nine).
+const MAX_FOG_COMPONENTS: usize = 256;
+/// Warnings kept in the block.
+const MAX_ATMOSPHERE_WARNINGS: usize = 64;
+
+/// `<map>.scene.json`: the scene's own fields, then the additive
+/// [`Atmosphere`] block (existing keys keep their order and values).
+#[derive(Debug, Serialize)]
+pub struct SceneFile<'a> {
+    /// The scene.
+    #[serde(flatten)]
+    pub scene: &'a Scene,
+    /// Fog components and the default post-process chain.
+    pub atmosphere: &'a Atmosphere,
+}
+
+/// Fog and post-process data the actor list does not carry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Atmosphere {
+    /// [`ATMOSPHERE_VERSION`].
+    pub version: u32,
+    /// `HeightFogComponent` / `ExponentialHeightFogComponent` subobjects.
+    pub height_fogs: Vec<FogComponentExport>,
+    /// `FogVolumeDensityComponent` subobjects (constant, linear half-space,
+    /// sphere, cone density) with their fog material and volume mesh.
+    pub fog_volumes: Vec<FogVolumeExport>,
+    /// The engine's default post-process chain.
+    pub post_process_chain: Option<ChainExport>,
+    /// Non-fatal problems.
+    pub warnings: Vec<String>,
+}
+
+/// One fog component.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FogComponentExport {
+    /// Owning actor's slot in `ULevel::Actors` (index into `actors`).
+    pub slot: usize,
+    /// Owning actor name.
+    pub actor: String,
+    /// Owning actor class path.
+    pub actor_class: String,
+    /// Owning actor `Location` (UE3, UU).
+    pub location: [f32; 3],
+    /// Component object name.
+    pub component: String,
+    /// Component class path.
+    pub class: String,
+    /// Effective component values (own values over archetype / class
+    /// defaults), in the actors' `params` encoding.
+    pub params: BTreeMap<String, ParamValue>,
+}
+
+/// One fog volume.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FogVolumeExport {
+    /// The density component.
+    #[serde(flatten)]
+    pub density: FogComponentExport,
+    /// `FogMaterial` (or the class `DefaultFogVolumeMaterial`) parameters.
+    pub material: Option<MaterialParamsExport>,
+    /// Static mesh of the actor's volume component (`AutomaticMeshComponent`).
+    pub mesh: Option<String>,
+    /// That component's world matrix (UE3 row-vector convention, as in the
+    /// scene's components).
+    pub mesh_local_to_world: Option<[[f32; 4]; 4]>,
+}
+
+/// A material instance's own parameter values.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MaterialParamsExport {
+    /// Material path.
+    pub path: String,
+    /// Material class path.
+    pub class: String,
+    /// `Parent` path (material instances).
+    pub parent: Option<String>,
+    /// `VectorParameterValues` (name → R, G, B, A).
+    pub vectors: BTreeMap<String, [f32; 4]>,
+    /// `ScalarParameterValues` (name → value).
+    pub scalars: BTreeMap<String, f32>,
+}
+
+/// A post-process chain.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChainExport {
+    /// Chain object path.
+    pub name: String,
+    /// Where the name came from (config file and key).
+    pub source: String,
+    /// Effects in chain order.
+    pub effects: Vec<EffectExport>,
+}
+
+/// One post-process effect of a chain.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EffectExport {
+    /// Effect object name.
+    pub name: String,
+    /// Effect class path.
+    pub class: String,
+    /// Effective values (own over class defaults).
+    pub params: BTreeMap<String, ParamValue>,
+}
+
+fn warn_into(w: &mut Vec<String>, msg: String) {
+    if w.len() < MAX_ATMOSPHERE_WARNINGS {
+        w.push(msg);
+    }
+}
+
+/// Class defaults of `class` as a property list.
+fn class_default_props(set: &PackageSet, class: &str) -> Result<Vec<Property>> {
+    let d = set
+        .inherited_defaults(class)
+        .with_context(|| format!("class defaults of {class}"))?;
+    Ok(d.values
+        .into_iter()
+        .map(|r| Property {
+            name: r.name,
+            type_name: r.type_name,
+            array_index: r.array_index,
+            size: 0,
+            struct_name: None,
+            enum_name: None,
+            value: r.value,
+            offset: 0,
+        })
+        .collect())
+}
+
+/// Effective properties of export `index` of `lp`: its own values merged
+/// over its archetype's effective values or, without an archetype, over its
+/// class defaults (the same rule the scene extractor uses for actors).
+pub fn effective_props(
+    set: &PackageSet,
+    lp: &Arc<LoadedPackage>,
+    index: usize,
+    depth: usize,
+) -> Result<Vec<Property>> {
+    let own = set
+        .decode(lp, index)
+        .with_context(|| format!("{}: export {index} does not decode", lp.name))?
+        .properties;
+    let archetype = lp.package.export(index)?.archetype_index;
+    let mut base = None;
+    if !archetype.is_null()
+        && depth < MAX_ARCHETYPE_DEPTH
+        && let Some(path) = lp.ref_path(archetype)?
+        && let Some((alp, ai)) = set.locate(&path)
+    {
+        base = Some(effective_props(set, &alp, ai, depth + 1)?);
+    }
+    let mut base = match base {
+        Some(b) => b,
+        None => {
+            let class = asamu_ue3::object::export_class_path(&lp.package, Some(&lp.name), index)?;
+            class_default_props(set, &class)?
+        }
+    };
+    level::merge_properties(&mut base, &own);
+    Ok(base)
+}
+
+fn object_path(v: &Value) -> Option<String> {
+    match v {
+        Value::Object(o) if o.index != 0 => Some(o.path.clone()),
+        _ => None,
+    }
+}
+
+fn param_rgba(v: &Value) -> Option<[f32; 4]> {
+    let c = |n: &str| level::member(v, n).and_then(level::as_f32).unwrap_or(0.0);
+    matches!(v, Value::Struct { .. }).then(|| [c("R"), c("G"), c("B"), c("A")])
+}
+
+fn param_name(v: &Value) -> Option<String> {
+    match level::member(v, "ParameterName")? {
+        Value::Name(s) | Value::Str(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Own vector and scalar parameter values of the material at `path`.
+fn material_params(set: &PackageSet, path: &str) -> Result<MaterialParamsExport> {
+    let (lp, i) = set
+        .locate(path)
+        .with_context(|| format!("material {path} not found"))?;
+    let obj = set.decode(&lp, i)?;
+    let props = &obj.properties;
+    let mut vectors = BTreeMap::new();
+    let mut scalars = BTreeMap::new();
+    if let Some(Value::Array(items)) = level::prop(props, "VectorParameterValues") {
+        for item in items {
+            if let (Some(name), Some(value)) = (
+                param_name(item),
+                level::member(item, "ParameterValue").and_then(param_rgba),
+            ) {
+                vectors.insert(name, value);
+            }
+        }
+    }
+    if let Some(Value::Array(items)) = level::prop(props, "ScalarParameterValues") {
+        for item in items {
+            if let (Some(name), Some(value)) = (
+                param_name(item),
+                level::member(item, "ParameterValue").and_then(level::as_f32),
+            ) {
+                scalars.insert(name, value);
+            }
+        }
+    }
+    Ok(MaterialParamsExport {
+        path: obj.path.clone(),
+        class: obj.class.clone(),
+        parent: level::prop(props, "Parent").and_then(object_path),
+        vectors,
+        scalars,
+    })
+}
+
+/// Kind of fog component, from a lower-case class chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FogKind {
+    Height,
+    Volume,
+}
+
+fn fog_kind(chain: &[String]) -> Option<FogKind> {
+    let has = |n: &str| chain.iter().any(|c| c == n);
+    if has("heightfogcomponent") || has("exponentialheightfogcomponent") {
+        Some(FogKind::Height)
+    } else if has("fogvolumedensitycomponent") {
+        Some(FogKind::Volume)
+    } else {
+        None
+    }
+}
+
+/// Fog components of the scene's actors.
+fn fog_components(
+    set: &PackageSet,
+    lp: &Arc<LoadedPackage>,
+    scene: &Scene,
+    atmosphere: &mut Atmosphere,
+) {
+    for actor in &scene.actors {
+        for comp in &actor.components {
+            let chain = set.class_chain(&comp.class);
+            let Some(kind) = fog_kind(&chain) else {
+                continue;
+            };
+            if atmosphere.height_fogs.len() + atmosphere.fog_volumes.len() >= MAX_FOG_COMPONENTS {
+                warn_into(
+                    &mut atmosphere.warnings,
+                    format!("more than {MAX_FOG_COMPONENTS} fog components; the rest are left out"),
+                );
+                return;
+            }
+            let props = match effective_props(set, lp, comp.export_index, 0) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn_into(
+                        &mut atmosphere.warnings,
+                        format!("{}.{}: {e:#}", actor.name, comp.name),
+                    );
+                    continue;
+                }
+            };
+            let export = FogComponentExport {
+                slot: actor.slot,
+                actor: actor.name.clone(),
+                actor_class: actor.class.clone(),
+                location: actor.location,
+                component: comp.name.clone(),
+                class: comp.class.clone(),
+                params: level::param_map(&props),
+            };
+            match kind {
+                FogKind::Height => atmosphere.height_fogs.push(export),
+                FogKind::Volume => {
+                    let material_path = level::prop(&props, "FogMaterial")
+                        .and_then(object_path)
+                        .or_else(|| {
+                            level::prop(&props, "DefaultFogVolumeMaterial").and_then(object_path)
+                        });
+                    let material = material_path.and_then(|p| match material_params(set, &p) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            warn_into(&mut atmosphere.warnings, format!("{p}: {e:#}"));
+                            None
+                        }
+                    });
+                    // The volume's shape: the actor's (first) static mesh
+                    // component, `AutomaticMeshComponent` on the shipped
+                    // fog volume actors.
+                    let mesh_comp = actor
+                        .components
+                        .iter()
+                        .find(|c| c.kind == level::ComponentKind::StaticMesh);
+                    atmosphere.fog_volumes.push(FogVolumeExport {
+                        density: export,
+                        material,
+                        mesh: mesh_comp.and_then(|c| c.static_mesh.clone()),
+                        mesh_local_to_world: mesh_comp.map(|c| c.local_to_world),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The config files that may set `[Engine.Engine] DefaultPostProcessName`,
+/// most specific first: the platform file, the game default and the engine
+/// base (UE3 config inheritance: a more specific file overrides).
+fn engine_config_files(config_dir: &Path, engine_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        config_dir.join("Mac").join("MacEngine.ini"),
+        config_dir.join("DefaultEngine.ini"),
+        engine_dir.join("Config").join("BaseEngine.ini"),
+    ]
+}
+
+/// Value of `key` in `[section]` of an ini text (last assignment wins inside
+/// one file; keys and sections compare without regard to ASCII case).
+pub fn ini_value(text: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    let mut out = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with(';') || line.is_empty() {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_section = name.trim().eq_ignore_ascii_case(section);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim().eq_ignore_ascii_case(key)
+        {
+            out = Some(v.trim().trim_matches('"').to_owned());
+        }
+    }
+    out
+}
+
+/// The default post-process chain named by the first config file that sets
+/// it, with its effects' effective values.
+fn post_process_chain(
+    set: &PackageSet,
+    configs: &[PathBuf],
+    warnings: &mut Vec<String>,
+) -> Option<ChainExport> {
+    let (name, source) = configs.iter().find_map(|f| {
+        let text = std::fs::read_to_string(f).ok()?;
+        let v = ini_value(&text, "Engine.Engine", "DefaultPostProcessName")?;
+        let file = f.file_name()?.to_string_lossy().into_owned();
+        Some((v, format!("{file} [Engine.Engine] DefaultPostProcessName")))
+    })?;
+    let Some((lp, ci)) = set.locate(&name) else {
+        warn_into(warnings, format!("post-process chain {name} not found"));
+        return None;
+    };
+    let props = match set.decode(&lp, ci) {
+        Ok(o) => o.properties,
+        Err(e) => {
+            warn_into(warnings, format!("{name}: {e}"));
+            return None;
+        }
+    };
+    let mut effects = Vec::new();
+    if let Some(Value::Array(items)) = level::prop(&props, "Effects") {
+        for path in items.iter().filter_map(object_path).take(MAX_CHAIN_EFFECTS) {
+            let Some((elp, ei)) = set.locate(&path) else {
+                warn_into(warnings, format!("post-process effect {path} not found"));
+                continue;
+            };
+            let class = asamu_ue3::object::export_class_path(&elp.package, Some(&elp.name), ei)
+                .unwrap_or_default();
+            match effective_props(set, &elp, ei, 0) {
+                Ok(p) => effects.push(EffectExport {
+                    name: path.rsplit('.').next().unwrap_or(&path).to_owned(),
+                    class,
+                    params: level::param_map(&p),
+                }),
+                Err(e) => warn_into(warnings, format!("{path}: {e:#}")),
+            }
+        }
+    }
+    Some(ChainExport {
+        name,
+        source,
+        effects,
+    })
+}
+
+/// The additive atmosphere block of one map.
+pub fn atmosphere(
+    set: &PackageSet,
+    lp: &Arc<LoadedPackage>,
+    scene: &Scene,
+    configs: &[PathBuf],
+) -> Atmosphere {
+    let mut out = Atmosphere {
+        version: ATMOSPHERE_VERSION,
+        ..Atmosphere::default()
+    };
+    fog_components(set, lp, scene, &mut out);
+    let mut warnings = std::mem::take(&mut out.warnings);
+    out.post_process_chain = post_process_chain(set, configs, &mut warnings);
+    out.warnings = warnings;
+    out
+}
+
 // ------------------------------------------------------------ manifest
 
 /// One map in `manifest.json` (counts only).
@@ -456,7 +893,13 @@ fn kinds_of(scene: &Scene) -> BTreeMap<String, usize> {
         .collect()
 }
 
-fn convert_map(file: &Path, cooked: &Path, out_dir: &Path, args: &Args) -> Result<ManifestEntry> {
+fn convert_map(
+    file: &Path,
+    cooked: &Path,
+    configs: &[PathBuf],
+    out_dir: &Path,
+    args: &Args,
+) -> Result<ManifestEntry> {
     let set = PackageSet::new(&[cooked.to_path_buf(), cooked.join("Maps")]);
     let lp: Arc<LoadedPackage> = set
         .open_file(file)
@@ -473,12 +916,17 @@ fn convert_map(file: &Path, cooked: &Path, out_dir: &Path, args: &Args) -> Resul
     let scene = level::extract_scene(&set, &lp, level_export, &opts)
         .with_context(|| format!("extracting the scene of {}", lp.name))?;
     let map = lp.name.clone();
+    let atmosphere = atmosphere(&set, &lp, &scene, configs);
     let mut files = Vec::new();
     let name = format!("{map}.scene.json");
+    let scene_file = SceneFile {
+        scene: &scene,
+        atmosphere: &atmosphere,
+    };
     write_file(
         out_dir,
         &name,
-        &to_json(&scene, args.pretty)?,
+        &to_json(&scene_file, args.pretty)?,
         file,
         args.force,
     )?;
@@ -523,7 +971,7 @@ fn convert_map(file: &Path, cooked: &Path, out_dir: &Path, args: &Args) -> Resul
 }
 
 pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {
-    let (cooked, install_root) = install_dirs(ctx)?;
+    let (cooked, install_root, configs) = install_dirs(ctx)?;
     let maps_dir = cooked.join("Maps");
     let maps = select_maps(&maps_dir, &args.maps)?;
     if maps.is_empty() {
@@ -541,7 +989,7 @@ pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {
         maps: Vec::new(),
     };
     for file in &maps {
-        let entry = convert_map(file, &cooked, &out_dir, &args)?;
+        let entry = convert_map(file, &cooked, &configs, &out_dir, &args)?;
         println!(
             "{:<20} actors {:>5}  components {:>5}  bsp triangles {:>12}  streaming {:?}  warnings {}",
             entry.map,
@@ -739,6 +1187,253 @@ mod tests {
         assert!(is_within(Path::new("/a/b"), Path::new("/a/b")));
         assert!(!is_within(Path::new("/a/bc"), Path::new("/a/b")));
         assert!(!is_within(Path::new("/a"), Path::new("/a/b")));
+    }
+
+    #[test]
+    fn ini_lookup_follows_sections_case_and_last_assignment() {
+        let text = "[Core.System]\nDefaultPostProcessName=Wrong.Section\n\
+                    ; comment\n[Engine.Engine]\n  defaultpostprocessname = A.B \n\
+                    DefaultPostProcessName=\"FX.Chain\"\nOther=1\n[engine.engine]\nKey=V\n";
+        assert_eq!(
+            ini_value(text, "Engine.Engine", "DefaultPostProcessName").as_deref(),
+            Some("FX.Chain")
+        );
+        assert_eq!(
+            ini_value(text, "ENGINE.ENGINE", "key").as_deref(),
+            Some("V")
+        );
+        assert_eq!(ini_value(text, "Engine.Engine", "Missing"), None);
+        assert_eq!(ini_value("", "Engine.Engine", "Key"), None);
+        assert_eq!(ini_value("Key=V\n[", "Engine.Engine", "Key"), None);
+        let dirs = engine_config_files(Path::new("/g/Config"), Path::new("/g/Engine"));
+        assert_eq!(dirs.len(), 3);
+        assert!(dirs[0].ends_with("Mac/MacEngine.ini"));
+        assert!(dirs[2].ends_with("Engine/Config/BaseEngine.ini"));
+    }
+
+    #[test]
+    fn fog_components_classify_by_class_chain() {
+        let chain = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            fog_kind(&chain(&[
+                "exponentialheightfogcomponent",
+                "actorcomponent",
+                "component",
+                "object"
+            ])),
+            Some(FogKind::Height)
+        );
+        assert_eq!(
+            fog_kind(&chain(&["heightfogcomponent", "actorcomponent"])),
+            Some(FogKind::Height)
+        );
+        assert_eq!(
+            fog_kind(&chain(&[
+                "fogvolumelinearhalfspacedensitycomponent",
+                "fogvolumedensitycomponent"
+            ])),
+            Some(FogKind::Volume)
+        );
+        assert_eq!(
+            fog_kind(&chain(&["staticmeshcomponent", "primitivecomponent"])),
+            None
+        );
+    }
+
+    #[test]
+    fn atmosphere_block_serializes_after_the_scene_keys() {
+        let a = Atmosphere {
+            version: ATMOSPHERE_VERSION,
+            height_fogs: vec![FogComponentExport {
+                slot: 3,
+                actor: "ExponentialHeightFog_0".to_owned(),
+                actor_class: "Engine.ExponentialHeightFog".to_owned(),
+                location: [1.0, 2.0, 3.0],
+                component: "C".to_owned(),
+                class: "Engine.ExponentialHeightFogComponent".to_owned(),
+                params: BTreeMap::from([("FogDensity".to_owned(), ParamValue::Float(0.5))]),
+            }],
+            ..Atmosphere::default()
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["height_fogs"][0]["params"]["FogDensity"], 0.5);
+        assert!(v["post_process_chain"].is_null());
+        // A fog volume flattens its density component next to its own keys.
+        let fv = FogVolumeExport {
+            density: a.height_fogs[0].clone(),
+            material: None,
+            mesh: Some("EngineMeshes.Cube".to_owned()),
+            mesh_local_to_world: Some(level::IDENTITY),
+        };
+        let v = serde_json::to_value(&fv).unwrap();
+        assert_eq!(v["slot"], 3);
+        assert_eq!(v["mesh"], "EngineMeshes.Cube");
+        assert_eq!(v["mesh_local_to_world"][3][3], 1.0);
+    }
+
+    /// Cooked folder and config files of the user's install, `None` (the
+    /// test skips) when it is absent.
+    fn real_install() -> Option<(PathBuf, Vec<PathBuf>)> {
+        let original = std::env::var_os("ASAMU_ORIGINAL_DIR").map(PathBuf::from);
+        let install = match &original {
+            Some(d) => asamu_locate::from_original_dir(d),
+            None => asamu_locate::locate(),
+        };
+        let Ok(install) = install else {
+            eprintln!("SKIP: original game data not found");
+            return None;
+        };
+        let configs = engine_config_files(&install.config_dir, &install.engine_dir);
+        Some((install.cooked_dir, configs))
+    }
+
+    /// The scene and atmosphere block of one map file, the way
+    /// `convert_map` extracts them.
+    fn scene_and_atmosphere(
+        cooked: &Path,
+        configs: &[PathBuf],
+        file: &Path,
+    ) -> (Scene, Atmosphere) {
+        let set = PackageSet::new(&[cooked.to_path_buf(), cooked.join("Maps")]);
+        let lp = set.open_file(file).unwrap();
+        let lvl = level::level_exports(&lp.package)[0];
+        let scene = level::extract_scene(&set, &lp, lvl, &SceneOptions::default()).unwrap();
+        let atmosphere = atmosphere(&set, &lp, &scene, configs);
+        (scene, atmosphere)
+    }
+
+    /// The scene file is byte for byte the JSON the importer wrote before
+    /// the block existed (`to_json(&scene)`), with only `"atmosphere": ...`
+    /// appended as the last key, compact and pretty.
+    fn assert_scene_bytes_kept(scene: &Scene, atmosphere: &Atmosphere) {
+        for pretty in [false, true] {
+            let old = to_json(scene, pretty).unwrap();
+            let new = to_json(&SceneFile { scene, atmosphere }, pretty).unwrap();
+            let close: &[u8] = if pretty { b"\n}" } else { b"}" };
+            let head = old.strip_suffix(close).expect("a JSON object");
+            assert!(
+                new.starts_with(head),
+                "{} (pretty {pretty}): existing keys changed",
+                scene.package
+            );
+            let sep: &[u8] = if pretty {
+                b",\n  \"atmosphere\": "
+            } else {
+                b",\"atmosphere\":"
+            };
+            let rest = &new[head.len()..];
+            assert!(
+                rest.starts_with(sep),
+                "{}: block not appended",
+                scene.package
+            );
+            let block = rest[sep.len()..].strip_suffix(close).unwrap();
+            // The appended value is the block itself (compared as parsed
+            // text: f32 values print in their shortest form).
+            let parsed: serde_json::Value = serde_json::from_slice(block).unwrap();
+            let alone = to_json(atmosphere, false).unwrap();
+            let expected: serde_json::Value = serde_json::from_slice(&alone).unwrap();
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    /// The atmosphere block of the user's install: one exponential height
+    /// fog in AG-StarHaven with the values the component stores, seven
+    /// linear half-space fog volumes in AG-Darkcave, and the configured
+    /// post-process chain; the rest of both scene files is unchanged.
+    /// Skips when the install is absent.
+    #[test]
+    fn atmosphere_matches_the_original_data() {
+        let Some((cooked, configs)) = real_install() else {
+            return;
+        };
+        let load = |map: &str| {
+            let file = cooked.join("Maps").join(format!("{map}.asamu"));
+            let (scene, atmosphere) = scene_and_atmosphere(&cooked, &configs, &file);
+            assert_scene_bytes_kept(&scene, &atmosphere);
+            atmosphere
+        };
+        let star = load("AG-StarHaven");
+        assert!(star.warnings.is_empty(), "{:?}", star.warnings);
+        assert_eq!(star.height_fogs.len(), 1);
+        let f = &star.height_fogs[0].params;
+        assert_eq!(f.get("StartDistance"), Some(&ParamValue::Float(1024.0)));
+        assert_eq!(
+            f.get("LightTerminatorAngle"),
+            Some(&ParamValue::Float(50.0))
+        );
+        // Not stored on the component: the class default.
+        assert_eq!(f.get("FogDensity"), Some(&ParamValue::Float(0.02)));
+        let chain = star.post_process_chain.as_ref().unwrap();
+        assert_eq!(chain.name, "FX_HitEffects.UTPostProcess_PC");
+        assert_eq!(chain.effects.len(), 5);
+        let uber = chain
+            .effects
+            .iter()
+            .find(|e| e.class == "Engine.UberPostProcessEffect")
+            .unwrap();
+        assert_eq!(
+            uber.params.get("TonemapperType"),
+            Some(&ParamValue::Text("Tonemapper_Customizable".to_owned()))
+        );
+        assert_eq!(
+            uber.params.get("bUseWorldSettings"),
+            Some(&ParamValue::Bool(true))
+        );
+        let dark = load("AG-Darkcave");
+        assert!(dark.height_fogs.is_empty());
+        assert_eq!(dark.fog_volumes.len(), 7);
+        for v in &dark.fog_volumes {
+            assert_eq!(v.mesh.as_deref(), Some("EngineMeshes.Cube"));
+            let m = v.material.as_ref().unwrap();
+            assert_eq!(
+                m.parent.as_deref(),
+                Some("EngineMaterials.FogVolumeMaterial")
+            );
+            assert!(m.vectors.contains_key("EmissiveColor"));
+            // A horizontal plane: dark mist below the actor's height.
+            let plane = v.density.params.get("HalfspacePlane");
+            let Some(ParamValue::Map(p)) = plane else {
+                panic!("HalfspacePlane: {plane:?}");
+            };
+            let z = match p.get("Z") {
+                Some(ParamValue::Float(z)) => *z,
+                other => panic!("Z: {other:?}"),
+            };
+            assert!((z - 1.0).abs() < 1e-5);
+        }
+    }
+
+    /// Every map of the install: the scene part of the file is unchanged by
+    /// the atmosphere block, and every map's block has no warnings and one
+    /// chain. Slow in debug builds: `cargo test --release -p asamu-import
+    /// -- --ignored every_map`.
+    #[test]
+    #[ignore = "slow: decodes every map (run with --release -- --ignored)"]
+    fn every_map_keeps_its_scene_bytes() {
+        let Some((cooked, configs)) = real_install() else {
+            return;
+        };
+        let maps = select_maps(&cooked.join("Maps"), &[]).unwrap();
+        assert!(!maps.is_empty());
+        for file in &maps {
+            let (scene, atmosphere) = scene_and_atmosphere(&cooked, &configs, file);
+            assert_scene_bytes_kept(&scene, &atmosphere);
+            assert!(
+                atmosphere.warnings.is_empty(),
+                "{}: {:?}",
+                scene.package,
+                atmosphere.warnings
+            );
+            assert!(atmosphere.post_process_chain.is_some(), "{}", scene.package);
+            eprintln!(
+                "{}: scene bytes kept; {} height fogs, {} fog volumes",
+                scene.package,
+                atmosphere.height_fogs.len(),
+                atmosphere.fog_volumes.len()
+            );
+        }
     }
 
     #[test]
