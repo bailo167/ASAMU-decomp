@@ -52,6 +52,18 @@
 //! run on [`WorldObjects`], falling rocks on the scene runtime, movers stay
 //! where they are placed (Matinee is not imported yet), and the map's
 //! level-start abilities apply ([`asamu_world::level_start_abilities`]).
+//!
+//! # Kismet
+//!
+//! [`load_level_with_kismet`] loads a converted map together with its
+//! Kismet and Matinee exports and returns a [`LevelScript`]: the map's own
+//! level scripting ([`asamu_kismet`]) runs each frame through
+//! [`LevelScript::tick`] (Kismet update, then [`Game::tick`]; see
+//! [`kismet_host`] for the frame order, movers and basing). With a script,
+//! abilities, checkpoints triggered from Kismet, streaming, story mode and
+//! Matinee movers come from the map's Kismet instead of the level-start
+//! table, and [`ScriptedTick::outputs`] carries the presentation events
+//! (audio, narration, UI, level transitions) for the app.
 
 mod converted;
 pub mod kismet_host;
@@ -81,6 +93,7 @@ use asamu_world::{
 
 pub use converted::{DEATH_FADE_DOWN_TIME, SCENE_RANDOM_SEED};
 use glam::Vec3;
+pub use kismet_host::{LevelScript, LevelScriptError, ScriptedTick, load_level_with_kismet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 pub use world::{GameWorld, SceneCollision};

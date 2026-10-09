@@ -513,6 +513,28 @@ impl CollisionScene {
         self.tlas.bounds()
     }
 
+    /// Removes the static instances whose actor id is in `actors` (keeping
+    /// the order of the rest) and rebuilds the top-level BVH; returns the
+    /// removed instances in their former order. Used before play to turn
+    /// actors that Kismet moves (Matinee) or removes into dynamic
+    /// instances. Static instance indices change; no hit should be kept
+    /// across this call.
+    pub fn take_actor_statics(
+        &mut self,
+        actors: &std::collections::BTreeSet<u32>,
+    ) -> Vec<Instance> {
+        if actors.is_empty() {
+            return Vec::new();
+        }
+        let (taken, kept): (Vec<Instance>, Vec<Instance>) = std::mem::take(&mut self.statics)
+            .into_iter()
+            .partition(|i| i.info.actor.is_some_and(|a| actors.contains(&a)));
+        self.statics = kept;
+        let boxes: Vec<Aabb3> = self.statics.iter().map(|i| i.bounds).collect();
+        self.tlas = Bvh::build(&boxes);
+        taken
+    }
+
     /// A dynamic instance of `mesh` (for the list passed to the queries);
     /// `None` for an unknown mesh or a transform without an inverse.
     #[must_use]
@@ -1050,6 +1072,54 @@ mod tests {
             [1, 7, 3],
         ];
         (v, t)
+    }
+
+    #[test]
+    fn taking_actor_statics_turns_them_into_dynamic_instances() {
+        let mut b = CollisionSceneBuilder::new();
+        let (v, t) = cube();
+        let m = b.add_mesh(v, t).unwrap();
+        let floor = Affine {
+            rows: [DVec3::X * 200.0, DVec3::Y * 200.0, DVec3::Z * 200.0],
+            translation: DVec3::new(-100.0, -100.0, -200.0),
+        };
+        b.add_static(m, floor, info()).unwrap();
+        let mut mover = info();
+        mover.actor = Some(7);
+        mover.class = CollisionClass::InterpActor;
+        b.add_static(
+            m,
+            floor.then(&Affine::from_translation(DVec3::new(0.0, 0.0, 1000.0))),
+            mover,
+        )
+        .unwrap();
+        let mut s = b.build();
+        let none = s.take_actor_statics(&std::collections::BTreeSet::new());
+        assert!(none.is_empty());
+        let taken = s.take_actor_statics(&std::collections::BTreeSet::from([7]));
+        assert_eq!(taken.len(), 1);
+        assert_eq!(s.statics().len(), 1);
+        let ray = |s: &CollisionScene, dynamic: &[Instance]| {
+            s.raycast(
+                dynamic,
+                Vec3::new(0.0, 0.0, 2000.0),
+                Vec3::new(0.0, 0.0, 500.0),
+                QueryFilter::TRACE,
+            )
+        };
+        // Gone from the static set; found again as a dynamic instance.
+        assert!(ray(&s, &[]).is_none());
+        let mut dynamic = vec![
+            s.dynamic_instance(taken[0].mesh, taken[0].to_world, taken[0].info)
+                .unwrap(),
+        ];
+        assert_eq!(ray(&s, &dynamic).unwrap().instance, InstanceRef::Dynamic(0));
+        // Moving it below the ray's end clears the hit.
+        let low = taken[0]
+            .to_world
+            .then(&Affine::from_translation(DVec3::new(0.0, 0.0, -900.0)));
+        assert!(s.place_dynamic(&mut dynamic[0], low));
+        assert!(ray(&s, &dynamic).is_none());
     }
 
     #[test]
