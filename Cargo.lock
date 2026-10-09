@@ -305,6 +305,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 name = "asamu"
 version = "0.0.1"
 dependencies = [
+ "asamu-assets",
  "asamu-core",
  "asamu-game",
  "asamu-player",
@@ -317,6 +318,9 @@ version = "0.0.1"
 dependencies = [
  "asamu-core",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

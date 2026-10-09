@@ -1,11 +1,24 @@
 //! A Story About My Uncle — Rust/Bevy engine recreation (executable).
 //!
-//! **Graybox prototype.** It does not load original game data. It renders the
-//! hand-made graybox level from `asamu-world` and drives the deterministic
-//! simulation in `asamu-game` / `asamu-player` from Bevy's fixed-update
-//! schedule. All gameplay logic lives in those pure crates; this file only
-//! translates devices → `InputFrame`, and simulation state → camera, meshes,
-//! gizmos and HUD.
+//! Two modes:
+//!
+//! - **Graybox** (default, no game data needed): renders the hand-made
+//!   graybox level from `asamu-world` and drives the deterministic
+//!   simulation in `asamu-game` / `asamu-player` from Bevy's fixed-update
+//!   schedule. All gameplay logic lives in those pure crates; this file only
+//!   translates devices → `InputFrame`, and simulation state → camera,
+//!   meshes, gizmos and HUD.
+//! - **Converted original level** (`--converted DIR --level NAME`, see
+//!   [`converted`]): renders a level from the user-local output of
+//!   `asamu-import` (scene JSON, glTF meshes, DDS textures, materials when
+//!   converted). The level's game (`asamu_game::Game::load_level`: triangle
+//!   collision and the gameplay actors) loads on a background task; once it
+//!   is ready the simulation drives the first-person camera exactly as in
+//!   the graybox. Until then, when it fails, or with `--fly`, a render-only
+//!   fly camera ([`fly`]) is used.
+//!
+//! The render scale is the presentation convention (50 UU per render unit);
+//! the simulation stays in UU.
 //!
 //! **Movement and abilities use the original's values and rules**: by
 //! default the player runs the port of the original's native pawn physics
@@ -20,10 +33,10 @@
 //! banner says which parameters are original and which are placeholders
 //! (see `docs/PARITY.md`).
 //!
-//! Command line (debugging): `--placeholder` runs the old placeholder model
-//! with the placeholder parameters (and the placeholder rope grapple);
-//! `--placeholder-movement` keeps the original parameters on the
-//! placeholder model. `ASAMU_MOVEMENT=placeholder` is the same as
+//! Command line: see [`USAGE`]. Debugging: `--placeholder` runs the old
+//! placeholder model with the placeholder parameters (and the placeholder
+//! rope grapple); `--placeholder-movement` keeps the original parameters on
+//! the placeholder model. `ASAMU_MOVEMENT=placeholder` is the same as
 //! `--placeholder`.
 //!
 //! Controls follow the original's `DefaultInput.ini` keyboard bindings: WASD
@@ -40,8 +53,14 @@
 //! 30, `LookRightScale` 300, `LookUpScale` −250) is not ported because its
 //! exact formula is not specified yet.
 
+mod capture;
+mod converted;
+mod fly;
+mod hud;
+
 use std::path::PathBuf;
 
+use asamu_assets::{ConvertedDir, LightMapping, PlanOptions};
 use asamu_core::coords::{
     WorldScale, ue_extents_to_bevy, ue_pos_to_bevy, ue_right_flat, ue_view_to_bevy_rotation,
 };
@@ -57,11 +76,11 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 /// Render scale: UU → Bevy units, using the **presentation** convention
 /// (50 UU per metre). Not a gameplay value; the simulation runs in UU.
-const SCALE: WorldScale = WorldScale::PRESENTATION_METRES;
+pub(crate) const SCALE: WorldScale = WorldScale::PRESENTATION_METRES;
 
 /// Mouse sensitivity in radians per mouse count. An app input setting, not a
 /// gameplay constant.
-const MOUSE_RADIANS_PER_COUNT: f32 = 0.0025;
+pub(crate) const MOUSE_RADIANS_PER_COUNT: f32 = 0.0025;
 
 /// Render-only offset (UU) of the rope's start point from the eye, so the rope
 /// is visible in first person: down and to the right.
@@ -94,12 +113,17 @@ fn banner(game: &Game) -> String {
                 )
             })
             .unwrap_or_else(|| "no grapple gun".to_owned());
+        let abilities = if game.scene_map().is_some() {
+            "converted level: level-start abilities from the map's data, triangle collision"
+        } else {
+            "graybox abilities: everything on, 3 grapples (test configuration)"
+        };
         format!(
             "ASAMU-decomp pre-alpha \u{b7} {movement} + ASAMU script layer (original grapple gun, rocket boots)\n\
              ORIGINAL values ({original} params): GroundSpeed {}, AccelRate {}, JumpZ {}, AirControl {}, \
              cylinder {}/{}, eye {}, FOV {} \u{b7} {gun}\n\
              PLACEHOLDER: {} params read only by the debug models (placeholder movement, rope grapple) \u{b7} \
-             graybox abilities: everything on, 3 grapples (test configuration)",
+             {abilities}",
             m.max_ground_speed.value,
             m.ground_acceleration.value,
             m.jump_velocity.value,
@@ -131,33 +155,195 @@ enum Config {
     Placeholder,
 }
 
-const USAGE: &str = "usage: asamu [--original | --placeholder | --placeholder-movement]\n  \
+const USAGE: &str = "usage: asamu [options]\n\
+    \n\
+    graybox (default, no game data needed):\n  \
     --original              original parameters on the native pawn physics port (default)\n  \
     --placeholder           placeholder parameters and model (debugging)\n  \
-    --placeholder-movement  original parameters on the placeholder model (debugging)";
+    --placeholder-movement  original parameters on the placeholder model (debugging)\n\
+    \n\
+    converted original level (output of `asamu-import textures/meshes/levels [materials]`):\n  \
+    --converted DIR         converted data directory (default: the importer's default output\n                          \
+    directory, or ASAMU_CONVERTED_DIR)\n  \
+    --level NAME            level to load, e.g. AG-Workshop (lists the available levels if missing)\n  \
+    --fly                   render-only fly camera (no collision)\n  \
+    --all-sublevels         also show sub-levels Kismet streams in later (e.g. TheCore in AG-IceCave)\n  \
+    --camera X,Y,Z[,YAW,PITCH]  start the fly camera at a UE3 position (UU), yaw/pitch in degrees\n  \
+    --light-scale F         multiply converted light intensities (approximation, default 1)\n  \
+    --light-shadows N       point/spot lights with shadow maps (default 4)\n  \
+    --no-shadows            no directional light shadows\n  \
+    --no-fog                no placeholder fog\n  \
+    --normal-maps           use converted normal maps (unverified convention)\n\
+    \n\
+    unattended runs:\n  \
+    --screenshot PATH       save a screenshot once the level has loaded (keep it local)\n  \
+    --exit-after SECONDS    quit after this many seconds\n  \
+    --walk SECONDS          start playing at once and hold forward for this simulated time";
 
-/// The configuration, or `None` when only the usage was requested.
-fn parse_config() -> Result<Option<Config>, String> {
-    let mut config = match std::env::var("ASAMU_MOVEMENT").as_deref() {
-        Ok("placeholder") => Config::Placeholder,
-        Ok("ue3") | Ok("original") | Err(_) => Config::Original,
-        Ok(other) => return Err(format!("unknown ASAMU_MOVEMENT value {other:?}")),
+/// A camera placement from the command line (UE3 position in UU, angles in
+/// degrees).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CameraOverride {
+    position: [f32; 3],
+    yaw_degrees: f32,
+    pitch_degrees: f32,
+}
+
+/// Parsed command line.
+#[derive(Clone, Debug, PartialEq)]
+struct Cli {
+    config: Config,
+    converted: Option<PathBuf>,
+    level: Option<String>,
+    fly: bool,
+    all_sublevels: bool,
+    camera: Option<CameraOverride>,
+    light_scale: f32,
+    light_shadows: usize,
+    shadows: bool,
+    fog: bool,
+    normal_maps: bool,
+    screenshot: Option<PathBuf>,
+    exit_after: Option<f32>,
+    walk: f32,
+}
+
+impl Default for Cli {
+    fn default() -> Self {
+        Self {
+            config: Config::Original,
+            converted: None,
+            level: None,
+            fly: false,
+            all_sublevels: false,
+            camera: None,
+            light_scale: 1.0,
+            light_shadows: converted::RenderSettings::default().light_shadows,
+            shadows: true,
+            fog: true,
+            normal_maps: false,
+            screenshot: None,
+            exit_after: None,
+            walk: 0.0,
+        }
+    }
+}
+
+fn parse_f32(flag: &str, v: &str) -> Result<f32, String> {
+    v.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|x| x.is_finite())
+        .ok_or_else(|| format!("{flag}: {v:?} is not a finite number"))
+}
+
+fn parse_camera(v: &str) -> Result<CameraOverride, String> {
+    let parts: Vec<f32> = v
+        .split(',')
+        .map(|p| parse_f32("--camera", p))
+        .collect::<Result<_, _>>()?;
+    match parts.as_slice() {
+        [x, y, z] => Ok(CameraOverride {
+            position: [*x, *y, *z],
+            yaw_degrees: 0.0,
+            pitch_degrees: 0.0,
+        }),
+        [x, y, z, yaw, pitch] => Ok(CameraOverride {
+            position: [*x, *y, *z],
+            yaw_degrees: *yaw,
+            pitch_degrees: *pitch,
+        }),
+        _ => Err(format!(
+            "--camera expects X,Y,Z or X,Y,Z,YAW,PITCH, got {v:?}"
+        )),
+    }
+}
+
+/// Parses the command line (`args` without the program name) and the
+/// `ASAMU_MOVEMENT` value. `Ok(None)` means only the usage was requested.
+fn parse_cli(
+    args: impl IntoIterator<Item = String>,
+    movement_env: Option<&str>,
+) -> Result<Option<Cli>, String> {
+    let mut cli = Cli {
+        config: match movement_env {
+            Some("placeholder") => Config::Placeholder,
+            Some("ue3" | "original") | None => Config::Original,
+            Some(other) => return Err(format!("unknown ASAMU_MOVEMENT value {other:?}")),
+        },
+        ..Cli::default()
     };
-    for arg in std::env::args().skip(1) {
-        config = match arg.as_str() {
-            "--placeholder" => Config::Placeholder,
-            "--placeholder-movement" => Config::PlaceholderMovement,
-            "--original" => Config::Original,
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let mut value = |flag: &str| {
+            args.next()
+                .ok_or_else(|| format!("{flag} needs a value (try --help)"))
+        };
+        match arg.as_str() {
+            "--placeholder" => cli.config = Config::Placeholder,
+            "--placeholder-movement" => cli.config = Config::PlaceholderMovement,
+            "--original" => cli.config = Config::Original,
+            "--converted" => cli.converted = Some(PathBuf::from(value("--converted")?)),
+            "--level" => cli.level = Some(value("--level")?),
+            "--fly" => cli.fly = true,
+            "--all-sublevels" => cli.all_sublevels = true,
+            "--camera" => cli.camera = Some(parse_camera(&value("--camera")?)?),
+            "--light-scale" => {
+                let v = parse_f32("--light-scale", &value("--light-scale")?)?;
+                if v < 0.0 {
+                    return Err("--light-scale must not be negative".to_owned());
+                }
+                cli.light_scale = v;
+            }
+            "--light-shadows" => {
+                let v = value("--light-shadows")?;
+                cli.light_shadows = v
+                    .parse()
+                    .map_err(|_| format!("--light-shadows: {v:?} is not a count"))?;
+            }
+            "--no-shadows" => cli.shadows = false,
+            "--no-fog" => cli.fog = false,
+            "--normal-maps" => cli.normal_maps = true,
+            "--screenshot" => cli.screenshot = Some(PathBuf::from(value("--screenshot")?)),
+            "--exit-after" => {
+                let v = parse_f32("--exit-after", &value("--exit-after")?)?;
+                if v <= 0.0 {
+                    return Err("--exit-after must be positive".to_owned());
+                }
+                cli.exit_after = Some(v);
+            }
+            "--walk" => {
+                let v = parse_f32("--walk", &value("--walk")?)?;
+                if v < 0.0 {
+                    return Err("--walk must not be negative".to_owned());
+                }
+                cli.walk = v;
+            }
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?} (try --help)")),
-        };
+        }
     }
-    Ok(Some(config))
+    Ok(Some(cli))
+}
+
+impl Cli {
+    /// The converted directory to use, if a converted level was requested
+    /// (`--converted`, or `--level` with `ASAMU_CONVERTED_DIR` / the
+    /// importer's default output directory).
+    fn converted_dir(&self, env_dir: Option<PathBuf>) -> Option<ConvertedDir> {
+        match (&self.converted, &self.level) {
+            (Some(dir), _) => Some(ConvertedDir::new(dir.clone())),
+            (None, Some(_)) => env_dir
+                .map(ConvertedDir::new)
+                .or_else(ConvertedDir::default_location),
+            (None, None) => None,
+        }
+    }
 }
 
 /// The simulation plus render-interpolation state.
 #[derive(Resource)]
-struct Sim {
+pub(crate) struct Sim {
     game: Game,
     /// First banner line (configuration and parameter provenance).
     banner: String,
@@ -171,6 +357,19 @@ struct Sim {
 }
 
 impl Sim {
+    fn new(game: Game, banner: String) -> Self {
+        let position = game.player().position;
+        let eye = game.eye_position();
+        Self {
+            game,
+            banner,
+            prev_position: position,
+            curr_position: position,
+            prev_eye: eye,
+            curr_eye: eye,
+        }
+    }
+
     fn snap_interpolation(&mut self) {
         let p = self.game.player().position;
         self.prev_position = p;
@@ -195,21 +394,16 @@ struct PendingInput {
 }
 
 #[derive(Component)]
-struct PlayerCamera;
-
-#[derive(Component)]
-struct HudText;
-
-#[derive(Component)]
-struct Crosshair;
+pub(crate) struct PlayerCamera;
 
 /// A rendered mover (index into `Level::movers`).
 #[derive(Component)]
 struct MoverVisual(usize);
 
 fn main() -> AppExit {
-    let config = match parse_config() {
-        Ok(Some(config)) => config,
+    let movement_env = std::env::var("ASAMU_MOVEMENT").ok();
+    let mut cli = match parse_cli(std::env::args().skip(1), movement_env.as_deref()) {
+        Ok(Some(cli)) => cli,
         Ok(None) => {
             println!("{USAGE}");
             return AppExit::Success;
@@ -219,7 +413,39 @@ fn main() -> AppExit {
             return AppExit::error();
         }
     };
-    let game = match config {
+    // Screenshots of converted levels are game content: check the path
+    // before a window opens (see `capture::check_screenshot_path`).
+    if let Some(path) = &cli.screenshot {
+        let install = std::env::var_os("ASAMU_ORIGINAL_DIR").map(PathBuf::from);
+        match capture::check_screenshot_path(path, install.as_deref()) {
+            Ok(resolved) => cli.screenshot = Some(resolved),
+            Err(message) => {
+                eprintln!("{message}");
+                return AppExit::error();
+            }
+        }
+    }
+    let env_dir = std::env::var_os("ASAMU_CONVERTED_DIR").map(PathBuf::from);
+    match cli.converted_dir(env_dir) {
+        Some(dir) => run_converted(&cli, dir),
+        None => run_graybox(&cli),
+    }
+}
+
+/// The window and default plugins (after any asset sources are registered).
+fn add_default_plugins(app: &mut App, title: &str) {
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: title.into(),
+            ..default()
+        }),
+        ..default()
+    }))
+    .add_plugins((hud::HudPlugin, capture::CapturePlugin));
+}
+
+fn run_graybox(cli: &Cli) -> AppExit {
+    let game = match cli.config {
         Config::Original => Game::graybox(),
         Config::PlaceholderMovement => {
             Game::graybox().map(|g| g.with_movement_model(MovementModelKind::Placeholder))
@@ -233,59 +459,334 @@ fn main() -> AppExit {
             return AppExit::error();
         }
     };
-    let tick_rate_hz = game.clock().tick_rate_hz();
-    let position = game.player().position;
-    let eye = game.eye_position();
     let banner = banner(&game);
     println!("{banner}");
 
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "ASAMU-decomp (pre-alpha graybox)".into(),
-                ..default()
-            }),
-            ..default()
-        }))
-        // Fixed tick rate comes from the simulation clock (a runtime choice;
-        // the original's tick model is UNKNOWN).
-        .insert_resource(Time::<Fixed>::from_hz(tick_rate_hz))
-        .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
+    let mut app = App::new();
+    add_default_plugins(&mut app, "ASAMU-decomp (pre-alpha graybox)");
+    app.insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
         .insert_resource(GlobalAmbientLight {
             brightness: 400.0,
             ..default()
         })
-        .insert_resource(Sim {
-            game,
-            banner,
-            prev_position: position,
-            curr_position: position,
-            prev_eye: eye,
-            curr_eye: eye,
-        })
-        .init_resource::<PendingInput>()
-        .add_systems(Startup, (spawn_level, spawn_camera_and_light, spawn_hud))
+        .insert_resource(capture::AutoCapture::new(
+            cli.screenshot.clone(),
+            cli.exit_after,
+        ))
+        .add_systems(Startup, (spawn_level, spawn_camera_and_light));
+    add_simulation(&mut app, game, banner);
+    app.insert_resource(ScriptedWalk(cli.walk));
+    app.run()
+}
+
+/// The fixed-step simulation, its input and the simulation-driven camera
+/// and HUD.
+fn add_simulation(app: &mut App, game: Game, banner: String) {
+    // Fixed tick rate comes from the simulation clock (a runtime choice;
+    // the original's tick model is UNKNOWN).
+    app.insert_resource(Time::<Fixed>::from_hz(game.clock().tick_rate_hz()))
+        .insert_resource(Sim::new(game, banner));
+    add_simulation_systems(app);
+}
+
+/// The simulation's systems; they run while a [`Sim`] resource exists (from
+/// the start in the graybox, once the level's game has loaded for a
+/// converted level).
+fn add_simulation_systems(app: &mut App) {
+    app.init_resource::<PendingInput>()
+        .init_resource::<LevelGizmos>()
+        .init_resource::<ScriptedWalk>()
         .add_systems(
             RunFixedMainLoop,
             (cursor_and_pause, gather_input)
                 .chain()
+                .run_if(resource_exists::<Sim>)
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
         )
-        .add_systems(FixedUpdate, fixed_tick)
-        .add_systems(Update, (sync_camera, sync_movers, draw_gizmos, update_hud))
-        .run()
+        .add_systems(FixedUpdate, fixed_tick.run_if(resource_exists::<Sim>))
+        .add_systems(
+            Update,
+            (sync_camera, sync_movers, draw_gizmos, update_hud).run_if(resource_exists::<Sim>),
+        );
 }
 
-fn bevy_vec(v: sim_glam::Vec3) -> Vec3 {
+/// `--walk SECONDS`: simulated seconds of scripted forward input left
+/// (unattended checks of the simulation; 0 = off).
+#[derive(Resource, Clone, Copy, Debug, Default)]
+struct ScriptedWalk(f32);
+
+/// Whether the level-object gizmos (checkpoint volumes, crystal charge,
+/// attractor pads) are drawn: on in the graybox, off (F10 toggles) on
+/// converted levels, whose objects are rendered as meshes.
+#[derive(Resource, Clone, Copy, Debug)]
+struct LevelGizmos(bool);
+
+impl Default for LevelGizmos {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// The converted level's [`Game`], loaded on the async pool.
+#[derive(Resource)]
+struct GameLoad {
+    /// Converted directory and level to load (`None` with `--fly`).
+    request: Option<(PathBuf, String)>,
+    task: Option<bevy::tasks::Task<Result<Game, String>>>,
+}
+
+fn start_game_load(mut load: ResMut<GameLoad>) {
+    if let Some((root, name)) = load.request.take() {
+        load.task = Some(
+            bevy::tasks::AsyncComputeTaskPool::get()
+                .spawn(async move { Game::load_level(&root, &name).map_err(|e| e.to_string()) }),
+        );
+    }
+}
+
+/// Inserts the [`Sim`] once the converted level's game has loaded.
+fn poll_game_load(
+    mut commands: Commands,
+    mut load: ResMut<GameLoad>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+) {
+    let Some(task) = load.task.as_mut() else {
+        return;
+    };
+    let Some(result) = bevy::tasks::futures::check_ready(task) else {
+        return;
+    };
+    load.task = None;
+    match result {
+        Ok(game) => {
+            let banner = banner(&game);
+            info!("gameplay collision loaded: the simulation drives the camera");
+            // The loader tolerates missing pieces (e.g. meshes not converted:
+            // no static-mesh collision); say so instead of failing silently.
+            if let Some(map) = game.scene_map()
+                && !map.warnings.is_empty()
+            {
+                warn!(
+                    "the level's gameplay data loaded with {} warnings, e.g. {:?}",
+                    map.warnings.len(),
+                    map.warnings.iter().take(3).collect::<Vec<_>>()
+                );
+            }
+            println!("{banner}");
+            let mut game = game;
+            // Already captured the mouse in fly mode: start playing at once.
+            if cursor.grab_mode != CursorGrabMode::None {
+                game.start();
+            }
+            commands.insert_resource(Time::<Fixed>::from_hz(game.clock().tick_rate_hz()));
+            commands.insert_resource(Sim::new(game, banner));
+        }
+        Err(e) => {
+            warn!("could not load the converted level for gameplay ({e}); staying in fly mode");
+        }
+    }
+}
+
+fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
+    let Some(level) = cli.level.clone() else {
+        let levels = dir.list_levels();
+        if levels.is_empty() {
+            eprintln!(
+                "no converted levels in {} (run `asamu-import --out <dir> levels --map <name>` \
+                 plus `textures` and `meshes`)",
+                dir.levels_dir().display()
+            );
+        } else {
+            eprintln!(
+                "choose a level with --level; converted levels in {}: {}",
+                dir.levels_dir().display(),
+                levels.join(", ")
+            );
+        }
+        return AppExit::error();
+    };
+    // Bevy resolves relative asset roots against the executable's directory:
+    // use an absolute path.
+    let dir = match dir.root().canonicalize() {
+        Ok(abs) => ConvertedDir::new(abs),
+        Err(e) => {
+            eprintln!("converted directory {}: {e}", dir.root().display());
+            return AppExit::error();
+        }
+    };
+    // Fail early (before opening a window) when the level is missing.
+    if let Err(e) = dir.scene_path(&level) {
+        eprintln!("{e}");
+        return AppExit::error();
+    }
+    let params = asamu_player::PlayerParams::asamu_original();
+    let eye_height = params.camera.eye_height.value;
+    let lights = LightMapping::default();
+    let options = PlanOptions {
+        scale: SCALE,
+        all_sublevels: cli.all_sublevels,
+        lights: LightMapping {
+            point_lumens_per_brightness_m2: lights.point_lumens_per_brightness_m2 * cli.light_scale,
+            directional_lux_per_brightness: lights.directional_lux_per_brightness * cli.light_scale,
+            ..lights
+        },
+    };
+    let settings = converted::RenderSettings {
+        shadows: cli.shadows,
+        light_shadows: cli.light_shadows,
+        fog: cli.fog,
+        normal_maps: cli.normal_maps,
+    };
+    // Gameplay: the level's game (triangle collision, gameplay actors) loads
+    // on the async pool; until it is ready (or with --fly) the camera flies.
+    let game_load = GameLoad {
+        request: (!cli.fly).then(|| (dir.root().to_path_buf(), level.clone())),
+        task: None,
+    };
+    println!(
+        "ASAMU-decomp: converted level {level} from {} (local data derived from your own install)",
+        dir.root().display()
+    );
+
+    let mut app = App::new();
+    converted::register_source(&mut app, dir.root().to_path_buf());
+    add_default_plugins(
+        &mut app,
+        &format!("ASAMU-decomp - {level} (converted, pre-alpha)"),
+    );
+    app.insert_resource(ClearColor(Color::srgb(0.04, 0.045, 0.06)))
+        .insert_resource(GlobalAmbientLight {
+            brightness: options.lights.base_ambient,
+            ..default()
+        })
+        .insert_resource(hud::HudStyle {
+            info_color: Color::srgb(0.92, 0.92, 0.88),
+        })
+        .insert_resource(capture::AutoCapture::new(
+            cli.screenshot.clone(),
+            cli.exit_after,
+        ))
+        .insert_resource(converted::ConvertedLevel {
+            dir,
+            level,
+            options,
+            settings,
+            eye_height,
+            phase: None,
+            progress: (0, 0, 0),
+        })
+        .insert_resource(CameraOverrideRes(cli.camera))
+        .insert_resource(LevelGizmos(false))
+        .insert_resource(game_load)
+        .add_plugins((converted::ConvertedLevelPlugin, fly::FlyCameraPlugin))
+        .add_systems(Startup, (spawn_converted_camera, start_game_load))
+        .add_systems(
+            Update,
+            (
+                poll_game_load,
+                (apply_level_start, update_converted_hud).run_if(not(resource_exists::<Sim>)),
+            ),
+        );
+    add_simulation_systems(&mut app);
+    app.insert_resource(ScriptedWalk(cli.walk));
+    app.run()
+}
+
+/// The `--camera` override, applied when the level start is known.
+#[derive(Resource, Clone, Copy, Debug)]
+struct CameraOverrideRes(Option<CameraOverride>);
+
+fn spawn_converted_camera(mut commands: Commands) {
+    commands.spawn((
+        PlayerCamera,
+        Camera3d::default(),
+        Projection::from(PerspectiveProjection {
+            // 90° horizontal at 16:9 (the original's default FOV is 90,
+            // horizontal; refined per frame in `update_converted_hud`).
+            fov: 2.0 * ((45.0_f32).to_radians().tan() * 9.0 / 16.0).atan(),
+            near: 0.05,
+            far: 1000.0,
+            ..default()
+        }),
+        Transform::default(),
+    ));
+}
+
+/// Moves the fly camera to the level's player start (or `--camera`) once.
+fn apply_level_start(
+    start: Res<converted::LevelStart>,
+    override_: Res<CameraOverrideRes>,
+    mut fly: ResMut<fly::FlyCam>,
+    mut applied: Local<bool>,
+) {
+    if *applied {
+        return;
+    }
+    if let Some(c) = override_.0 {
+        fly.position = sim_glam::Vec3::from_array(c.position);
+        fly.yaw = c.yaw_degrees.to_radians();
+        fly.pitch = c.pitch_degrees.to_radians();
+        *applied = true;
+        return;
+    }
+    if !start.is_changed() {
+        return;
+    }
+    if let Some((eye, yaw, pitch)) = start.0 {
+        fly.position = eye;
+        fly.yaw = yaw;
+        fly.pitch = pitch;
+        *applied = true;
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_converted_hud(
+    level: Res<converted::ConvertedLevel>,
+    fly: Res<fly::FlyCam>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut projection: Single<&mut Projection, With<PlayerCamera>>,
+    mut info: Single<&mut Text, (With<hud::HudInfo>, Without<hud::HudAbilities>)>,
+    mut abilities: Single<&mut Text, (With<hud::HudAbilities>, Without<hud::HudInfo>)>,
+) {
+    // Horizontal FOV 90 (UE3 convention, the original's default) mapped to
+    // Bevy's vertical FOV for the window's aspect.
+    if let Projection::Perspective(p) = projection.as_mut() {
+        let aspect = (window.width() / window.height().max(1.0)).max(0.1);
+        p.fov = 2.0 * ((90.0_f32.to_radians() * 0.5).tan() / aspect).atan();
+    }
+    let p = fly.position;
+    info.0 = format!(
+        "ASAMU-decomp pre-alpha \u{b7} converted original level (render approximation: dynamic \
+         lights, no lightmaps) \u{b7} FLY CAMERA (render only, no collision)\n\
+         {}\n\
+         camera UE ({:.0}, {:.0}, {:.0}) uu | yaw {:.0}\u{b0} pitch {:.0}\u{b0} | speed {:.0} uu/s | {} fps\n\
+         click to capture the mouse | WASD move | Space/E up | Ctrl/Q down | Shift fast | wheel speed | Esc release",
+        level.status(),
+        p.x,
+        p.y,
+        p.z,
+        fly.yaw.to_degrees(),
+        fly.pitch.to_degrees(),
+        fly.speed,
+        hud::fps(&diagnostics).map_or_else(|| "-".to_owned(), |f| format!("{f:.0}")),
+    );
+    abilities.0 = "GRAPPLES -/- | grapple gun: n/a | power jump: n/a | rocket boots: n/a\n\
+                   (fly mode: no simulation running)"
+        .to_owned();
+}
+
+pub(crate) fn bevy_vec(v: sim_glam::Vec3) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
 }
 
-fn bevy_quat(q: sim_glam::Quat) -> Quat {
+pub(crate) fn bevy_quat(q: sim_glam::Quat) -> Quat {
     Quat::from_xyzw(q.x, q.y, q.z, q.w)
 }
 
 /// UE position (UU) → Bevy render position.
-fn to_render(v: sim_glam::Vec3) -> Vec3 {
+pub(crate) fn to_render(v: sim_glam::Vec3) -> Vec3 {
     bevy_vec(ue_pos_to_bevy(v, SCALE))
 }
 
@@ -405,43 +906,6 @@ fn spawn_camera_and_light(mut commands: Commands) {
     ));
 }
 
-fn spawn_hud(mut commands: Commands, sim: Res<Sim>) {
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(10),
-            left: px(12),
-            ..default()
-        },
-        children![(
-            HudText,
-            Text::new(sim.banner.clone()),
-            TextFont {
-                font_size: FontSize::Px(15.0),
-                ..default()
-            },
-            TextColor(Color::srgb(0.05, 0.05, 0.08)),
-        )],
-    ));
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: percent(50),
-            top: percent(50),
-            ..default()
-        },
-        children![(
-            Crosshair,
-            Text::new("+"),
-            TextFont {
-                font_size: FontSize::Px(22.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
-        )],
-    ));
-}
-
 /// Cursor capture, pause/resume, respawn and trace recording hotkeys.
 fn cursor_and_pause(
     mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
@@ -449,6 +913,7 @@ fn cursor_and_pause(
     keys: Res<ButtonInput<KeyCode>>,
     mut sim: ResMut<Sim>,
     mut pending: ResMut<PendingInput>,
+    mut level_gizmos: ResMut<LevelGizmos>,
 ) {
     let grabbed = cursor.grab_mode != CursorGrabMode::None;
     if !grabbed && mouse.just_pressed(MouseButton::Left) {
@@ -515,6 +980,9 @@ fn cursor_and_pause(
     if keys.just_pressed(KeyCode::F9) {
         toggle_recording(&mut sim.game);
     }
+    if keys.just_pressed(KeyCode::F10) {
+        level_gizmos.0 = !level_gizmos.0;
+    }
 }
 
 fn toggle_recording(game: &mut Game) {
@@ -580,16 +1048,29 @@ fn fixed_tick(
     mut pending: ResMut<PendingInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut walk: ResMut<ScriptedWalk>,
 ) {
+    // `--walk`: start at once and hold forward for the given simulated time.
+    let scripted = walk.0 > 0.0;
+    if scripted && sim.game.state() == GameState::Boot {
+        sim.game.start();
+    }
     if sim.game.state() != GameState::Playing {
         return;
     }
+    if scripted {
+        walk.0 -= 1.0 / sim.game.clock().tick_rate_hz() as f32;
+    }
     let input = InputFrame {
-        move_forward: axis(
-            &keys,
-            [KeyCode::KeyW, KeyCode::ArrowUp],
-            [KeyCode::KeyS, KeyCode::ArrowDown],
-        ),
+        move_forward: if scripted {
+            1.0
+        } else {
+            axis(
+                &keys,
+                [KeyCode::KeyW, KeyCode::ArrowUp],
+                [KeyCode::KeyS, KeyCode::ArrowDown],
+            )
+        },
         move_right: axis(
             &keys,
             [KeyCode::KeyD, KeyCode::ArrowRight],
@@ -663,7 +1144,12 @@ fn sync_camera(
     }
 }
 
-fn draw_gizmos(sim: Res<Sim>, fixed: Res<Time<Fixed>>, mut gizmos: Gizmos) {
+fn draw_gizmos(
+    sim: Res<Sim>,
+    fixed: Res<Time<Fixed>>,
+    level_gizmos: Res<LevelGizmos>,
+    mut gizmos: Gizmos,
+) {
     let game = &sim.game;
     let player = game.player();
     let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
@@ -714,6 +1200,9 @@ fn draw_gizmos(sim: Res<Sim>, fixed: Res<Time<Fixed>>, mut gizmos: Gizmos) {
         }
     }
 
+    if !level_gizmos.0 {
+        return;
+    }
     // Crystal charge (outline), attractor pads.
     let level = game.level();
     for c in &level.crystals {
@@ -756,10 +1245,13 @@ fn draw_gizmos(sim: Res<Sim>, fixed: Res<Time<Fixed>>, mut gizmos: Gizmos) {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn update_hud(
     sim: Res<Sim>,
-    mut hud: Single<&mut Text, (With<HudText>, Without<Crosshair>)>,
-    crosshair: Single<&mut TextColor, With<Crosshair>>,
+    level: Option<Res<converted::ConvertedLevel>>,
+    mut hud: Single<&mut Text, (With<hud::HudInfo>, Without<hud::HudAbilities>)>,
+    mut abilities: Single<&mut Text, (With<hud::HudAbilities>, Without<hud::HudInfo>)>,
+    crosshair: Single<&mut TextColor, With<hud::Crosshair>>,
 ) {
     let game = &sim.game;
     let player = game.player();
@@ -855,15 +1347,19 @@ fn update_hud(
     } else {
         "pawn script layer off (placeholder parameters)".to_owned()
     };
+    let banner = match &level {
+        Some(l) => format!("{}\n{}", sim.banner, l.status()),
+        None => sim.banner.clone(),
+    };
     hud.0 = format!(
-        "{}\n\
+        "{banner}\n\
          speed {speed:.0} uu/s ({:.1} m/s presentation) | horizontal {:.0} uu/s | {}\n\
          {pawn_line}\n\
          grapple {grapple} | aim: {aim_text} | rocket boots {boots_text}\n\
          tick {} @ {:.0} Hz | checkpoint {checkpoint} | respawns {} | {state}{}\n\
          WASD move | mouse look | Space jump (air: rocket boost) | LShift sprint | LMB grapple | hold RMB power jump / zoom | \
-         E use | F7/R respawn | debug: F2 story mode, F3 grapple capacity, F4 boots, F6 attractor, F9 record trace | Esc release mouse",
-        sim.banner,
+         E use | F7/R respawn | debug: F2 story mode, F3 grapple capacity, F4 boots, F6 attractor, F9 record trace, \
+         F10 level gizmos | Esc release mouse",
         uu_per_s_to_presentation_m_per_s(speed),
         player.horizontal_speed(),
         if player.pawn.flying {
@@ -878,6 +1374,7 @@ fn update_hud(
         game.respawn_count(),
         if game.is_recording() { " | REC" } else { "" },
     );
+    abilities.0 = ability_panel(game);
     let mut color = crosshair.into_inner();
     color.0 = if game.params().gun.is_some() {
         // The original HUD crosshair state (GRAPPLE.md G-TG-2).
@@ -893,4 +1390,288 @@ fn update_hud(
             Aim::OutOfRange => Color::WHITE,
         }
     };
+}
+
+/// The ability panel: grapple count and the state of each ability.
+fn ability_panel(game: &Game) -> String {
+    let player = game.player();
+    let script = &player.script;
+    let gun = &script.gun;
+    let grapples = if game.params().gun.is_none() {
+        "GRAPPLES - (placeholder rope)".to_owned()
+    } else if gun.max_grapples >= 32_767 || gun.max_grapples < 0 {
+        "GRAPPLES unlimited".to_owned()
+    } else {
+        let left = (gun.max_grapples - gun.times_grappled).max(0);
+        format!("GRAPPLES {left}/{}", gun.max_grapples)
+    };
+    let gun_state = if game.params().gun.is_none() {
+        "n/a".to_owned()
+    } else if gun.anchor().is_some() {
+        "attached".to_owned()
+    } else if gun.can_grapple {
+        "ready".to_owned()
+    } else {
+        "closed".to_owned()
+    };
+    let power_jump = if !script.started {
+        "n/a".to_owned()
+    } else if script.power_jump.charged {
+        "charged".to_owned()
+    } else {
+        format!("{:?}", script.power_jump.state)
+    };
+    let boots = &script.boots;
+    let boots_state = if !boots.spawned {
+        "none"
+    } else if !boots.enabled {
+        "disabled"
+    } else {
+        match boots.state {
+            BootsStateName::Ready => "ready",
+            BootsStateName::Boosting => "boosting",
+            BootsStateName::Unavailable | BootsStateName::UnavailableAndPlayedSound => "used",
+        }
+    };
+    format!(
+        "{grapples} | grapple gun: {gun_state} | power jump: {power_jump} | rocket boots: {boots_state}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn default_is_the_graybox_with_original_parameters() {
+        let cli = parse_cli(args(&[]), None).unwrap().unwrap();
+        assert_eq!(cli, Cli::default());
+        assert!(cli.converted_dir(None).is_none());
+        assert_eq!(
+            parse_cli(args(&["--placeholder"]), None)
+                .unwrap()
+                .unwrap()
+                .config,
+            Config::Placeholder
+        );
+        assert_eq!(
+            parse_cli(args(&[]), Some("placeholder"))
+                .unwrap()
+                .unwrap()
+                .config,
+            Config::Placeholder
+        );
+        assert!(parse_cli(args(&[]), Some("bogus")).is_err());
+        assert!(parse_cli(args(&["--help"]), None).unwrap().is_none());
+    }
+
+    #[test]
+    fn converted_level_options() {
+        let cli = parse_cli(
+            args(&[
+                "--converted",
+                "/tmp/conv",
+                "--level",
+                "AG-Workshop",
+                "--fly",
+                "--all-sublevels",
+                "--camera",
+                "1,2,3,90,-10",
+                "--light-scale",
+                "2",
+                "--light-shadows",
+                "0",
+                "--no-shadows",
+                "--no-fog",
+                "--normal-maps",
+                "--screenshot",
+                "/tmp/shot.png",
+                "--exit-after",
+                "5",
+                "--walk",
+                "1.5",
+            ]),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cli.level.as_deref(), Some("AG-Workshop"));
+        assert!(cli.fly && cli.all_sublevels && !cli.shadows && !cli.fog && cli.normal_maps);
+        assert_eq!(cli.light_scale, 2.0);
+        assert_eq!(cli.light_shadows, 0);
+        assert_eq!(
+            cli.camera,
+            Some(CameraOverride {
+                position: [1.0, 2.0, 3.0],
+                yaw_degrees: 90.0,
+                pitch_degrees: -10.0
+            })
+        );
+        assert_eq!(cli.exit_after, Some(5.0));
+        assert_eq!(cli.walk, 1.5);
+        assert_eq!(
+            cli.converted_dir(Some(PathBuf::from("/elsewhere")))
+                .unwrap()
+                .root(),
+            std::path::Path::new("/tmp/conv")
+        );
+        // --level alone uses ASAMU_CONVERTED_DIR (or the importer default).
+        let cli = parse_cli(args(&["--level", "X"]), None).unwrap().unwrap();
+        assert_eq!(
+            cli.converted_dir(Some(PathBuf::from("/env")))
+                .unwrap()
+                .root(),
+            std::path::Path::new("/env")
+        );
+    }
+
+    #[test]
+    fn bad_arguments_are_errors() {
+        for bad in [
+            &["--level"][..],
+            &["--camera", "1,2"],
+            &["--camera", "1,2,x"],
+            &["--light-scale", "-1"],
+            &["--light-scale", "nan"],
+            &["--light-shadows", "-3"],
+            &["--exit-after", "0"],
+            &["--walk", "-1"],
+            &["--bogus"],
+        ] {
+            assert!(parse_cli(args(bad), None).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Real-data check (skipped unless `ASAMU_CONVERTED_DIR` names a
+    /// user-local `asamu-import` output with `levels/` and `meshes/`): the
+    /// simulation and the renderer agree on where the player starts and
+    /// where the floor is.
+    ///
+    /// - both pick the same `PlayerStart` and yaw;
+    /// - the simulation spawns there (its spot search only moves upwards),
+    ///   and its render-space eye is the fly camera's start up to that lift;
+    /// - after settling (no input, 2 s), when a level BSP triangle lies under
+    ///   the grounded pawn, its feet hover over that rendered triangle by the
+    ///   native walking physics' 1.9-2.4 uu (the floor the player sees is the
+    ///   floor the simulation collides with).
+    #[test]
+    fn converted_levels_spawn_where_the_render_plan_starts() {
+        let Some(root) = std::env::var_os("ASAMU_CONVERTED_DIR").map(PathBuf::from) else {
+            eprintln!("skipped: ASAMU_CONVERTED_DIR is not set");
+            return;
+        };
+        let dir = ConvertedDir::new(root.clone());
+        if !root.join("meshes").is_dir() {
+            eprintln!("skipped: no converted meshes in {}", root.display());
+            return;
+        }
+        let eye_height = asamu_player::PlayerParams::asamu_original()
+            .camera
+            .eye_height
+            .value;
+        let mut bsp_floors = 0usize;
+        for level in dir.list_levels() {
+            let plan =
+                asamu_assets::LevelPlan::load(&dir, &level, &PlanOptions::default()).expect("plan");
+            let Some((start, yaw, _)) = plan.start() else {
+                continue;
+            };
+            let mut game = match Game::load_level(&root, &level) {
+                Ok(game) => game,
+                Err(e) => {
+                    eprintln!("{level}: no game ({e})");
+                    continue;
+                }
+            };
+            let sim_start = game
+                .scene_map()
+                .and_then(|m| m.actors.player_start())
+                .expect("player start");
+            assert_eq!(sim_start.location.to_array(), start.to_array(), "{level}");
+            let p = game.player().position;
+            // Same direction (the two conversions may wrap differently).
+            let turn = (game.player().yaw - yaw).rem_euclid(std::f32::consts::TAU);
+            assert!(
+                turn.min(std::f32::consts::TAU - turn) < 1e-4,
+                "{level}: yaw {} vs {yaw}",
+                game.player().yaw
+            );
+            assert!(
+                (p.x - start.x).abs() < 1e-3 && (p.y - start.y).abs() < 1e-3,
+                "{level}: spawn {p} vs start {start}"
+            );
+            let lift = p.z - start.z;
+            assert!((-1e-3..=260.0).contains(&lift), "{level}: lift {lift}");
+            let fly_eye = sim_glam::Vec3::new(start.x, start.y, start.z + eye_height);
+            let gap = to_render(game.eye_position()) - to_render(fly_eye);
+            assert!(
+                (gap.x.abs() + gap.z.abs()) < 1e-4 && (gap.y - lift / 50.0).abs() < 0.2,
+                "{level}: eye gap {gap}"
+            );
+
+            game.start();
+            let ticks = (2.0 * game.clock().tick_rate_hz()) as usize;
+            for _ in 0..ticks {
+                game.tick(&InputFrame::default());
+            }
+            let half = game.params().movement.capsule_half_height.value;
+            let feet = game.player().position - sim_glam::Vec3::Z * half;
+            let f = to_render(feet);
+            // The highest BSP triangle under the feet (render space, y up).
+            let mut floor: Option<f32> = None;
+            for b in &plan.bsp {
+                for t in b.mesh.indices.as_chunks::<3>().0 {
+                    let v = t.map(|i| Vec3::from_array(b.mesh.positions[i as usize]));
+                    let side =
+                        |a: Vec3, c: Vec3| (c.x - a.x) * (f.z - a.z) - (c.z - a.z) * (f.x - a.x);
+                    let (d1, d2, d3) = (side(v[0], v[1]), side(v[1], v[2]), side(v[2], v[0]));
+                    let inside = (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0)
+                        || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0);
+                    let n = (v[1] - v[0]).cross(v[2] - v[0]);
+                    if !inside || n.y.abs() < 1e-6 {
+                        continue;
+                    }
+                    let y = v[0].y - (n.x * (f.x - v[0].x) + n.z * (f.z - v[0].z)) / n.y;
+                    if y <= f.y + 0.1 && floor.is_none_or(|h| y > h) {
+                        floor = Some(y);
+                    }
+                }
+            }
+            eprintln!(
+                "{level}: start {start}, spawn lift {lift:.2} uu, after 2 s grounded {} at {}, \
+                 feet above the BSP floor {:?} uu",
+                game.player().grounded,
+                game.player().position,
+                floor.map(|h| (f.y - h) * 50.0),
+            );
+            // A walking pawn hovers 1.9-2.4 uu above its floor
+            // (NATIVE_PHYSICS.md, CONFIRMED); 0.01 uu of slack for the
+            // render-space rounding. A BSP triangle far below means the pawn
+            // stands on a static mesh (not checked here).
+            if let Some(h) = floor
+                && game.player().grounded
+                && (f.y - h) * 50.0 < 10.0
+            {
+                let hover = (f.y - h) * 50.0;
+                assert!(
+                    (1.89..=2.41).contains(&hover),
+                    "{level}: feet {hover} uu above the BSP floor"
+                );
+                bsp_floors += 1;
+            }
+        }
+        eprintln!("{bsp_floors} levels start on a BSP floor (hover checked)");
+    }
+
+    #[test]
+    fn graybox_ability_panel_reports_grapples() {
+        let game = Game::graybox().unwrap();
+        let panel = ability_panel(&game);
+        assert!(panel.starts_with("GRAPPLES "), "{panel}");
+        assert!(panel.contains("rocket boots"), "{panel}");
+    }
 }

@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+asamu-assets.workspace = true
 asamu-core.workspace = true
 asamu-game.workspace = true
 asamu-player.workspace = true
