@@ -38,9 +38,11 @@
 //!    reached them; physics and the gun then use the updated world.
 //! 3. **Controller**, by controller state:
 //!    `PlayerWalking`: acceleration from the move axes along the pawn's yaw
-//!    **before** this tick's rotation update (A-WK-1), zero while the
-//!    move-input lock is held (A-IL-1); then the look update; then the jump
-//!    attempt `DoJump` if the jump flag is set. `Grappling` (attached,
+//!    **before** this tick's rotation update (A-WK-1; the axes come from the
+//!    engine's angle table, which floors the yaw to 4 rotator units, A-CM-8),
+//!    zero while the move-input lock is held (A-IL-1); then the look update
+//!    in whole rotator units (A-CM-9); then the jump attempt `DoJump` if the
+//!    jump flag is set. `Grappling` (attached,
 //!    G-PH-1): zero acceleration, look update, jump flag discarded.
 //!    `ReleaseGrapple` (the first controller tick after a grapple release,
 //!    G-RL-7): no move and no look update, jump flag discarded.
@@ -71,14 +73,18 @@
 //! tags), A-PJ-1…6 (power jump and leap), A-RB-1…8 (rocket boots,
 //! [`crate::rocket_boots`]), A-IL-1 (move-input lock counter), A-ST-1…4
 //! (story mode, zoom), A-CM-1…4 (view location, pitch limit, FOV, eye
-//! height and walk bob) and the whole grapple of GRAPPLE.md
+//! height and walk bob), A-CM-8/9 (table angles for the move axes, the walk
+//! bob and every aim; integer view rotation: [`crate::sim`]), the console
+//! command `SetSpeed` ([`set_speed`], [`console_command`]) and the whole
+//! grapple of GRAPPLE.md
 //! ([`crate::grapple_gun`]: targeting, acceptance, attach, flying physics
 //! with the pull, every release path, budget, Kismet events). The
 //! controller states `Grappling` (attached: zero acceleration, jump flag
 //! discarded, G-PH-1) and `ReleaseGrapple` (one tick without move and look,
 //! G-RL-7) follow the gun. Not ported: death fade and checkpoints (§11,
 //! `asamu-game` keeps its graybox rules), cinematic mode, hand/jump bob and
-//! camera animations (visual only), sounds (reported as events).
+//! camera animations (visual only), sounds (reported as events), the pawn's
+//! lean roll and kept flight pitch in the move axes (A-WK-1).
 
 use asamu_core::Provenance;
 use asamu_core::det_math;
