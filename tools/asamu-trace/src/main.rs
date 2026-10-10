@@ -674,17 +674,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     );
                 }
             }
-            let failures = r.failures().len();
-            println!(
-                "{} checks, {failures} failed; {} Python lookups; executable: {}",
-                r.checks.len(),
-                r.python_lookups,
-                r.binary.as_ref().map_or_else(
-                    || "not found (binary checks skipped)".to_owned(),
-                    |p| p.display().to_string()
-                )
-            );
-            if failures > 0 {
+            println!("{}", r.summary());
+            if !r.failures().is_empty() {
                 return Ok(ExitCode::FAILURE);
             }
         }

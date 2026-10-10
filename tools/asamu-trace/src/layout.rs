@@ -915,6 +915,28 @@ impl LayoutReport {
     pub fn failures(&self) -> Vec<&Check> {
         self.checks.iter().filter(|c| !c.ok).collect()
     }
+
+    /// One line for the end of a report: the counts and, for each of the two
+    /// builds, the executable its binary checks read (or that they were
+    /// skipped). The two are independent: on a machine with only the Windows
+    /// install the Windows binary checks run and the Mac ones do not.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let executable = |p: &Option<PathBuf>| {
+            p.as_ref().map_or_else(
+                || "not found (binary checks skipped)".to_owned(),
+                |p| p.display().to_string(),
+            )
+        };
+        format!(
+            "{} checks, {} failed; {} Python lookups; Mac executable: {}; Windows executable: {}",
+            self.checks.len(),
+            self.failures().len(),
+            self.python_lookups,
+            executable(&self.binary),
+            executable(&self.win32_binary),
+        )
+    }
 }
 
 /// Runs every check on the repository at `root`: the Mac layout, then the
@@ -3014,6 +3036,40 @@ mod tests {
                 assert_eq!(binary, 1);
             }
         }
+    }
+
+    #[test]
+    fn the_summary_names_each_checked_executable() {
+        let ok = |group| Check {
+            group,
+            what: String::new(),
+            ok: true,
+        };
+        let mut r = LayoutReport {
+            checks: vec![ok("schema"), ok("win32:binary")],
+            python_lookups: 3,
+            binary: None,
+            win32_binary: Some(PathBuf::from("game.exe")),
+        };
+        // Only the Windows executable was found: its checks ran, and the
+        // line must not read as if every binary check had been skipped.
+        assert_eq!(
+            r.summary(),
+            "2 checks, 0 failed; 3 Python lookups; Mac executable: not found (binary checks \
+             skipped); Windows executable: game.exe"
+        );
+        r.checks.push(Check {
+            group: "binary",
+            what: String::new(),
+            ok: false,
+        });
+        r.binary = Some(PathBuf::from("ASAMU"));
+        r.win32_binary = None;
+        assert_eq!(
+            r.summary(),
+            "3 checks, 1 failed; 3 Python lookups; Mac executable: ASAMU; Windows executable: \
+             not found (binary checks skipped)"
+        );
     }
 
     #[test]
