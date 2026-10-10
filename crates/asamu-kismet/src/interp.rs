@@ -19,9 +19,16 @@
 //!   carry its attached actors; event keys fire the output of the same name
 //!   (in any group, the director group included); director cuts, fades,
 //!   sound keys and visibility/toggle keys emit outputs.
+//! - Animation-control tracks call the actor's `SetAnimPosition` through the
+//!   host ([`crate::anim::update_track`]); the `AnimNotify_Kismet` notifies a
+//!   call fires activate their `SeqEvent_AnimNotify` events at once. Float,
+//!   vector and colour property tracks write their value (curves without
+//!   keys keep the current value, as `Eval` with the current value as
+//!   default does); skeletal-control strength tracks set the control's
+//!   strength (default 0 without keys, blend time 0).
 
 use crate::graph::ActorRef;
-use crate::host::{Host, Output, ToggleMode};
+use crate::host::{Host, Output, PropertyValue, ToggleMode};
 use crate::matinee::{
     InterpData, MatineeAction, MoveInstance, Playback, PlaybackInputs, TrackData, fired_keys,
     remove_scaling, rotation_translation_matrix,
@@ -40,6 +47,10 @@ pub(crate) struct GroupInst {
     pub(crate) group: usize,
     pub(crate) actor: Option<ActorRef>,
     pub(crate) moves: Vec<(usize, MoveInstance)>,
+    /// `(track, LastUpdatePosition)` of the animation-control tracks
+    /// (`UInterpTrackInstAnimControl::InitTrackInst` starts it at the
+    /// action's position).
+    pub(crate) anim_last: Vec<(usize, f32)>,
 }
 
 /// Run-time state of a `SeqAct_Interp`.
@@ -161,6 +172,7 @@ impl Runtime {
                     group: gi,
                     actor: None,
                     moves: Vec::new(),
+                    anim_last: Vec::new(),
                 });
                 continue;
             }
@@ -190,10 +202,18 @@ impl Runtime {
                         }
                     }
                 }
+                let anim_last = g
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| !t.disabled && matches!(t.data, TrackData::AnimControl(_)))
+                    .map(|(ti, _)| (ti, position))
+                    .collect();
                 run.groups.push(GroupInst {
                     group: gi,
                     actor: Some(a),
                     moves,
+                    anim_last,
                 });
             }
         }
@@ -360,8 +380,8 @@ impl Runtime {
         let last = run.playback.position;
         let len = run.playback.length;
         let playing_reverse = run.playback.playing && run.playback.reverse;
-        let groups = run.groups.clone();
-        for gi in &groups {
+        let mut groups = std::mem::take(&mut run.groups);
+        for gi in &mut groups {
             let Some(g) = data.groups.get(gi.group) else {
                 continue;
             };
@@ -472,10 +492,77 @@ impl Runtime {
                             });
                         }
                     }
-                    TrackData::Director(_) | TrackData::Fade(_) | TrackData::Other => {}
+                    TrackData::AnimControl(a) => {
+                        let Some(actor) = gi.actor else { continue };
+                        let Some(info) = self.graph.actor(actor).cloned() else {
+                            continue;
+                        };
+                        let Some(slot) = gi.anim_last.iter_mut().find(|(i, _)| *i == ti) else {
+                            continue;
+                        };
+                        let channel = crate::anim::channel_index(&g.tracks, ti);
+                        let calls = {
+                            let host_ref: &dyn Host = &*host;
+                            crate::anim::update_track(a, channel, slot.1, new_pos, jump, &|seq| {
+                                host_ref.anim_sequence_length(&info, seq)
+                            })
+                        };
+                        slot.1 = new_pos;
+                        for call in &calls {
+                            for name in host.set_anim_position(&info, call) {
+                                self.anim_notify(actor, &name);
+                            }
+                        }
+                    }
+                    TrackData::FloatProperty(p) => {
+                        if let Some(v) = p.curve.points.first().map(|_| p.curve.eval(new_pos, 0.0))
+                        {
+                            self.set_property(
+                                gi.actor,
+                                p.name.as_deref(),
+                                PropertyValue::Float(v),
+                                host,
+                            );
+                        }
+                    }
+                    TrackData::VectorProperty(p) => {
+                        if !p.curve.points.is_empty() {
+                            let v = p.curve.eval(new_pos, [0.0; 3]);
+                            self.set_property(
+                                gi.actor,
+                                p.name.as_deref(),
+                                PropertyValue::Vector(v),
+                                host,
+                            );
+                        }
+                    }
+                    TrackData::ColorProperty(p) => {
+                        if !p.curve.points.is_empty() {
+                            let v = p.curve.eval(new_pos, [0.0; 3]);
+                            self.set_property(
+                                gi.actor,
+                                p.name.as_deref(),
+                                PropertyValue::Color(v),
+                                host,
+                            );
+                        }
+                    }
+                    TrackData::SkelControlStrength(p) => {
+                        let (Some(actor), Some(name)) = (gi.actor, p.name.as_deref()) else {
+                            continue;
+                        };
+                        if let Some(info) = self.graph.actor(actor).cloned() {
+                            host.set_skel_control_strength(&info, name, p.curve.eval(new_pos, 0.0));
+                        }
+                    }
+                    TrackData::SkelControlScale(_)
+                    | TrackData::Director(_)
+                    | TrackData::Fade(_)
+                    | TrackData::Other => {}
                 }
             }
         }
+        run.groups = groups;
         // Director group tracks (cuts and fades).
         for g in &data.groups {
             if g.kind != "director" {
@@ -522,6 +609,25 @@ impl Runtime {
             }
         }
         run.playback.position = new_pos;
+    }
+
+    /// A property track's value: recorded for the app and handed to the
+    /// host (unbound groups and unnamed tracks do nothing).
+    fn set_property(
+        &mut self,
+        actor: Option<ActorRef>,
+        name: Option<&str>,
+        value: PropertyValue,
+        host: &mut dyn Host,
+    ) {
+        let (Some(actor), Some(name)) = (actor, name) else {
+            return;
+        };
+        let Some(info) = self.graph.actor(actor).cloned() else {
+            return;
+        };
+        self.props.insert((actor, name.to_ascii_lowercase()), value);
+        host.set_actor_property(&info, name, value);
     }
 
     pub(crate) fn interp_deactivated(&mut self, op: usize) {

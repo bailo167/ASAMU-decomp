@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod abilities;
+pub mod anim;
 pub mod collision;
 pub mod fixtures;
 pub mod gameplay;

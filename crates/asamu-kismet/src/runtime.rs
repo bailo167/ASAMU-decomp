@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use crate::graph::{ActorRef, Graph, NodeKind};
-use crate::host::{Host, Output};
+use crate::host::{Host, Output, PropertyValue};
 use crate::matinee::MatineeSet;
 use crate::narrator::Narrator;
 use crate::ops::OpClass;
@@ -211,6 +211,8 @@ pub struct Runtime {
     pub(crate) tutorial_id: i32,
     pub(crate) attractors: Vec<PendingAttractor>,
     pub(crate) actor_xf: BTreeMap<ActorRef, ([f32; 3], [i32; 3])>,
+    /// Matinee property-track values per actor and lower-case property name.
+    pub(crate) props: BTreeMap<(ActorRef, String), PropertyValue>,
     pub(crate) touch_events: BTreeMap<ActorRef, Vec<usize>>,
     /// Actors attached to each actor (from the actor table's `base`).
     pub(crate) children: BTreeMap<ActorRef, Vec<ActorRef>>,
@@ -304,6 +306,7 @@ impl Runtime {
             tutorial_id: 0,
             attractors: Vec::new(),
             actor_xf: BTreeMap::new(),
+            props: BTreeMap::new(),
             touch_events,
             children,
             attach_rel: BTreeMap::new(),
@@ -424,6 +427,13 @@ impl Runtime {
     /// rotation, in actor-table order (for rendering).
     pub fn moved_actors(&self) -> impl Iterator<Item = (ActorRef, [f32; 3], [i32; 3])> + '_ {
         self.actor_xf.iter().map(|(a, (l, r))| (*a, *l, *r))
+    }
+
+    /// The values Matinee property tracks wrote so far (light brightness,
+    /// radius and colour, `DrawScale3D`, ...), keyed by actor and lower-case
+    /// property name, in order.
+    pub fn actor_properties(&self) -> impl Iterator<Item = (ActorRef, &str, PropertyValue)> + '_ {
+        self.props.iter().map(|((a, n), v)| (*a, n.as_str(), *v))
     }
 
     /// Moves graph actor `a` (Matinee move tracks,
@@ -1628,9 +1638,18 @@ impl Runtime {
         self.fire_enabled(OpClass::WormEvents, output);
     }
 
-    /// An animation notify on `actor` (`SeqEvent_AnimNotify` whose originator
-    /// is the actor and whose `NotifyName` matches; TENTATIVE dispatch).
+    /// An `AnimNotify_Kismet` notify fired on `actor`: every
+    /// `SeqEvent_AnimNotify` whose originator is the actor and whose
+    /// `NotifyName` matches is checked with the actor as originator and
+    /// instigator (CONFIRMED: decompiled `UAnimNotify_Kismet::Notify`, which
+    /// searches the owner's generated events). A notify without a name
+    /// fires nothing.
     pub fn anim_notify(&mut self, actor: ActorRef, notify: &str) {
+        // `NAME_None` (the nameless events' `NotifyName` is exported as
+        // "None") never matches: the native returns before the search.
+        if notify.is_empty() || notify.eq_ignore_ascii_case("None") {
+            return;
+        }
         for e in self.events_of(OpClass::AnimNotify) {
             let Some(node) = self.graph.node(e) else {
                 continue;
@@ -1645,7 +1664,9 @@ impl Runtime {
                 .and_then(KValue::as_str)
                 .is_some_and(|n| n.eq_ignore_ascii_case(notify));
             if orig == Some(actor) && name_ok {
-                self.check_activate(e, Obj::Actor(actor), Obj::None, false, None, false);
+                // `UAnimNotify_Kismet::Notify`: the owner is originator and
+                // instigator.
+                self.check_activate(e, Obj::Actor(actor), Obj::Actor(actor), false, None, false);
             }
         }
     }

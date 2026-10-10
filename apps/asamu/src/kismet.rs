@@ -20,17 +20,26 @@
 //!   `SeqEvent_CreditsEnded`);
 //! - **camera**: fades (`SeqAct_CameraFade`, Matinee fade tracks), view
 //!   targets (`SeqAct_SetCameraTarget`, Matinee director cuts), shakes (the
-//!   action and the worm's growl), cinematic mode (blocks player input in
-//!   `main.rs` while active);
+//!   action; the worm's growl falls back to a placeholder shake only when
+//!   its camera animation is not converted), cinematic mode (blocks player
+//!   input in `main.rs` while active), and the camera animations the level
+//!   script plays (gameplay events and `SeqAct_PlayCameraAnim`;
+//!   [`apply_camera_anims`] runs after `main.rs`'s `sync_camera` and applies
+//!   them to the point of view as `ACamera::ApplyAnimToCamera` does);
 //! - **level transitions**: `open <map>` → [`crate::ui::OpenMap`] (the flow
 //!   loads the next map; the save strings are already in the general save);
 //! - **rendering**: actors Kismet moved (`LevelScript::moved_actors`: movers,
 //!   their passengers, skeletal Matinee actors) follow their transform,
 //!   hidden/destroyed actors disappear, and the meshes of sub-levels Kismet
-//!   streams (TheCore) show only while streamed in;
+//!   streams (TheCore) show only while streamed in; level lights
+//!   ([`sync_light_render`]) follow the same rules (moved by Matinee, hidden
+//!   with their streamed sub-level), take the brightness, radius and colour
+//!   Matinee property tracks write, and switch with `SeqAct_Toggle` and
+//!   Matinee toggle keys;
 //! - **NPC events**: collectibles and story items → progression records
 //!   ([`crate::ui::CollectibleFound`], [`crate::ui::StoryItemFound`]), the
-//!   worm's camera shake.
+//!   worm's camera shake, animation sound notifies (`AnimNotify_Sound`, e.g.
+//!   the cutscene characters' lines) → `PlaySound` at the actor.
 //!
 //! Everything here is presentation; the simulation never reads it back
 //! (except the cinematic input block and the credits' end, which the
@@ -49,12 +58,14 @@ use bevy::prelude::*;
 
 use crate::audio::AudioCommandMessage;
 use crate::audio::music::{MusicCommand, MusicCommandMessage, TrackSpec};
-use crate::converted::{LevelEntity, RenderLevels};
+use crate::converted::{LevelEntity, LevelLight, RenderLevels};
 use crate::ui::{
     AchievementEarned, CollectibleFound, GameFinished, OpenMap, SaveStringEdited, Saves,
     StoryItemFound, TimeTrialEnd, TimeTrialStart, UiStrings,
 };
 use crate::{Sim, to_render};
+use asamu_game::asamu_kismet::PropertyValue;
+use asamu_game::asamu_kismet::camera_anim::{Pov, paths as camera_paths};
 
 /// How long the stand-in credits screen stays before `SeqEvent_CreditsEnded`
 /// fires (ours: the original's Scaleform credits movie is not ported, so
@@ -164,6 +175,9 @@ pub(crate) struct Presentation {
     pub hidden: BTreeSet<u32>,
     /// World actor ids Kismet unhid (actors hidden at level start show).
     pub shown: BTreeSet<u32>,
+    /// Lights switched by `SeqAct_Toggle` or Matinee toggle keys (world
+    /// actor id → enabled; unlisted lights keep their placed state).
+    pub light_enabled: BTreeMap<u32, bool>,
 }
 
 impl Default for Presentation {
@@ -186,6 +200,7 @@ impl Default for Presentation {
             look_at: BTreeMap::new(),
             hidden: BTreeSet::new(),
             shown: BTreeSet::new(),
+            light_enabled: BTreeMap::new(),
         }
     }
 }
@@ -217,6 +232,14 @@ impl Presentation {
     #[must_use]
     pub fn hud_shown(&self) -> bool {
         self.hud && !self.cinematic.is_some_and(|f| f[1])
+    }
+
+    /// Toggles light actor `id` (`ALight.OnToggle`: on / off / flip of the
+    /// light component's `bEnabled`; TENTATIVE, the stock light toggle was
+    /// not re-read).
+    fn toggle_light(&mut self, id: u32, mode: ToggleMode) {
+        let current = self.light_enabled.get(&id).copied().unwrap_or(true);
+        self.light_enabled.insert(id, toggle(current, mode));
     }
 
     /// Player input allowed by cinematic mode: (movement, turning, buttons).
@@ -320,7 +343,7 @@ pub(crate) fn route_frames(
             );
         }
         for e in &frame.npc_events {
-            route_npc_event(e, &sim, &mut pres, &mut ui);
+            route_npc_event(e, &sim, &mut pres, &mut ui, &mut audio);
         }
     }
 }
@@ -416,14 +439,19 @@ fn route_output(
         Output::SoundMode { start, mode, .. } => send(AudioCommand::SetSoundMode {
             mode: if *start { mode.clone() } else { None },
         }),
-        Output::ActorToggled { actor, mode } => send(AudioCommand::ToggleAmbient {
-            actor: object_name(actor).to_owned(),
-            action: match mode {
-                ToggleMode::On => ToggleAction::TurnOn,
-                ToggleMode::Off => ToggleAction::TurnOff,
-                ToggleMode::Toggle => ToggleAction::Toggle,
-            },
-        }),
+        Output::ActorToggled { actor, mode } => {
+            if let Some(id) = sim.script.as_ref().and_then(|s| s.actor_id_by_path(actor)) {
+                pres.toggle_light(id, *mode);
+            }
+            send(AudioCommand::ToggleAmbient {
+                actor: object_name(actor).to_owned(),
+                action: match mode {
+                    ToggleMode::On => ToggleAction::TurnOn,
+                    ToggleMode::Off => ToggleAction::TurnOff,
+                    ToggleMode::Toggle => ToggleAction::Toggle,
+                },
+            });
+        }
         Output::AdaptiveTracks { tracks } => {
             let specs = tracks
                 .items()
@@ -511,6 +539,14 @@ fn route_output(
                         _ => None,
                     };
                     if let (Some(action), Some(actor)) = (toggle_action, actor) {
+                        if let Some(id) = id {
+                            let mode = match action {
+                                ToggleAction::TurnOn => ToggleMode::On,
+                                ToggleAction::TurnOff => ToggleMode::Off,
+                                ToggleAction::Toggle => ToggleMode::Toggle,
+                            };
+                            pres.toggle_light(id, mode);
+                        }
                         send(AudioCommand::ToggleAmbient {
                             actor: object_name(actor).to_owned(),
                             action,
@@ -571,19 +607,64 @@ fn route_output(
                 .insert(looking.clone(), if *look { target.clone() } else { None });
         }
         // Handled inside the game frame (the worm controller, follow
-        // collision) or not presented yet (camera animations, music
-        // tracks of the front end, material parameters, the speed-line
-        // cone, the suit-on hand animation, menu calls).
+        // collision, camera animations, look-at targets) or not presented
+        // yet (music tracks of the front end, material parameters, the
+        // speed-line cone, the suit-on hand animation, menu calls).
         other => debug!("kismet: {other:?}"),
     }
 }
 
-fn route_npc_event(e: &NpcEvent, sim: &Sim, pres: &mut Presentation, ui: &mut UiWriters) {
+fn route_npc_event(
+    e: &NpcEvent,
+    sim: &Sim,
+    pres: &mut Presentation,
+    ui: &mut UiWriters,
+    audio: &mut MessageWriter<AudioCommandMessage>,
+) {
     let Some(npcs) = sim.game.npcs() else {
         return;
     };
     let scene = npcs.scene();
     match e {
+        NpcEvent::AnimSound {
+            actor,
+            cue,
+            volume,
+            pitch,
+            ..
+        } => {
+            // At the actor (its Kismet transform when Matinee moved it, else
+            // its first skeletal component's placement).
+            let location = sim
+                .script
+                .as_ref()
+                .and_then(|s| {
+                    s.moved_actors()
+                        .into_iter()
+                        .find(|(id, _, _)| id == actor)
+                        .map(|(_, l, _)| l)
+                })
+                .or_else(|| {
+                    let def = scene.skinned.iter().find(|d| d.id == *actor)?;
+                    let m = def.components.first()?.local_to_world;
+                    Some(sim_glam::Vec3::new(m[3][0], m[3][1], m[3][2]))
+                });
+            audio.write(AudioCommandMessage(AudioCommand::PlaySound {
+                cue: cue.clone(),
+                source: location
+                    .filter(|l| l.is_finite())
+                    .map_or(SoundSource::TwoD, |l| SoundSource::Location {
+                        location: l.to_array(),
+                    }),
+                volume_multiplier: *volume,
+                pitch_multiplier: *pitch,
+                fade_in_time: 0.0,
+                suppress_subtitles: false,
+                suppress_spatialization: false,
+                node: None,
+            }));
+        }
+        NpcEvent::AnimNotify { .. } => {}
         NpcEvent::CollectibleCollected { id } => {
             if let Some(def) = scene.collectibles.iter().find(|c| c.id == *id) {
                 ui.collectibles.write(CollectibleFound {
@@ -598,7 +679,17 @@ fn route_npc_event(e: &NpcEvent, sim: &Sim, pres: &mut Presentation, ui: &mut Ui
                 key: story_item_save_key(map, def),
             });
         }
-        NpcEvent::CameraShake { start, .. } => pres.worm_shake = *start,
+        NpcEvent::CameraShake { start, .. } => {
+            // The worm's growl is a camera animation the level script plays;
+            // the placeholder shake only stands in when it is not converted.
+            let converted = sim.script.as_ref().is_some_and(|s| {
+                s.camera_anims()
+                    .set()
+                    .get(camera_paths::WORM_GROWL)
+                    .is_some()
+            });
+            pres.worm_shake = *start && !converted;
+        }
         NpcEvent::FoliageTouched { .. } | NpcEvent::GlowFlowerGlow { .. } => debug!("npc: {e:?}"),
         _ => info!("npc: {e:?}"),
     }
@@ -698,6 +789,250 @@ pub(crate) fn shake_offset(pres: &Presentation, t: f32) -> Vec3 {
         (t * 89.0).sin() * a,
         (t * 53.0).cos() * a * 0.5,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Camera animations
+// ---------------------------------------------------------------------------
+
+/// Radians → rotator units (rounded).
+fn rad_to_units(r: f32) -> i32 {
+    let v = (f64::from(r) * 32768.0 / std::f64::consts::PI).round();
+    if v.is_finite() {
+        v.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    } else {
+        0
+    }
+}
+
+/// The UE point of view of a render camera transform (no roll) and
+/// horizontal FOV (degrees).
+#[must_use]
+pub(crate) fn pov_of(transform: &Transform, hfov_degrees: f32) -> Pov {
+    use asamu_core::coords::{bevy_dir_to_ue, bevy_pos_to_ue};
+    let t = transform.translation;
+    let location = bevy_pos_to_ue(sim_glam::Vec3::new(t.x, t.y, t.z), crate::SCALE);
+    let f = transform.rotation * Vec3::NEG_Z;
+    let f = bevy_dir_to_ue(sim_glam::Vec3::new(f.x, f.y, f.z));
+    let yaw = f.y.atan2(f.x);
+    let pitch = f.z.clamp(-1.0, 1.0).asin();
+    Pov {
+        location: location.to_array(),
+        rotation: [rad_to_units(pitch), rad_to_units(yaw), 0],
+        fov: hfov_degrees,
+    }
+}
+
+/// A render camera rotation for a UE rotator (pitch, yaw, roll).
+#[must_use]
+pub(crate) fn rotation_of(rot: [i32; 3]) -> Quat {
+    use asamu_core::rotator::{normalize_rotator_axis, rotator_units_to_radians};
+    let pitch = rotator_units_to_radians(normalize_rotator_axis(rot[0]));
+    let yaw = rotator_units_to_radians(rot[1]);
+    let roll = rotator_units_to_radians(normalize_rotator_axis(rot[2]));
+    // UE roll turns about the forward axis (Bevy −Z), clockwise as seen by
+    // the viewer for a positive roll (TENTATIVE sign; no shipped gameplay
+    // animation rolls far).
+    crate::bevy_quat(asamu_core::coords::ue_view_to_bevy_rotation(yaw, pitch))
+        * Quat::from_rotation_z(-roll)
+}
+
+/// Whether a camera-animation sample changes the point of view at all (an
+/// animated camera actor at the origin with the default FOV does not).
+fn sample_has_effect(s: &asamu_game::asamu_kismet::camera_anim::CameraAnimSample) -> bool {
+    use asamu_game::asamu_kismet::camera_anim::CAMERA_ACTOR_DEFAULT_FOV;
+    s.location != [0.0; 3] || s.rotation != [0; 3] || s.fov != CAMERA_ACTOR_DEFAULT_FOV
+}
+
+/// Applies the level script's camera animations to the camera `sync_camera`
+/// placed this frame (location, rotation and FOV offsets in camera space,
+/// `ACamera::ApplyAnimToCamera`; the pool advances with the fixed tick).
+pub(crate) fn apply_camera_anims(
+    sim: Option<Res<Sim>>,
+    camera: Option<Single<(&mut Transform, &mut Projection), With<crate::PlayerCamera>>>,
+) {
+    let (Some(sim), Some(camera)) = (sim, camera) else {
+        return;
+    };
+    let Some(script) = sim.script.as_ref() else {
+        return;
+    };
+    let anims = script.camera_anims();
+    // Animations without tracks (the grapple and normal-landing ones) hold
+    // an instance but move nothing: leave the camera alone then, so the
+    // float view rotation is not rounded to rotator units for nothing.
+    if !anims.player().samples().iter().any(sample_has_effect) {
+        return;
+    }
+    let (mut transform, mut projection) = camera.into_inner();
+    let Projection::Perspective(persp) = projection.as_mut() else {
+        return;
+    };
+    let aspect = persp.aspect_ratio.max(0.1);
+    let hfov = 2.0 * ((persp.fov * 0.5).tan() * aspect).atan();
+    let pov = pov_of(&transform, hfov.to_degrees());
+    let out = anims.apply(pov);
+    let location = sim_glam::Vec3::from_array(out.location);
+    if !location.is_finite() || !out.fov.is_finite() {
+        return;
+    }
+    transform.translation = to_render(location);
+    transform.rotation = rotation_of(out.rotation);
+    let h = out.fov.clamp(1.0, 170.0).to_radians();
+    persp.fov = 2.0 * ((h * 0.5).tan() / aspect).atan();
+}
+
+// ---------------------------------------------------------------------------
+// Lights
+// ---------------------------------------------------------------------------
+
+/// Each level light's render transform before its actor first moved.
+#[derive(Resource, Default)]
+pub(crate) struct LightRender {
+    rest: HashMap<Entity, Transform>,
+}
+
+/// The brightness and range a light shows for Matinee's property values:
+/// `(intensity scale, range scale)` from `Brightness` and `Radius` relative
+/// to the placed values (our UE3 → physical mapping is linear in brightness
+/// and quadratic in radius, `asamu_assets::lighting`).
+#[must_use]
+pub(crate) fn light_scales(
+    base_brightness: f32,
+    base_radius: Option<f32>,
+    brightness: Option<f32>,
+    radius: Option<f32>,
+) -> (f32, f32) {
+    let b = match brightness {
+        Some(b) if base_brightness > 0.0 && b.is_finite() => (b / base_brightness).max(0.0),
+        _ => 1.0,
+    };
+    let r = match (radius, base_radius) {
+        (Some(r), Some(r0)) if r0 > 0.0 && r.is_finite() => (r / r0).max(0.0),
+        _ => 1.0,
+    };
+    (b * r * r, r)
+}
+
+/// An `InterpTrackColorProp` value (linear 0..1) as the `FColor` the engine
+/// stores: `255 · c^(1/2.2)`, clamped (CONFIRMED constants 0.4545454 and 255
+/// read from the executable).
+#[must_use]
+pub(crate) fn color_prop_to_srgb(c: [f32; 3]) -> [u8; 3] {
+    c.map(|v| {
+        let x = (v.max(0.0).powf(0.454_545_44) * 255.0) as i32;
+        u8::try_from(x.clamp(0, 255)).unwrap_or(255)
+    })
+}
+
+/// Level lights follow Kismet: hidden with their streamed-out sub-level or
+/// their hidden actor, switched by toggles, moved with their actor (Matinee,
+/// attachment), and lit by Matinee's `Brightness`, `Radius` and `LightColor`
+/// tracks.
+#[allow(clippy::type_complexity)]
+pub(crate) fn sync_light_render(
+    sim: Option<Res<Sim>>,
+    pres: Res<Presentation>,
+    levels: Option<Res<RenderLevels>>,
+    mut render: ResMut<LightRender>,
+    mut lights: Query<(
+        Entity,
+        &LevelLight,
+        &mut Transform,
+        &mut Visibility,
+        Option<&mut PointLight>,
+        Option<&mut SpotLight>,
+    )>,
+) {
+    let Some(sim) = sim else {
+        return;
+    };
+    let Some(map) = sim.game.scene_map() else {
+        return;
+    };
+    if sim.is_added() {
+        for (e, rest) in render.rest.drain() {
+            if let Ok((_, _, mut t, _, _, _)) = lights.get_mut(e) {
+                *t = rest;
+            }
+        }
+    }
+    let Some(levels) = levels else {
+        return;
+    };
+    let script = sim.script.as_ref();
+    let moved: HashMap<u32, (sim_glam::Vec3, [i32; 3])> = script
+        .map(|s| {
+            s.moved_actors()
+                .into_iter()
+                .map(|(id, l, r)| (id, (l, r)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut props: HashMap<u32, Vec<(String, PropertyValue)>> = HashMap::new();
+    if let Some(s) = script {
+        for (id, name, v) in s.actor_properties() {
+            props.entry(id).or_default().push((name, v));
+        }
+    }
+    for (e, light, mut t, mut vis, point, spot) in &mut lights {
+        let Some(name) = levels.names.get(light.level) else {
+            continue;
+        };
+        let id = map.level_index(name).and_then(|i| {
+            asamu_game::asamu_world::scene::actor_id(u8::try_from(i).ok()?, light.actor_slot)
+        });
+        let streamed_out = !levels.force_all
+            && light.level > 0
+            && !levels
+                .always_loaded
+                .get(light.level)
+                .copied()
+                .unwrap_or(true)
+            && !sim.game.is_level_streamed(name);
+        let off = id.is_some_and(|id| {
+            pres.hidden.contains(&id) || pres.light_enabled.get(&id) == Some(&false)
+        });
+        set_visible(&mut vis, !streamed_out && !off);
+        let Some(id) = id else { continue };
+        if let (Some((l, r)), Some(s)) = (moved.get(&id), script)
+            && let Some(rest_xf) = s.actor_placement(id)
+            && l.is_finite()
+        {
+            let base = *render.rest.entry(e).or_insert(*t);
+            *t = Transform::from_matrix(render_delta(rest_xf, (*l, *r)) * base.to_matrix());
+        }
+        let Some(list) = props.get(&id) else { continue };
+        let get_f = |n: &str| {
+            list.iter().find_map(|(k, v)| match v {
+                PropertyValue::Float(f) if k == n => Some(*f),
+                _ => None,
+            })
+        };
+        let color = list.iter().find_map(|(k, v)| match v {
+            PropertyValue::Color(c) if k == "lightcolor" => Some(color_prop_to_srgb(*c)),
+            _ => None,
+        });
+        let (scale, range_scale) = light_scales(
+            light.brightness,
+            light.radius,
+            get_f("brightness"),
+            get_f("radius"),
+        );
+        if let Some(mut p) = point {
+            p.intensity = light.intensity * scale;
+            p.range = light.range * range_scale;
+            if let Some(c) = color {
+                p.color = Color::srgb_u8(c[0], c[1], c[2]);
+            }
+        } else if let Some(mut s) = spot {
+            s.intensity = light.intensity * scale;
+            s.range = light.range * range_scale;
+            if let Some(c) = color {
+                s.color = Color::srgb_u8(c[0], c[1], c[2]);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1401,7 @@ impl Plugin for KismetPlugin {
         app.add_message::<KismetFrame>()
             .init_resource::<Presentation>()
             .init_resource::<ActorRender>()
+            .init_resource::<LightRender>()
             .add_systems(Startup, spawn_overlays)
             .add_systems(
                 Update,
@@ -1075,10 +1411,12 @@ impl Plugin for KismetPlugin {
                     update_presentation,
                     apply_overlays,
                     sync_actor_render,
+                    sync_light_render,
                 )
                     .chain()
                     .before(crate::ui::UiFlowSet),
-            );
+            )
+            .add_systems(Update, apply_camera_anims.after(crate::sync_camera));
     }
 }
 
@@ -1582,6 +1920,302 @@ mod tests {
                 Some(&Visibility::Inherited),
                 "streamed in"
             );
+        }
+    }
+
+    #[test]
+    fn camera_povs_round_trip_and_light_values_follow_matinee() {
+        use asamu_core::coords::ue_view_to_bevy_rotation;
+        // A camera yawed 30° right and pitched 10° up, 5 m forward.
+        let (yaw, pitch) = (30.0f32.to_radians(), 10.0f32.to_radians());
+        let t = Transform {
+            translation: to_render(sim_glam::Vec3::new(500.0, -200.0, 96.0)),
+            rotation: crate::bevy_quat(ue_view_to_bevy_rotation(yaw, pitch)),
+            scale: Vec3::ONE,
+        };
+        let pov = pov_of(&t, 90.0);
+        assert!((pov.location[0] - 500.0).abs() < 1e-2 && (pov.location[1] + 200.0).abs() < 1e-2);
+        assert!((pov.rotation[1] - 5461).abs() <= 1, "{:?}", pov.rotation);
+        assert!((pov.rotation[0] - 1820).abs() <= 1, "{:?}", pov.rotation);
+        assert_eq!(pov.rotation[2], 0);
+        let back = rotation_of(pov.rotation);
+        assert!(back.angle_between(t.rotation) < 1e-3);
+        // A roll turns about the view axis only.
+        let rolled = rotation_of([pov.rotation[0], pov.rotation[1], 8192]);
+        assert!(((rolled * Vec3::NEG_Z) - (t.rotation * Vec3::NEG_Z)).length() < 1e-4);
+        assert!((rolled.angle_between(t.rotation) - 45.0f32.to_radians()).abs() < 1e-3);
+        // Light values: brightness is linear, the radius scales the range
+        // and (squared) the intensity; missing or unusable values keep the
+        // placed light.
+        assert_eq!(light_scales(2.0, Some(400.0), Some(1.0), None), (0.5, 1.0));
+        assert_eq!(
+            light_scales(2.0, Some(400.0), None, Some(800.0)),
+            (4.0, 2.0)
+        );
+        assert_eq!(light_scales(0.0, None, Some(3.0), Some(100.0)), (1.0, 1.0));
+        assert_eq!(
+            light_scales(2.0, Some(400.0), Some(f32::NAN), Some(-4.0)),
+            (0.0, 0.0)
+        );
+        assert_eq!(color_prop_to_srgb([1.0, 0.0, 4.0]), [255, 0, 255]);
+        assert_eq!(color_prop_to_srgb([0.5, -1.0, f32::NAN])[0], 186);
+        // Toggles flip from the placed (enabled) state.
+        let mut p = Presentation::default();
+        p.toggle_light(4, ToggleMode::Toggle);
+        assert_eq!(p.light_enabled.get(&4), Some(&false));
+        p.toggle_light(4, ToggleMode::On);
+        assert_eq!(p.light_enabled.get(&4), Some(&true));
+    }
+
+    /// A level script whose Kismet plays a camera animation at level start:
+    /// the camera `sync_camera` placed is moved, turned and zoomed by it.
+    #[test]
+    fn kismet_camera_animations_move_the_camera() {
+        use asamu_game::asamu_kismet::camera_anim::{CameraAnim, CameraAnimSet};
+        use asamu_game::asamu_kismet::matinee::{
+            CurveMode, CurvePoint, InterpCurve, MoveFrame, MoveTrack,
+        };
+        use asamu_game::asamu_kismet::{Graph, LevelScripts, MatineeSet};
+        let doc = format!(
+            r#"{{"format": "{}", "version": {}, "package": "T", "actors": [], "nodes": [
+                {{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3]}},
+                {{"id": 1, "class": "Engine.SeqEvent_LevelLoaded", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "Loaded and Visible", "links": [{{"op": 2, "input": 0}}]}}],
+                  "event": {{"max_trigger_count": 1}}}},
+                {{"id": 2, "class": "Engine.SeqAct_PlayCameraAnim", "kind": "action", "parent": 0,
+                  "inputs": [{{"desc": "Play"}}, {{"desc": "Stop"}}], "outputs": [{{"desc": "Out"}}],
+                  "variables": [{{"desc": "Target", "property": "Targets", "vars": [3]}}],
+                  "params": {{"CameraAnim": {{"$obj": "Anims.Nod"}}, "Rate": 1.0, "IntensityScale": 1.0,
+                              "BlendInTime": 0.0, "BlendOutTime": 0.0, "bLoop": true, "Targets": []}},
+                  "auto_activate_outputs": true}},
+                {{"id": 3, "class": "Engine.SeqVar_Player", "kind": "variable", "parent": 0}}
+            ]}}"#,
+            asamu_game::asamu_kismet::RUNTIME_FORMAT,
+            asamu_game::asamu_kismet::RUNTIME_VERSION
+        );
+        let graph = Graph::from_json_slice(doc.as_bytes()).unwrap();
+        let mut game = asamu_game::Game::graybox().unwrap();
+        let mut script = asamu_game::LevelScript::new(
+            &mut game,
+            LevelScripts {
+                graph,
+                matinee: MatineeSet::default(),
+                missing_sublevels: Vec::new(),
+            },
+        );
+        let key = |t: f32, v: [f32; 3]| CurvePoint {
+            in_val: t,
+            out_val: v,
+            arrive: [0.0; 3],
+            leave: [0.0; 3],
+            mode: CurveMode::Constant,
+        };
+        let mut set = CameraAnimSet::default();
+        set.insert(CameraAnim {
+            path: "Anims.Nod".into(),
+            length: 10.0,
+            base_fov: 100.0,
+            move_track: Some(MoveTrack {
+                // 20 UU up and 45° of yaw from the first tick on.
+                pos: InterpCurve {
+                    points: vec![key(0.0, [0.0; 3]), key(0.001, [0.0, 0.0, 20.0])],
+                    ..InterpCurve::default()
+                },
+                euler: InterpCurve {
+                    points: vec![key(0.0, [0.0; 3]), key(0.001, [0.0, 0.0, 45.0])],
+                    ..InterpCurve::default()
+                },
+                move_frame: MoveFrame::RelativeToInitial,
+                ..MoveTrack::default()
+            }),
+            fov_track: None,
+        });
+        script.set_camera_anims(set);
+        game.start();
+        script
+            .tick(&mut game, &asamu_player::InputFrame::default())
+            .unwrap();
+        assert_eq!(script.camera_anims().player().samples().len(), 1);
+        let mut app = App::new();
+        app.add_systems(Update, apply_camera_anims);
+        let rest = Transform::from_translation(to_render(sim_glam::Vec3::new(0.0, 0.0, 100.0)));
+        let aspect = 16.0 / 9.0;
+        let cam = app
+            .world_mut()
+            .spawn((
+                crate::PlayerCamera,
+                rest,
+                Projection::from(PerspectiveProjection {
+                    fov: 2.0 * ((45.0f32).to_radians().tan() / aspect).atan(),
+                    aspect_ratio: aspect,
+                    ..default()
+                }),
+            ))
+            .id();
+        app.insert_resource(Sim::new(game, String::new()).with_script(Some(script)));
+        app.update();
+        let t = *app.world().get::<Transform>(cam).unwrap();
+        let want = to_render(sim_glam::Vec3::new(0.0, 0.0, 120.0));
+        assert!(
+            (t.translation - want).length() < 1e-3,
+            "{:?}",
+            t.translation
+        );
+        // Yawed 45° to the right: forward (−Z) turns towards +X.
+        let f = t.rotation * Vec3::NEG_Z;
+        assert!((f.x - f.z.abs()).abs() < 1e-2 && f.x > 0.5, "{f:?}");
+        // The FOV grew by BaseFOV − 90 = 10° (horizontal).
+        let Projection::Perspective(p) = app.world().get::<Projection>(cam).unwrap() else {
+            panic!("perspective");
+        };
+        let h = 2.0 * ((p.fov * 0.5).tan() * aspect).atan();
+        assert!((h.to_degrees() - 100.0).abs() < 1e-2, "{}", h.to_degrees());
+        // An animation without tracks (default FOV) holds an instance but
+        // leaves the camera exactly as `sync_camera` placed it.
+        {
+            use asamu_game::asamu_kismet::camera_anim::{CameraAnimHandle, CameraAnimSample};
+            let idle = CameraAnimSample {
+                handle: CameraAnimHandle(0),
+                weight: 1.0,
+                location: [0.0; 3],
+                rotation: [0; 3],
+                fov: 90.0,
+            };
+            assert!(!sample_has_effect(&idle));
+            assert!(sample_has_effect(&CameraAnimSample { fov: 89.98, ..idle }));
+            assert!(sample_has_effect(&CameraAnimSample {
+                rotation: [0, 1, 0],
+                ..idle
+            }));
+            assert!(sample_has_effect(&CameraAnimSample {
+                location: [0.0, 0.0, -0.5],
+                ..idle
+            }));
+        }
+        // Without samples nothing changes.
+        let mut sim = app.world_mut().remove_resource::<Sim>().unwrap();
+        sim.script = None;
+        *app.world_mut().get_mut::<Transform>(cam).unwrap() = rest;
+        app.insert_resource(sim);
+        app.update();
+        assert_eq!(app.world().get::<Transform>(cam), Some(&rest));
+    }
+
+    /// Gated on converted data: a level light bound to a Matinee brightness
+    /// track (AG-Workshop) takes the track's value, a light of an actor
+    /// Kismet moved follows it, toggles and hidden actors switch lights off,
+    /// and a new game puts everything back.
+    #[test]
+    fn converted_lights_follow_matinee_and_kismet() {
+        use crate::converted::{LevelLight, RenderLevels};
+        let Some(dir) = std::env::var_os("ASAMU_CONVERTED_DIR").map(std::path::PathBuf::from)
+        else {
+            eprintln!("SKIP: ASAMU_CONVERTED_DIR not set");
+            return;
+        };
+        if !dir.join("kismet").is_dir() {
+            eprintln!("SKIP: no converted Kismet");
+            return;
+        }
+        let Ok((mut game, Some(mut script))) =
+            asamu_game::load_level_with_kismet(&dir, "AG-Workshop")
+        else {
+            eprintln!("SKIP: AG-Workshop not converted");
+            return;
+        };
+        game.start();
+        for _ in 0..600 {
+            script
+                .tick(&mut game, &asamu_player::InputFrame::default())
+                .unwrap();
+        }
+        let props = script.actor_properties();
+        let Some((id, value)) = props.iter().find_map(|(id, n, v)| match v {
+            PropertyValue::Float(f) if n == "brightness" => Some((*id, *f)),
+            _ => None,
+        }) else {
+            eprintln!("SKIP: no brightness track ran in 10 s");
+            return;
+        };
+        let moved = script.moved_actors();
+        let map_name = game.scene_map().unwrap().map.clone();
+        let mut app = App::new();
+        app.init_resource::<Presentation>()
+            .init_resource::<LightRender>()
+            .insert_resource(RenderLevels {
+                names: vec![map_name],
+                always_loaded: vec![true],
+                force_all: false,
+            })
+            .add_systems(Update, sync_light_render);
+        let light = |slot: usize| LevelLight {
+            level: 0,
+            actor_slot: slot,
+            brightness: 2.0,
+            radius: Some(512.0),
+            intensity: 1000.0,
+            range: 5.0,
+        };
+        let rest = Transform::from_xyz(1.0, 2.0, 3.0);
+        let lit = app
+            .world_mut()
+            .spawn((
+                light((id & 0xFFFF) as usize),
+                PointLight::default(),
+                rest,
+                Visibility::Inherited,
+            ))
+            .id();
+        let follower = moved.first().map(|(mid, _, _)| {
+            let e = app
+                .world_mut()
+                .spawn((
+                    light((mid & 0xFFFF) as usize),
+                    PointLight::default(),
+                    rest,
+                    Visibility::Inherited,
+                ))
+                .id();
+            (*mid, e)
+        });
+        let placement = follower.and_then(|(mid, _)| script.actor_placement(mid));
+        let current = follower.and_then(|(mid, _)| {
+            moved
+                .iter()
+                .find(|(i, _, _)| *i == mid)
+                .map(|(_, l, r)| (*l, *r))
+        });
+        app.insert_resource(Sim::new(game, String::new()).with_script(Some(script)));
+        app.update();
+        let got = app.world().get::<PointLight>(lit).unwrap().intensity;
+        assert!(
+            (got - 1000.0 * value / 2.0).abs() < 1e-2,
+            "{got} for {value}"
+        );
+        if let (Some((_, e)), Some(p), Some(c)) = (follower, placement, current) {
+            let want = Transform::from_matrix(render_delta(p, c) * rest.to_matrix());
+            let t = *app.world().get::<Transform>(e).unwrap();
+            assert!((t.translation - want.translation).length() < 1e-4);
+        }
+        // Toggled off, then a fresh game: on and at rest again.
+        app.world_mut()
+            .resource_mut::<Presentation>()
+            .toggle_light(id, ToggleMode::Off);
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(lit),
+            Some(&Visibility::Hidden)
+        );
+        let sim = app.world_mut().remove_resource::<Sim>().unwrap();
+        *app.world_mut().resource_mut::<Presentation>() = Presentation::default();
+        app.insert_resource(Sim::new(sim.game, String::new()));
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(lit),
+            Some(&Visibility::Inherited)
+        );
+        if let Some((_, e)) = follower {
+            assert_eq!(app.world().get::<Transform>(e), Some(&rest));
         }
     }
 

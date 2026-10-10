@@ -203,7 +203,7 @@ instigator (or the world). No match is an error in the log. CONFIRMED
 | `SaveGameState_SeqEvent_SavedGameStateLoaded` | the level-start load (above) | forced output 0 when the event's index is −1 or equals the loaded checkpoint index |
 | `SeqEvent_TrackBeat` | a beat timer | a latent sleep of `beatAmount` seconds (GRAPPLE.md G-TM-3), then forced output 0, in a loop |
 | `SeqEvent_WormEvents`, `SeqEvent_CreditsEnded` | the worm NPC, the credits | API for those systems (`Runtime::worm_event`, `credits_ended`) |
-| `SeqEvent_AnimNotify` | animation notifies | API (`Runtime::anim_notify`): an event whose originator and `NotifyName` match is checked. TENTATIVE dispatch: no animation playback drives it yet. |
+| `SeqEvent_AnimNotify` | an `AnimNotify_Kismet` of a sequence playing on the originator | `Runtime::anim_notify`: every event whose originator is the actor and whose `NotifyName` equals the notify's is checked with the actor as originator and instigator (CONFIRMED: decompiled `UAnimNotify_Kismet::Notify`). Driven by the skinned actors' own animations (the NPC system's `AnimNotify` events, activated for the next update like any actor tick's event) and by Matinee animation tracks (activated inside the Matinee update); NPCS.md "Animation notifies". 36 events in the maps, 2 without a name. |
 
 ## 4. Variables and properties
 
@@ -237,7 +237,8 @@ instigator (or the world). No match is an error in the log. CONFIRMED
 | `SeqAct_ConsoleCommand` | runs only with a player target. `open <map>[?options]` emits a level transition; other commands are emitted as console-command outputs (KISMET.md lists which have handlers) | native dispatch; command effects per KISMET.md |
 | `SeqAct_Teleport`, `SeqAct_SetVelocity` | player target: teleport to the destination actor (rotation with `bUpdateRotation`); velocity = normalized `VelocityDir` × `VelocityMag` | stock; TENTATIVE details |
 | `SeqAct_Destroy`, `SeqAct_ChangeCollision` | host: the actor's collision is removed / switched (such actors are made dynamic at load) | stock; TENTATIVE (actor removal is not modelled beyond collision) |
-| `SeqAct_CameraShake`, `SeqAct_PlayCameraAnim`, `SeqAct_PlayMusicTrack`, `SeqAct_SetSoundMode`, `SeqAct_SetCameraTarget`, `SeqAct_SetMatInstScalarParam`, `SeqAct_ToggleCinematicMode`, `SeqAct_ToggleHUD`, `GFxAction_OpenMovie` | typed presentation outputs | stock |
+| `SeqAct_PlayCameraAnim` | runs only with an animation and a player target. "Play" (wins over "Stop") plays `CameraAnim` on the player's camera with `Rate`, `IntensityScale`, the blend times, `bLoop` and `bRandomStartTime`; "Stop" stops every instance of that animation with its blend-out. Emitted as an output the game host applies to the camera-animation pool in the same frame (MATINEE.md "Camera animations"). 5 actions in the maps (Darkcave 2, StarHaven 3), all targeting the player and naming a converted animation (gated test `shipped_camera_anim_actions_play_on_the_player`). | native (`USeqAct_PlayCameraAnim::Activated`) |
+| `SeqAct_CameraShake`, `SeqAct_PlayMusicTrack`, `SeqAct_SetSoundMode`, `SeqAct_SetCameraTarget`, `SeqAct_SetMatInstScalarParam`, `SeqAct_ToggleCinematicMode`, `SeqAct_ToggleHUD`, `GFxAction_OpenMovie` | typed presentation outputs | stock |
 | `SeqAct_Interp` | §6 | native + MATINEE.md |
 | `SeqCond_CompareBool` | AND of the "Bool" variables → "True" or "False"; result written to `bResult` | native |
 | `SeqCond_CompareInt`, `SeqCond_CompareFloat` | marks every true output among `A <= B`, `A > B`, `A == B`, `A < B`, `A >= B` | native |
@@ -263,7 +264,8 @@ instigator (or the world). No match is an error in the log. CONFIRMED
 | `SeqAct_StartTimeTrial`, `SeqAct_EndTimeTrial`, `SeqCond_IsTimeTrial` | only under the time-trial game type; the condition forces "Yes"/"No" |
 | `SeqAct_SetGameFinished` | sets the flag from its input, emits it, forces "Out" |
 | `SeqAct_SetRotationToPlayerRotation` | copies the selected rotator components of the player to the actor |
-| `SeqAct_ShowTutorialPopup` / `SeqAct_HideTutorialPopup`, `SeqAct_ToggleCrosshair`, `SeqAct_ShowTitleLogo`, `SeqAct_ToggleRestartFromCheckpointOption`, `SeqAct_DisablePauseMenu`, `SeqAct_SetLookAtTarget`, `SeqAct_SetVelocityConeMaterial`, `SeqAct_ToggleFollowCollision`, `SeqAct_PlaySuitOnAnimation`, `SeqAct_StartWorm` / `PauseWorm` / `ShutDownWorm`, `SeqAct_AddAdaptiveTracks`, `SeqAct_EditMultiplierForAllTracks`, `SeqAct_SetAdaptiveTrackVolumeMultiplier`, `SeqAct_UnlockASAMUAchievement`, `SeqAction_GFx_CustomInvoke_AS3_Menu` | typed outputs; the ones whose script forces "Out" do so |
+| `SeqAct_SetLookAtTarget` | each input on its own: "LookAt" stores the target, "StopLookAt" clears it, both store the head and eye offsets on the looking actor (host `set_look_at`; NPCS.md "Look-at": only the offsets matter); forces "Out" |
+| `SeqAct_ShowTutorialPopup` / `SeqAct_HideTutorialPopup`, `SeqAct_ToggleCrosshair`, `SeqAct_ShowTitleLogo`, `SeqAct_ToggleRestartFromCheckpointOption`, `SeqAct_DisablePauseMenu`, `SeqAct_SetVelocityConeMaterial`, `SeqAct_ToggleFollowCollision`, `SeqAct_PlaySuitOnAnimation`, `SeqAct_StartWorm` / `PauseWorm` / `ShutDownWorm`, `SeqAct_AddAdaptiveTracks`, `SeqAct_EditMultiplierForAllTracks`, `SeqAct_SetAdaptiveTrackVolumeMultiplier`, `SeqAct_UnlockASAMUAchievement`, `SeqAction_GFx_CustomInvoke_AS3_Menu` | typed outputs; the ones whose script forces "Out" do so |
 | `SeqAct_PlayerDied` (not in the maps) | kills the player |
 
 Class flags (`bAutoActivateOutputLinks`, latent) come from the class defaults in the data, so a class that
@@ -286,8 +288,16 @@ parts:
 Every group except a folder is instanced, the director group included: its event and sound tracks fire like
 any other group's (11 event tracks and 3 sound tracks of the shipped Matinees sit in director groups, with 23
 linked event keys, among them TheCore's five narrator cues). Director cuts, fades, sound keys and
-visibility/toggle keys become outputs (visibility also hides actors through the host). Animation, property,
-skeletal-control and particle tracks are not played. MATINEE.md lists them as decoded only.
+visibility/toggle keys become outputs (visibility also hides actors through the host).
+
+Animation-control tracks call the host's `set_anim_position` for each `SetAnimPosition` the engine's update
+would make (`asamu_kismet::anim`, a port of `UInterpTrackAnimControl::UpdateTrack`); the Kismet notify names
+the host reports back are activated at once through `Runtime::anim_notify`. Float, vector and colour property
+tracks with keys write their value through `set_actor_property` and into `Runtime::actor_properties` (lights'
+`Brightness`, `Radius`, `LightColor`; `DrawScale3D`); skeletal-control strength tracks call
+`set_skel_control_strength`. Skeletal-control scale and particle-replay tracks are not played. Rules, evidence
+and the coverage table: MATINEE.md "Animation-control tracks", "Property and skeletal-control tracks",
+"Runtime coverage".
 
 An attached actor's move track is evaluated in its base's current frame on every update: the engine's
 `GetMoveRefFrame` reads the base matrix each call (decompiled), so the actor follows a base that moves after
@@ -349,7 +359,8 @@ unbounded) so a graph that keeps adding lines whose cue never ends cannot grow i
 
 `asamu_kismet::Host` receives the game-affecting calls: abilities, story mode, checkpoints, attractors,
 falling rocks, level streaming, actor toggles, hide, destroy and collision, actor transforms, player
-teleport, velocity and kill. Triggering a checkpoint that is already activated or disabled is a silent no-op,
+teleport, velocity and kill, and (for skeletal actors and Matinee tracks) sequence lengths, `SetAnimPosition`,
+skeletal-control strengths, property values and look-at targets. Triggering a checkpoint that is already activated or disabled is a silent no-op,
 as in the original (A-CP rules); only an actor that is not a checkpoint of the level is reported as an
 error. `asamu_game::kismet_host` implements it on `Game`. With a script, the level-start
 ability table (`asamu_world::level_start_abilities`) is undone at attach (the pawn's script state is reset to
@@ -359,9 +370,14 @@ a fresh start) and the map's Kismet decides.
 narration, tutorials, crosshair, cinematic mode, HUD, camera (target, fade, shake, animation, Matinee
 cuts/fades), music and sound modes, adaptive music, menus, achievements, time trial, game finished, NPC look-at
 and worm control, actor toggled/hidden/destroyed. `LevelScript::tick` returns them with the tick report
-(`ScriptedTick`, which also carries the frame's NPC events). `TickReport` itself is unchanged. The worm actions and
-`SeqAct_ToggleFollowCollision` act on the game inside the same tick (`LevelScript::apply_game_outputs`); where every
-other output goes in the app: `docs/INTEGRATION.md` §4.
+(`ScriptedTick`, which also carries the frame's NPC events). `TickReport` itself is unchanged. The worm actions,
+`SeqAct_ToggleFollowCollision` and `SeqAct_PlayCameraAnim` act on the game inside the same tick
+(`LevelScript::apply_game_outputs`); where every other output goes in the app: `docs/INTEGRATION.md` §4.
+
+The level script also owns the player camera's animation pool (`LevelScript::camera_anims`): after the game
+tick the frame's gameplay events become the script's `PlayCameraAnim` / `StopCameraAnim` calls and the pool
+advances by the tick (MATINEE.md "Camera animations"). Before the Kismet update the NPC pawns' collision
+cylinders are moved to their pawns (NPCS.md §12).
 
 ## 9. What the shipped maps do at level start
 
@@ -449,9 +465,11 @@ queued activations per sequence (4,096), pending attractor pads (1,024) and narr
 
 - Behavioural parity: traces of the original running the same sequences (the order of same-frame events, the
   first frames of a level).
-- Animation-driven events (`SeqEvent_AnimNotify`) need the animation side to call `Runtime::anim_notify`. (Worm
-  events now come from the game's NPC system and the credits' end from the app's credits screen,
-  `docs/INTEGRATION.md`.)
+- Animation-driven events (`SeqEvent_AnimNotify`) are driven by the NPC system's animation nodes and by Matinee
+  animation tracks (§3, §6); their timing against the original is unmeasured. (Worm events come from the game's
+  NPC system and the credits' end from the app's credits screen, `docs/INTEGRATION.md`.)
+- Matinee: skeletal-control scale and particle-replay tracks, the animation slot weight, property names beyond
+  the ones the data uses.
 - Cinematic mode blocks player input in the app (`apps/asamu` `fixed_tick`; the mapping of the stock flags to
   movement, turning and buttons is TENTATIVE).
 - `bSequenceNeedsPublishing` is exported as false.

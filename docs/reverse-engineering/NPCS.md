@@ -72,6 +72,7 @@ never instantiated. CONFIRMED (map, src).
 |---|---|---|
 | NPC pawn `GroundSpeed` 200 | `asamu.ASAMUNPC_Pawn` | CONFIRMED (cdo) |
 | NPC pawn collision 34 × 78 (worm, Maddie: inherited) | template `Engine.Default__Pawn.CollisionCylinder` (the `GamePawn`, `UDKPawn` and `ASAMUNPC_Pawn` templates set no size; corrected from `UDKPawn` in the verification pass) | CONFIRMED (cdo) |
+| The placed worm's cylinder: radius 200, half height 500 | the map instance's `CylinderComponent` (AG-Darkcave) overrides the template | CONFIRMED (map) |
 | Villager collision 16 × 52, mesh offset −52 z | `asamu.Default__ASAMUNPC_VillagerPawn` templates | CONFIRMED (cdo) |
 | Villager `PeripheralVision` 0.4, `SightRadius` 5 000, `bCanWalkOffLedges` | `ASAMUNPC_VillagerPawn` / `Engine.Pawn` | CONFIRMED (cdo) |
 | Villager `reachedDestinationTolerance` 300 | `asamu.ASAMUNPC_Villager` | CONFIRMED (cdo) |
@@ -251,22 +252,89 @@ BeautifulCity, StarHaven and Darkcave 13 of them (plus TheCore's single one) are
 tracks not imported).
 
 **Look-at (`SeqAct_SetLookAtTarget`, `SkeletalMeshActorMATWithFollowCollision`).** The action stores a target actor
-and two offsets on the looking actor (input 0 with the target, input 1 with none). The actor's per-tick update then
-aims its head and eye `SkelControlLookAt` nodes at the **player pawn's** location plus the offsets; the stored
-target is never read, so changing or clearing it does not change where the head looks, only the offsets do.
-STRONG (local reading of the action and actor classes). `SeqAct_ToggleFollowCollision` switches the actor's
+and two offsets on the looking actor (input 0 with the target, input 1 with none; each input is checked on its
+own). The actor's per-tick update then sets the `TargetLocation` of the `SkelControlLookAt` controls named in its
+`headLookAtControlNames` to the **player pawn's** location plus `lookAtOffset`, and of those in
+`eyesLookAtControlNames` to it plus `eyesLookAtOffset`; the stored target is never read, so changing or clearing
+it does not change where the head looks, only the offsets do. CONFIRMED (src: the action and actor classes, read
+locally). Whether a control shows depends on its strength, which Matinee drives: 17
+`InterpTrackSkelControlStrength` tracks on these controls in BeautifulCity, Darkcave and StarHaven (values 0 and
+1; `SetSkelControlStrength` with blend time 0, MATINEE.md). `SeqAct_ToggleFollowCollision` switches the actor's
 collision between block-all-but-weapons and none; the collision component it attaches to a socket at spawn is not
 converted (our runtime applies the switch to the actor's mover collision when it has one, TENTATIVE stand-in).
 
-**Importer gap (integration item):** the scene export (`asamu-import levels`) carries each skeletal component's
-mesh but not its animation node. The runtime reads an optional component field
+The controls (CONFIRMED (data): the components' `AnimTreeTemplate` trees, exported per actor by `asamu-import
+matinee` into `matinee/<map>.actors.json`): Maddie's tree has `LookAtController` on the bone `head` (look-at axis
+X, limit 45°, target interpolation effectively instant) and `EyesLookAt` on `Eye_L` (axis Z, limit 40°); Samuel's
+(BeautifulCity) a head control (limit 70°) and one per eye (30°); Fred's (TheCore) a head control (90°) and one
+per eye (30°); the worm's tree four (`Spine4`, `Spine_45_LookAT`, `EyeLookat`, `HeadLookat`). 26 control
+instances on 11 actors: BeautifulCity 9 on 4 actors, Darkcave 6 (the worm's 4, Maddie's 2), StarHaven 8 on 4,
+TheCore 3 on 1. Four StarHaven look-at actors (the three cutscene strays and one villager) name controls their
+trees do not have, so they never turn; one Maddie there has the controls but names none, so they keep their
+stored target.
 
-```json
-"animation": {"sequence": "StrayVillager_Talk_02", "looping": true, "playing": true, "start_time": 4.0, "rate": 1.0}
-```
+Ours: the offsets, the stored target and the strengths live in the NPC runtime
+(`NpcRuntime::{set_look_at, set_skel_control_strength, control_strength}`, fed by the Kismet host); the app
+(`apps/asamu/src/npc/skins.rs`, `apply_look_at`) turns each control's bone after the animation pose so that its
+look-at axis points at the target, limited to `MaxAngle` and blended by the strength over the control's blend
+time. This is an approximation of `USkelControlLookAt` (TENTATIVE): the up axis, the per-axis rotation switches
+and ranges, the dead zone, the target interpolation speed and the limit's reference pose are not modelled, and
+the result was not compared with the original on screen.
 
-(`AnimSeqName`, `bLooping`, `bPlaying`, `CurrentTime`, `Rate` of the component's `Animations` subobject). Until the
-importer writes it, the app plays the mesh's first idle-named sequence (ours).
+**The components' own animation nodes.** The scene export (`asamu-import levels`) carries each skeletal
+component's mesh but not its animation node; `asamu-import matinee` therefore writes, per map,
+`matinee/<map>.actors.json` with every placed component's own `AnimNodeSequence` (`AnimSeqName`, `bLooping`,
+`bPlaying`, `CurrentTime`, `Rate`): 66 in BeautifulCity, 58 in StarHaven, 1 in Darkcave (CONFIRMED, import).
+The NPC scene loader fills the components' `animation` from it (a scene file that already has the field wins).
+Without the file the app plays the mesh's first idle-named sequence (ours).
+
+**Animation notifies** — CONFIRMED (native, data) unless noted. Sequences carry notifies (`AnimNotifyEvent`: time,
+notify object); the skeletal manifest lists them by object path and `asamu-import matinee` writes what each
+object is to `matinee/anim_notifies.json` (72 objects over `Startup.upk` and the maps: 26 `AnimNotify_Kismet`, 22
+`AnimNotify_Sound`, 24 `AnimNotify_Footstep`).
+
+- A playing sequence node advances by `Rate · RateScale · dt` each tick and first issues the notifies of the
+  move (`UAnimNodeSequence::TickAnim` → `AdvanceBy` → `IssueNotifies`): starting from the first notify at or
+  ahead of the current position (a looping node looks past the end), every notify whose distance is below the
+  move fires, notifies at the same time all fire, and one exactly at the new position fires with the next
+  move. Past the end a looping node wraps, another stops. A `SkeletalMeshActor` fires notifies only with
+  `bShouldDoAnimNotifies`, which is the class default (true) and set on the placed actors (cdo, map).
+- Anim nodes tick while the mesh is not rendered: `bTickAnimNodesWhenNotRendered` defaults to true and the
+  `SkeletalMeshActor` component template only clears `bUpdateSkelWhenNotRendered` (STRONG (cdo); the
+  component's tick was not read in full).
+- `AnimNotify_Kismet` (`UAnimNotify_Kismet::Notify`): every `SeqEvent_AnimNotify` among the owner actor's
+  events whose `NotifyName` equals the notify's is checked with the owner as originator and instigator; a
+  notify without a name does nothing.
+- `AnimNotify_Sound` (`UAnimNotify_Sound::Notify`): plays the cue at the mesh (following the actor with
+  `bFollowActor`, or at `BoneName`), with its volume and pitch multipliers, when a random draw passes
+  `PercentToPlay`; skipped for a hidden owner with `bIgnoreIfActorHidden`.
+- Matinee's `SetAnimPosition` fires the notifies between the old and the new position when its
+  `bFireNotifies` is set (`UAnimNodeSequence::SetPosition`); on the `...MAT` classes a change of sequence
+  fires none (MATINEE.md).
+- A plain `SkeletalMeshActor` has no slot node: Matinee's `SetAnimPosition` drives the component's own
+  sequence node (CONFIRMED (src): the engine class's script event, read locally), which keeps playing if it
+  was; `SetAnim` leaves the node's time alone (CONFIRMED, decompiled). Two AG-StarHaven actors are driven
+  this way (CONFIRMED (data): both anim-control tracks without a slot name sit on plain `SkeletalMeshActor`s
+  with their own playing node; every other anim-control track is on a `...MAT` class).
+
+What uses them (CONFIRMED (data, map)): the villagers' talk sequences (`StrayVillager_Talk_01/02`,
+`StrayVillager_BenchTalk_01/02`, a child idle) carry Kismet notifies named `Talk_Standing_1..4`,
+`Talk_Sitting_1..4` (and `_2` variants) and `Child_Playing_1/2`; each sequence carries all the names, and the
+36 `SeqEvent_AnimNotify` events (BeautifulCity 24, StarHaven 12) pick theirs by originator and name and play a
+sound, so every talking villager says its own line once or twice per loop of its animation. 2 of the
+BeautifulCity events have no `NotifyName` and can never fire. The cutscene characters' long sequences (Maddie,
+Arvin, Ingo, Tamia) carry `AnimNotify_Sound` notifies — their spoken lines — which Matinee's animation tracks
+fire; hammering and smithing loops carry sound notifies too.
+
+Ours: `asamu_world::anim` (sequence node, notify window), `NpcRuntime::skinned` (each skinned actor's own node,
+ticking with the NPCs; the slot node Matinee drives on `...MAT` actors, the own node on plain ones), events
+`NpcEvent::AnimNotify` (→ Kismet in the next
+update, as an actor tick's event activation is) and `NpcEvent::AnimSound` (→ the app plays the cue at the
+actor). Kismet notifies fired by Matinee are activated inside the Matinee update. Check on converted
+BeautifulCity (gated test, 25 s without input): 65 ambient nodes play, 22 of the 24 `SeqEvent_AnimNotify` fire
+(the other two are the nameless ones). Not modelled: `bIgnoreIfActorHidden`, sounds at bones (played at the
+actor), duration notifies, notifies of backwards playback, the worm's own sound notifies (its tree is emulated
+separately, §3.3).
 
 ## 7. Story interactables — CONFIRMED (src) unless noted
 
@@ -328,15 +396,45 @@ gun drives at which moment is only mapped approximately here (TENTATIVE).
 | Definitions from converted scenes (worm, worm volumes, Maddie/villager pawns, navigation points, collectibles, story items, glow flowers, foliage, other skinned actors), skeletal manifest index | `crates/asamu-world/src/npc.rs` (`load_npc_scene`, `load_npc_scene_for_map`, `SkeletalIndex`) |
 | Worm state machine with the emulated tree, timers, ProcessState rule; Maddie, backpack, villager state machines; story items, collectibles, glow flowers, foliage | `crates/asamu-world/src/npc.rs` (`NpcRuntime`, `tick_worm`, `tick_villager`, …) |
 | Game side: spawn from a loaded map, tick, apply the push and the kill, route the player's handler calls, Kismet entry points, `use`, hand animation mapping and bob | `crates/asamu-game/src/npc.rs` (`NpcSystem`, `apply_worm_push`, `hand_animation`, `hand_bob_offset`) |
-| Rendering: skinned actors (Bevy skins, `AnimationPlayer`, state-driven clips), hands on an overlay camera, state gizmos | `apps/asamu/src/npc.rs`, `apps/asamu/src/npc/{skins,hands}.rs` |
+| Skinned actors' animation nodes and notifies, Matinee `SetAnimPosition`, look-at offsets and control strengths, pawn collision cylinders | `crates/asamu-world/src/anim.rs`, `crates/asamu-world/src/npc.rs` (`SkinnedAnimState`, `LookAtDef`, `PawnCollisionDef`), `crates/asamu-game/src/npc.rs`, `crates/asamu-game/src/kismet_host.rs` |
+| Rendering: skinned actors (Bevy skins, `AnimationPlayer`, clips following the simulation's nodes), look-at bones, hands on an overlay camera, state gizmos | `apps/asamu/src/npc.rs`, `apps/asamu/src/npc/{skins,hands}.rs` |
 
 **Wired into the game frame (2026-10-10):** `load_level_with_kismet` attaches the map's `NpcSystem` to the `Game`;
 it ticks in step 2 of the converted level's tick (with the other map actors, so the push acts in the same frame
 as in the original), its touches run with the player's, kill-zone deaths notify it and respawns restart its
 touches; its events reach Kismet through the level script (worm events, collectible pick-ups, interactions) and
 the app (progression, camera shake). Frame order and routing: `docs/INTEGRATION.md`. Our own choices
-(not original): the random generator; NPC pawns are not collision; villager movement is a straight kinematic walk
-at `GroundSpeed`; the idle stand-in animation; animation blend times; the overlay light.
+(not original): the random generator; villager movement is a straight kinematic walk at `GroundSpeed`; the idle
+stand-in animation; animation blend times; the overlay light.
+
+**NPC pawn collision (2026-10-10).** `ASAMUNPC_Pawn` switches to block-all-but-weapons at begin play (CONFIRMED
+(src)), so the pawn's cylinder blocks the player while zero-extent traces (the grapple) pass. Ours: each NPC
+pawn's cylinder (its placed `CylinderComponent`, else the class template's size) is a dynamic collision
+instance (`CollisionScene::add_cylinder_mesh`; `NpcScene::pawn_collision`; `load_level_with_kismet`), queried
+exactly — a swept player cylinder against it is a swept point against their Minkowski sum, with the triangle
+sweeps' start-contact rules — and moved to the pawn before every scripted tick (the worm stands still; a
+walking villager's cylinder lags its pawn by one tick).
+
+The engine's model is the same (CONFIRMED: `UCylinderComponent::LineCheck`, decompiled and read by the
+verification pass): the trace extent is added to the cylinder (`Extent.X` to the radius, `Extent.Z` to the half
+height; the moving extent is treated as a circle, not a box), the line is clipped against the top and bottom
+planes and then against the circle, and the normal is the cap's or the radial one. Where ours differs (ours,
+TENTATIVE impact): a start already inside the circle and between the caps is blocked by the engine only
+against motion towards the axis (dot product of the move and the offset below −0.1, radial normal), where ours
+picks the least-penetration face; the engine pulls every hit time back by 0.001 of the move, ours uses the
+triangle sweeps' tolerance. Not modelled: pawn-on-pawn basing — the stock `Pawn.BaseChange` makes a pawn
+that lands on a pawn which does not allow it jump off again (`JumpOffPawn`: a random horizontal kick and an
+upward one; STRONG (src): the engine script read locally, no `asamu` class overrides it, `UTPawn` not
+checked), ours lets the player stand on the cylinder's top — and pawns pushing each other.
+
+Checks: unit tests compare the cylinder sweep with an independent stepped march of the same path (6,000 random
+paths, side and cap entries) and pin the start-contact cases; `the_player_cannot_walk_through_an_npc_pawn`
+runs the player's own movement into a pawn (it stops where the cylinders touch, slides around an off-centre
+one and never enters). Real data (gated tests on converted AG-Darkcave): a player cylinder dropped onto the
+worm stops on top of its 200 × 500 cylinder; a player flown level at the worm's axis is stopped at 221 UU
+from it (200 + the player's 21) from 7 of the 8 directions tried (the eighth is not a free approach in the
+level), while the same flight without the NPCs passes through; a zero-extent trace along the same line does
+not hit the worm.
 
 Tests: `crates/asamu-world/tests/npc_worm.rs` (worm timings, checks, pushes, scream timeout and kill, kill-zone
 notification, a Kismet restart mid-scream keeping the scream timer, sleep/wake, shut-down, the look chain
@@ -345,7 +443,8 @@ replaying its nodes and never stalling, the sleep delay after the awake time ove
 story-item counting/linking/registration and fade timing, a parent fading without a glow mesh, glow-flower timing
 and regrapple, Maddie, backpack, villager paths/roaming/talk/empty paths), `npc_scene.rs` (synthetic scene
 loading, streamed sub-level ids, hostile/truncated JSON, hulls, skeletal index and unsafe glTF paths, real-data
-census of AG-Darkcave and of all six story maps), `crates/asamu-game/tests/npc_system.rs` (push application,
+census of AG-Darkcave and of all six story maps), `npc_anim.rs` (the importer's extras loaded and tolerated when
+bad, ambient notifies per loop, Matinee positions, control strengths, look-at offsets, pawn cylinders), `crates/asamu-game/tests/npc_system.rs` (push application,
 full scream-to-kill run, routing, touches, Kismet entry points, spawn from scene JSON, real-data worm alert on
 converted AG-Darkcave).
 
@@ -368,8 +467,9 @@ villagers posed by their animation and the worm. CONFIRMED (test, local run).
 
 - Trace from the original: worm cycle timings (the awake period and the sleep delay after it, §3.3), push and
   scream timing relative to the player's physics.
-- The importer should export each skeletal component's animation node (§6) and Matinee animation tracks.
-- NPC pawn collision for the player; the worm's eye spot light in the renderer (the growl's camera shake is a
-  placeholder shake, `apps/asamu/src/kismet.rs`).
-- Head/eye look-at controls of the skeletal Matinee actors (above) are not rendered.
+- The worm's eye spot light in the renderer; the worm's own animation sound notifies.
+- Look-at rendering is an approximation of `USkelControlLookAt` (§6) and unverified on screen; the growl is now
+  the `MonsterGrowl` camera animation (MATINEE.md "Camera animations").
+- Pawn basing (`JumpOffPawn` after landing on an NPC pawn) is not modelled; the cylinder check's start-inside
+  rule and time pull-back differ from the engine's (§ "NPC pawn collision").
 - The stock `Encompasses`, use search and `FInterpTo` natives were not re-read (TENTATIVE).

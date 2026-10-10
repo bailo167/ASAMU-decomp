@@ -125,6 +125,9 @@ pub struct NpcSystem {
     scene: NpcScene,
     runtime: NpcRuntimeHolder,
     pending: Vec<NpcEvent>,
+    /// `(pawn actor id, index into the scene's dynamic instances)` of the
+    /// NPC pawns' collision cylinders ([`NpcSystem::set_pawn_colliders`]).
+    pawn_colliders: Vec<(u32, usize)>,
 }
 
 /// The runtime (a wrapper so `NpcSystem` can derive `Default`).
@@ -171,6 +174,7 @@ impl NpcSystem {
             scene,
             runtime: NpcRuntimeHolder(runtime),
             pending: Vec::new(),
+            pawn_colliders: Vec::new(),
         }
     }
 
@@ -389,6 +393,105 @@ impl NpcSystem {
     /// Restores a collectible's collected state (save snapshot).
     pub fn set_collected(&mut self, id: u32, collected: bool) -> bool {
         self.runtime.0.set_collected(&self.scene, id, collected)
+    }
+
+    /// Matinee's `SetAnimPosition` on skinned actor `id` (see
+    /// [`NpcRuntime::set_anim_position`]): sound notifies join the next
+    /// tick's events; the Kismet notify names fired are returned. `None` for
+    /// an actor that is not a skinned actor of the map.
+    pub fn set_anim_position(
+        &mut self,
+        id: u32,
+        sequence: &str,
+        position: f32,
+        fire_notifies: bool,
+        looping: bool,
+    ) -> Option<Vec<String>> {
+        let mut out = NpcOutput::default();
+        let names = self.runtime.0.set_anim_position(
+            &self.scene,
+            id,
+            sequence,
+            position,
+            fire_notifies,
+            looping,
+            &mut out,
+        );
+        self.pending.extend(out.events);
+        names
+    }
+
+    /// The `SequenceLength` of `sequence` on skinned actor `id`'s mesh.
+    #[must_use]
+    pub fn anim_sequence_length(&self, id: u32, sequence: &str) -> Option<f32> {
+        self.runtime
+            .0
+            .anim_sequence_length(&self.scene, id, sequence)
+    }
+
+    /// Matinee `SetSkelControlStrength` on skinned actor `id`.
+    pub fn set_skel_control_strength(&mut self, id: u32, control: &str, strength: f32) -> bool {
+        self.runtime
+            .0
+            .set_skel_control_strength(&self.scene, id, control, strength)
+    }
+
+    /// `SeqAct_SetLookAtTarget` on look-at actor `id`.
+    pub fn set_look_at(
+        &mut self,
+        id: u32,
+        target: Option<u32>,
+        head_offset: Vec3,
+        eyes_offset: Vec3,
+    ) -> bool {
+        self.runtime
+            .0
+            .set_look_at(&self.scene, id, target, head_offset, eyes_offset)
+    }
+
+    /// Records where the pawns' collision cylinders sit among the scene's
+    /// dynamic instances (`load_level_with_kismet` adds them, see
+    /// [`crate::kismet_host`]).
+    pub fn set_pawn_colliders(&mut self, colliders: Vec<(u32, usize)>) {
+        self.pawn_colliders = colliders;
+    }
+
+    /// The pawns' collision cylinders as `(actor id, dynamic instance index)`.
+    #[must_use]
+    pub fn pawn_colliders(&self) -> &[(u32, usize)] {
+        &self.pawn_colliders
+    }
+
+    /// Moves the pawns' collision cylinders to where the pawns are now.
+    pub fn place_pawn_colliders(
+        &self,
+        collision: &asamu_world::collision::CollisionScene,
+        dynamic: &mut [asamu_world::collision::Instance],
+    ) {
+        if self.pawn_colliders.is_empty() {
+            return;
+        }
+        for (id, cyl) in self.runtime.0.pawn_cylinders(&self.scene) {
+            let Some(&(_, index)) = self.pawn_colliders.iter().find(|(c, _)| *c == id) else {
+                continue;
+            };
+            // Only the instance recorded for this pawn is ever moved: an
+            // index that no longer names it (a dynamic list rebuilt by
+            // someone else) must not drag another actor's collision here.
+            if let Some(inst) = dynamic.get_mut(index)
+                && inst.info.actor == Some(id)
+            {
+                let center = cyl.center.as_dvec3();
+                if inst.to_world.translation == center {
+                    continue;
+                }
+                let info = inst.info;
+                let to_world = asamu_world::collision::Affine::from_translation(center);
+                if collision.place_dynamic(inst, to_world) {
+                    inst.info = info;
+                }
+            }
+        }
     }
 
     /// The `use` key (see [`UseOutcome`]).

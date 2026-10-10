@@ -12,11 +12,16 @@
 //! - [`host`]: the game side: [`Host`] for game-affecting effects, [`Output`]
 //!   for presentation events.
 //! - [`narrator`]: the narrator manager that `SeqAct_NarratorLine` drives.
+//! - [`anim`]: Matinee animation-control tracks (`SetAnimPosition` calls).
+//! - [`camera_anim`]: camera animations (`CameraAnim` assets, the camera's
+//!   animation pool and blending, the gameplay script's calls).
 //!
 //! Behaviour, evidence and confidence for every class:
 //! `docs/reverse-engineering/KISMET_RUNTIME.md`. Everything is deterministic:
 //! ordered containers only, no wall clock, seeded random variables.
 
+pub mod anim;
+pub mod camera_anim;
 mod classes;
 pub mod graph;
 pub mod host;
@@ -31,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use graph::{ActorInfo, ActorRef, Graph, GraphError, RUNTIME_FORMAT, RUNTIME_VERSION};
-pub use host::{Host, NullHost, Output, ToggleMode};
+pub use host::{Host, NullHost, Output, PropertyValue, ToggleMode};
 pub use matinee::MatineeSet;
 pub use ops::{IMPLEMENTED, OpClass};
 pub use runtime::{Obj, Runtime, RuntimeStats};

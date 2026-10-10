@@ -260,12 +260,25 @@ impl Runtime {
                 }
             }
             OpClass::PlayCameraAnim => {
-                self.emit(Output::CameraAnim {
-                    play: self.impulse(op, 0),
-                    anim: self.obj_path(&self.prop(op, "CameraAnim")),
-                    looping: self.prop(op, "bLoop").as_bool(),
-                    rate: self.prop(op, "Rate").as_float(),
-                });
+                // `USeqAct_PlayCameraAnim::Activated` (decompiled): nothing
+                // without an animation; Play (input 0) wins over Stop
+                // (input 1); either acts on the cameras of the targets that
+                // are player controllers (or pawns with one), so nothing
+                // happens without a player target.
+                let play = self.impulse(op, 0);
+                let anim = self.obj_path(&self.prop(op, "CameraAnim"));
+                if anim.is_some() && (play || self.impulse(op, 1)) && self.has_player_target(op) {
+                    self.emit(Output::CameraAnim {
+                        play,
+                        anim,
+                        looping: self.prop(op, "bLoop").as_bool(),
+                        rate: self.prop(op, "Rate").as_float(),
+                        scale: self.prop(op, "IntensityScale").as_float(),
+                        blend_in: self.prop(op, "BlendInTime").as_float(),
+                        blend_out: self.prop(op, "BlendOutTime").as_float(),
+                        random_start: self.prop(op, "bRandomStartTime").as_bool(),
+                    });
+                }
             }
             OpClass::PlayMusicTrack => {
                 self.emit(Output::MusicTrack {
@@ -609,6 +622,27 @@ impl Runtime {
                     target: self.obj_path(&self.prop(op, "LookAtActor")),
                     looking: self.obj_path(&self.prop(op, "lookingAtActorActor")),
                 });
+                // The script checks each input on its own: LookAt stores the
+                // target, StopLookAt clears it; both set the offsets.
+                if let Some(looking) = self
+                    .prop_actor(op, "lookingAtActorActor")
+                    .and_then(|a| self.graph.actor(a).cloned())
+                {
+                    let head = self.prop(op, "lookAtOffset").as_vec3().unwrap_or([0.0; 3]);
+                    let eyes = self
+                        .prop(op, "eyesLookAtOffset")
+                        .as_vec3()
+                        .unwrap_or([0.0; 3]);
+                    let target = self
+                        .prop_actor(op, "LookAtActor")
+                        .and_then(|a| self.graph.actor(a).cloned());
+                    if self.impulse(op, 0) {
+                        host.set_look_at(&looking, target.as_ref(), head, eyes);
+                    }
+                    if self.impulse(op, 1) {
+                        host.set_look_at(&looking, None, head, eyes);
+                    }
+                }
             }
             OpClass::SetMaxGrapples => host.set_max_grapples(self.prop(op, "Grapples").as_int()),
             OpClass::SetRotationToPlayerRotation => {

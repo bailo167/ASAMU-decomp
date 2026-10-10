@@ -3,19 +3,34 @@
 //! files, with Bevy skins and an `AnimationPlayer`.
 //!
 //! Animation choice: the worm follows its state machine (the active node of
-//! its emulated `AnimTree`); an ambient actor plays its component's own node
-//! (`AnimSeqName`, looping, start time) when the scene provides it, else the
-//! mesh's first idle-named sequence (ours); Matinee-driven actors play the
-//! same until Matinee animation tracks are imported; villager and Maddie pawns
-//! pick idle/walk/talk sequences by name from their state (ours: their
-//! `AnimTree` nodes carry no sequence names).
+//! its emulated `AnimTree`); a placed skinned actor follows the simulation's
+//! node (`NpcRuntime::skinned`: its component's own `AnimNodeSequence`, or
+//! the slot node Matinee's animation-control tracks drive, held where
+//! Matinee left it) — a playing node runs on the `AnimationPlayer` and is
+//! re-synchronised when it drifts, a held one is posed at its position every
+//! frame; without simulation data, the mesh's first idle-named sequence
+//! (ours); villager and Maddie pawns pick idle/walk/talk sequences by name
+//! from their state (ours: their `AnimTree` nodes carry no sequence names).
+//!
+//! Look-at ([`apply_look_at`], after the animation, before transform
+//! propagation): the head and eye `SkelControlLookAt` controls of
+//! `SeqAct_SetLookAtTarget` actors aim at the player pawn's location plus
+//! the actor's offsets, blended by the controls' strengths (Matinee's
+//! skeletal-control strength tracks); the worm's four controls aim at its
+//! aim while it is alerted or screaming. The bone is turned so its look-at
+//! axis points at the target, limited to `MaxAngle` (TENTATIVE: an
+//! approximation of `USkelControlLookAt`; up-axis and per-axis rotation
+//! limits, the target interpolation and the limit's reference pose are not
+//! modelled).
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use asamu_assets::transform::{decompose, instance_matrix, ue_row_matrix_to_mat4};
+use asamu_core::glam as sim_glam;
 use asamu_game::npc::defs::{MaddieStateName, SkinnedComponent};
 use asamu_game::npc::{
-    HandAnim, SkeletalMeshInfo, VillagerStateName, hand_animation, worm_animation,
+    HandAnim, SkeletalMeshInfo, VillagerStateName, WormStateName, hand_animation, worm_animation,
 };
 use bevy::asset::{AssetPath, RenderAssetUsages};
 use bevy::gltf::convert_coordinates::GltfConvertCoordinates;
@@ -89,6 +104,12 @@ pub(super) struct NpcSkin {
     /// Component-space → render transform of the actor at rest (villagers
     /// move from here).
     base: Transform,
+    /// Index into `NpcScene::skinned` (placed skinned actors).
+    skinned: Option<usize>,
+    /// Bone entities by lower-case name (filled on first use).
+    bones: HashMap<String, Entity>,
+    /// Look-at strengths shown per control (smoothed for the worm).
+    look_alpha: HashMap<String, f32>,
 }
 
 impl NpcSkin {
@@ -112,6 +133,9 @@ impl NpcSkin {
             player: None,
             current: None,
             base,
+            skinned: None,
+            bones: HashMap::new(),
+            look_alpha: HashMap::new(),
         }
     }
 }
@@ -185,6 +209,8 @@ struct SpawnSpec<'a> {
     /// World actor id of an actor Kismet may move or hide (skeletal Matinee
     /// actors; `crate::kismet`).
     actor: Option<u32>,
+    /// Index into `NpcScene::skinned`.
+    skinned: Option<usize>,
 }
 
 fn spawn_one(
@@ -200,6 +226,7 @@ fn spawn_one(
         start,
         name,
         actor,
+        skinned,
     } = spec;
     let Some(transform) = component_transform(comp, mesh) else {
         return false;
@@ -218,7 +245,10 @@ fn spawn_one(
         } else {
             Visibility::Inherited
         },
-        NpcSkin::new(kind, clips, start, transform),
+        NpcSkin {
+            skinned,
+            ..NpcSkin::new(kind, clips, start, transform)
+        },
     ));
     if let Some(id) = actor {
         e.insert(crate::kismet::KismetActor(id));
@@ -265,13 +295,15 @@ pub(super) fn spawn_skins(
     let scene = system.scene();
     let mut spawned = 0usize;
     let mut missing = 0usize;
-    for actor in &scene.skinned {
-        for comp in &actor.components {
+    for (ai, actor) in scene.skinned.iter().enumerate() {
+        // Every sequence of the mesh may play (Matinee picks them at run
+        // time); the clip handles are shared assets.
+        for (ci, comp) in actor.components.iter().enumerate() {
             let Some(mesh) = index.get(&comp.mesh) else {
                 missing += 1;
                 continue;
             };
-            let (start, sequences): (Option<StartAnim>, Vec<String>) = match &comp.animation {
+            let (start, mut sequences): (Option<StartAnim>, Vec<String>) = match &comp.animation {
                 Some(h) => (
                     Some(StartAnim {
                         sequence: h.sequence.clone(),
@@ -290,6 +322,9 @@ pub(super) fn spawn_skins(
                     None => (None, Vec::new()),
                 },
             };
+            if ci == 0 && actor.drive == asamu_game::npc::SkinnedDrive::Matinee {
+                sequences.extend(mesh.animations.iter().map(|a| a.sequence.clone()));
+            }
             let seqs: Vec<&str> = sequences.iter().map(String::as_str).collect();
             if spawn_one(
                 &mut commands,
@@ -302,6 +337,8 @@ pub(super) fn spawn_skins(
                     start,
                     name: &actor.name,
                     actor: Some(actor.id),
+                    // The first component follows the simulation's node.
+                    skinned: (ci == 0).then_some(ai),
                 },
             ) {
                 spawned += 1;
@@ -326,6 +363,7 @@ pub(super) fn spawn_skins(
                         start: None,
                         name: &w.name,
                         actor: None,
+                        skinned: None,
                     },
                 )
             {
@@ -349,6 +387,7 @@ pub(super) fn spawn_skins(
                         start: None,
                         name: &m.name,
                         actor: None,
+                        skinned: None,
                     },
                 ));
             }
@@ -370,6 +409,7 @@ pub(super) fn spawn_skins(
                         start: None,
                         name: &v.name,
                         actor: None,
+                        skinned: None,
                     },
                 ));
             }
@@ -463,7 +503,14 @@ pub(super) fn update_skin_animations(
     let scene = system.scene();
     for (mut skin, mut transform) in &mut skins {
         let (wanted, looping, seek): (Option<String>, bool, Option<f32>) = match skin.kind {
-            SkinKind::Ambient => continue,
+            SkinKind::Ambient => {
+                // Only a running game ticks the nodes (fly mode shows the
+                // rest state and lets the clips play).
+                if sim.is_some() {
+                    follow_sim_node(&mut skin, scene, rt, &mut players);
+                }
+                continue;
+            }
             SkinKind::Hands => {
                 let Some(sim) = &sim else {
                     continue;
@@ -569,6 +616,296 @@ pub(super) fn update_skin_animations(
     }
 }
 
+/// How far a playing clip may drift from the simulation's position before
+/// it is put back, s (ours, presentation).
+const DRIFT: f32 = 0.25;
+
+/// A placed skinned actor follows its simulation node: the sequence it
+/// plays, and its position (held nodes every frame; playing ones when they
+/// drift). A playing node whose sequence the simulation has no data for
+/// (no skeletal manifest when the game loaded) is left to the
+/// `AnimationPlayer`.
+fn follow_sim_node(
+    skin: &mut NpcSkin,
+    scene: &asamu_game::npc::NpcScene,
+    rt: &asamu_game::npc::NpcRuntime,
+    players: &mut Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+) {
+    let Some(index) = skin.skinned else {
+        return;
+    };
+    let Some(node) = rt.skinned.get(index).and_then(|s| s.current()) else {
+        return;
+    };
+    let (Some(seq), Some(entity)) = (node.sequence.clone(), skin.player) else {
+        return;
+    };
+    let info = scene
+        .skinned
+        .get(index)
+        .and_then(|d| d.components.first())
+        .and_then(|c| scene.sequence_info(&c.mesh, &seq));
+    if node.playing && info.is_none() {
+        return;
+    }
+    let Some(i) = skin
+        .clips
+        .iter()
+        .position(|(n, _)| n.eq_ignore_ascii_case(&seq))
+    else {
+        return;
+    };
+    let Some(anim_node) = skin.nodes.get(i).copied() else {
+        return;
+    };
+    let Ok((mut player, mut transitions)) = players.get_mut(entity) else {
+        return;
+    };
+    let position = node.position.max(0.0);
+    if skin.current.as_deref() != Some(seq.as_str()) {
+        let active = transitions.play(&mut player, anim_node, BLEND);
+        if node.looping {
+            active.repeat();
+        }
+        active.seek_to(position);
+        skin.current = Some(seq);
+    }
+    let Some(active) = player.animation_mut(anim_node) else {
+        return;
+    };
+    if node.playing {
+        if active.is_paused() {
+            active.resume();
+        }
+        let speed = node.rate * info.map_or(1.0, |i| i.rate_scale);
+        if speed.is_finite() && active.speed() != speed {
+            active.set_speed(speed);
+        }
+        // Drift, measured around the loop.
+        let mut drift = (active.seek_time() - position).abs();
+        if let Some(len) = info.map(|i| i.length).filter(|l| node.looping && *l > 0.0) {
+            drift = drift.min((len - drift).abs());
+        }
+        if drift > DRIFT {
+            active.seek_to(position);
+        }
+    } else {
+        active.seek_to(position);
+        active.pause();
+    }
+}
+
+/// glTF bone-space vector of a UE3 bone axis (`AXIS_X`, ...): the importer
+/// maps UE (x, y, z) to glTF (y, z, −x) (skeletal manifest `coordinates`).
+fn bone_axis(axis: &str, invert: bool) -> Vec3 {
+    let v = match axis {
+        "AXIS_Y" => Vec3::X,
+        "AXIS_Z" => Vec3::Y,
+        _ => Vec3::NEG_Z,
+    };
+    if invert { -v } else { v }
+}
+
+/// The descendant of `root` named `name` (case-insensitive, bounded walk).
+fn find_bone(
+    root: Entity,
+    name: &str,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+) -> Option<Entity> {
+    let mut stack = vec![root];
+    let mut visited = 0usize;
+    while let Some(e) = stack.pop() {
+        visited += 1;
+        if visited > 4096 {
+            return None;
+        }
+        if names
+            .get(e)
+            .is_ok_and(|n| n.as_str().eq_ignore_ascii_case(name))
+        {
+            return Some(e);
+        }
+        if let Ok(c) = children.get(e) {
+            stack.extend(c.iter());
+        }
+    }
+    None
+}
+
+/// Look-at controls (see the module docs).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(super) fn apply_look_at(
+    world: Option<Res<NpcWorld>>,
+    sim: Option<Res<Sim>>,
+    time: Res<Time>,
+    mut skins: Query<(Entity, &mut NpcSkin)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    parents: Query<&ChildOf>,
+    globals: Query<&GlobalTransform>,
+    mut bones: Query<&mut Transform, Without<NpcSkin>>,
+) {
+    let (Some(world), Some(sim)) = (world, sim) else {
+        return;
+    };
+    let Some(system) = world.system(Some(&*sim)) else {
+        return;
+    };
+    let scene = system.scene();
+    let rt = system.runtime();
+    let player = sim.game.player().position;
+    let dt = time.delta_secs().clamp(0.0, 0.25);
+    for (root, mut skin) in &mut skins {
+        // (look-at setup, head target, eye target, target strength override)
+        let (def, head_target, eye_target, worm_alpha) = match skin.kind {
+            SkinKind::Ambient => {
+                let Some(def) = skin
+                    .skinned
+                    .and_then(|i| scene.skinned.get(i))
+                    .and_then(|d| scene.look_at_of(d.id))
+                else {
+                    continue;
+                };
+                let state = skin.skinned.and_then(|i| rt.skinned.get(i));
+                let (h, e) = state.map_or((sim_glam::Vec3::ZERO, sim_glam::Vec3::ZERO), |s| {
+                    (s.look_at.head_offset, s.look_at.eyes_offset)
+                });
+                (def, player + h, player + e, None)
+            }
+            SkinKind::Worm(i) => {
+                let (Some(w), Some(d)) = (rt.worms.get(i), scene.worms.get(i)) else {
+                    continue;
+                };
+                let Some(def) = scene.look_at_of(d.id) else {
+                    continue;
+                };
+                // `SetWormLookAtAlpha`: 1 while alerted or screaming, else 0
+                // (0.3 s blends; CONFIRMED (src)).
+                let on = matches!(w.state, WormStateName::Alerted | WormStateName::Screaming);
+                (
+                    def,
+                    w.current_aim,
+                    w.current_aim,
+                    Some(if on { 1.0 } else { 0.0 }),
+                )
+            }
+            _ => continue,
+        };
+        let id = def.id;
+        for (names_list, target) in [(&def.head, head_target), (&def.eyes, eye_target)] {
+            for control_name in names_list {
+                let Some(control) = def
+                    .controls
+                    .iter()
+                    .find(|c| c.control.eq_ignore_ascii_case(control_name))
+                else {
+                    continue;
+                };
+                let Some(bone_name) = control.bone.as_deref() else {
+                    continue;
+                };
+                let key = bone_name.to_ascii_lowercase();
+                let bone = match skin.bones.get(&key) {
+                    Some(b) => *b,
+                    None => {
+                        let Some(b) = find_bone(root, bone_name, &children, &names) else {
+                            continue;
+                        };
+                        skin.bones.insert(key.clone(), b);
+                        b
+                    }
+                };
+                let wanted = match worm_alpha {
+                    Some(a) => a,
+                    None => rt.control_strength(scene, id, &control.control),
+                };
+                // Blend towards the strength over the control's blend time
+                // (the worm's 0.3 s).
+                let blend = if worm_alpha.is_some() {
+                    0.3
+                } else {
+                    control.blend_in_time.max(0.0)
+                };
+                let shown = skin
+                    .look_alpha
+                    .entry(control.control.to_ascii_lowercase())
+                    .or_insert(wanted);
+                *shown = if blend > 0.0 {
+                    let step = dt / blend;
+                    if wanted > *shown {
+                        (*shown + step).min(wanted)
+                    } else {
+                        (*shown - step).max(wanted)
+                    }
+                } else {
+                    wanted
+                };
+                let strength = shown.clamp(0.0, 1.0);
+                if strength <= 0.0 || !target.is_finite() {
+                    continue;
+                }
+                let (Ok(bone_global), Ok(mut local)) = (globals.get(bone), bones.get_mut(bone))
+                else {
+                    continue;
+                };
+                let parent_rot = parents
+                    .get(bone)
+                    .ok()
+                    .and_then(|p| globals.get(p.parent()).ok())
+                    .map_or(Quat::IDENTITY, |g| g.to_scale_rotation_translation().1);
+                let axis = bone_axis(&control.look_at_axis, control.invert_look_at_axis);
+                let limit = (control.enable_limit && control.max_angle > 0.0)
+                    .then(|| control.max_angle.to_radians());
+                if let Some(turned) = look_at_rotation(
+                    parent_rot,
+                    local.rotation,
+                    axis,
+                    bone_global.translation(),
+                    crate::to_render(target),
+                    limit,
+                    strength,
+                ) {
+                    local.rotation = turned;
+                }
+            }
+        }
+    }
+}
+
+/// The bone's new local rotation for a look-at control: the bone (local
+/// rotation `local` under a parent with world rotation `parent`, at
+/// `bone_pos`) is turned by the shortest arc that points its `axis` at
+/// `target`, by at most `limit` radians, blended by `strength` (0..1).
+/// `None` when there is nothing to turn towards or the result would not be
+/// finite (a degenerate parent or bone transform must not reach the bone).
+fn look_at_rotation(
+    parent: Quat,
+    local: Quat,
+    axis: Vec3,
+    bone_pos: Vec3,
+    target: Vec3,
+    limit: Option<f32>,
+    strength: f32,
+) -> Option<Quat> {
+    let world_rot = parent * local;
+    let current = (world_rot * axis).normalize_or_zero();
+    let to_target = (target - bone_pos).normalize_or_zero();
+    if current == Vec3::ZERO || to_target == Vec3::ZERO {
+        return None;
+    }
+    let mut delta = Quat::from_rotation_arc(current, to_target);
+    if let Some(max) = limit {
+        let (axis_r, angle) = delta.to_axis_angle();
+        if angle > max {
+            delta = Quat::from_axis_angle(axis_r, max);
+        }
+    }
+    let delta = Quat::IDENTITY.slerp(delta, strength.clamp(0.0, 1.0));
+    let turned = (parent.inverse() * delta * world_rot).normalize();
+    turned.is_finite().then_some(turned)
+}
+
 fn clip_finished(
     skin: &NpcSkin,
     sequence: &str,
@@ -595,4 +932,79 @@ fn find_clip(skin: &NpcSkin, key: &str) -> Option<String> {
         .iter()
         .find(|(n, _)| n.to_ascii_lowercase().contains(key))
         .map(|(n, _)| n.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bone_axes_follow_the_importers_coordinates() {
+        // UE (x, y, z) → glTF (y, z, −x).
+        assert_eq!(bone_axis("AXIS_X", false), Vec3::NEG_Z);
+        assert_eq!(bone_axis("AXIS_Y", false), Vec3::X);
+        assert_eq!(bone_axis("AXIS_Z", false), Vec3::Y);
+        assert_eq!(bone_axis("AXIS_Z", true), Vec3::NEG_Y);
+        // Anything else is read as the default axis (X).
+        assert_eq!(bone_axis("", false), Vec3::NEG_Z);
+    }
+
+    #[test]
+    fn look_at_turns_the_bone_axis_towards_the_target() {
+        let parent = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(-0.2);
+        let local = Quat::from_rotation_z(0.3);
+        let axis = bone_axis("AXIS_X", false);
+        let bone_pos = Vec3::new(1.0, 2.0, 3.0);
+        let target = Vec3::new(4.0, 2.5, -1.0);
+        let world_axis = |local: Quat| (parent * local) * axis;
+        let want = (target - bone_pos).normalize();
+        // Full strength, no limit: the axis points at the target.
+        let full = look_at_rotation(parent, local, axis, bone_pos, target, None, 1.0).unwrap();
+        assert!((world_axis(full) - want).length() < 1e-5);
+        assert!(full.is_normalized());
+        // Half strength: half the angle.
+        let angle = world_axis(local).angle_between(want);
+        let half = look_at_rotation(parent, local, axis, bone_pos, target, None, 0.5).unwrap();
+        assert!((world_axis(half).angle_between(want) - angle * 0.5).abs() < 1e-4);
+        // No strength: unchanged.
+        let none = look_at_rotation(parent, local, axis, bone_pos, target, None, 0.0).unwrap();
+        assert!(none.angle_between(local) < 1e-5);
+        // Limited: the bone turns by the limit only.
+        let limit = 0.2f32;
+        assert!(angle > limit);
+        let limited =
+            look_at_rotation(parent, local, axis, bone_pos, target, Some(limit), 1.0).unwrap();
+        assert!((world_axis(limited).angle_between(world_axis(local)) - limit).abs() < 1e-4);
+        assert!((world_axis(limited).angle_between(want) - (angle - limit)).abs() < 1e-4);
+        // A limit wider than the turn changes nothing.
+        let wide = look_at_rotation(parent, local, axis, bone_pos, target, Some(3.0), 1.0).unwrap();
+        assert!(wide.angle_between(full) < 1e-5);
+        // Strength is clamped.
+        let over = look_at_rotation(parent, local, axis, bone_pos, target, None, 7.0).unwrap();
+        assert!(over.angle_between(full) < 1e-5);
+    }
+
+    #[test]
+    fn look_at_refuses_degenerate_input() {
+        let axis = Vec3::NEG_Z;
+        let q = Quat::IDENTITY;
+        // The target on the bone: no direction.
+        assert!(look_at_rotation(q, q, axis, Vec3::ONE, Vec3::ONE, None, 1.0).is_none());
+        // Non-finite transforms or targets never reach the bone.
+        let nan = Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0);
+        assert!(look_at_rotation(nan, q, axis, Vec3::ZERO, Vec3::X, None, 1.0).is_none());
+        assert!(look_at_rotation(q, nan, axis, Vec3::ZERO, Vec3::X, None, 1.0).is_none());
+        assert!(
+            look_at_rotation(q, q, axis, Vec3::ZERO, Vec3::splat(f32::NAN), None, 1.0).is_none()
+        );
+        assert!(
+            look_at_rotation(q, q, axis, Vec3::splat(f32::INFINITY), Vec3::X, None, 1.0).is_none()
+        );
+        assert!(look_at_rotation(q, q, Vec3::ZERO, Vec3::ZERO, Vec3::X, None, 1.0).is_none());
+        // Looking straight back (the arc's worst case) still gives a
+        // finite, unit rotation.
+        let back = look_at_rotation(q, q, axis, Vec3::ZERO, Vec3::Z, None, 1.0).unwrap();
+        assert!(back.is_finite() && back.is_normalized());
+        assert!(((back * axis) - Vec3::Z).length() < 1e-5);
+    }
 }

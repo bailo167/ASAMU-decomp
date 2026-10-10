@@ -7,8 +7,22 @@
 //! game-info functions synchronously). Presentation actions only emit an
 //! [`Output`]; the app turns them into sound, subtitles, HUD changes.
 
+use crate::anim::AnimPosition;
 use crate::graph::ActorInfo;
 use crate::value::KValue;
+
+/// A value a Matinee property track writes on an actor.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum PropertyValue {
+    /// `InterpTrackFloatProp` (e.g. a light's `Brightness` or `Radius`).
+    Float(f32),
+    /// `InterpTrackVectorProp` (e.g. `DrawScale3D`).
+    Vector([f32; 3]),
+    /// `InterpTrackColorProp`: linear colour components in 0..1 (the engine
+    /// stores them as an `FColor`: `255 · c^(1/2.2)`, clamped).
+    Color([f32; 3]),
+}
 
 /// Which input of an on/off/toggle action fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -106,6 +120,36 @@ pub trait Host {
     fn set_player_velocity(&mut self, _velocity: [f32; 3]) {}
     /// Kills the player (`SeqAct_PlayerDied`).
     fn kill_player(&mut self) {}
+    /// The `SequenceLength` of `sequence` on the actor's skeletal mesh
+    /// (`None`: unknown; Matinee animation tracks then use raw positions, as
+    /// the engine does for a sequence missing from the track's anim sets).
+    fn anim_sequence_length(&self, _actor: &ActorInfo, _sequence: &str) -> Option<f32> {
+        None
+    }
+    /// The `SetAnimPosition` event of a skeletal actor (Matinee animation
+    /// control). Returns the `NotifyName`s of the `AnimNotify_Kismet`
+    /// notifies the move fired; the runtime activates the matching
+    /// `SeqEvent_AnimNotify` events at once, as the notify's
+    /// `CheckActivate` does inside the Matinee update.
+    fn set_anim_position(&mut self, _actor: &ActorInfo, _call: &AnimPosition) -> Vec<String> {
+        Vec::new()
+    }
+    /// `SetSkelControlStrength(name, strength)` (Matinee
+    /// `InterpTrackSkelControlStrength`; blend time 0).
+    fn set_skel_control_strength(&mut self, _actor: &ActorInfo, _control: &str, _strength: f32) {}
+    /// A Matinee property track's value on an actor (`PropertyName`).
+    fn set_actor_property(&mut self, _actor: &ActorInfo, _name: &str, _value: PropertyValue) {}
+    /// `SeqAct_SetLookAtTarget` on a look-at actor: the stored target (never
+    /// read by the original's tick) and the head and eye offsets added to
+    /// the player pawn's location.
+    fn set_look_at(
+        &mut self,
+        _actor: &ActorInfo,
+        _target: Option<&ActorInfo>,
+        _head_offset: [f32; 3],
+        _eyes_offset: [f32; 3],
+    ) {
+    }
 }
 
 /// A host that does nothing (tests, headless tools).
@@ -226,7 +270,8 @@ pub enum Output {
         /// `ShakeScale`.
         scale: f32,
     },
-    /// Camera animation play/stop.
+    /// `SeqAct_PlayCameraAnim` Play (else Stop: every instance of the
+    /// animation, `StopAllCameraAnimsByType(anim, false)`).
     CameraAnim {
         /// Play.
         play: bool,
@@ -236,6 +281,14 @@ pub enum Output {
         looping: bool,
         /// `Rate`.
         rate: f32,
+        /// `IntensityScale`.
+        scale: f32,
+        /// `BlendInTime`.
+        blend_in: f32,
+        /// `BlendOutTime`.
+        blend_out: f32,
+        /// `bRandomStartTime`.
+        random_start: bool,
     },
     /// `SeqAct_PlayMusicTrack`.
     MusicTrack {

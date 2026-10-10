@@ -33,7 +33,7 @@ pub mod cylinder;
 
 use std::cell::Cell;
 
-use glam::{DVec3, Vec3};
+use glam::{DVec2, DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub use affine::Affine;
@@ -143,6 +143,9 @@ pub struct CollisionMesh {
     triangles: Vec<[u32; 3]>,
     bvh: Bvh,
     convex: Option<Convex>,
+    /// An upright cylinder `(radius, half height)` instead of triangles (a
+    /// pawn's `CylinderComponent`; see [`CollisionScene::add_cylinder_mesh`]).
+    cylinder: Option<(f64, f64)>,
 }
 
 impl CollisionMesh {
@@ -316,6 +319,7 @@ impl CollisionSceneBuilder {
             triangles,
             bvh,
             convex: None,
+            cylinder: None,
         });
         Some(index)
     }
@@ -371,6 +375,7 @@ impl CollisionSceneBuilder {
             triangles,
             bvh,
             convex: Some(Convex { centroid, planes }),
+            cylinder: None,
         });
         Some(index)
     }
@@ -570,6 +575,39 @@ impl CollisionScene {
         }
     }
 
+    /// Adds an upright collision cylinder (`radius`, `half_height`, centred
+    /// on its instance's origin) for dynamic instances: NPC pawns'
+    /// `CylinderComponent`s, which block the player and move with the pawn.
+    /// Instances of it use only their transform's translation (pawn
+    /// cylinders stay upright). Queries are exact: a swept player cylinder
+    /// against it is a swept point against their Minkowski sum (radius and
+    /// half height added). That is the engine's model too (CONFIRMED,
+    /// locally decompiled `UCylinderComponent::LineCheck`: the trace extent
+    /// is added to the cylinder — `Extent.X` to the radius, `Extent.Z` to
+    /// the half height — and the line is clipped against the two caps and
+    /// the circle). The start-contact rules are ours, those of the triangle
+    /// sweeps; the engine instead blocks a start inside only against radial
+    /// inward motion and pulls every hit time back by 0.001 of the move
+    /// (NPCS.md §12). `None` for a non-positive or non-finite size.
+    pub fn add_cylinder_mesh(&mut self, radius: f32, half_height: f32) -> Option<u32> {
+        if !(radius.is_finite() && half_height.is_finite() && radius > 0.0 && half_height > 0.0) {
+            return None;
+        }
+        let index = u32::try_from(self.meshes.len()).ok()?;
+        let local = Aabb3 {
+            min: Vec3::new(-radius, -radius, -half_height),
+            max: Vec3::new(radius, radius, half_height),
+        };
+        self.meshes.push(CollisionMesh {
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            bvh: Bvh::build(&[local]),
+            convex: None,
+            cylinder: Some((f64::from(radius), f64::from(half_height))),
+        });
+        Some(index)
+    }
+
     /// The instance a hit refers to.
     #[must_use]
     pub fn instance<'a>(&'a self, dynamic: &'a [Instance], r: InstanceRef) -> Option<&'a Instance> {
@@ -613,6 +651,30 @@ impl CollisionScene {
         let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
             return;
         };
+        if let Some((cr, ch)) = mesh.cylinder {
+            let limit = best.map_or(1.0, |b| b.t);
+            if let Some(c) = cylinder_sweep(
+                q.s,
+                q.d,
+                q.r + cr,
+                q.h + ch,
+                inst.to_world.translation,
+                q.tol,
+                limit,
+            ) {
+                let hit = SceneHit {
+                    t: c.t,
+                    normal: c.normal,
+                    penetrating: c.penetrating,
+                    instance: which,
+                    triangle: 0,
+                };
+                if best.is_none_or(|b| hit.better_than(&b)) {
+                    *best = Some(hit);
+                }
+            }
+            return;
+        }
         let s_l = inst.to_local.point(q.s);
         let d_l = inst.to_local.vector(q.d);
         let pad_l = inst.to_local.transform_extent(q.pad);
@@ -769,6 +831,10 @@ impl CollisionScene {
             let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
                 continue;
             };
+            if mesh.cylinder.is_some() {
+                self.sweep_instance(inst, which, &q, &mut best);
+                continue;
+            }
             for tri in 0..mesh.triangles.len() as u32 {
                 let Some(w) = self.world_triangle(inst, tri) else {
                     continue;
@@ -806,6 +872,21 @@ impl CollisionScene {
         let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
             return;
         };
+        if let Some((cr, ch)) = mesh.cylinder {
+            if let Some((t, normal)) = cylinder_ray(o, dv, cr, ch, inst.to_world.translation) {
+                let hit = SceneHit {
+                    t,
+                    normal,
+                    penetrating: false,
+                    instance: which,
+                    triangle: 0,
+                };
+                if best.is_none_or(|b| hit.better_than(&b)) {
+                    *best = Some(hit);
+                }
+            }
+            return;
+        }
         let o_l = inst.to_local.point(o);
         let d_l = inst.to_local.vector(dv);
         let pad_l = inst.to_local.transform_extent(DVec3::splat(1.0e-3));
@@ -927,6 +1008,10 @@ impl CollisionScene {
             let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
                 continue;
             };
+            if mesh.cylinder.is_some() {
+                self.ray_instance(inst, which, o, dv, &mut best);
+                continue;
+            }
             for tri in 0..mesh.triangles.len() as u32 {
                 let Some(w) = self.world_triangle(inst, tri) else {
                     continue;
@@ -964,6 +1049,10 @@ impl CollisionScene {
         let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
             return false;
         };
+        if let Some((cr, ch)) = mesh.cylinder {
+            let p = c - inst.to_world.translation;
+            return DVec2::new(p.x, p.y).length() < r + cr && p.z.abs() < h + ch;
+        }
         if let Some(cv) = &mesh.convex {
             let lc = inst.to_local.point(c);
             if !cv.planes.is_empty() && cv.planes.iter().all(|(n, w)| n.dot(lc) < *w) {
@@ -1036,6 +1125,147 @@ impl CollisionScene {
     }
 }
 
+/// Swept point `s + t·d` (`t ∈ [0, limit]`) against the upright cylinder
+/// `(r, h)` centred at `c` (the Minkowski sum of a swept player cylinder and
+/// a pawn cylinder). Start contacts follow the triangle sweeps: a start
+/// within `tol` of the surface is a contact at `t = 0` when the motion goes
+/// into the surface normal; a start deeper than `tol` inside is a
+/// penetrating contact along the least-penetration normal (side or cap),
+/// blocking only motion into it.
+fn cylinder_sweep(
+    s: DVec3,
+    d: DVec3,
+    r: f64,
+    h: f64,
+    c: DVec3,
+    tol: f64,
+    limit: f64,
+) -> Option<cylinder::Contact> {
+    if !(s.is_finite() && d.is_finite() && c.is_finite() && r > 0.0 && h > 0.0) {
+        return None;
+    }
+    let p = s - c;
+    let pxy = DVec2::new(p.x, p.y);
+    let dxy = DVec2::new(d.x, d.y);
+    let dist = pxy.length();
+    let radial = |q: DVec2| -> DVec3 {
+        let l = q.length();
+        if l > 1.0e-12 {
+            DVec3::new(q.x / l, q.y / l, 0.0)
+        } else {
+            let m = dxy.length();
+            if m > 1.0e-12 {
+                DVec3::new(-dxy.x / m, -dxy.y / m, 0.0)
+            } else {
+                DVec3::X
+            }
+        }
+    };
+    let contact = |t: f64, normal: DVec3, penetrating: bool| cylinder::Contact {
+        t,
+        normal,
+        penetrating,
+    };
+    // Starts inside (deeper than the tolerance).
+    if dist < r - tol && p.z.abs() < h - tol {
+        let side_depth = r - dist;
+        let cap_depth = h - p.z.abs();
+        let n = if side_depth < cap_depth {
+            radial(pxy)
+        } else if p.z > 0.0 || (p.z == 0.0 && d.z < 0.0) {
+            DVec3::Z
+        } else {
+            DVec3::NEG_Z
+        };
+        return (d.dot(n) < 0.0).then(|| contact(0.0, n, true));
+    }
+    // Starts touching (within the tolerance).
+    if dist <= r + tol && p.z.abs() <= h + tol {
+        let n = if p.z.abs() >= h - tol && dist <= r - tol {
+            if p.z > 0.0 { DVec3::Z } else { DVec3::NEG_Z }
+        } else {
+            radial(pxy)
+        };
+        if d.dot(n) < 0.0 {
+            return Some(contact(0.0, n, false));
+        }
+        // Moving along or away: later entries only through the other
+        // feature, handled below.
+    }
+    let mut best: Option<cylinder::Contact> = None;
+    let mut consider = |t: f64, n: DVec3| {
+        if (0.0..=limit).contains(&t) && best.is_none_or(|b| t < b.t) {
+            best = Some(contact(t, n, false));
+        }
+    };
+    // Side: |p_xy + t d_xy| = r, entering.
+    let a = dxy.dot(dxy);
+    let b = pxy.dot(dxy);
+    if a > 0.0 && b < 0.0 && dist > r {
+        let cq = pxy.dot(pxy) - r * r;
+        let disc = b * b - a * cq;
+        if disc >= 0.0 {
+            let t = (-b - disc.sqrt()) / a;
+            let z = p.z + d.z * t;
+            if z.abs() <= h {
+                consider(t, radial(pxy + dxy * t));
+            }
+        }
+    }
+    // Caps.
+    if d.z < 0.0 && p.z >= h {
+        let t = (h - p.z) / d.z;
+        if (pxy + dxy * t).length() <= r {
+            consider(t, DVec3::Z);
+        }
+    } else if d.z > 0.0 && p.z <= -h {
+        let t = (-h - p.z) / d.z;
+        if (pxy + dxy * t).length() <= r {
+            consider(t, DVec3::NEG_Z);
+        }
+    }
+    best
+}
+
+/// Segment `o + t·dv` (`t ∈ [0, 1]`) entering the upright cylinder `(r, h)`
+/// centred at `c` from outside: `(t, normal)`.
+fn cylinder_ray(o: DVec3, dv: DVec3, r: f64, h: f64, c: DVec3) -> Option<(f64, DVec3)> {
+    let mut best: Option<(f64, DVec3)> = None;
+    let mut consider = |t: f64, n: DVec3| {
+        if (0.0..=1.0).contains(&t) && best.is_none_or(|b| t < b.0) {
+            best = Some((t, n));
+        }
+    };
+    let p = o - c;
+    let pxy = DVec2::new(p.x, p.y);
+    let dxy = DVec2::new(dv.x, dv.y);
+    let a = dxy.dot(dxy);
+    let b = pxy.dot(dxy);
+    if a > 0.0 && b < 0.0 && pxy.length() > r {
+        let disc = b * b - a * (pxy.dot(pxy) - r * r);
+        if disc >= 0.0 {
+            let t = (-b - disc.sqrt()) / a;
+            let q = pxy + dxy * t;
+            if (p.z + dv.z * t).abs() <= h && q.length() > 0.0 {
+                let n = q / q.length();
+                consider(t, DVec3::new(n.x, n.y, 0.0));
+            }
+        }
+    }
+    if dv.z < 0.0 && p.z >= h {
+        let t = (h - p.z) / dv.z;
+        if (pxy + dxy * t).length() <= r {
+            consider(t, DVec3::Z);
+        }
+    } else if dv.z > 0.0 && p.z <= -h {
+        let t = (-h - p.z) / dv.z;
+        if (pxy + dxy * t).length() <= r {
+            consider(t, DVec3::NEG_Z);
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1302,285 @@ mod tests {
             [1, 7, 3],
         ];
         (v, t)
+    }
+
+    /// An NPC pawn's cylinder (radius 34, half height 78) blocks the player
+    /// cylinder (21 × 44) exactly where their Minkowski sum begins, from the
+    /// side and from above, moves with its instance, lets zero-extent traces
+    /// through when it does not block them, and agrees with the brute-force
+    /// queries.
+    #[test]
+    fn pawn_cylinders_block_the_player_exactly() {
+        let mut scene = CollisionSceneBuilder::new().build();
+        assert!(scene.add_cylinder_mesh(0.0, 10.0).is_none());
+        assert!(scene.add_cylinder_mesh(f32::NAN, 10.0).is_none());
+        let m = scene.add_cylinder_mesh(34.0, 78.0).unwrap();
+        let mut pawn = info();
+        pawn.actor = Some(9);
+        pawn.blocks_traces = false;
+        let mut inst = scene
+            .dynamic_instance(
+                m,
+                Affine::from_translation(DVec3::new(500.0, 0.0, 78.0)),
+                pawn,
+            )
+            .unwrap();
+        let dynamic = vec![inst.clone()];
+        let f = QueryFilter::PAWN;
+        // From the side along +X at the pawn's height: contact at x = 500 − 55.
+        let h = scene
+            .sweep_cylinder(
+                &dynamic,
+                Vec3::new(0.0, 0.0, 78.0),
+                Vec3::new(1000.0, 0.0, 78.0),
+                21.0,
+                44.0,
+                f,
+            )
+            .unwrap();
+        assert!((h.t - 0.445).abs() < 1e-9, "{}", h.t);
+        assert!((h.normal - DVec3::NEG_X).length() < 1e-9);
+        assert_eq!(h.instance, InstanceRef::Dynamic(0));
+        assert!(!h.penetrating);
+        let brute = scene
+            .sweep_cylinder_brute_force(
+                &dynamic,
+                Vec3::new(0.0, 0.0, 78.0),
+                Vec3::new(1000.0, 0.0, 78.0),
+                21.0,
+                44.0,
+                f,
+            )
+            .unwrap();
+        assert_eq!(brute, h);
+        // Passing beside it (|y| > 55) touches nothing.
+        assert!(
+            scene
+                .sweep_cylinder(
+                    &dynamic,
+                    Vec3::new(0.0, 60.0, 78.0),
+                    Vec3::new(1000.0, 60.0, 78.0),
+                    21.0,
+                    44.0,
+                    f
+                )
+                .is_none()
+        );
+        // Falling onto its top (z = 156 + 44).
+        let h = scene
+            .sweep_cylinder(
+                &dynamic,
+                Vec3::new(500.0, 10.0, 400.0),
+                Vec3::new(500.0, 10.0, 0.0),
+                21.0,
+                44.0,
+                f,
+            )
+            .unwrap();
+        assert!((h.t - 0.5).abs() < 1e-9 && h.normal == DVec3::Z);
+        // Resting on top: moving down is blocked at once, sideways is free
+        // until the edge.
+        let top = Vec3::new(500.0, 0.0, 200.0);
+        let h = scene
+            .sweep_cylinder(&dynamic, top, top - Vec3::Z * 10.0, 21.0, 44.0, f)
+            .unwrap();
+        assert_eq!(h.t, 0.0);
+        assert!(
+            scene
+                .sweep_cylinder(&dynamic, top, top + Vec3::X * 20.0, 21.0, 44.0, f)
+                .is_none()
+        );
+        // Starting inside: only motion deeper in is blocked.
+        let inside = Vec3::new(470.0, 0.0, 78.0);
+        let h = scene
+            .sweep_cylinder(&dynamic, inside, inside + Vec3::X * 10.0, 21.0, 44.0, f)
+            .unwrap();
+        assert!(h.penetrating && h.t == 0.0);
+        assert!(
+            scene
+                .sweep_cylinder(&dynamic, inside, inside - Vec3::X * 10.0, 21.0, 44.0, f)
+                .is_none()
+        );
+        assert!(scene.overlaps_cylinder(&dynamic, inside, 21.0, 44.0, f));
+        assert!(!scene.overlaps_cylinder(&dynamic, Vec3::new(400.0, 0.0, 78.0), 21.0, 44.0, f));
+        // Traces pass (block-all-but-weapons) unless the instance blocks them.
+        let o = Vec3::new(0.0, 0.0, 78.0);
+        assert!(
+            scene
+                .raycast(&dynamic, o, o + Vec3::X * 1000.0, QueryFilter::TRACE)
+                .is_none()
+        );
+        let mut tracing = dynamic.clone();
+        tracing[0].info.blocks_traces = true;
+        let r = scene
+            .raycast(&tracing, o, o + Vec3::X * 1000.0, QueryFilter::TRACE)
+            .unwrap();
+        assert!((r.t - 0.466).abs() < 1e-9);
+        assert_eq!(
+            scene.raycast_brute_force(&tracing, o, o + Vec3::X * 1000.0, QueryFilter::TRACE),
+            Some(r)
+        );
+        // Moving the instance moves the obstacle.
+        assert!(scene.place_dynamic(
+            &mut inst,
+            Affine::from_translation(DVec3::new(800.0, 0.0, 78.0))
+        ));
+        let h = scene
+            .sweep_cylinder(
+                &[inst],
+                Vec3::new(0.0, 0.0, 78.0),
+                Vec3::new(1000.0, 0.0, 78.0),
+                21.0,
+                44.0,
+                f,
+            )
+            .unwrap();
+        assert!((h.t - 0.745).abs() < 1e-9);
+    }
+
+    /// `cylinder_sweep` against an independent stepped march of the same
+    /// path through the Minkowski cylinder: every path the march finds
+    /// entering is hit at the entry (to the march's resolution), on the
+    /// surface, with that surface's outward normal opposing the motion; a
+    /// path the sweep misses never enters.
+    #[test]
+    fn cylinder_sweeps_agree_with_a_stepped_march() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let (r, h) = (55.0f64, 122.0f64);
+        let c = DVec3::new(10.0, -20.0, 30.0);
+        let tol = 1.0e-3;
+        let inside = |p: DVec3, margin: f64| {
+            let q = p - c;
+            DVec2::new(q.x, q.y).length() < r - margin && q.z.abs() < h - margin
+        };
+        let steps = 4000usize;
+        let (mut hits, mut misses, mut side, mut cap) = (0usize, 0usize, 0usize, 0usize);
+        for _ in 0..6000 {
+            let mut point = |sx: f64, sz: f64| {
+                c + DVec3::new((rnd() - 0.5) * sx, (rnd() - 0.5) * sx, (rnd() - 0.5) * sz)
+            };
+            let s = point(400.0, 600.0);
+            let e = point(400.0, 600.0);
+            // Start contacts have their own rules (tested with the pawn
+            // cylinder above and below).
+            if inside(s, -2.0 * tol) {
+                continue;
+            }
+            let d = e - s;
+            let got = cylinder_sweep(s, d, r, h, c, tol, 1.0);
+            let first = (1..=steps)
+                .map(|i| i as f64 / steps as f64)
+                .find(|t| inside(s + d * *t, 1.0e-9));
+            let on_surface = |t: f64| {
+                let q = s + d * t - c;
+                let dist = DVec2::new(q.x, q.y).length();
+                let on_side = (dist - r).abs() < 1.0e-6 && q.z.abs() <= h + 1.0e-6;
+                let on_cap = (q.z.abs() - h).abs() < 1.0e-6 && dist <= r + 1.0e-6;
+                (on_side, on_cap, q)
+            };
+            match (got, first) {
+                (Some(hit), found) => {
+                    assert!(!hit.penetrating && (0.0..=1.0).contains(&hit.t));
+                    if let Some(t) = found {
+                        // The entry lies in the march step before `t`.
+                        assert!(
+                            hit.t <= t + 1.0e-12 && hit.t >= t - 1.0 / steps as f64 - 1.0e-9,
+                            "sweep {} march {t}",
+                            hit.t
+                        );
+                    }
+                    let (on_side, on_cap, q) = on_surface(hit.t);
+                    assert!(on_side || on_cap, "contact off the surface: {q:?}");
+                    assert!(d.dot(hit.normal) < 0.0, "normal along the motion");
+                    assert!((hit.normal.length() - 1.0).abs() < 1.0e-9);
+                    if on_cap && !on_side {
+                        assert_eq!(hit.normal, DVec3::Z * q.z.signum());
+                        cap += 1;
+                    } else if on_side && !on_cap {
+                        let n = DVec3::new(q.x, q.y, 0.0).normalize();
+                        assert!((hit.normal - n).length() < 1.0e-6);
+                        side += 1;
+                    }
+                    hits += 1;
+                }
+                (None, None) => misses += 1,
+                (None, Some(t)) => panic!("the sweep missed an entry at {t}: {s:?} + {d:?}"),
+            }
+        }
+        assert!(hits > 500 && misses > 500, "{hits} hits, {misses} misses");
+        assert!(side > 100 && cap > 100, "{side} side, {cap} cap");
+    }
+
+    /// Start contacts of the cylinder sweep at the rim, on the cap and with
+    /// hostile values: resting anywhere on the top blocks downward motion,
+    /// sliding off the edge is free, a start inside blocks only motion
+    /// deeper in, and non-finite input hits nothing.
+    #[test]
+    fn cylinder_sweep_start_contacts() {
+        let (r, h, tol) = (55.0f64, 122.0f64, 1.0e-3f64);
+        let c = DVec3::ZERO;
+        let down = DVec3::new(0.0, 0.0, -10.0);
+        // On the cap, from the axis out to the rim (inside the radius by
+        // less than the tolerance included).
+        for x in [0.0, 20.0, r - 1.0, r - tol * 0.5, r] {
+            let hit = cylinder_sweep(DVec3::new(x, 0.0, h), down, r, h, c, tol, 1.0)
+                .unwrap_or_else(|| panic!("falls through the cap at x = {x}"));
+            assert_eq!(hit.t, 0.0, "x = {x}");
+            assert_eq!(hit.normal, DVec3::Z, "x = {x}");
+            assert!(!hit.penetrating);
+        }
+        // Just past the rim there is nothing below.
+        assert!(cylinder_sweep(DVec3::new(r + 0.01, 0.0, h), down, r, h, c, tol, 1.0).is_none());
+        // Under the bottom cap, moving up.
+        let hit = cylinder_sweep(DVec3::new(3.0, 4.0, -h), -down, r, h, c, tol, 1.0).unwrap();
+        assert_eq!((hit.t, hit.normal), (0.0, DVec3::NEG_Z));
+        // Resting on the cap, sideways and upward motion is free.
+        for d in [DVec3::X * 30.0, DVec3::Z * 5.0, DVec3::new(-7.0, 9.0, 0.0)] {
+            assert!(cylinder_sweep(DVec3::new(5.0, 5.0, h), d, r, h, c, tol, 1.0).is_none());
+        }
+        // Touching the side: inward is blocked at once, along and away free.
+        let at_side = DVec3::new(r, 0.0, 10.0);
+        let hit = cylinder_sweep(at_side, DVec3::NEG_X * 3.0, r, h, c, tol, 1.0).unwrap();
+        assert_eq!((hit.t, hit.normal), (0.0, DVec3::X));
+        assert!(cylinder_sweep(at_side, DVec3::Y * 3.0, r, h, c, tol, 1.0).is_none());
+        assert!(cylinder_sweep(at_side, DVec3::X * 3.0, r, h, c, tol, 1.0).is_none());
+        assert!(cylinder_sweep(at_side, down, r, h, c, tol, 1.0).is_none());
+        // Inside: the least-penetration face blocks motion into it only.
+        let near_side = DVec3::new(r - 2.0, 0.0, 0.0);
+        let hit = cylinder_sweep(near_side, DVec3::NEG_X, r, h, c, tol, 1.0).unwrap();
+        assert!(hit.penetrating && hit.t == 0.0 && hit.normal == DVec3::X);
+        assert!(cylinder_sweep(near_side, DVec3::X, r, h, c, tol, 1.0).is_none());
+        let near_top = DVec3::new(0.0, 0.0, h - 2.0);
+        let hit = cylinder_sweep(near_top, down, r, h, c, tol, 1.0).unwrap();
+        assert!(hit.penetrating && hit.normal == DVec3::Z);
+        assert!(cylinder_sweep(near_top, -down, r, h, c, tol, 1.0).is_none());
+        // On the axis the radial normal falls back to the motion.
+        let hit =
+            cylinder_sweep(DVec3::new(0.0, 0.0, 0.0), DVec3::Y, 1.0, 100.0, c, tol, 1.0).unwrap();
+        assert!(hit.penetrating && hit.normal == DVec3::NEG_Y);
+        // A hit beyond the limit is not reported.
+        let far = DVec3::new(-500.0, 0.0, 0.0);
+        let hit = cylinder_sweep(far, DVec3::X * 1000.0, r, h, c, tol, 1.0).unwrap();
+        assert!((hit.t - 0.445).abs() < 1.0e-12);
+        assert!(cylinder_sweep(far, DVec3::X * 1000.0, r, h, c, tol, 0.4).is_none());
+        // Hostile values.
+        for bad in [f64::NAN, f64::INFINITY] {
+            assert!(cylinder_sweep(DVec3::splat(bad), down, r, h, c, tol, 1.0).is_none());
+            assert!(cylinder_sweep(far, DVec3::splat(bad), r, h, c, tol, 1.0).is_none());
+            assert!(cylinder_sweep(far, down, r, h, DVec3::splat(bad), tol, 1.0).is_none());
+            // A non-finite size never panics (`add_cylinder_mesh` refuses
+            // one before it gets here).
+            let _ = cylinder_sweep(far, DVec3::X * 1000.0, bad, h, c, tol, 1.0);
+            assert!(cylinder_ray(DVec3::splat(bad), down, r, h, c).is_none());
+        }
+        assert!(cylinder_sweep(far, DVec3::X * 1000.0, -1.0, h, c, tol, 1.0).is_none());
+        assert!(cylinder_sweep(far, DVec3::ZERO, r, h, c, tol, 1.0).is_none());
     }
 
     #[test]

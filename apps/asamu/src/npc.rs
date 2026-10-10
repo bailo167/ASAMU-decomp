@@ -10,17 +10,21 @@
 //!   NPCs;
 //! - renders the placed skinned actors (villagers, Maddie, the worm) from the
 //!   importer's skeletal glTF output with Bevy skins and an `AnimationPlayer`
-//!   ([`skins`]): the component's own looping animation when the scene
-//!   provides it, the worm's animation from its state machine, a stand-in
-//!   idle otherwise;
+//!   ([`skins`]): each actor follows the simulation's animation node (its
+//!   component's own sequence, or the one Matinee's animation tracks set),
+//!   the worm its state machine, a stand-in idle otherwise; look-at controls
+//!   turn the head and eye bones towards the player (`SeqAct_SetLookAtTarget`
+//!   actors) or the worm's aim;
 //! - renders the first-person hands (`PlayerHand`) on an overlay camera with
 //!   the original's mesh FOV (70°) and picks the hand animation from the
 //!   player's state ([`hands`]);
 //! - draws state gizmos for collectibles, story interactables, glow flowers
 //!   and the worm (F10, with the other level gizmos).
 //!
-//! Needs `asamu-import levels` and `asamu-import skeletal` output; without the
-//! skeletal manifest nothing is rendered (the simulation still runs).
+//! Needs `asamu-import levels` and `asamu-import skeletal` output (and
+//! `asamu-import matinee` for the actors' own animations, notifies and
+//! look-at controls); without the skeletal manifest nothing is rendered (the
+//! simulation still runs).
 
 mod hands;
 mod skins;
@@ -40,21 +44,29 @@ pub struct NpcPlugin;
 
 impl Plugin for NpcPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NpcLoad>().add_systems(
-            Update,
-            (
-                begin_npc_load,
-                finish_npc_load,
-                skins::spawn_skins,
-                skins::attach_animations,
-                skins::update_skin_animations,
-                hands::spawn_hands,
-                hands::tag_overlay_meshes,
-                hands::update_hands,
-                draw_npc_gizmos,
+        app.init_resource::<NpcLoad>()
+            .add_systems(
+                Update,
+                (
+                    begin_npc_load,
+                    finish_npc_load,
+                    skins::spawn_skins,
+                    skins::attach_animations,
+                    skins::update_skin_animations,
+                    hands::spawn_hands,
+                    hands::tag_overlay_meshes,
+                    hands::update_hands,
+                    draw_npc_gizmos,
+                )
+                    .chain(),
             )
-                .chain(),
-        );
+            // Look-at after the animation pose, before transforms propagate.
+            .add_systems(
+                PostUpdate,
+                skins::apply_look_at
+                    .after(bevy::app::AnimationSystems)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 

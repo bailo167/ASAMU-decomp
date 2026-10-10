@@ -216,9 +216,25 @@ impl RenderLevels {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LevelBsp;
 
-/// Marker on every spawned level light.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct LevelLight;
+/// Every spawned level light: its UE3 actor (plan level and actor slot, so
+/// Kismet's moves, toggles, streaming and Matinee property tracks find it)
+/// and the placed values the render values were mapped from.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct LevelLight {
+    /// Plan level of the owning actor (see [`LevelEntity::level`]).
+    pub level: usize,
+    /// Owning actor slot.
+    pub actor_slot: usize,
+    /// Placed `Brightness`.
+    pub brightness: f32,
+    /// Placed `Radius` (UU), if any.
+    pub radius: Option<f32>,
+    /// Render intensity mapped from the placed values (lumens; lux for a
+    /// directional light).
+    pub intensity: f32,
+    /// Render range (point and spot lights; 0 otherwise).
+    pub range: f32,
+}
 
 /// Which texture of a material an image fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,6 +401,7 @@ fn poll_planning(
     };
     log_plan(&plan);
     let settings = level.settings;
+    let mapping = level.options.lights;
     let summary = spawn_plan(
         &mut commands,
         &asset_server,
@@ -393,6 +410,7 @@ fn poll_planning(
         &mut users,
         &plan,
         &settings,
+        &mapping,
     );
     commands.insert_resource(RenderLevels::of_plan(&plan, level.force_all_sublevels));
     ambient.brightness = plan.ambient;
@@ -607,6 +625,32 @@ fn standard_material(
     }
 }
 
+/// The scene light of each render light of `plan` (same order: the plan maps
+/// the scene's lights in order and drops the ones without effect and the
+/// ambient ones, as here). Empty when the mapping disagrees with the plan.
+fn plan_light_sources<'a>(
+    plan: &'a LevelPlan,
+    mapping: &asamu_assets::LightMapping,
+) -> Vec<&'a asamu_assets::scene::SceneLight> {
+    let sources: Vec<&asamu_assets::scene::SceneLight> = plan
+        .scene
+        .lights
+        .iter()
+        .filter(|l| {
+            matches!(
+                asamu_assets::lighting::map_light(l, mapping, plan.scale),
+                Some(r) if !matches!(r.kind, RenderLightKind::Ambient { .. })
+            )
+        })
+        .collect();
+    if sources.len() == plan.lights.len() {
+        sources
+    } else {
+        Vec::new()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_plan(
     commands: &mut Commands,
     server: &AssetServer,
@@ -615,6 +659,7 @@ fn spawn_plan(
     users: &mut TextureUsers,
     plan: &LevelPlan,
     settings: &RenderSettings,
+    mapping: &asamu_assets::LightMapping,
 ) -> LevelSummary {
     let mut tracked: Vec<UntypedAssetId> = Vec::new();
     // One mesh handle per distinct primitive.
@@ -746,12 +791,38 @@ fn spawn_plan(
         .collect();
     let radius = plan.render_radius();
     let mut light_count = 0usize;
+    let sources = plan_light_sources(plan, mapping);
     for (i, l) in plan.lights.iter().enumerate() {
         let pos = to_render(l.location_ue);
         let dir = bevy_vec(ue_dir_to_bevy(l.direction_ue));
         let color = Color::srgb_u8(l.color_srgb[0], l.color_srgb[1], l.color_srgb[2]);
         let shadows = shadowed.contains(&i);
-        let slot = LevelLight;
+        let (intensity, range) = match l.kind {
+            RenderLightKind::Point { lumens, range }
+            | RenderLightKind::Spot { lumens, range, .. } => (lumens, range),
+            RenderLightKind::Directional { lux } => (lux, 0.0),
+            RenderLightKind::Ambient { brightness } => (brightness, 0.0),
+        };
+        // Without its scene light (a mapping mismatch) the light keeps a
+        // slot nothing names (`usize::MAX`), so Kismet never touches it.
+        let slot = match sources.get(i) {
+            Some(src) => LevelLight {
+                level: src.level,
+                actor_slot: src.actor_slot,
+                brightness: src.brightness,
+                radius: src.radius,
+                intensity,
+                range,
+            },
+            None => LevelLight {
+                level: 0,
+                actor_slot: usize::MAX,
+                brightness: 0.0,
+                radius: None,
+                intensity,
+                range,
+            },
+        };
         match l.kind {
             RenderLightKind::Point { lumens, range } => {
                 commands.spawn((

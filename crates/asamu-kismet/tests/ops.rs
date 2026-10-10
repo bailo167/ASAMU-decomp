@@ -679,6 +679,60 @@ fn saved_state_anim_notify_worm_used_destroyed_events() {
     );
 }
 
+/// `UAnimNotify_Kismet::Notify`: only the notify's own actor's events with
+/// its name fire (instigator = the actor), and a nameless notify fires
+/// nothing — not even the events whose `NotifyName` is unset (exported as
+/// "None"; 2 such events ship in AG-BeautifulCity).
+#[test]
+fn anim_notifies_match_by_actor_and_name_and_nameless_ones_never_fire() {
+    let event = |id: usize, name: &str, npc: &str, to: usize| {
+        node(id, "Engine.SeqEvent_AnimNotify", "event")
+            .out(&[("Out", &[(to, 0)])])
+            .params(json!({"NotifyName": name}))
+            .event(json!({"originator": path(npc), "max_trigger_count": 0}))
+    };
+    let g = graph(
+        vec![
+            seq(0, &[1, 2, 3, 4, 5, 6]),
+            event(1, "Talk_1", "A", 4),
+            event(2, "None", "A", 5),
+            event(3, "Talk_1", "B", 6),
+            act(4, "asamu.SeqAct_SetMaxGrapples").params(json!({"Grapples": 1})),
+            act(5, "asamu.SeqAct_SetMaxGrapples").params(json!({"Grapples": 2})),
+            act(6, "asamu.SeqAct_SetMaxGrapples").params(json!({"Grapples": 3})),
+        ],
+        vec![
+            actor("A", "Engine.SkeletalMeshActor", "other", 4),
+            actor("B", "Engine.SkeletalMeshActor", "other", 5),
+        ],
+    );
+    let a = g.actor_by_path(&path("A")).unwrap();
+    let mut r = rt(g);
+    let mut h = Rec::default();
+    ticks(&mut r, &mut h, 1);
+    // Nameless notifies, in any spelling.
+    for name in ["None", "none", ""] {
+        r.anim_notify(a, name);
+    }
+    ticks(&mut r, &mut h, 2);
+    assert!(h.calls.is_empty(), "{:?}", h.calls);
+    assert_eq!(r.activate_count(2), 0);
+    // An unknown name fires nothing; the right one fires A's event only.
+    r.anim_notify(a, "Talk_2");
+    r.anim_notify(a, "talk_1");
+    ticks(&mut r, &mut h, 2);
+    assert_eq!(h.calls, vec!["max_grapples 1"]);
+    assert_eq!(
+        (
+            r.activate_count(1),
+            r.activate_count(2),
+            r.activate_count(3)
+        ),
+        (1, 0, 0)
+    );
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+}
+
 #[test]
 fn track_beats_pulse_on_their_interval() {
     let g = graph(
@@ -1003,11 +1057,6 @@ fn presentation_actions_emit_outputs() {
             json!({"ShakeScale": 0.5}),
         ),
         (
-            "Engine.SeqAct_PlayCameraAnim",
-            vec!["Play", "Stop"],
-            json!({"Rate": 1.0}),
-        ),
-        (
             "Engine.SeqAct_PlayMusicTrack",
             vec!["In"],
             json!({"MusicTrack": {"$struct": "MusicTrackStruct"}}),
@@ -1155,6 +1204,82 @@ fn presentation_actions_emit_outputs() {
         assert!(r.errors().is_empty(), "{class}: {:?}", r.errors());
         assert!(h.calls.is_empty(), "{class}: {:?}", h.calls);
     }
+}
+
+/// `SeqAct_PlayCameraAnim` (native `Activated`): Play wins over Stop, the
+/// output carries every play parameter, and the action does nothing without
+/// an animation or without a player among its targets.
+#[test]
+fn play_camera_anim_needs_an_animation_and_a_player_target() {
+    let action = |params: Value, target: bool| {
+        let vars: &[usize] = if target { &[3] } else { &[] };
+        node(2, "Engine.SeqAct_PlayCameraAnim", "action")
+            .inputs(&["Play", "Stop"])
+            .out(&[("Out", &[])])
+            .vars(&[("Target", Some("Targets"), vars)])
+            .params(params)
+            .auto()
+    };
+    let full = json!({"CameraAnim": {"$obj": "Pkg.Anims.Nod"}, "Rate": 2.0, "IntensityScale": 0.5,
+                      "BlendInTime": 0.1, "BlendOutTime": 0.4, "bLoop": true,
+                      "bRandomStartTime": true, "Targets": []});
+    let cam = |out: &[Output]| -> Vec<Output> {
+        out.iter()
+            .filter(|o| matches!(o, Output::CameraAnim { .. }))
+            .cloned()
+            .collect()
+    };
+    // Play, with the player as target.
+    let (r, _, out) = start_with(action(full.clone(), true), 0, vec![player(3)], vec![], 2);
+    assert_eq!(
+        cam(&out),
+        vec![Output::CameraAnim {
+            play: true,
+            anim: Some("Pkg.Anims.Nod".into()),
+            looping: true,
+            rate: 2.0,
+            scale: 0.5,
+            blend_in: 0.1,
+            blend_out: 0.4,
+            random_start: true,
+        }]
+    );
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    // Stop.
+    let (_, _, out) = start_with(action(full.clone(), true), 1, vec![player(3)], vec![], 2);
+    assert!(matches!(
+        cam(&out).as_slice(),
+        [Output::CameraAnim { play: false, anim: Some(a), .. }] if a == "Pkg.Anims.Nod"
+    ));
+    // Both inputs in one update: Play.
+    let g = graph(
+        vec![
+            seq(0, &[1, 2, 3]),
+            loaded(1, &[(2, 1), (2, 0)]),
+            action(full.clone(), true),
+            player(3),
+        ],
+        vec![],
+    );
+    let mut r = rt(g);
+    let mut h = Rec::default();
+    let out = ticks(&mut r, &mut h, 2);
+    assert!(matches!(
+        cam(&out).as_slice(),
+        [Output::CameraAnim { play: true, .. }]
+    ));
+    // No target, or no animation: nothing.
+    let (r, _, out) = start_with(action(full, false), 0, vec![], vec![], 2);
+    assert!(cam(&out).is_empty(), "{out:?}");
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
+    let (_, _, out) = start_with(
+        action(json!({"Rate": 1.0, "Targets": []}), true),
+        0,
+        vec![player(3)],
+        vec![],
+        2,
+    );
+    assert!(cam(&out).is_empty(), "{out:?}");
 }
 
 #[test]

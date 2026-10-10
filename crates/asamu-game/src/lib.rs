@@ -63,7 +63,13 @@
 //! abilities, checkpoints triggered from Kismet, streaming, story mode and
 //! Matinee movers come from the map's Kismet instead of the level-start
 //! table, and [`ScriptedTick::outputs`] carries the presentation events
-//! (audio, narration, UI, level transitions) for the app.
+//! (audio, narration, UI, level transitions) for the app. The level script
+//! also owns the player camera's animations
+//! ([`LevelScript::camera_anims`]: the gameplay script's and Kismet's
+//! `PlayCameraAnim` calls with the engine's pool and blending), routes
+//! Matinee animation, property and skeletal-control tracks to the skinned
+//! actors and the renderer, and keeps the NPC pawns' collision cylinders on
+//! their pawns.
 //!
 //! # NPCs
 //!

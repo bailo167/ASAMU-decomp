@@ -717,6 +717,93 @@ pub struct KeyedTrack {
     pub fire_backwards: bool,
 }
 
+/// One `AnimControlTrackKey`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AnimControlKey {
+    /// `StartTime`.
+    #[serde(default)]
+    pub start_time: f32,
+    /// `AnimSeqName` (`None` = no animation).
+    #[serde(default)]
+    pub sequence: Option<String>,
+    /// `AnimStartOffset`.
+    #[serde(default)]
+    pub start_offset: f32,
+    /// `AnimEndOffset`.
+    #[serde(default)]
+    pub end_offset: f32,
+    /// `AnimPlayRate`.
+    #[serde(default = "one")]
+    pub play_rate: f32,
+    /// `bLooping`.
+    #[serde(default)]
+    pub looping: bool,
+    /// `bReverse`.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl Default for AnimControlKey {
+    fn default() -> Self {
+        AnimControlKey {
+            start_time: 0.0,
+            sequence: None,
+            start_offset: 0.0,
+            end_offset: 0.0,
+            play_rate: 1.0,
+            looping: false,
+            reverse: false,
+        }
+    }
+}
+
+/// `InterpTrackAnimControl`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct AnimControlTrack {
+    /// `SlotName`.
+    #[serde(default)]
+    pub slot: Option<String>,
+    /// `AnimSets` of the track.
+    #[serde(default)]
+    pub anim_sets: Vec<String>,
+    /// Keys.
+    #[serde(default)]
+    pub keys: Vec<AnimControlKey>,
+    /// The slot weight curve (`FloatTrack`).
+    #[serde(default)]
+    pub weight: InterpCurve<f32>,
+    /// `bEnableRootMotion`.
+    #[serde(default)]
+    pub root_motion: bool,
+    /// `bSkipAnimNotifiers`.
+    #[serde(default)]
+    pub skip_notifiers: bool,
+}
+
+/// A float curve driving a named value (`InterpTrackFloatProp`,
+/// `InterpTrackSkelControlStrength`, `InterpTrackSkelControlScale`).
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct FloatPropertyTrack {
+    /// `PropertyName` / `SkelControlName`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Curve.
+    #[serde(default)]
+    pub curve: InterpCurve<f32>,
+}
+
+/// A vector curve driving a named value (`InterpTrackVectorProp`,
+/// `InterpTrackColorProp`: colour components 0–1).
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct VectorPropertyTrack {
+    /// `PropertyName`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Curve.
+    #[serde(default)]
+    pub curve: InterpCurve<[f32; 3]>,
+}
+
 /// Track contents (the classes the runtime plays; others are skipped).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -735,6 +822,18 @@ pub enum TrackData {
     Visibility(KeyedTrack),
     /// Toggle.
     Toggle(KeyedTrack),
+    /// Skeletal animation (`InterpTrackAnimControl`).
+    AnimControl(AnimControlTrack),
+    /// `InterpTrackFloatProp`.
+    FloatProperty(FloatPropertyTrack),
+    /// `InterpTrackVectorProp`.
+    VectorProperty(VectorPropertyTrack),
+    /// `InterpTrackColorProp`.
+    ColorProperty(VectorPropertyTrack),
+    /// `InterpTrackSkelControlStrength`.
+    SkelControlStrength(FloatPropertyTrack),
+    /// `InterpTrackSkelControlScale`.
+    SkelControlScale(FloatPropertyTrack),
     /// Anything else (decoded by the importer, not played here).
     #[serde(other)]
     Other,
@@ -952,6 +1051,136 @@ impl MatineeSet {
             .data
             .get(&a.interp_data.as_deref()?.to_ascii_lowercase())?;
         Some((a, d))
+    }
+}
+
+// ================================================================== coverage
+
+/// How the runtime treats a track class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackEffect {
+    /// Played by the interpreter with a game effect (movement and moving
+    /// collision, Kismet events, skeletal animation and its notifies).
+    Gameplay,
+    /// Played as a presentation effect (camera cuts, fades, sounds,
+    /// visibility and toggle keys, light and scale properties, look-at
+    /// control strengths).
+    Presentation,
+    /// Decoded but not played.
+    NotPlayed,
+}
+
+/// Counts of one track class over the level-scope actions' data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct TrackClassCoverage {
+    /// Tracks.
+    pub tracks: usize,
+    /// Tracks with at least one key.
+    pub with_keys: usize,
+    /// Tracks with keys whose group an action binds to an object (or that
+    /// sit in a director group, which needs none).
+    pub effective: usize,
+}
+
+impl Track {
+    /// How the runtime treats this track.
+    #[must_use]
+    pub fn effect(&self) -> TrackEffect {
+        match &self.data {
+            TrackData::Move(_) | TrackData::Event(_) | TrackData::AnimControl(_) => {
+                TrackEffect::Gameplay
+            }
+            TrackData::Director(_)
+            | TrackData::Sound(_)
+            | TrackData::Fade(_)
+            | TrackData::Visibility(_)
+            | TrackData::Toggle(_)
+            | TrackData::FloatProperty(_)
+            | TrackData::VectorProperty(_)
+            | TrackData::ColorProperty(_)
+            | TrackData::SkelControlStrength(_) => TrackEffect::Presentation,
+            TrackData::SkelControlScale(_) | TrackData::Other => TrackEffect::NotPlayed,
+        }
+    }
+
+    /// Number of keys (curve points or discrete keys) the runtime sees;
+    /// `None` for classes it does not model.
+    #[must_use]
+    pub fn key_count(&self) -> Option<usize> {
+        Some(match &self.data {
+            TrackData::Move(m) => {
+                m.pos.points.len()
+                    + m.euler.points.len()
+                    + m.axes.iter().map(|a| a.curve.points.len()).sum::<usize>()
+            }
+            TrackData::Event(e) => e.keys.len(),
+            TrackData::Director(d) => d.cuts.len(),
+            TrackData::Sound(t) => t.keys.len(),
+            TrackData::Fade(f) => f.curve.points.len(),
+            TrackData::Visibility(k) | TrackData::Toggle(k) => k.keys.len(),
+            TrackData::AnimControl(a) => a.keys.len(),
+            TrackData::FloatProperty(p)
+            | TrackData::SkelControlStrength(p)
+            | TrackData::SkelControlScale(p) => p.curve.points.len(),
+            TrackData::VectorProperty(p) | TrackData::ColorProperty(p) => p.curve.points.len(),
+            TrackData::Other => return None,
+        })
+    }
+}
+
+impl MatineeSet {
+    /// Per track class (short name) and effect: how many tracks the
+    /// level-scope actions' data hold, how many carry keys, and how many of
+    /// those act on something (a bound object or the director group). Data
+    /// shared by several actions is counted once.
+    #[must_use]
+    pub fn track_coverage(&self) -> BTreeMap<(TrackEffect, String), TrackClassCoverage> {
+        let mut out: BTreeMap<(TrackEffect, String), TrackClassCoverage> = BTreeMap::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for action in self.actions.values() {
+            let Some(path) = action.interp_data.as_deref().map(str::to_ascii_lowercase) else {
+                continue;
+            };
+            let Some(data) = self.data.get(&path) else {
+                continue;
+            };
+            if !seen.insert(path) {
+                continue;
+            }
+            // Bound by any action that uses this data.
+            let bound = |group: &InterpGroup| {
+                group.kind == "director"
+                    || self.actions.values().any(|a| {
+                        a.interp_data
+                            .as_deref()
+                            .is_some_and(|p| p.eq_ignore_ascii_case(&data.path))
+                            && a.bindings.iter().any(|b| {
+                                (b.label.eq_ignore_ascii_case(&group.name)
+                                    || b.group
+                                        .as_deref()
+                                        .is_some_and(|n| n.eq_ignore_ascii_case(&group.name)))
+                                    && b.targets.iter().any(|t| t.object.is_some())
+                            })
+                    })
+            };
+            for g in &data.groups {
+                let is_bound = bound(g);
+                for t in &g.tracks {
+                    let class = t.class.rsplit('.').next().unwrap_or(&t.class).to_owned();
+                    let c = out.entry((t.effect(), class)).or_default();
+                    c.tracks += 1;
+                    let keys = t.key_count().unwrap_or(0);
+                    if keys > 0 {
+                        c.with_keys += 1;
+                        if is_bound && !t.disabled {
+                            c.effective += 1;
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1634,9 +1863,27 @@ mod tests {
         assert_eq!(d.length, 3.0);
         let tracks = &d.groups[0].tracks;
         assert!(matches!(tracks[0].data, TrackData::Move(_)));
-        assert!(matches!(tracks[1].data, TrackData::Other));
+        assert!(matches!(tracks[1].data, TrackData::AnimControl(_)));
         assert!(matches!(tracks[2].data, TrackData::Event(_)));
         assert!(set.data_of(19).is_none(), "prefab actions are skipped");
+        // Coverage: the move track has a key and a bound group; the event
+        // key too; the animation track has none.
+        let cov = set.track_coverage();
+        let get = |e: TrackEffect, c: &str| cov.get(&(e, c.to_owned())).copied().unwrap();
+        assert_eq!(
+            get(TrackEffect::Gameplay, "InterpTrackMove"),
+            TrackClassCoverage {
+                tracks: 1,
+                with_keys: 1,
+                effective: 1
+            }
+        );
+        assert_eq!(get(TrackEffect::Gameplay, "InterpTrackEvent").effective, 1);
+        assert_eq!(
+            get(TrackEffect::Gameplay, "InterpTrackAnimControl").with_keys,
+            0
+        );
+        assert_eq!(cov.len(), 3);
         assert!(
             set.add_json(b"{\"format\":\"x\",\"version\":1}", 0)
                 .is_err()

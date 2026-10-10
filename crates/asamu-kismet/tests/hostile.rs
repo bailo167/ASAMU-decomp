@@ -258,3 +258,100 @@ fn looping_playback_with_hostile_steps_is_bounded() {
         }
     });
 }
+
+/// Animation-control tracks, notify windows and camera animations with
+/// absurd values (non-finite rates and times, zero-length loops, huge
+/// steps) stay bounded and never panic.
+#[test]
+fn hostile_animation_tracks_and_camera_animations_are_bounded() {
+    use asamu_kismet::anim::update_track;
+    use asamu_kismet::camera_anim::{CameraAnim, CameraAnimPlayer, CameraAnimSet, Pov};
+    use asamu_kismet::matinee::{AnimControlKey, AnimControlTrack};
+    within(20, || {
+        let key = |t: f32, rate: f32, looping: bool| AnimControlKey {
+            start_time: t,
+            sequence: Some("S".into()),
+            start_offset: f32::NAN,
+            end_offset: 1.0e30,
+            play_rate: rate,
+            looping,
+            reverse: true,
+        };
+        let track = AnimControlTrack {
+            keys: vec![
+                key(0.0, 1.0e30, true),
+                key(f32::NAN, f32::INFINITY, true),
+                key(1.0, -1.0e30, false),
+            ],
+            ..AnimControlTrack::default()
+        };
+        for len in [
+            Some(0.0),
+            Some(1.0e-30),
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+            None,
+        ] {
+            for (last, new) in [
+                (0.0, 1.0e30),
+                (0.0, f32::NAN),
+                (f32::NAN, 5.0),
+                (-1.0e30, 1.0e30),
+            ] {
+                let calls = update_track(&track, 0, last, new, false, &|_| len);
+                assert!(calls.len() < 10_000, "{}", calls.len());
+            }
+        }
+        // Camera animations: hostile JSON is rejected or contained; hostile
+        // play parameters never loop or panic.
+        let mut set = CameraAnimSet::default();
+        assert!(set.add_json(b"{\"camera_anims\": 7}").is_err());
+        assert_eq!(
+            set.add_json(br#"{"camera_anims": [{"path": "A", "length": 1e39, "base_fov": null}]}"#)
+                .unwrap_or(0),
+            0
+        );
+        let anim = std::sync::Arc::new(CameraAnim {
+            path: "A".into(),
+            length: 0.0,
+            base_fov: f32::NAN,
+            move_track: None,
+            fov_track: None,
+        });
+        let mut p = CameraAnimPlayer::new();
+        for (rate, blend) in [
+            (f32::NAN, f32::NAN),
+            (1.0e30, 0.0),
+            (-1.0, -5.0),
+            (0.0, f32::INFINITY),
+        ] {
+            p.play(
+                &anim,
+                rate,
+                f32::INFINITY,
+                blend,
+                blend,
+                true,
+                true,
+                f32::NAN,
+                false,
+            );
+            p.play(&anim, rate, 1.0, blend, blend, false, true, 1.0e30, true);
+        }
+        let pov = Pov {
+            location: [0.0; 3],
+            rotation: [i32::MAX, i32::MIN, 7],
+            fov: 90.0,
+        };
+        for dt in [0.0, 1.0 / 60.0, f32::NAN, 1.0e30, -1.0] {
+            for _ in 0..100 {
+                p.advance(dt);
+                let _ = p.apply(pov);
+            }
+        }
+        p.stop_all(false);
+        p.stop_all(true);
+        p.advance(0.0);
+        assert!(p.active().is_empty());
+    });
+}

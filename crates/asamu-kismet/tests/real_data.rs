@@ -165,3 +165,139 @@ fn every_sound_action_has_its_durations() {
     }
     eprintln!("{checked} sound and narrator actions have their durations");
 }
+
+/// Coverage of the shipped Matinee tracks by the runtime (prints the table
+/// MATINEE.md quotes): every track class is modelled, and the only tracks
+/// with keys that act on something yet are not played are the
+/// skeletal-control *scale* tracks.
+#[test]
+fn matinee_track_coverage() {
+    use asamu_kismet::matinee::{TrackClassCoverage, TrackEffect};
+    use std::collections::BTreeMap;
+    let Some(dir) = converted() else {
+        eprintln!("SKIP: ASAMU_CONVERTED_DIR not set");
+        return;
+    };
+    let mut total: BTreeMap<(TrackEffect, String), TrackClassCoverage> = BTreeMap::new();
+    for map in maps(&dir) {
+        let s = load_level_scripts(&dir, &map, &[]).unwrap();
+        for (k, c) in s.matinee.track_coverage() {
+            let t = total.entry(k).or_default();
+            t.tracks += c.tracks;
+            t.with_keys += c.with_keys;
+            t.effective += c.effective;
+        }
+    }
+    if total.is_empty() {
+        eprintln!("SKIP: no converted Matinee");
+        return;
+    }
+    for ((effect, class), c) in &total {
+        println!(
+            "{effect:?} {class}: {} tracks, {} with keys, {} effective",
+            c.tracks, c.with_keys, c.effective
+        );
+    }
+    let unplayed: Vec<(&String, &TrackClassCoverage)> = total
+        .iter()
+        .filter(|((e, _), c)| *e == TrackEffect::NotPlayed && c.effective > 0)
+        .map(|((_, class), c)| (class, c))
+        .collect();
+    assert!(
+        unplayed
+            .iter()
+            .all(|(class, _)| class.as_str() == "InterpTrackSkelControlScale"),
+        "{unplayed:?}"
+    );
+    let played: usize = total
+        .iter()
+        .filter(|((e, _), _)| *e != TrackEffect::NotPlayed)
+        .map(|(_, c)| c.effective)
+        .sum();
+    assert!(played > 100, "{played}");
+}
+
+/// Every shipped `SeqAct_PlayCameraAnim` targets the player and names an
+/// animation the converted data holds (the gameplay ones of `Startup.upk` or
+/// the map's own): pulsing its Play input emits the play output with the
+/// action's parameters, pulsing Stop the stop output. 5 actions in the maps
+/// (AG-Darkcave 2, AG-StarHaven 3).
+#[test]
+fn shipped_camera_anim_actions_play_on_the_player() {
+    use asamu_kismet::camera_anim::load_camera_anims;
+    use asamu_kismet::{OpClass, Output};
+    let Some(dir) = converted() else {
+        eprintln!("SKIP: ASAMU_CONVERTED_DIR not set");
+        return;
+    };
+    if !dir.join("matinee").join("camera_anims.json").is_file() {
+        eprintln!("SKIP: no converted camera animations (run `asamu-import matinee`)");
+        return;
+    }
+    let mut total = 0usize;
+    let mut per_map = Vec::new();
+    for map in maps(&dir) {
+        let s = load_level_scripts(&dir, &map, &[]).unwrap();
+        let actions: Vec<usize> = s
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.class == OpClass::PlayCameraAnim)
+            .map(|n| n.id)
+            .collect();
+        if actions.is_empty() {
+            continue;
+        }
+        let (set, problems) = load_camera_anims(&dir, std::slice::from_ref(&map));
+        assert!(problems.is_empty(), "{map}: {problems:?}");
+        let mut rt = Runtime::new(Arc::new(s.graph), Arc::new(s.matinee));
+        let mut host = NullHost;
+        rt.tick(1.0 / 60.0, &mut host);
+        rt.take_outputs();
+        for &op in &actions {
+            for (input, want_play) in [(0usize, true), (1, false)] {
+                rt.force_input(op, input);
+                rt.tick(1.0 / 60.0, &mut host);
+                let cams: Vec<Output> = rt
+                    .take_outputs()
+                    .into_iter()
+                    .filter(|o| matches!(o, Output::CameraAnim { .. }))
+                    .collect();
+                let [
+                    Output::CameraAnim {
+                        play,
+                        anim: Some(anim),
+                        rate,
+                        scale,
+                        blend_in,
+                        blend_out,
+                        ..
+                    },
+                ] = cams.as_slice()
+                else {
+                    panic!("{map} node {op} input {input}: {cams:?}");
+                };
+                assert_eq!(*play, want_play, "{map} node {op}");
+                assert!(
+                    set.get(anim).is_some(),
+                    "{map} node {op}: animation not converted"
+                );
+                assert!(
+                    rate.is_finite() && scale.is_finite() && *blend_in >= 0.0 && *blend_out >= 0.0,
+                    "{map} node {op}"
+                );
+            }
+            total += 1;
+        }
+        per_map.push((map, actions.len()));
+    }
+    println!("SeqAct_PlayCameraAnim actions: {total} {per_map:?}");
+    // The census (a partial conversion checks the maps it has).
+    for (map, n) in &per_map {
+        match map.as_str() {
+            "AG-Darkcave" => assert_eq!(*n, 2, "{map}"),
+            "AG-StarHaven" => assert_eq!(*n, 3, "{map}"),
+            other => panic!("unexpected camera-animation action in {other}"),
+        }
+    }
+}

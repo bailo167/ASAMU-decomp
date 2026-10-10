@@ -30,8 +30,18 @@
 //! Random choices use [`Rng`] (SplitMix64, ours), seeded per actor; the
 //! original's random stream is not reproducible.
 //!
-//! Conventions: UE3 axes and UU (see the crate docs). The NPC pawns are not
-//! collision for the player here (TENTATIVE gap; the original's pawns block).
+//! Skinned actors ([`SkinnedActorDef`]) also carry simulation state
+//! ([`SkinnedAnimState`]): their own sequence node ticks and fires its
+//! animation notifies ([`crate::anim`]; Kismet `SeqEvent_AnimNotify`, sound
+//! notifies), Matinee's animation tracks drive a slot node, and
+//! `SeqAct_SetLookAtTarget` and Matinee's skeletal-control tracks set the
+//! look-at offsets and strengths the renderer uses.
+//!
+//! Conventions: UE3 axes and UU (see the crate docs). The NPC pawns'
+//! collision cylinders ([`PawnCollisionDef`], [`NpcRuntime::pawn_cylinders`])
+//! block the player through the collision scene
+//! ([`crate::collision::CollisionScene::add_cylinder_mesh`]); the game places
+//! them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,6 +49,7 @@ use glam::{DVec2, DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::anim::{NotifyDef, NotifyKind, SequenceInfo, SequenceNode};
 use crate::gameplay::Rng;
 use crate::objects::{LATENT_WAKE_FRACTION, ObjectEvent};
 use crate::scene::{
@@ -543,8 +554,8 @@ pub struct SkinnedComponent {
 
 /// The `AnimNodeSequence` a component plays at level start (`AnimSeqName`,
 /// `bLooping`, `bPlaying`, `CurrentTime`, `Rate`). Read from the optional
-/// component field `animation` of the scene JSON (not written by the current
-/// importer: an integration item, NPCS.md).
+/// component field `animation` of the scene JSON, else from the importer's
+/// `matinee/<map>.actors.json` (`asamu-import matinee`; NPCS.md §6).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnimHint {
     /// `AnimSeqName`.
@@ -742,8 +753,8 @@ pub struct FoliageDef {
 pub enum SkinnedDrive {
     /// Loops the component's own animation node (villagers at rest).
     Ambient,
-    /// Driven by a Matinee (`SeqAct_Interp` references it); Matinee animation
-    /// tracks are not imported yet.
+    /// Driven by a Matinee (`SeqAct_Interp` references it): its animation
+    /// tracks pose it through [`NpcRuntime::set_anim_position`].
     Matinee,
 }
 
@@ -763,6 +774,109 @@ pub struct SkinnedActorDef {
     pub drive: SkinnedDrive,
     /// Its skeletal mesh components.
     pub components: Vec<SkinnedComponent>,
+}
+
+/// A `SkelControlLookAt` of a skinned actor's anim tree (the importer's
+/// `<map>.actors.json`, `asamu-import matinee`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LookAtControlDef {
+    /// `ControlName`.
+    pub control: String,
+    /// Bone of the control's list.
+    #[serde(default)]
+    pub bone: Option<String>,
+    /// `LookAtAxis` (`AXIS_X`, ...).
+    #[serde(default)]
+    pub look_at_axis: String,
+    /// `UpAxis`.
+    #[serde(default)]
+    pub up_axis: String,
+    /// `bInvertLookAtAxis`.
+    #[serde(default)]
+    pub invert_look_at_axis: bool,
+    /// `bInvertUpAxis`.
+    #[serde(default)]
+    pub invert_up_axis: bool,
+    /// `bEnableLimit`.
+    #[serde(default)]
+    pub enable_limit: bool,
+    /// `bLimitBasedOnRefPose`.
+    #[serde(default)]
+    pub limit_based_on_ref_pose: bool,
+    /// `MaxAngle`, degrees.
+    #[serde(default)]
+    pub max_angle: f32,
+    /// `OuterMaxAngle`, degrees.
+    #[serde(default)]
+    pub outer_max_angle: f32,
+    /// `DeadZoneAngle`, degrees.
+    #[serde(default)]
+    pub dead_zone_angle: f32,
+    /// `bAllowRotationX/Y/Z`.
+    #[serde(default = "all_axes")]
+    pub allow_rotation: [bool; 3],
+    /// `AllowRotationSpace`.
+    #[serde(default)]
+    pub allow_rotation_space: String,
+    /// `TargetLocationInterpSpeed`.
+    #[serde(default)]
+    pub target_interp_speed: f32,
+    /// `ControlStrength` at level start.
+    #[serde(default = "one")]
+    pub control_strength: f32,
+    /// `BlendInTime`, s.
+    #[serde(default)]
+    pub blend_in_time: f32,
+    /// `BlendOutTime`, s.
+    #[serde(default)]
+    pub blend_out_time: f32,
+}
+
+fn all_axes() -> [bool; 3] {
+    [true; 3]
+}
+
+/// What drives an actor's look-at controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LookAtDriver {
+    /// `SkeletalMeshActorMATWithFollowCollision.Tick`: the head controls aim
+    /// at the player pawn's location plus the head offset, the eye controls
+    /// plus the eye offset (CONFIRMED (src); NPCS.md §6).
+    Player,
+    /// `ASAMUNPC_WormPawn.SetLookAtTarget`: all four controls aim at the
+    /// worm controller's aim (CONFIRMED (src)).
+    WormAim,
+}
+
+/// The look-at setup of a skinned actor or the worm.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LookAtDef {
+    /// Actor id.
+    pub id: u32,
+    /// Driver.
+    pub driver: LookAtDriver,
+    /// Head control names (`headLookAtControlNames`; the worm's four).
+    pub head: Vec<String>,
+    /// Eye control names (`eyesLookAtControlNames`).
+    pub eyes: Vec<String>,
+    /// The tree's look-at controls (all of them, by name).
+    pub controls: Vec<LookAtControlDef>,
+}
+
+/// An NPC pawn's collision cylinder: it blocks the player (the pawn's
+/// collision type becomes block-all-but-weapons at begin play, so
+/// zero-extent traces such as the grapple pass through; CONFIRMED (src,
+/// `ASAMUNPC_Pawn`)).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PawnCollisionDef {
+    /// Actor id.
+    pub id: u32,
+    /// `CollisionRadius`, UU (the placed cylinder component's, else the
+    /// template's).
+    pub radius: f32,
+    /// `CollisionHeight` (half height), UU.
+    pub half_height: f32,
 }
 
 /// Every NPC-related definition of a loaded map (all levels).
@@ -790,11 +904,46 @@ pub struct NpcScene {
     pub skinned: Vec<SkinnedActorDef>,
     /// Object name (lower case) → actor id, per level, for Kismet references.
     pub names: BTreeMap<String, u32>,
+    /// Sequence timing and notifies by lower-case mesh path and lower-case
+    /// sequence name (from the skeletal manifest and the importer's
+    /// `anim_notifies.json`; empty without them).
+    #[serde(default)]
+    pub anims: BTreeMap<String, BTreeMap<String, SequenceInfo>>,
+    /// Look-at setups (skinned look-at actors, the worm).
+    #[serde(default)]
+    pub look_at: Vec<LookAtDef>,
+    /// NPC pawn collision cylinders.
+    #[serde(default)]
+    pub pawn_collision: Vec<PawnCollisionDef>,
     /// Non-fatal problems.
     pub warnings: Vec<String>,
 }
 
 impl NpcScene {
+    /// The timing and notifies of `sequence` on `mesh` (case-insensitive;
+    /// a mesh path with the map package prefix also matches the bare path).
+    #[must_use]
+    pub fn sequence_info(&self, mesh: &str, sequence: &str) -> Option<&SequenceInfo> {
+        let key = mesh.to_ascii_lowercase();
+        let seqs = self.anims.get(&key).or_else(|| {
+            key.split_once('.')
+                .and_then(|(_, rest)| self.anims.get(rest))
+        })?;
+        seqs.get(&sequence.to_ascii_lowercase())
+    }
+
+    /// Index of skinned actor `id` in [`Self::skinned`].
+    #[must_use]
+    pub fn skinned_index(&self, id: u32) -> Option<usize> {
+        self.skinned.iter().position(|s| s.id == id)
+    }
+
+    /// The look-at setup of actor `id`.
+    #[must_use]
+    pub fn look_at_of(&self, id: u32) -> Option<&LookAtDef> {
+        self.look_at.iter().find(|l| l.id == id)
+    }
+
     /// Actor id of an object path or name (Kismet variable values), searched
     /// case-insensitively by object name.
     #[must_use]
@@ -960,15 +1109,20 @@ pub fn load_npc_scene(
     opts: &LoadOptions,
 ) -> NpcScene {
     let mut out = NpcScene::default();
+    let mut names = Vec::new();
     for (i, level) in levels.iter().enumerate().take(64) {
         let Ok(index) = u8::try_from(i) else {
             break;
         };
         match read_npc_scene(source, &level.name, opts) {
-            Ok(scene) => collect_npcs(&mut out, &scene, index, level.offset),
+            Ok(scene) => {
+                collect_npcs(&mut out, &scene, index, level.offset);
+                names.push((index, level.name.clone()));
+            }
             Err(e) => out.warnings.push(format!("level {}: {e}", level.name)),
         }
     }
+    attach_extras(&mut out, source, &names, opts);
     out
 }
 
@@ -985,6 +1139,7 @@ pub fn load_npc_scene_for_map(
     let main = read_npc_scene(source, map, opts)?;
     let mut out = NpcScene::default();
     collect_npcs(&mut out, &main, 0, Vec3::ZERO);
+    let mut names = vec![(0u8, map.to_owned())];
     let mut index: u8 = 1;
     for s in &main.streaming_levels {
         let Some(pkg) = s.package_name.as_deref() else {
@@ -1004,12 +1159,277 @@ pub fn load_npc_scene_for_map(
                     Vec3::ZERO
                 };
                 collect_npcs(&mut out, &scene, index, offset);
+                names.push((index, pkg.to_owned()));
                 index = index.saturating_add(1);
             }
             Err(e) => out.warnings.push(format!("streaming level {pkg}: {e}")),
         }
     }
+    attach_extras(&mut out, source, &names, opts);
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Skinned actors' animation data (`asamu-import matinee` extras, skeletal
+// manifest): ambient sequence nodes, look-at controls, notifies.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ActorsFileJson {
+    #[serde(default)]
+    format: String,
+    #[serde(default)]
+    anim_nodes: Vec<AnimNodeJson>,
+    #[serde(default)]
+    look_at_controls: Vec<LookAtControlJson>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AnimNodeJson {
+    #[serde(default)]
+    actor: String,
+    #[serde(default)]
+    component: String,
+    #[serde(default)]
+    sequence: Option<String>,
+    #[serde(default)]
+    looping: bool,
+    #[serde(default)]
+    playing: bool,
+    #[serde(default)]
+    start_time: f32,
+    #[serde(default = "one")]
+    rate: f32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LookAtControlJson {
+    #[serde(default)]
+    actor: String,
+    #[serde(flatten)]
+    control: LookAtControlDef,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct AnimNotifiesJson {
+    #[serde(default)]
+    notifies: Vec<AnimNotifyJson>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AnimNotifyJson {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    class: String,
+    #[serde(default)]
+    notify_name: Option<String>,
+    #[serde(default)]
+    sound_cue: Option<String>,
+    #[serde(default)]
+    follow_actor: bool,
+    #[serde(default)]
+    ignore_if_actor_hidden: bool,
+    #[serde(default)]
+    bone: Option<String>,
+    #[serde(default = "one")]
+    volume: f32,
+    #[serde(default = "one")]
+    pitch: f32,
+    #[serde(default = "one")]
+    percent_to_play: f32,
+}
+
+/// `format` of the importer's `<map>.actors.json`.
+pub const ACTORS_FORMAT: &str = "asamu-matinee-actors";
+
+fn read_optional<T: serde::de::DeserializeOwned + Default>(
+    source: &dyn DataSource,
+    path: &str,
+    opts: &LoadOptions,
+    warnings: &mut Vec<String>,
+) -> Option<T> {
+    let data = source.read(path, opts.max_file_bytes).ok()?;
+    match serde_json::from_slice(&data) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            warnings.push(format!("{path}: {e}"));
+            None
+        }
+    }
+}
+
+/// What a notify object does (`anim_notifies.json` entry; footsteps and
+/// other classes are not acted on).
+fn notify_kind(n: &AnimNotifyJson) -> NotifyKind {
+    let class = n.class.rsplit('.').next().unwrap_or(&n.class);
+    if class.eq_ignore_ascii_case("AnimNotify_Kismet") {
+        // A notify without a name (`NAME_None`) does nothing.
+        match n
+            .notify_name
+            .as_deref()
+            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("None"))
+        {
+            Some(name) => NotifyKind::Kismet {
+                name: name.to_owned(),
+            },
+            None => NotifyKind::Other {
+                what: n.class.clone(),
+            },
+        }
+    } else if class.eq_ignore_ascii_case("AnimNotify_Sound")
+        && let Some(cue) = &n.sound_cue
+    {
+        let finite = |v: f32| if v.is_finite() { v } else { 1.0 };
+        NotifyKind::Sound {
+            cue: cue.clone(),
+            follow_actor: n.follow_actor,
+            bone: n.bone.clone(),
+            volume: finite(n.volume),
+            pitch: finite(n.pitch),
+            percent_to_play: finite(n.percent_to_play),
+            ignore_if_hidden: n.ignore_if_actor_hidden,
+        }
+    } else {
+        NotifyKind::Other {
+            what: n.class.clone(),
+        }
+    }
+}
+
+/// Reads the optional extras of the levels `(level index, package)`: the
+/// importer's `matinee/<level>.actors.json` (ambient sequence nodes fill
+/// components without an `animation`, look-at controls join the actors'
+/// [`LookAtDef`]s), and the skeletal manifest with `matinee/anim_notifies.json`
+/// for the sequences the skinned actors and worms use. Missing files are
+/// normal (older conversions); a malformed one is a warning.
+fn attach_extras(
+    out: &mut NpcScene,
+    source: &dyn DataSource,
+    levels: &[(u8, String)],
+    opts: &LoadOptions,
+) {
+    let mut warnings = Vec::new();
+    for (index, name) in levels {
+        let path = format!("matinee/{name}.actors.json");
+        let Some(file) = read_optional::<ActorsFileJson>(source, &path, opts, &mut warnings) else {
+            continue;
+        };
+        if file.format != ACTORS_FORMAT {
+            warnings.push(format!("{path}: unsupported format {}", file.format));
+            continue;
+        }
+        let in_level = |id: u32| (id >> 16) == u32::from(*index);
+        for n in &file.anim_nodes {
+            let Some(seq) = n.sequence.clone().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let actor = object_name(&n.actor);
+            let Some(def) = out
+                .skinned
+                .iter_mut()
+                .find(|d| in_level(d.id) && d.name.eq_ignore_ascii_case(actor))
+            else {
+                continue;
+            };
+            if let Some(c) = def
+                .components
+                .iter_mut()
+                .find(|c| c.name.eq_ignore_ascii_case(&n.component))
+                && c.animation.is_none()
+                && n.start_time.is_finite()
+                && n.rate.is_finite()
+            {
+                c.animation = Some(AnimHint {
+                    sequence: seq,
+                    looping: n.looping,
+                    playing: n.playing,
+                    start_time: n.start_time,
+                    rate: n.rate,
+                });
+            }
+        }
+        for c in &file.look_at_controls {
+            let actor = object_name(&c.actor);
+            let Some(id) = out
+                .skinned
+                .iter()
+                .find(|d| in_level(d.id) && d.name.eq_ignore_ascii_case(actor))
+                .map(|d| d.id)
+                .or_else(|| {
+                    out.worms
+                        .iter()
+                        .find(|w| in_level(w.id) && w.name.eq_ignore_ascii_case(actor))
+                        .map(|w| w.id)
+                })
+            else {
+                continue;
+            };
+            if let Some(l) = out.look_at.iter_mut().find(|l| l.id == id)
+                && !l.controls.iter().any(|x| x.control == c.control.control)
+            {
+                l.controls.push(c.control.clone());
+            }
+        }
+    }
+    // Sequence data for the meshes the skinned actors and worms use.
+    let meshes: BTreeSet<String> = out
+        .skinned
+        .iter()
+        .flat_map(|d| d.components.iter())
+        .chain(out.worms.iter().flat_map(|w| w.meshes.iter()))
+        .map(|c| c.mesh.to_ascii_lowercase())
+        .collect();
+    if !meshes.is_empty()
+        && let Ok(index) = SkeletalIndex::load(source, opts)
+    {
+        let names: BTreeMap<String, NotifyKind> = read_optional::<AnimNotifiesJson>(
+            source,
+            "matinee/anim_notifies.json",
+            opts,
+            &mut warnings,
+        )
+        .unwrap_or_default()
+        .notifies
+        .iter()
+        .map(|n| (n.path.to_ascii_lowercase(), notify_kind(n)))
+        .collect();
+        for mesh in meshes {
+            let Some(info) = index.get(&mesh) else {
+                continue;
+            };
+            let seqs = out.anims.entry(mesh).or_default();
+            for a in &info.animations {
+                let notifies = a
+                    .notifies
+                    .iter()
+                    .filter(|n| n.time.is_finite())
+                    .map(|n| NotifyDef {
+                        time: n.time,
+                        duration: if n.duration.is_finite() {
+                            n.duration
+                        } else {
+                            0.0
+                        },
+                        kind: n
+                            .path
+                            .as_deref()
+                            .and_then(|p| names.get(&p.to_ascii_lowercase()).cloned())
+                            .unwrap_or_else(|| NotifyKind::Other {
+                                what: n.path.clone().unwrap_or_default(),
+                            }),
+                    })
+                    .collect();
+                seqs.entry(a.sequence.to_ascii_lowercase())
+                    .or_insert(SequenceInfo {
+                        length: a.length,
+                        rate_scale: a.rate_scale,
+                        notifies,
+                    });
+            }
+        }
+    }
+    out.warnings.extend(warnings);
 }
 
 fn has_class(actor: &NpcActorJson, class: &str) -> bool {
@@ -1089,6 +1509,28 @@ fn skinned_components(actor: &NpcActorJson, offset: Vec3) -> Vec<SkinnedComponen
         })
         .collect()
 }
+
+/// The pawn's collision cylinder: its placed `CylinderComponent` (radius,
+/// half height), else `default` (the class template's).
+fn pawn_collision(actor: &NpcActorJson, id: u32, default: (f32, f32)) -> PawnCollisionDef {
+    let (radius, half_height) = actor
+        .components
+        .iter()
+        .filter(|c| c.kind == "cylinder")
+        .find_map(|c| c.cylinder)
+        .filter(|[r, h]| r.is_finite() && h.is_finite() && *r > 0.0 && *h > 0.0)
+        .map_or(default, |[r, h]| (r, h));
+    PawnCollisionDef {
+        id,
+        radius,
+        half_height,
+    }
+}
+
+/// The worm pawn's look-at controls (`ASAMUNPC_WormPawn.PostInitAnimTree`
+/// finds these four by name; CONFIRMED (src)).
+pub const WORM_LOOK_AT_CONTROLS: [&str; 4] =
+    ["Spine4", "Spine_45_LookAT", "EyeLookat", "HeadLookat"];
 
 fn color_param(params: &BTreeMap<String, Value>, name: &str, default: [u8; 4]) -> [u8; 4] {
     let Some(m) = param(params, name).and_then(Value::as_object) else {
@@ -1180,6 +1622,21 @@ fn collect_npcs(out: &mut NpcScene, scene: &NpcSceneFile, level: u8, offset: Vec
                 params: WormParams::ORIGINAL,
                 meshes: skinned_components(a, offset),
             });
+            out.pawn_collision.push(pawn_collision(
+                a,
+                id,
+                (NPC_COLLISION_RADIUS, NPC_COLLISION_HALF_HEIGHT),
+            ));
+            out.look_at.push(LookAtDef {
+                id,
+                driver: LookAtDriver::WormAim,
+                head: WORM_LOOK_AT_CONTROLS
+                    .iter()
+                    .map(|c| (*c).to_owned())
+                    .collect(),
+                eyes: Vec::new(),
+                controls: Vec::new(),
+            });
         } else if has_class(a, "asamu.ASAMUWormScreamVolume")
             || has_class(a, "asamu.ASAMUWormShadowVolume")
         {
@@ -1216,6 +1673,11 @@ fn collect_npcs(out: &mut NpcScene, scene: &NpcSceneFile, level: u8, offset: Vec
                 rotation: a.rotation,
                 meshes: skinned_components(a, offset),
             });
+            out.pawn_collision.push(pawn_collision(
+                a,
+                id,
+                (NPC_COLLISION_RADIUS, NPC_COLLISION_HALF_HEIGHT),
+            ));
         } else if has_class(a, "asamu.ASAMUNPC_VillagerPawn") {
             let scripted_path = object_list(p, "scriptedPath")
                 .iter()
@@ -1236,6 +1698,11 @@ fn collect_npcs(out: &mut NpcScene, scene: &NpcSceneFile, level: u8, offset: Vec
                 scripted_path,
                 meshes: skinned_components(a, offset),
             });
+            out.pawn_collision.push(pawn_collision(
+                a,
+                id,
+                (VILLAGER_COLLISION_RADIUS, VILLAGER_COLLISION_HALF_HEIGHT),
+            ));
         } else if a.kind == "collectible" {
             out.collectibles.push(CollectibleDef {
                 id,
@@ -1316,6 +1783,17 @@ fn collect_npcs(out: &mut NpcScene, scene: &NpcSceneFile, level: u8, offset: Vec
             });
         } else {
             let components = skinned_components(a, offset);
+            let head = object_list(p, "headLookAtControlNames");
+            let eyes = object_list(p, "eyesLookAtControlNames");
+            if !components.is_empty() && (!head.is_empty() || !eyes.is_empty()) {
+                out.look_at.push(LookAtDef {
+                    id,
+                    driver: LookAtDriver::Player,
+                    head,
+                    eyes,
+                    controls: Vec::new(),
+                });
+            }
             if !components.is_empty() {
                 out.skinned.push(SkinnedActorDef {
                     id,
@@ -1384,6 +1862,22 @@ struct SkelSequenceJson {
     length: f32,
     #[serde(default = "one")]
     rate_scale: f32,
+    /// `(time, notify object path, comment, duration)`.
+    #[serde(default)]
+    notifies: Vec<(f32, Option<String>, String, f32)>,
+}
+
+/// One notify of a converted sequence (skeletal manifest).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SkelNotify {
+    /// `Time`, s.
+    pub time: f32,
+    /// The notify object's path (`None` when unset).
+    pub path: Option<String>,
+    /// The editor `Comment`.
+    pub comment: String,
+    /// `Duration`, s.
+    pub duration: f32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1409,6 +1903,9 @@ pub struct SkeletalAnimInfo {
     pub length: f32,
     /// `RateScale`.
     pub rate_scale: f32,
+    /// `Notifies`.
+    #[serde(default)]
+    pub notifies: Vec<SkelNotify>,
 }
 
 /// One converted skeletal mesh (`skeletal/manifest.json` of `asamu-import
@@ -1505,6 +2002,17 @@ impl SkeletalIndex {
                         } else {
                             1.0
                         },
+                        notifies: s
+                            .notifies
+                            .iter()
+                            .take(1024)
+                            .map(|(time, path, comment, duration)| SkelNotify {
+                                time: *time,
+                                path: path.clone(),
+                                comment: comment.clone(),
+                                duration: *duration,
+                            })
+                            .collect(),
                     })
                 })
                 .collect();
@@ -1652,6 +2160,29 @@ pub enum NpcEvent {
     GlowFlowerGlow {
         /// Flower actor id.
         id: u32,
+    },
+    /// An `AnimNotify_Kismet` of a skinned actor's own animation fired
+    /// (every `SeqEvent_AnimNotify` of the actor with this name is checked;
+    /// Matinee-driven notifies reach Kismet inside the Matinee update
+    /// instead).
+    AnimNotify {
+        /// Actor id.
+        actor: u32,
+        /// `NotifyName`.
+        name: String,
+    },
+    /// An `AnimNotify_Sound` fired (play the cue at the actor or its bone).
+    AnimSound {
+        /// Actor id.
+        actor: u32,
+        /// Sound cue path.
+        cue: String,
+        /// `VolumeMultiplier`.
+        volume: f32,
+        /// `PitchMultiplier`.
+        pitch: f32,
+        /// `BoneName`, if any.
+        bone: Option<String>,
     },
 }
 
@@ -3372,11 +3903,61 @@ pub struct NpcRuntime {
     pub backpack: BackpackState,
     /// Time-trial game (collectibles hidden and non-colliding).
     pub time_trial: bool,
+    /// Skinned actors' animation and look-at state (same order as
+    /// `NpcScene::skinned`).
+    #[serde(default)]
+    pub skinned: Vec<SkinnedAnimState>,
     /// Per story item: its children (`linkedInteractables` + children that
     /// registered with it at begin play), indices.
     children: Vec<Vec<usize>>,
     foliage_grid: FoliageGrid,
+    /// Draws for `AnimNotify_Sound.PercentToPlay` (ours).
+    #[serde(default)]
+    notify_rng: Rng,
 }
+
+/// `SeqAct_SetLookAtTarget` state of a look-at actor.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LookAtState {
+    /// The stored target (the original's tick never reads it, NPCS.md §6).
+    pub target: Option<u32>,
+    /// `lookAtOffset` added to the player pawn's location for the head.
+    pub head_offset: Vec3,
+    /// `eyesLookAtOffset` for the eyes.
+    pub eyes_offset: Vec3,
+}
+
+/// A skinned actor's animation, skeletal-control and look-at state.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SkinnedAnimState {
+    /// Its first skeletal component's own sequence node (ambient actors),
+    /// ticking every frame.
+    pub ambient: Option<SequenceNode>,
+    /// The slot node Matinee's `SetAnimPosition` drives, once a Matinee has
+    /// animated the actor (it then holds the pose Matinee left).
+    pub matinee: Option<SequenceNode>,
+    /// Control strengths Matinee set (`SetSkelControlStrength`), by name.
+    pub controls: BTreeMap<String, f32>,
+    /// Look-at offsets.
+    pub look_at: LookAtState,
+}
+
+impl SkinnedAnimState {
+    /// The node that poses the mesh: Matinee's once used, else the ambient
+    /// one.
+    #[must_use]
+    pub fn current(&self) -> Option<&SequenceNode> {
+        self.matinee.as_ref().or(self.ambient.as_ref())
+    }
+}
+
+/// Seed of the notify draws (ours).
+const NOTIFY_SEED: u64 = 0x4E4F_5449_4659_0001;
+
+/// The stock skeletal actor class whose `SetAnimPosition` script event
+/// drives the component's own `AnimNodeSequence` (its `...MAT` subclasses
+/// override the event with the native slot path).
+pub const PLAIN_SKELETAL_ACTOR_CLASS: &str = "Engine.SkeletalMeshActor";
 
 /// SplitMix-style seed mixing per actor (ours).
 fn actor_seed(seed: u64, id: u32) -> u64 {
@@ -3431,9 +4012,276 @@ impl NpcRuntime {
             foliage_touching: vec![false; scene.foliage.len()],
             backpack: BackpackState::default(),
             time_trial,
+            skinned: scene
+                .skinned
+                .iter()
+                .map(|d| SkinnedAnimState {
+                    ambient: d
+                        .components
+                        .first()
+                        .and_then(|c| c.animation.as_ref())
+                        .map(|a| {
+                            SequenceNode::new(
+                                Some(a.sequence.clone()),
+                                a.start_time,
+                                a.rate,
+                                a.playing,
+                                a.looping,
+                            )
+                        }),
+                    ..SkinnedAnimState::default()
+                })
+                .collect(),
             children,
             foliage_grid: FoliageGrid::new(&scene.foliage),
+            notify_rng: Rng(seed ^ NOTIFY_SEED),
         }
+    }
+
+    /// The fired notifies `fired` (indices into `info`) of skinned actor
+    /// `id`: sounds become events, Kismet notifies are returned (or, with
+    /// `kismet_events`, become [`NpcEvent::AnimNotify`] events).
+    fn route_notifies(
+        &mut self,
+        id: u32,
+        info: &SequenceInfo,
+        fired: &[usize],
+        kismet_events: bool,
+        out: &mut NpcOutput,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        for &i in fired {
+            let Some(n) = info.notifies.get(i) else {
+                continue;
+            };
+            match &n.kind {
+                NotifyKind::Kismet { name } => {
+                    if kismet_events {
+                        out.events.push(NpcEvent::AnimNotify {
+                            actor: id,
+                            name: name.clone(),
+                        });
+                    } else {
+                        names.push(name.clone());
+                    }
+                }
+                NotifyKind::Sound {
+                    cue,
+                    volume,
+                    pitch,
+                    bone,
+                    percent_to_play,
+                    ..
+                } => {
+                    // `PercentToPlay` ≥ 1 always plays, else a draw below it.
+                    if 1.0 <= *percent_to_play || self.notify_rng.frand() < *percent_to_play {
+                        out.events.push(NpcEvent::AnimSound {
+                            actor: id,
+                            cue: cue.clone(),
+                            volume: *volume,
+                            pitch: *pitch,
+                            bone: bone.clone(),
+                        });
+                    }
+                }
+                NotifyKind::Other { .. } => {}
+            }
+        }
+        names
+    }
+
+    /// Ticks the skinned actors' own sequence nodes (`TickAnim`) and fires
+    /// their notifies (anim nodes tick while not rendered:
+    /// `bTickAnimNodesWhenNotRendered` defaults true and the
+    /// `SkeletalMeshActor` template keeps it; STRONG (cdo)).
+    fn tick_skinned(&mut self, scene: &NpcScene, dt: f32, out: &mut NpcOutput) {
+        for i in 0..self.skinned.len().min(scene.skinned.len()) {
+            let Some(def) = scene.skinned.get(i) else {
+                continue;
+            };
+            let Some(mesh) = def.components.first().map(|c| c.mesh.as_str()) else {
+                continue;
+            };
+            let Some(state) = self.skinned.get_mut(i) else {
+                continue;
+            };
+            let Some(node) = state.ambient.as_mut() else {
+                continue;
+            };
+            let Some(info) = node
+                .sequence
+                .as_deref()
+                .and_then(|s| scene.sequence_info(mesh, s))
+            else {
+                continue;
+            };
+            let fired = node.tick(dt, true, Some(info));
+            if !fired.is_empty() {
+                let info = info.clone();
+                self.route_notifies(def.id, &info, &fired, true, out);
+            }
+        }
+    }
+
+    /// The `SequenceLength` of `sequence` on skinned actor `id`'s mesh.
+    #[must_use]
+    pub fn anim_sequence_length(&self, scene: &NpcScene, id: u32, sequence: &str) -> Option<f32> {
+        let def = scene.skinned.iter().find(|d| d.id == id)?;
+        let mesh = def.components.first()?.mesh.as_str();
+        scene.sequence_info(mesh, sequence).map(|i| i.length)
+    }
+
+    /// Matinee's `SetAnimPosition` on skinned actor `id`: the slot node (a
+    /// plain `SkeletalMeshActor`: its own sequence node) switches to
+    /// `sequence` and moves to `position`, firing notifies when `fire`.
+    /// Sound notifies become events in `out`; the `NotifyName`s of the
+    /// Kismet notifies fired are returned (the Kismet runtime activates them
+    /// inside the Matinee update). `None` for an unknown actor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_anim_position(
+        &mut self,
+        scene: &NpcScene,
+        id: u32,
+        sequence: &str,
+        position: f32,
+        fire: bool,
+        looping: bool,
+        out: &mut NpcOutput,
+    ) -> Option<Vec<String>> {
+        let i = scene.skinned_index(id)?;
+        let def = scene.skinned.get(i)?;
+        let mesh = def.components.first().map(|c| c.mesh.clone());
+        // A plain `SkeletalMeshActor`'s script event drives the component's
+        // own sequence node (and does nothing without one); the `...MAT`
+        // classes drive a slot node of their tree (CONFIRMED (src, native);
+        // `crate::anim`).
+        let plain = def.class.eq_ignore_ascii_case(PLAIN_SKELETAL_ACTOR_CLASS);
+        let info = mesh
+            .as_deref()
+            .and_then(|m| scene.sequence_info(m, sequence))
+            .cloned();
+        let state = self.skinned.get_mut(i)?;
+        let fired = if plain {
+            match state.ambient.as_mut() {
+                Some(node) => node.actor_set(sequence, position, fire, looping, info.as_ref()),
+                None => Vec::new(),
+            }
+        } else {
+            let node = state.matinee.get_or_insert_with(SequenceNode::default);
+            node.matinee_set(sequence, position, fire, looping, info.as_ref())
+        };
+        Some(match info {
+            Some(info) if !fired.is_empty() => self.route_notifies(id, &info, &fired, false, out),
+            _ => Vec::new(),
+        })
+    }
+
+    /// `SetSkelControlStrength(control, strength)` on skinned actor `id`
+    /// (Matinee); `false` for an unknown actor.
+    pub fn set_skel_control_strength(
+        &mut self,
+        scene: &NpcScene,
+        id: u32,
+        control: &str,
+        strength: f32,
+    ) -> bool {
+        let Some(state) = scene
+            .skinned_index(id)
+            .and_then(|i| self.skinned.get_mut(i))
+        else {
+            return false;
+        };
+        if strength.is_finite() {
+            state
+                .controls
+                .insert(control.to_ascii_lowercase(), strength);
+        }
+        true
+    }
+
+    /// `SeqAct_SetLookAtTarget` on actor `id`: the stored target and the
+    /// offsets; `false` for an unknown actor.
+    pub fn set_look_at(
+        &mut self,
+        scene: &NpcScene,
+        id: u32,
+        target: Option<u32>,
+        head_offset: Vec3,
+        eyes_offset: Vec3,
+    ) -> bool {
+        let Some(state) = scene
+            .skinned_index(id)
+            .and_then(|i| self.skinned.get_mut(i))
+        else {
+            return false;
+        };
+        let finite = |v: Vec3| if v.is_finite() { v } else { Vec3::ZERO };
+        state.look_at = LookAtState {
+            target,
+            head_offset: finite(head_offset),
+            eyes_offset: finite(eyes_offset),
+        };
+        true
+    }
+
+    /// The strength of look-at control `control` of actor `id` (Matinee's
+    /// latest, else the control's own `ControlStrength`).
+    #[must_use]
+    pub fn control_strength(&self, scene: &NpcScene, id: u32, control: &str) -> f32 {
+        let set = scene
+            .skinned_index(id)
+            .and_then(|i| self.skinned.get(i))
+            .and_then(|s| s.controls.get(&control.to_ascii_lowercase()).copied());
+        set.unwrap_or_else(|| {
+            scene
+                .look_at_of(id)
+                .and_then(|l| {
+                    l.controls
+                        .iter()
+                        .find(|c| c.control.eq_ignore_ascii_case(control))
+                })
+                .map_or(1.0, |c| c.control_strength)
+        })
+    }
+
+    /// The NPC pawns' collision cylinders where the pawns are now (the worm
+    /// and Maddie stand still; villagers walk).
+    #[must_use]
+    pub fn pawn_cylinders(&self, scene: &NpcScene) -> Vec<(u32, NpcCylinder)> {
+        let mut out = Vec::new();
+        for c in &scene.pawn_collision {
+            let center = scene
+                .worms
+                .iter()
+                .find(|w| w.id == c.id)
+                .map(|w| w.location)
+                .or_else(|| {
+                    scene
+                        .villagers
+                        .iter()
+                        .zip(&self.villagers)
+                        .find(|(d, _)| d.id == c.id)
+                        .map(|(_, v)| v.location)
+                })
+                .or_else(|| {
+                    scene
+                        .maddies
+                        .iter()
+                        .find(|m| m.id == c.id)
+                        .map(|m| m.location)
+                });
+            if let Some(center) = center.filter(|p| p.is_finite()) {
+                out.push((
+                    c.id,
+                    NpcCylinder {
+                        center,
+                        radius: c.radius,
+                        half_height: c.half_height,
+                    },
+                ));
+            }
+        }
+        out
     }
 
     /// What the worms see of the player at `player`.
@@ -3479,6 +4327,7 @@ impl NpcRuntime {
         for (f, def) in self.flowers.iter_mut().zip(&scene.flowers) {
             tick_flower(f, def, dt, out);
         }
+        self.tick_skinned(scene, dt, out);
     }
 
     /// Touches along the player's path of the tick (`before` → `after`,

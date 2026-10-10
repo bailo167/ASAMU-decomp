@@ -21,8 +21,13 @@ animation names are original game data and stay local (see [Local outputs](#loca
   engine. CONFIRMED (numerical self-consistency only)
 - An independent re-check (own walk, own curve decoding, own tangent and curve evaluators; see
   [Verification](#verification)) reproduced every census number and the tangent results exactly.
-- Not yet ported: the run-time effects of animation, sound, property, toggle, visibility and particle
-  tracks. The decoder covers them; their playback semantics are listed under [Open items](#open-items).
+- Run-time effects: move, event, director, fade, sound, visibility and toggle tracks, and (2026-10-10,
+  camera-npc pass) animation-control, float/vector/colour property and skeletal-control strength tracks
+  are played by the Kismet runtime; camera animations play on the player camera with the engine's pool
+  and blending. Skeletal-control *scale* and particle-replay tracks are decoded only. See
+  [Camera animations](#camera-animations), [Animation-control tracks](#animation-control-tracks),
+  [Property and skeletal-control tracks](#property-and-skeletal-control-tracks) and
+  [Runtime coverage](#runtime-coverage).
 
 ## Tooling and reproduction
 
@@ -326,6 +331,161 @@ engine. CONFIRMED (numerical self-consistency only)
 | Fade | `clamp(curve(t), 0, 1)`, with curve(t) = 0 without keys. | CONFIRMED |
 | Slomo | `max(curve(t), 0.1)`. | CONFIRMED |
 
+## Camera animations
+
+`CameraAnim` assets are played on the player's camera by script (`Camera.PlayCameraAnim`) and by
+`SeqAct_PlayCameraAnim`. Ours: `asamu_kismet::camera_anim` (data, pool, blending, application, the gameplay
+script's calls), owned by the level script (`asamu_game::LevelScript::camera_anims`), applied to the render
+camera by `apps/asamu` `kismet::apply_camera_anims`.
+
+**Where they are (CONFIRMED, export census).** `Startup.upk` holds 25 `CameraAnim` assets: 11 in
+`ASAMUCameraAnimations` (grapple begin and loop, normal and hard landing, power-jump and power-leap bobs,
+rocket-boots begin and boosting, three parkour-mode ones), 6 in `Zeth_CameraStuffs` (power-jump charge and
+keep-charging, sprint, two landing ones, the worm's growl) and 8 stock UDK ones. The maps add 3 (AG-Darkcave 2,
+AG-StarHaven 1), which their `SeqAct_PlayCameraAnim` actions name. `asamu-import matinee` writes the
+`Startup.upk` ones to `matinee/camera_anims.json` (same shape as a map file's `camera_anims`).
+
+**What they contain (CONFIRMED, decoded).** A camera group with at most one move track, float property tracks
+on `FOVAngle` or on post-process settings (`CamOverridePostProcess.*`) and vector property tracks on
+post-process settings, plus the asset's own `BasePPSettings`. The two grapple animations and the normal-landing
+one have **no tracks at all**: they move nothing (the grapple ones carry post-process settings only; the
+landing one is an empty asset with the class-default `AnimLength` 3). The hard landing, the bobs, the boots
+animations and the growl have move tracks.
+
+**Engine rules** (CONFIRMED unless noted; locally decompiled `ACamera::{PlayCameraAnim, AllocCameraAnimInst,
+ReleaseCameraAnimInst, StopCameraAnim, StopAllCameraAnims, ApplyCameraModifiers, InitTempCameraActor,
+ApplyAnimToCamera}`, `UCameraAnimInst::{Play, AdvanceAnim, Stop, Update}`, `USeqAct_PlayCameraAnim::Activated`;
+class constants and defaults from `Engine.u`). The verification pass (2026-10-10) re-read these natives on its
+own and found the port in agreement on every rule below; the two float constants the blend code compares and
+defaults against were read from the executable (the weight threshold of `ApplyCameraModifiers` is 0.0, the
+unblended weight 1.0), and each rule is pinned by a unit test in `asamu_kismet::camera_anim`:
+
+| Rule | Evidence |
+|---|---|
+| The camera owns a pool of `MAX_ACTIVE_CAMERA_ANIMS` = 8 instances. `PlayCameraAnim` takes the last free one and returns it; with none free it returns nothing and the animation does not play. Script keeps the returned object, so a kept reference to an instance that finished and was handed out again acts on the new animation. | class constant; `AllocCameraAnimInst` |
+| `PlayCameraAnim(Anim, Rate = 1, Scale = 1, BlendInTime, BlendOutTime, bLoop, bRandomStartTime, Duration, bSingleInstance)`: the two defaults are bytecode default-parameter values. `bSingleInstance` re-uses a running instance of the same animation (`Update`) instead of allocating. | bytecode of `Camera.PlayCameraAnim`; native |
+| `Play`: time 0 (or `frand · AnimLength`), blend timers 0, **blending in always set**, not blending out, not finished; `RemainingTime = Duration − BlendOutTime` for a positive duration; the animated camera actor is reset to the origin; the group instance is initialised and its first move track kept. | `UCameraAnimInst::Play` |
+| `AdvanceAnim(dt)`: time += `dt · PlayRate`, blend timers += `dt`. Not looping: past `AnimLength` the animation finishes; otherwise, within `BlendOutTime` of the end it (re)starts blending out with the timer at the overshoot. Looping: past the length, the length is subtracted once. Blending in ends once its timer is strictly above `BlendInTime` (so a zero blend-in ends on the first update); a blend-out timer above `BlendOutTime` is clamped and finishes the animation. Weight = `min(t_in / BlendInTime or 1, 1 − t_out / BlendOutTime or 1) · BasePlayScale · TransientScaleModifier`. Then the group is evaluated at the new time. A finished animation is terminated; a running `RemainingTime` counts down and starts the blend-out (or ends the animation when `BlendOutTime` is 0). | `UCameraAnimInst::AdvanceAnim` |
+| `Stop(immediate)`: immediately, or with `BlendOutTime ≤ 0`, the animation is terminated; otherwise it starts blending out from 0. `StopCameraAnim` and `StopAllCameraAnims(ByType)` do the same per instance. | natives |
+| Per camera update (`ApplyCameraModifiers`, after the camera modifiers): for every active instance in pool order — the animated camera actor is reset (origin, zero rotation, `FOVAngle` = the animation's `BaseFOV`), the instance advances, and when its weight is above 0 it is applied to the point of view; a finished auto-release instance returns to the pool; the transient scale is reset to 1. An animation that finishes in this update was evaluated and weighted before it was terminated, so it still contributes this one frame (at full weight when it ran out without a blend-out, not at all when its blend-out completed). | `ApplyCameraModifiers`, `AdvanceAnim` |
+| Application (`CAPS_CameraLocal`, the default play space and the only one the shipped calls use), weight `s`: location += (animated location × `s`) rotated by the view rotation; rotation = `rotator(R(animated rotation × s, truncated to whole units) · R(view))`; FOV += `s · (animated FOVAngle − 90)`, 90 being the `CameraActor` class default. So an animation whose `BaseFOV` is not 90 shifts the FOV even without an FOV track. | `ApplyAnimToCamera`; `CameraActor` defaults |
+| The move track's initial transform is taken at time 0: `CalcInitialTransform` uses the owning `SeqAct_Interp`'s position only when the group instance's outer is one, which it is not here. With the camera actor at the origin, the animated offset is the track's key transform relative to its first key. | disassembly of `CalcInitialTransform` (the `Cast<USeqAct_Interp>` result is tested before `Position` is read) |
+| `SeqAct_PlayCameraAnim`: "Play" wins over "Stop". Play calls `PlayCameraAnim(CameraAnim, Rate, IntensityScale, BlendInTime, BlendOutTime, bLoop, bRandomStartTime)` on each target's camera; Stop calls `StopAllCameraAnimsByType(CameraAnim, false)`. Nothing happens without an animation, and nothing without a target that is a player controller or a pawn with one (all 5 shipped actions target the player). | `USeqAct_PlayCameraAnim::Activated`; map census |
+
+**The gameplay script's calls** (CONFIRMED (src): local reading of the `asamu` classes; rate 1, default scale,
+no blend, not looping unless noted):
+
+| When | Call |
+|---|---|
+| every grapple attach (`GrappleGun.Grapple`) | `GrappleBegin` once; `GrappleLoop` looping, its instance kept |
+| every release (`ReleaseGrappleButton`, the common release) | stop the kept loop instance (no blend-out time, so it ends at once) |
+| `ASAMUPawn.Landed`, normal handler, floor not `NotLandable` | `HardLanding` when `V.z < −hardLandingThreshold`, else `NormalLand`; the story-state handler plays nothing |
+| power-jump `Charging` begin code | `PowerJumpChargeCameraAnim` with 0.5 s blend in and out, instance kept |
+| power-jump `Canceled` begin code | stop the kept charge instance (blends out over 0.5 s) |
+| power jump / power leap | `PowerJumpBob` / `PowerLeapBob` (parkour mode, off by default, would play the flip animations instead) |
+| rocket boots: charge begins / boost begins | `RocketBootsBegin` / `RocketBootsBoosting`, instances kept |
+| rocket boots: boost runs out / `ResetBoots` (a landing cancels the boost; the pawn's death reset `ResetPlayer` calls it too whenever the boots are enabled) | stop the boosting instance / stop the boosting and charge instances |
+| worm starts / stops screaming (`StartCameraShake` / `StopCameraShake`) | `MonsterGrowl` looping, instance kept / stopped (twice: `StopCameraAnim`, then the instance's own `Stop`) |
+| sprint | the sprint animation is never started: its start requires an instance that only that start creates (ABILITIES.md) |
+
+Consequences (STRONG, from the rules and the data): the grapple and normal-landing animations have no visible
+camera motion; a normal landing still occupies a pool instance for its 3 s, the grapple-begin one for its
+0.25 s and the grapple loop for as long as the grapple lasts, so eight of them alive at once (in practice:
+landings less than 0.4 s apart) exhaust the 8 instances, after which further animations (a hard landing's, the
+boots') silently do not play until instances free up. Our pool reproduces this (unit test
+`normal_landings_can_exhaust_the_pool`); how often the original gets there is unmeasured. The kept instance
+references are another quirk the pool reproduces: the boots', the charge's and the growl's references outlive
+their animations, so a later stop through one of them (every death reset with the boots enabled, every scream
+end) ends whatever animation has been handed that instance since.
+
+Ours: `LevelScript::tick` turns the tick's events into these calls after the game tick (the death reset,
+attach, release, landing handler, power-jump state code and events, boots events, the worm's shake event),
+routes Kismet's `CameraAnim` outputs in the same frame as the update, and advances the pool by the fixed tick.
+Deviations and limits: the order of several calls within one tick is ours (the death reset's boots stop,
+release before attach, then power jump, boots, landing, worm; TENTATIVE); the post-process settings and tracks of the animations are not applied; play spaces
+other than camera-local are not implemented (unused); the animations do not yet bias the player's aim
+(GRAPPLE.md G-TG-1: the original's fire trace uses the camera's point of view, which includes them) — the
+simulation would have to read `LevelScript::camera_anims().apply(...)`; random start times use our own seed;
+non-finite play parameters fall back to the defaults and a sample that would make the point of view non-finite
+is skipped (ours; the engine takes what it is given, and no shipped call passes such values). The pool
+advances with the 60 Hz simulation tick while the app applies the latest samples every rendered frame, so at
+higher frame rates the offsets move in tick-sized steps. Parity with the running game is unmeasured.
+
+## Animation-control tracks
+
+`InterpTrackAnimControl` plays skeletal animations on a group's actor through the actor event
+`SetAnimPosition(SlotName, ChannelIndex, AnimSeqName, Position, bFireNotifies, bLooping,
+bEnableRootMotion)`. Ours: `asamu_kismet::anim` (a port of the locally decompiled
+`UInterpTrackAnimControl::{GetAnimForTime, UpdateTrack, CalcChannelIndex}`), called from the interpreter's
+Matinee update; the host hands each call to the NPC system's slot node (`asamu_world::anim::SequenceNode`).
+
+| Rule | Confidence |
+|---|---|
+| A key is `(StartTime, AnimSeqName, AnimStartOffset, AnimEndOffset, AnimPlayRate, bLooping, bReverse)`. The key in effect at `t` is the last one starting at or before `t`; before the first key, the first key's sequence at its start offset. | CONFIRMED |
+| Position in a key: `(t − StartTime) · AnimPlayRate`. Looping keys wrap it with `fmod` into `SequenceLength − AnimStartOffset − AnimEndOffset` (at least 0.01) and add the start offset. Other keys add the start offset and clamp to `[0, SequenceLength − AnimEndOffset + 1e-4]`. Reversed keys mirror the position inside the offsets. A sequence missing from the group's anim sets keeps the raw position. | CONFIRMED (constants 1e-4 float, 0.01 float read from the executable) |
+| An update without keys, a jump, or one that does not advance calls `SetAnimPosition` once for the key at the new time with notifies off. | CONFIRMED |
+| A forwards update walks every key from the one at the last position to the one at the new position: each key is played up to the next key's start (or the new position) with notifies on — unless `bSkipAnimNotifiers`, or the position equals the start offset; a looping key first plays to `SequenceLength − AnimEndOffset + 1e-4` (double) with notifies on and restarts at its start offset with notifies off, once per wrap; then the next key's sequence is set at its start offset with notifies off. | CONFIRMED |
+| The track instance's last position starts at the action's position when the instances are built. The channel index is the number of earlier, enabled animation-control tracks of the group with the same slot name. | CONFIRMED (`UInterpTrackInstAnimControl::InitTrackInst`, `CalcChannelIndex`) |
+| A forwards update that starts before the first key makes one call for that stretch (the first key's sequence at its start offset, notifies off) and then plays the first key; the "next key" call is only made after a key that was actually played. | CONFIRMED (`UpdateTrack`; found by the verification pass, which removed a duplicate call) |
+| `SkeletalMeshActorMAT.SetAnimPosition` (native `MAT_SetAnimPosition`) finds the slot node by name; the slot's sequence node switches sequence when the name differs (`SetAnim`, then `SetPosition(p, false)`), takes rate 1 and the looping flag, then `SetPosition(p, bFireNotifies)`. The node is not set playing, so it holds the pose Matinee last gave it; neither class resets anything when the track ends (`MAT_FinishAnimControl` only drops the group's anim sets). | CONFIRMED (`UAnimNodeSlot::MAT_SetAnimPosition`, `ASkeletalMeshActor::MAT_FinishAnimControl`) |
+| A plain `SkeletalMeshActor` has no slots: its `SetAnimPosition` script event drives the component's own `AnimNodeSequence` (when the component's `Animations` is one; otherwise nothing happens) — `SetAnim` when the name differs, the looping flag, `SetPosition(p, bFireNotifies)`. `SetAnim` leaves the node's time alone, so a switch with notifies on issues the new sequence's notifies between the old time and `p`; rate and `bPlaying` are untouched, so a node that was playing keeps ticking between Matinee's updates. | CONFIRMED (src: the engine class, read locally; `UAnimNodeSequence::SetAnim` decompiled) |
+
+Ours treats every slot of a `...MAT` actor as its one body animation (every shipped slot track uses the slot
+`FullBody`), drives a plain `SkeletalMeshActor`'s own node as above (the two shipped tracks without a slot
+name, both in AG-StarHaven, sit on such actors, and both have their own playing, non-looping node), ignores
+the slot weight curve (TENTATIVE: full weight), resolves sequence lengths through the actor's converted mesh,
+and makes at most 4,096 `SetAnimPosition` calls per track update (ours, against hostile data; a real update
+makes a handful). Notifies: [NPCS.md](NPCS.md) "Animation notifies".
+
+## Property and skeletal-control tracks
+
+| Track | Rule | Confidence |
+|---|---|---|
+| `InterpTrackFloatProp`, `InterpTrackVectorProp` | The instance resolves `PropertyName` on the group's actor once; every update writes `curve.Eval(t, current value)`, so a curve without keys writes the current value back (no effect), then runs the property's update callback or re-attaches the actor's components. | CONFIRMED (`UpdateTrack`, `InitTrackInst`); how a name such as `Brightness` reaches a light actor's component (`AActor::GetInterpFloatPropertyRef`) was not read: TENTATIVE |
+| `InterpTrackColorProp` | As above with a vector curve; the result is stored as an `FColor`: each component `255 · c^(1/2.2)` (float `0.4545454`), clamped to 0–255. | CONFIRMED |
+| `InterpTrackSkelControlStrength` | Calls the actor's `SetSkelControlStrength(SkelControlName, curve(t))` with 0 as the value of an empty curve; `SkeletalMeshActorMAT` finds the control and sets its strength with blend time 0. | CONFIRMED (`UpdateTrack`, `MAT_SetSkelControlStrength`) |
+| `InterpTrackSkelControlScale` | Decoded only (4 tracks, each one key of value 1 on look-at controls). | — |
+
+What the shipped tracks drive (CONFIRMED, decoded data): `Brightness` of 3 `PointLightMovable`s in AG-Workshop
+(and one in the front end) with keys; `Radius` tracks with keys in 3 AG-StarHaven groups that no action binds
+to an actor, so they do nothing; every `LightColor` track (7) and both `FOVAngle` tracks on camera actors are
+empty; `DrawScale3D` of 10 movers (StarHaven's winch ropes, a Workshop pad light); the strength of look-at
+controls (17 tracks, 2 of them in AG-StarHaven without a control name, which do nothing; NPCS.md
+"Look-at"). The verification pass recounted these from a fresh conversion with its own script and got the
+same numbers.
+
+Ours: the interpreter evaluates the curves each Matinee update and skips empty ones; values are kept per actor
+(`Runtime::actor_properties`) for the renderer, which scales a light's intensity linearly with `Brightness`
+and its range with `Radius` (our UE3 → physical light mapping, `asamu_assets::lighting`); `DrawScale3D` also
+rescales the mover's collision through the host; strengths go to the NPC system. Not modelled: the camera
+actors' `FOVAngle` (no keys anyway), any other property name (none in the data).
+
+## Runtime coverage
+
+`MatineeSet::track_coverage` (gated test `matinee_track_coverage` in `crates/asamu-kismet/tests/real_data.rs`)
+counts, over the level-scope actions' data of all maps, the tracks of each class, those with keys, and those
+with keys that act on something (a bound object, or a director group). CONFIRMED (converted data, 2026-10-10):
+
+| Track class | Tracks | With keys | Effective | Runtime |
+|---|---:|---:|---:|---|
+| InterpTrackMove (split sub-tracks counted with their track) | 160 | 153 | 149 | gameplay: movers, moving collision |
+| InterpTrackAnimControl | 49 | 49 | 49 | gameplay: skeletal animation and notifies |
+| InterpTrackEvent | 35 | 34 | 34 | gameplay: Kismet outputs |
+| InterpTrackSkelControlStrength | 17 | 17 | 17 | presentation: look-at strengths |
+| InterpTrackSound | 17 | 14 | 14 | presentation |
+| InterpTrackFloatProp | 16 | 7 | 4 | presentation: light brightness |
+| InterpTrackDirector | 15 | 3 | 3 | presentation: cuts |
+| InterpTrackFade | 14 | 14 | 14 | presentation |
+| InterpTrackVectorProp | 10 | 10 | 10 | presentation (+ collision scale) |
+| InterpTrackColorProp | 7 | 0 | 0 | presentation (no keys) |
+| InterpTrackVisibility | 2 | 2 | 2 | presentation |
+| InterpTrackToggle | 1 | 1 | 1 | presentation |
+| InterpTrackSkelControlScale | 4 | 4 | 4 | not played |
+| InterpTrackParticleReplay | 1 | 0 | 0 | not played (no keys) |
+
+(The census table below counts every track export including prefab archetypes and the camera animations'
+tracks; this table counts what level actions can play.)
+
 ## SeqAct_Interp
 
 **Inputs.** The five inputs are always, in order, Play, Reverse, Stop, Pause and Change Dir.
@@ -483,15 +643,16 @@ install, and symlinks, the same guard as `asamu-import levels`.
 
 ## Open items
 
-- **Run-time effects not yet ported** (decoded only):
-  - AnimControl: slot weights and the `GetAnimForTime` key selection, looping and reversal.
-  - Sound: start, stop on reverse and continue-on-end rules.
-  - Property tracks: resolving `PropertyName` on the bound actor or its components; the shipped tracks
-    drive light brightness, radius and colour and similar properties.
-  - SkelControl strength and scale, Toggle, Visibility, ParticleReplay.
+- **Run-time effects not yet ported or simplified:**
+  - AnimControl: the slot weight curve (full weight assumed) and slot selection by name (one body
+    animation per actor); notifies of backwards moves (`IssueNegativeRateNotifies`).
+  - Sound: stop on reverse and continue-on-end rules.
+  - Property tracks: the engine's property-name resolution on actors and components (only the names the
+    data uses are mapped); camera actors' `FOVAngle`.
+  - SkelControl scale, ParticleReplay; the engine side of toggle tracks on emitters.
   - Director transition blending, camera-cut streaming hints.
-
-  UNKNOWN until read.
+  - Camera animations: post-process settings and tracks, non-local play spaces, the aim bias (see
+    [Camera animations](#camera-animations)).
 - **AI groups and pawn offsets** in `CalcInitialTransform`: unused by the shipped data. Not implemented.
 - **Base matrix scale** (`GetBaseMatrix`), the operation order of the winding transform and frame
   products, and the general `FMatrix::Inverse` with reversed summation in `CalcInitialTransform`:

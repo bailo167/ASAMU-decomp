@@ -55,15 +55,45 @@
 //! table (`asamu_world::level_start_abilities`) that [`Game::load_level`]
 //! applies is undone (the pawn's script state is reset to a fresh start)
 //! and the map's own Kismet sets abilities, as in the original.
+//!
+//! **Camera animations.** The level script owns the player camera's
+//! animation pool ([`asamu_kismet::camera_anim::CameraAnims`], loaded from
+//! `matinee/camera_anims.json` and the maps' own camera animations): after
+//! the game tick the frame's gameplay events become the script's
+//! `PlayCameraAnim` / `StopCameraAnim` calls (grapple attach and release,
+//! landings, power-jump charge, cancel and jump, rocket-boots charge, boost,
+//! end and reset (a cancelling landing, the death reset), the worm's growl),
+//! Kismet's `SeqAct_PlayCameraAnim` plays
+//! or stops in step 2b, and the pool advances by the tick
+//! ([`LevelScript::camera_anims`] gives the app the point-of-view offsets).
+//!
+//! **Skeletal actors.** Matinee animation-control tracks, skeletal-control
+//! strength tracks and `SeqAct_SetLookAtTarget` reach the NPC system
+//! (`SetAnimPosition`: the slot node and its notifies; Kismet notifies fired
+//! by Matinee activate their events inside the update); the skinned actors'
+//! own animations tick with the NPCs and their Kismet notifies reach the
+//! interpreter in step 5 ([`NpcEvent::AnimNotify`]). Matinee property tracks
+//! are kept by the interpreter for rendering (lights); `DrawScale3D` also
+//! rescales a mover's collision.
+//!
+//! **NPC pawn collision.** The NPC pawns' collision cylinders (the worm's
+//! 200 × 500 cylinder in AG-Darkcave) are added as dynamic instances that
+//! block the player (not traces) and follow the pawns before each tick.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use asamu_core::DEFAULT_TICK_RATE_HZ;
-use asamu_kismet::{ActorInfo, ActorRef, Host, LoadError, Output, Runtime, ToggleMode};
+use asamu_kismet::anim::AnimPosition;
+use asamu_kismet::camera_anim::{CameraAnimSet, CameraAnims, GameplayCue};
+use asamu_kismet::{
+    ActorInfo, ActorRef, Host, LoadError, Output, PropertyValue, Runtime, ToggleMode,
+};
+use asamu_player::pawn::{LandingHandler, PowerJumpEvent, PowerJumpStateName};
+use asamu_player::rocket_boots::BootsEvent;
 use asamu_player::world::{CollisionShape, CollisionWorld};
 use asamu_player::{InputFrame, PlayerParams, PlayerState, SimEvent, pawn};
-use asamu_world::collision::Affine;
+use asamu_world::collision::{Affine, CollisionClass, InstanceInfo};
 use asamu_world::scene::{self, LoadedMap, SceneError};
 use asamu_world::{WorldEvent, rotation};
 use glam::Vec3;
@@ -164,6 +194,8 @@ pub struct LevelScript {
     /// actor's path (director cuts name the group whose actor becomes the
     /// view target).
     group_actors: BTreeMap<(usize, String), String>,
+    /// The player camera's animations.
+    camera: CameraAnims,
 }
 
 fn world_id(map: &LoadedMap, a: &ActorInfo) -> Option<u32> {
@@ -344,21 +376,63 @@ pub fn load_level_with_kismet_options(
         .map(|s| prepare_movers(&mut loaded, s))
         .unwrap_or_default();
     let levels = loaded.levels.clone();
-    let mut game =
-        Game::from_loaded_map(loaded, PlayerParams::asamu_original(), DEFAULT_TICK_RATE_HZ)?;
-    if options.npcs {
+    let level_names: Vec<String> = levels.iter().map(|l| l.name.clone()).collect();
+    let npcs = options.npcs.then(|| {
         let npc_options = NpcOptions {
             time_trial: options.time_trial,
             ..NpcOptions::default()
         };
-        game.attach_npcs(NpcSystem::load_from_dir(dir, &levels, npc_options));
+        let mut npcs = NpcSystem::load_from_dir(dir, &levels, npc_options);
+        npcs.set_pawn_colliders(prepare_pawn_collision(&mut loaded, &npcs));
+        npcs
+    });
+    let mut game =
+        Game::from_loaded_map(loaded, PlayerParams::asamu_original(), DEFAULT_TICK_RATE_HZ)?;
+    if let Some(npcs) = npcs {
+        game.attach_npcs(npcs);
     }
     let script = scripts.map(|s| {
         let mut script = LevelScript::attach(&mut game, s, movers);
         script.runtime.set_time_trial(options.time_trial);
+        let (anims, problems) = asamu_kismet::camera_anim::load_camera_anims(dir, &level_names);
+        for p in problems {
+            script.note(format!("camera animations: {p}"));
+        }
+        script.set_camera_anims(anims);
         script
     });
     Ok((game, script))
+}
+
+/// The NPC pawns' collision cylinders as dynamic instances of `map`
+/// (blocking the player's moves, not zero-extent traces: the pawns'
+/// block-all-but-weapons collision, NPCS.md §2); returns `(pawn actor id,
+/// dynamic index)`.
+fn prepare_pawn_collision(map: &mut LoadedMap, npcs: &NpcSystem) -> Vec<(u32, usize)> {
+    let mut out = Vec::new();
+    for (id, cyl) in npcs.runtime().pawn_cylinders(npcs.scene()) {
+        let Some(mesh) = map.collision.add_cylinder_mesh(cyl.radius, cyl.half_height) else {
+            continue;
+        };
+        let info = InstanceInfo {
+            actor: Some(id),
+            class: CollisionClass::StaticMesh,
+            tag: asamu_world::SurfaceTag::None,
+            grapple_able: false,
+            blocks_pawn: true,
+            blocks_traces: false,
+            sublevel: u8::try_from(id >> 16).unwrap_or(u8::MAX),
+        };
+        if let Some(inst) = map.collision.dynamic_instance(
+            mesh,
+            Affine::from_translation(cyl.center.as_dvec3()),
+            info,
+        ) {
+            out.push((id, map.dynamic.len()));
+            map.dynamic.push(inst);
+        }
+    }
+    out
 }
 
 impl LevelScript {
@@ -426,6 +500,86 @@ impl LevelScript {
             spawn_in_story: false,
             host_errors: Vec::new(),
             group_actors,
+            camera: CameraAnims::default(),
+        }
+    }
+
+    /// Uses `set` for the player camera's animations (a fresh pool).
+    pub fn set_camera_anims(&mut self, set: CameraAnimSet) {
+        self.camera = CameraAnims::new(std::sync::Arc::new(set));
+    }
+
+    /// The player camera's animations (apply them to the point of view with
+    /// `CameraAnims::apply`).
+    #[must_use]
+    pub fn camera_anims(&self) -> &CameraAnims {
+        &self.camera
+    }
+
+    /// The values Matinee property tracks wrote, as `(world actor id,
+    /// lower-case property name, value)` (lights' `Brightness`, `Radius`,
+    /// `LightColor`; `DrawScale3D`).
+    #[must_use]
+    pub fn actor_properties(&self) -> Vec<(u32, String, PropertyValue)> {
+        self.runtime
+            .actor_properties()
+            .filter_map(|(r, n, v)| Some((self.world_id(r)?, n.to_owned(), v)))
+            .collect()
+    }
+
+    /// The gameplay script's camera-animation calls of one tick (see the
+    /// module docs; `pj_before` is the power-jump actor before the tick).
+    fn camera_cues(&mut self, game: &Game, report: &TickReport, pj_before: pawn::PowerJump) {
+        let ev = &report.events;
+        // `ASAMUPawn.ResetPlayer` (the death sequence's reset) calls the
+        // boots' `ResetBoots` whenever the boots are enabled, whatever they
+        // were doing (CONFIRMED (src)): the kept charge and boosting
+        // instances are stopped.
+        if report.respawned && game.player.script.boots.enabled {
+            self.camera.cue(GameplayCue::BootsReset);
+        }
+        if ev.gun.released.is_some() {
+            self.camera.cue(GameplayCue::GrappleReleased);
+        }
+        if ev.gun.attached.is_some() {
+            self.camera.cue(GameplayCue::GrappleAttached);
+        }
+        // `ASAMUPowerJump`: the charge animation starts in `Charging`'s begin
+        // code and stops in `Canceled`'s; the jump and leap bobs play with
+        // the jump.
+        let pj = game.player.script.power_jump;
+        let charging = PowerJumpStateName::Charging;
+        if pj.state == charging
+            && !pj.begin_pending
+            && (pj_before.state != charging || pj_before.begin_pending)
+        {
+            self.camera.cue(GameplayCue::PowerJumpChargeStarted);
+        }
+        let canceled = PowerJumpStateName::Canceled;
+        let cancel_ran = (pj_before.state == canceled && pj.state != canceled)
+            || (ev.power_jump == Some(PowerJumpEvent::Canceled) && pj.state != canceled);
+        if cancel_ran {
+            self.camera.cue(GameplayCue::PowerJumpCanceled);
+        }
+        if let Some(PowerJumpEvent::Fired { leap, .. }) = ev.power_jump {
+            self.camera.cue(GameplayCue::PowerJumped { leap });
+        }
+        match ev.boots {
+            Some(BootsEvent::Started) => self.camera.cue(GameplayCue::BootsChargeStarted),
+            Some(BootsEvent::BoostBegan) => self.camera.cue(GameplayCue::BootsBoostBegan),
+            Some(BootsEvent::Finished) => self.camera.cue(GameplayCue::BootsFinished),
+            Some(BootsEvent::Canceled) => self.camera.cue(GameplayCue::BootsReset),
+            _ => {}
+        }
+        if let Some(l) = &ev.landing
+            && l.handler == LandingHandler::Normal
+        {
+            self.camera.cue(GameplayCue::Landed { hard: l.hard });
+        }
+        for e in game.npc_events() {
+            if let NpcEvent::CameraShake { start, .. } = *e {
+                self.camera.cue(GameplayCue::WormGrowl { start });
+            }
         }
     }
 
@@ -549,6 +703,10 @@ impl LevelScript {
             return None;
         }
         let dt = game.clock.dt();
+        // The NPC pawns' collision follows the pawns.
+        if let (Some(npcs), Some(sc)) = (game.npcs.as_deref(), game.world.scene.as_mut()) {
+            npcs.place_pawn_colliders(&sc.map.collision, &mut sc.dynamic);
+        }
         // 1. Base mover under a standing player.
         let base = self.base_mover(game);
         let base_before =
@@ -579,9 +737,12 @@ impl LevelScript {
                 game.player.yaw = asamu_core::rotator::wrap_radians(game.player.yaw + dyaw);
             }
         }
-        // 4. The game tick.
+        // 4. The game tick, then the camera's animations of the frame.
         let was_story = game.in_story_mode();
+        let pj_before = game.player.script.power_jump;
         let report = game.tick(input)?;
+        self.camera_cues(game, &report, pj_before);
+        self.camera.advance(dt);
         // 5. Events for the next Kismet update. (Event activation only
         // queues ops, so this rarely emits anything; whatever it emits is
         // applied and returned like the update's own.)
@@ -627,6 +788,33 @@ impl LevelScript {
                     };
                     if !known {
                         self.note(format!("worm action {action} on unknown worm {worm:?}"));
+                    }
+                }
+                Output::CameraAnim {
+                    play,
+                    anim: Some(anim),
+                    looping,
+                    rate,
+                    scale,
+                    blend_in,
+                    blend_out,
+                    random_start,
+                } => {
+                    if *play {
+                        if !self.camera.kismet_play(
+                            anim,
+                            *rate,
+                            *scale,
+                            *blend_in,
+                            *blend_out,
+                            *looping,
+                            *random_start,
+                        ) && self.camera.set().get(anim).is_none()
+                        {
+                            self.note(format!("camera animation {anim} not converted"));
+                        }
+                    } else {
+                        self.camera.kismet_stop(anim);
                     }
                 }
                 Output::FollowCollision {
@@ -741,6 +929,11 @@ impl LevelScript {
                 NpcEvent::ActorInteractedWith { originator } => {
                     if let Some(r) = self.refs(originator).first().copied() {
                         self.runtime.actor_interacted_with(r);
+                    }
+                }
+                NpcEvent::AnimNotify { actor, ref name } => {
+                    for r in self.refs(actor) {
+                        self.runtime.anim_notify(r, name);
                     }
                 }
                 _ => {}
@@ -1003,6 +1196,87 @@ impl Host for GameHost<'_> {
 
     fn kill_player(&mut self) {
         self.game.kill_player();
+    }
+
+    fn anim_sequence_length(&self, actor: &ActorInfo, sequence: &str) -> Option<f32> {
+        let id = self.id(actor)?;
+        self.game.npcs()?.anim_sequence_length(id, sequence)
+    }
+
+    fn set_anim_position(&mut self, actor: &ActorInfo, call: &AnimPosition) -> Vec<String> {
+        let Some(id) = self.id(actor) else {
+            return Vec::new();
+        };
+        self.game
+            .npcs_mut()
+            .and_then(|n| {
+                n.set_anim_position(
+                    id,
+                    &call.sequence,
+                    call.position,
+                    call.fire_notifies,
+                    call.looping,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn set_skel_control_strength(&mut self, actor: &ActorInfo, control: &str, strength: f32) {
+        if let Some(id) = self.id(actor)
+            && let Some(n) = self.game.npcs_mut()
+        {
+            n.set_skel_control_strength(id, control, strength);
+        }
+    }
+
+    fn set_look_at(
+        &mut self,
+        actor: &ActorInfo,
+        target: Option<&ActorInfo>,
+        head_offset: [f32; 3],
+        eyes_offset: [f32; 3],
+    ) {
+        let target = target.and_then(|t| self.id(t));
+        if let Some(id) = self.id(actor)
+            && let Some(n) = self.game.npcs_mut()
+        {
+            n.set_look_at(
+                id,
+                target,
+                Vec3::from_array(head_offset),
+                Vec3::from_array(eyes_offset),
+            );
+        }
+    }
+
+    fn set_actor_property(&mut self, actor: &ActorInfo, name: &str, value: PropertyValue) {
+        // `DrawScale3D` rescales the actor and so its collision; the other
+        // properties the shipped tracks drive (light brightness, radius and
+        // colour) are presentation (the app reads them from the runtime).
+        if !name.eq_ignore_ascii_case("DrawScale3D") {
+            return;
+        }
+        let (Some(id), PropertyValue::Vector(v)) = (self.id(actor), value) else {
+            return;
+        };
+        let scale = Vec3::from_array(v);
+        if !scale.is_finite() {
+            return;
+        }
+        let Some(body) = self.movers.get_mut(&id) else {
+            return;
+        };
+        body.draw_scale3d = scale;
+        let affine = body.actor_affine(body.location, body.rotation);
+        if let Some(sc) = &mut self.game.world.scene {
+            for (i, rel) in &body.parts {
+                if let Some(inst) = sc.dynamic.get_mut(*i) {
+                    let info = inst.info;
+                    sc.map.collision.place_dynamic(inst, rel.then(&affine));
+                    inst.info = info;
+                }
+            }
+        }
     }
 }
 
@@ -1646,6 +1920,526 @@ mod tests {
         );
     }
 
+    /// A skinned actor (slot 9) animated by a Matinee animation-control
+    /// track, its look-at control driven by a strength track, and a light
+    /// (slot 10) whose brightness a float property track drives. The
+    /// sequence's Kismet notify at 1 s fires the actor's
+    /// `SeqEvent_AnimNotify` (→ grapple limit 6), its sound notify at 2 s
+    /// becomes an NPC event.
+    fn anim_game() -> (Game, LevelScript) {
+        use crate::npc::defs::{SkinnedComponent, SkinnedDrive};
+        use crate::npc::{NpcScene, SkinnedActorDef};
+        use asamu_world::anim::{NotifyDef, NotifyKind, SequenceInfo};
+        let nodes = format!(
+            r#"[
+                {{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3, 4, 5, 6, 7]}},
+                {{"id": 1, "class": "Engine.SeqEvent_LevelLoaded", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "Loaded and Visible", "links": [{{"op": 2, "input": 0}}]}}],
+                  "event": {{"max_trigger_count": 1}}}},
+                {{"id": 2, "class": "Engine.SeqAct_Interp", "kind": "action", "parent": 0,
+                  "inputs": [{{"desc": "Play"}}, {{"desc": "Reverse"}}, {{"desc": "Stop"}}, {{"desc": "Pause"}}, {{"desc": "Change Dir"}}],
+                  "outputs": [{{"desc": "Completed"}}, {{"desc": "Reversed"}}],
+                  "variables": [{{"desc": "Data", "vars": [3]}}, {{"desc": "Villager", "vars": [4]}}, {{"desc": "Lamp", "vars": [7]}}],
+                  "auto_activate_outputs": true, "latent": true, "latent_base": true}},
+                {{"id": 3, "path": "T.Data", "class": "Engine.InterpData", "kind": "variable", "parent": 0}},
+                {{"id": 4, "class": "Engine.SeqVar_Object", "kind": "variable", "parent": 0,
+                  "var": {{"value": {{"$obj": "T.TheWorld.PersistentLevel.Villager"}}}}}},
+                {{"id": 5, "class": "Engine.SeqEvent_AnimNotify", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "Out", "links": [{{"op": 6, "input": 0}}]}}],
+                  "event": {{"max_trigger_count": 0, "originator": "T.TheWorld.PersistentLevel.Villager"}},
+                  "params": {{"NotifyName": "Talk_Standing_1"}}}},
+                {},
+                {{"id": 7, "class": "Engine.SeqVar_Object", "kind": "variable", "parent": 0,
+                  "var": {{"value": {{"$obj": "T.TheWorld.PersistentLevel.Lamp"}}}}}}
+            ]"#,
+            action(
+                6,
+                "asamu.SeqAct_SetMaxGrapples",
+                &["In"],
+                None,
+                r#"{"Grapples": 6}"#
+            ),
+        );
+        let g = graph(
+            &nodes,
+            r#"[{"path": "T.TheWorld.PersistentLevel.Villager", "name": "Villager",
+                 "class": "Engine.SkeletalMeshActorMAT", "kind": "other", "package": "T", "slot": 9},
+                {"path": "T.TheWorld.PersistentLevel.Lamp", "name": "Lamp",
+                 "class": "Engine.PointLightMovable", "kind": "light", "package": "T", "slot": 10}]"#,
+        );
+        let pt = |t: f32, v: f32| {
+            format!(
+                r#"{{"in": {t:?}, "out": {v:?}, "arrive": 0.0, "leave": 0.0, "mode": "linear"}}"#
+            )
+        };
+        let doc = format!(
+            r#"{{"format": "asamu-matinee", "version": 1, "package": "T",
+                "actions": [{{"path": "T.Interp", "node": 2, "scope": "level", "interp_data": "T.Data",
+                              "bindings": [
+                                {{"link": 1, "label": "Villager", "group": "Villager",
+                                  "targets": [{{"variable": "T.V", "object": "T.TheWorld.PersistentLevel.Villager"}}]}},
+                                {{"link": 2, "label": "Lamp", "group": "Lamp",
+                                  "targets": [{{"variable": "T.L", "object": "T.TheWorld.PersistentLevel.Lamp"}}]}}]}}],
+                "interp_data": [{{"path": "T.Data", "length": 3.0, "groups": [
+                    {{"kind": "group", "name": "Villager", "tracks": [
+                      {{"class": "Engine.InterpTrackAnimControl", "data": {{"type": "anim_control", "slot": "FullBody",
+                        "keys": [{{"start_time": 0.0, "sequence": "Talk", "start_offset": 0.0, "end_offset": 0.0,
+                                   "play_rate": 1.0, "looping": false, "reverse": false}}]}}}},
+                      {{"class": "Engine.InterpTrackSkelControlStrength", "data": {{"type": "skel_control_strength",
+                        "name": "LookAtController", "curve": {{"points": [{}]}}}}}}]}},
+                    {{"kind": "group", "name": "Lamp", "tracks": [
+                      {{"class": "Engine.InterpTrackFloatProp", "data": {{"type": "float_property",
+                        "name": "Brightness", "curve": {{"points": [{}, {}]}}}}}},
+                      {{"class": "Engine.InterpTrackColorProp", "data": {{"type": "color_property",
+                        "name": "LightColor", "curve": {{"points": []}}}}}}]}}]}}]}}"#,
+            pt(0.0, 0.5),
+            pt(0.0, 0.0),
+            pt(2.0, 4.0)
+        );
+        let mut m = MatineeSet::default();
+        m.add_json(doc.as_bytes(), 0).unwrap();
+        let (mut map, _) = lift_map();
+        let s = scripts(g, m);
+        let movers = prepare_movers(&mut map, &s);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let mut scene = NpcScene {
+            skinned: vec![SkinnedActorDef {
+                id: 9,
+                name: "Villager".into(),
+                class: "Engine.SkeletalMeshActorMAT".into(),
+                hidden: false,
+                drive: SkinnedDrive::Matinee,
+                components: vec![SkinnedComponent {
+                    name: "SkeletalMeshComponent_0".into(),
+                    mesh: "Villagers.Meshes.V".into(),
+                    local_to_world: [[0.0; 4]; 4],
+                    hidden: false,
+                    animation: None,
+                }],
+            }],
+            ..NpcScene::default()
+        };
+        scene
+            .anims
+            .entry("villagers.meshes.v".into())
+            .or_default()
+            .insert(
+                "talk".into(),
+                SequenceInfo {
+                    length: 5.0,
+                    rate_scale: 1.0,
+                    notifies: vec![
+                        NotifyDef {
+                            time: 1.0,
+                            duration: 0.0,
+                            kind: NotifyKind::Kismet {
+                                name: "Talk_Standing_1".into(),
+                            },
+                        },
+                        NotifyDef {
+                            time: 2.0,
+                            duration: 0.0,
+                            kind: NotifyKind::Sound {
+                                cue: "Cue.Talk".into(),
+                                follow_actor: true,
+                                bone: None,
+                                volume: 1.0,
+                                pitch: 1.0,
+                                percent_to_play: 1.0,
+                                ignore_if_hidden: false,
+                            },
+                        },
+                    ],
+                },
+            );
+        game.attach_npcs(NpcSystem::new(scene, NpcOptions::default()));
+        let script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        (game, script)
+    }
+
+    #[test]
+    fn matinee_animation_tracks_reach_skinned_actors_lights_and_kismet() {
+        let (mut game, mut script) = anim_game();
+        let mut limit_at = None;
+        let mut sound_at = None;
+        for i in 1..=240u32 {
+            let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+            if limit_at.is_none() && game.player().script.gun.max_grapples == 6 {
+                limit_at = Some(i);
+            }
+            if t.npc_events.iter().any(
+                |e| matches!(e, NpcEvent::AnimSound { actor: 9, cue, .. } if cue == "Cue.Talk"),
+            ) {
+                sound_at.get_or_insert(i);
+            }
+        }
+        // The Matinee starts in the first update; its position crosses 1 s
+        // in update 61 and the notify's event runs in that same update.
+        assert_eq!(limit_at, Some(61), "{limit_at:?}");
+        // The sound notify at 2 s is reported with the NPC events of the game
+        // tick after the crossing update.
+        assert_eq!(sound_at, Some(121), "{sound_at:?}");
+        let state = &game.npcs().unwrap().runtime().skinned[0];
+        let node = state.current().unwrap();
+        assert_eq!(node.sequence.as_deref(), Some("Talk"));
+        assert!((node.position - 3.0).abs() < 0.02, "{}", node.position);
+        assert_eq!(state.controls.get("lookatcontroller"), Some(&0.5));
+        // The lamp's brightness followed its curve (0 → 4 over 2 s, held);
+        // the colour track has no keys and wrote nothing.
+        let props = script.actor_properties();
+        assert_eq!(
+            props,
+            vec![(10, "brightness".to_owned(), PropertyValue::Float(4.0))]
+        );
+        assert!(
+            script.runtime().errors().is_empty(),
+            "{:?}",
+            script.runtime().errors()
+        );
+        assert!(
+            script.host_errors().is_empty(),
+            "{:?}",
+            script.host_errors()
+        );
+    }
+
+    #[test]
+    fn gameplay_events_and_kismet_play_camera_animations() {
+        use asamu_kismet::camera_anim::{CameraAnim, Pov, paths};
+        use asamu_kismet::matinee::{CurveMode, CurvePoint, InterpCurve, MoveFrame, MoveTrack};
+        let (mut game, mut script) = npc_game("[]");
+        let mut set = CameraAnimSet::default();
+        let anim = |path: &str, z: f32| CameraAnim {
+            path: path.into(),
+            length: 1.0,
+            base_fov: 90.0,
+            move_track: Some(MoveTrack {
+                pos: InterpCurve {
+                    points: vec![
+                        CurvePoint {
+                            in_val: 0.0,
+                            out_val: [0.0; 3],
+                            arrive: [0.0; 3],
+                            leave: [0.0; 3],
+                            mode: CurveMode::Linear,
+                        },
+                        CurvePoint {
+                            in_val: 1.0,
+                            out_val: [0.0, 0.0, z],
+                            arrive: [0.0; 3],
+                            leave: [0.0; 3],
+                            mode: CurveMode::Linear,
+                        },
+                    ],
+                    ..InterpCurve::default()
+                },
+                // A move track needs rotation keys to move anything
+                // (`GetLocationAtTime`).
+                euler: InterpCurve {
+                    points: vec![CurvePoint {
+                        in_val: 0.0,
+                        out_val: [0.0; 3],
+                        arrive: [0.0; 3],
+                        leave: [0.0; 3],
+                        mode: CurveMode::Linear,
+                    }],
+                    ..InterpCurve::default()
+                },
+                move_frame: MoveFrame::RelativeToInitial,
+                ..MoveTrack::default()
+            }),
+            fov_track: None,
+        };
+        set.insert(anim(paths::HARD_LAND, -60.0));
+        set.insert(anim(paths::NORMAL_LAND, -6.0));
+        set.insert(anim(paths::WORM_GROWL, 3.0));
+        set.insert(anim("Map.Kismet.Anim", 12.0));
+        script.set_camera_anims(set);
+        let mut report = script
+            .tick(&mut game, &InputFrame::default())
+            .unwrap()
+            .report;
+        // A hard landing of the normal handler plays `HardLanding`.
+        report.events.landing = Some(asamu_player::LandingOutcome {
+            handler: LandingHandler::Normal,
+            velocity_z: -2500.0,
+            hard: true,
+            sound: true,
+            cue: None,
+            sprint_applied: false,
+            grapples_refilled: true,
+            boost_canceled: false,
+        });
+        let pj = game.player.script.power_jump;
+        script.camera_cues(&game, &report, pj);
+        script.camera.advance(0.5);
+        let playing: Vec<&str> = script
+            .camera_anims()
+            .player()
+            .active()
+            .into_iter()
+            .filter_map(|h| script.camera_anims().player().playing(h))
+            .collect();
+        assert_eq!(playing, vec![paths::HARD_LAND]);
+        let pov = Pov {
+            location: [0.0, 0.0, 100.0],
+            rotation: [0; 3],
+            fov: 90.0,
+        };
+        let out = script.camera_anims().apply(pov);
+        assert!((out.location[2] - 70.0).abs() < 1e-3, "{:?}", out.location);
+        // A story-mode landing plays nothing.
+        report.events.landing = report.events.landing.map(|mut l| {
+            l.handler = LandingHandler::Story;
+            l
+        });
+        script.camera_cues(&game, &report, pj);
+        assert_eq!(script.camera_anims().player().active().len(), 1);
+        // Kismet's `SeqAct_PlayCameraAnim` plays and stops through the
+        // update's outputs.
+        let play = |play: bool| Output::CameraAnim {
+            play,
+            anim: Some("Map.Kismet.Anim".into()),
+            looping: true,
+            rate: 1.0,
+            scale: 1.0,
+            blend_in: 0.0,
+            blend_out: 0.0,
+            random_start: false,
+        };
+        script.apply_game_outputs(&mut game, &[play(true)]);
+        assert_eq!(script.camera_anims().player().active().len(), 2);
+        script.apply_game_outputs(&mut game, &[play(false)]);
+        script.camera.advance(0.01);
+        assert!(
+            script
+                .camera_anims()
+                .player()
+                .active()
+                .iter()
+                .all(|h| script.camera_anims().player().playing(*h) != Some("Map.Kismet.Anim"))
+        );
+        // A missing animation is reported once per call, not played.
+        script.apply_game_outputs(
+            &mut game,
+            &[Output::CameraAnim {
+                play: true,
+                anim: Some("Missing.Anim".into()),
+                looping: false,
+                rate: 1.0,
+                scale: 1.0,
+                blend_in: 0.0,
+                blend_out: 0.0,
+                random_start: false,
+            }],
+        );
+        assert_eq!(script.host_errors().len(), 1);
+    }
+
+    #[test]
+    fn npc_pawn_cylinders_block_the_player() {
+        use crate::npc::defs::{PawnCollisionDef, WormLight, WormParams};
+        use crate::npc::{NpcScene, WormDef};
+        let (mut map, _) = lift_map();
+        let scene = NpcScene {
+            worms: vec![WormDef {
+                id: 7,
+                name: "Worm".into(),
+                location: Vec3::new(150.0, 0.0, 150.0),
+                rotation: [0; 3],
+                look_targets: Vec::new(),
+                light: WormLight::default(),
+                params: WormParams::ORIGINAL,
+                meshes: Vec::new(),
+            }],
+            pawn_collision: vec![PawnCollisionDef {
+                id: 7,
+                radius: 40.0,
+                half_height: 100.0,
+            }],
+            ..NpcScene::default()
+        };
+        let mut npcs = NpcSystem::new(scene, NpcOptions::default());
+        let colliders = prepare_pawn_collision(&mut map, &npcs);
+        assert_eq!(colliders, vec![(7, 0)]);
+        npcs.set_pawn_colliders(colliders);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        game.attach_npcs(npcs);
+        let shape = CollisionShape {
+            radius: 21.0,
+            half_height: 44.0,
+        };
+        let start = Vec3::new(0.0, 0.0, 120.0);
+        let hit = game
+            .world
+            .sweep_capsule(start, start + Vec3::X * 300.0, shape)
+            .unwrap();
+        assert_eq!(hit.surface.actor, Some(7));
+        assert!(
+            (hit.distance - (150.0 - 61.0)).abs() < 1e-2,
+            "{}",
+            hit.distance
+        );
+        // Traces (the grapple) pass through.
+        assert!(
+            game.world
+                .raycast(start, Vec3::X, 300.0)
+                .is_none_or(|h| h.surface.actor != Some(7))
+        );
+        // The colliders follow the pawns every scripted tick (the worm stays).
+        let mut script =
+            LevelScript::new(&mut game, scripts(graph("[]", "[]"), MatineeSet::default()));
+        game.start();
+        script.tick(&mut game, &InputFrame::default()).unwrap();
+        let sc = game.world.scene.as_ref().unwrap();
+        assert_eq!(
+            sc.dynamic[0].to_world.translation,
+            DVec3::new(150.0, 0.0, 150.0)
+        );
+    }
+
+    /// The lift map (no Kismet, so the platform stays put) with or without
+    /// an NPC pawn (id 7) whose 40 × 100 cylinder stands on the platform at
+    /// `pawn_at`.
+    fn pawn_obstacle_game(pawn_at: Option<Vec3>) -> (Game, LevelScript) {
+        use crate::npc::defs::{PawnCollisionDef, WormLight, WormParams};
+        use crate::npc::{NpcScene, WormDef};
+        let (mut map, _) = lift_map();
+        let scene = match pawn_at {
+            Some(location) => NpcScene {
+                worms: vec![WormDef {
+                    id: 7,
+                    name: "Worm".into(),
+                    location,
+                    rotation: [0; 3],
+                    look_targets: Vec::new(),
+                    light: WormLight::default(),
+                    params: WormParams::ORIGINAL,
+                    meshes: Vec::new(),
+                }],
+                pawn_collision: vec![PawnCollisionDef {
+                    id: 7,
+                    radius: 40.0,
+                    half_height: 100.0,
+                }],
+                ..NpcScene::default()
+            },
+            None => NpcScene::default(),
+        };
+        let mut npcs = NpcSystem::new(scene, NpcOptions::default());
+        npcs.set_pawn_colliders(prepare_pawn_collision(&mut map, &npcs));
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        game.attach_npcs(npcs);
+        let script = LevelScript::new(&mut game, scripts(graph("[]", "[]"), MatineeSet::default()));
+        game.start();
+        (game, script)
+    }
+
+    /// The player's own movement (not just a sweep query) is stopped by an
+    /// NPC pawn's cylinder: walking straight at it ends where the two
+    /// cylinders touch, walking at it off-centre slides around it without
+    /// ever entering, and without the pawn the same input walks through
+    /// the spot.
+    #[test]
+    fn the_player_cannot_walk_through_an_npc_pawn() {
+        let pawn = Vec3::new(150.0, 0.0, 150.0);
+        let reach = 40.0 + 21.0; // pawn radius + player radius
+        let forward = InputFrame {
+            move_forward: 1.0,
+            ..InputFrame::default()
+        };
+        let axis_distance = |g: &Game| {
+            let p = g.player().position;
+            ((p.x - pawn.x).powi(2) + (p.y - pawn.y).powi(2)).sqrt()
+        };
+        // Straight at it.
+        let (mut game, mut script) = pawn_obstacle_game(Some(pawn));
+        let mut closest = f32::MAX;
+        for _ in 0..180 {
+            script.tick(&mut game, &forward).unwrap();
+            closest = closest.min(axis_distance(&game));
+        }
+        let x = game.player().position.x;
+        assert!(
+            closest >= reach - 0.05,
+            "entered the pawn's cylinder: {closest} < {reach}"
+        );
+        assert!(
+            (x - (pawn.x - reach)).abs() < 1.0,
+            "stopped at x = {x}, the cylinders touch at {}",
+            pawn.x - reach
+        );
+        assert!(game.player().velocity.x.abs() < 1.0, "still moving");
+        // Off-centre: the player slides around and gets past, never inside.
+        let (mut game, mut script) = pawn_obstacle_game(Some(pawn + Vec3::Y * 30.0));
+        let pawn_y = pawn + Vec3::Y * 30.0;
+        let mut closest = f32::MAX;
+        let mut passed = false;
+        for _ in 0..240 {
+            script.tick(&mut game, &forward).unwrap();
+            let p = game.player().position;
+            closest = closest.min(((p.x - pawn_y.x).powi(2) + (p.y - pawn_y.y).powi(2)).sqrt());
+            passed |= p.x > pawn_y.x;
+        }
+        assert!(closest >= reach - 0.05, "{closest}");
+        assert!(passed, "slid around the pawn: {:?}", game.player().position);
+        // Without the pawn the same walk goes straight through the spot.
+        let (mut game, mut script) = pawn_obstacle_game(None);
+        for _ in 0..180 {
+            script.tick(&mut game, &forward).unwrap();
+        }
+        assert!(game.player().position.x > pawn.x, "{:?}", game.player());
+    }
+
+    /// The death reset stops the rocket-boots camera animations when the
+    /// boots are enabled (`ResetPlayer` → `ResetBoots`), and only then.
+    #[test]
+    fn the_death_reset_stops_the_boots_camera_animations() {
+        use asamu_kismet::camera_anim::{CameraAnim, paths};
+        let (mut game, mut script) = npc_game("[]");
+        let mut set = CameraAnimSet::default();
+        for p in [paths::BOOTS_CHARGE, paths::BOOTS_BOOSTING] {
+            set.insert(CameraAnim {
+                path: p.into(),
+                length: 100.0,
+                base_fov: 90.0,
+                move_track: None,
+                fov_track: None,
+            });
+        }
+        script.set_camera_anims(set);
+        let mut report = script
+            .tick(&mut game, &InputFrame::default())
+            .unwrap()
+            .report;
+        let pj = game.player.script.power_jump;
+        let boost = |script: &mut LevelScript| {
+            script.camera.cue(GameplayCue::BootsChargeStarted);
+            script.camera.cue(GameplayCue::BootsBoostBegan);
+            script.camera.advance(0.1);
+            assert_eq!(script.camera_anims().player().active().len(), 2);
+        };
+        // Boots not enabled: the reset is not called.
+        game.enable_rocket_boots(false);
+        boost(&mut script);
+        report.respawned = true;
+        script.camera_cues(&game, &report, pj);
+        script.camera.advance(0.1);
+        assert_eq!(script.camera_anims().player().active().len(), 2);
+        // Enabled: both kept instances stop (no blend-out time: at once).
+        game.enable_rocket_boots(true);
+        script.camera_cues(&game, &report, pj);
+        script.camera.advance(0.1);
+        assert!(script.camera_anims().player().active().is_empty());
+        // No respawn, no reset.
+        boost(&mut script);
+        report.respawned = false;
+        script.camera_cues(&game, &report, pj);
+        script.camera.advance(0.1);
+        assert_eq!(script.camera_anims().player().active().len(), 2);
+    }
+
     #[test]
     fn pause_worm_inputs_on_their_own() {
         // Start → PauseWorm A with "Pause" only (input 1) → PauseWorm B with
@@ -1822,6 +2616,239 @@ mod tests {
         sum.errors = script.runtime().errors().to_vec();
         sum.activations = script.runtime().stats().activations.clone();
         Some(sum)
+    }
+
+    /// Gated on converted data (`levels`, `meshes --collision`, `kismet`,
+    /// `matinee`, `skeletal`): the gameplay camera animations and the maps'
+    /// own are loaded, BeautifulCity's talking villagers fire their
+    /// `SeqEvent_AnimNotify` events from their own animations, Matinee
+    /// animation tracks pose their actors, and Darkcave's worm pawn blocks
+    /// the player with its placed cylinder.
+    #[test]
+    fn converted_camera_anims_notifies_look_at_and_pawn_collision() {
+        use asamu_kismet::camera_anim::paths;
+        let Some(dir) = converted_dir() else {
+            eprintln!("SKIP: ASAMU_CONVERTED_DIR with converted Kismet not set");
+            return;
+        };
+        // Camera animations.
+        if dir.join("matinee").join("camera_anims.json").is_file()
+            && let Ok((_, Some(script))) = load_level_with_kismet(&dir, "AG-Darkcave")
+        {
+            let set = script.camera_anims().set();
+            for p in [
+                paths::GRAPPLE_BEGIN,
+                paths::GRAPPLE_LOOP,
+                paths::NORMAL_LAND,
+                paths::HARD_LAND,
+                paths::POWER_JUMP_CHARGE,
+                paths::POWER_JUMP_BOB,
+                paths::POWER_LEAP_BOB,
+                paths::BOOTS_CHARGE,
+                paths::BOOTS_BOOSTING,
+                paths::WORM_GROWL,
+            ] {
+                assert!(set.get(p).is_some(), "{p}");
+            }
+            // Every animation a `SeqAct_PlayCameraAnim` of the map names.
+            let g = script.runtime().graph();
+            let named: Vec<String> = g
+                .nodes
+                .iter()
+                .filter(|n| n.class == asamu_kismet::OpClass::PlayCameraAnim)
+                .filter_map(|n| n.param("CameraAnim").and_then(|v| v.as_obj()))
+                .map(str::to_owned)
+                .collect();
+            assert!(!named.is_empty());
+            for p in &named {
+                assert!(set.get(p).is_some(), "{p}");
+            }
+            assert!(
+                script.host_errors().is_empty(),
+                "{:?}",
+                script.host_errors()
+            );
+        } else {
+            eprintln!("SKIP: no converted camera animations (run `asamu-import matinee`)");
+        }
+        // Animation notifies and Matinee animation on BeautifulCity.
+        if dir.join("skeletal").join("manifest.json").is_file()
+            && dir.join("matinee").join("anim_notifies.json").is_file()
+            && let Ok((mut game, Some(mut script))) =
+                load_level_with_kismet(&dir, "AG-BeautifulCity")
+        {
+            game.start();
+            let mut notifies = 0usize;
+            let mut sounds = 0usize;
+            for _ in 0..1500 {
+                let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+                for e in &t.npc_events {
+                    match e {
+                        NpcEvent::AnimNotify { .. } => notifies += 1,
+                        NpcEvent::AnimSound { .. } => sounds += 1,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(notifies > 0, "ambient animations fire Kismet notifies");
+            let g = script.runtime().graph();
+            let fired = g
+                .nodes
+                .iter()
+                .filter(|n| n.class == asamu_kismet::OpClass::AnimNotify)
+                .filter(|n| script.runtime().activate_count(n.id) > 0)
+                .count();
+            let total = g
+                .nodes
+                .iter()
+                .filter(|n| n.class == asamu_kismet::OpClass::AnimNotify)
+                .count();
+            println!(
+                "AG-BeautifulCity: {notifies} anim notifies, {sounds} anim sounds in 25 s; \
+                 {fired} of {total} SeqEvent_AnimNotify fired"
+            );
+            assert!(fired >= total / 2, "{fired} of {total}");
+            let npcs = game.npcs().unwrap();
+            let ambient = npcs
+                .runtime()
+                .skinned
+                .iter()
+                .filter(|s| s.ambient.as_ref().is_some_and(|n| n.playing))
+                .count();
+            let look = npcs.scene().look_at.len();
+            println!("AG-BeautifulCity: {ambient} ambient nodes playing, {look} look-at setups");
+            assert!(ambient >= 40, "{ambient}");
+            assert!(look >= 3, "{look}");
+            assert!(
+                script.runtime().errors().is_empty(),
+                "{:?}",
+                script.runtime().errors()
+            );
+            assert!(
+                script.host_errors().is_empty(),
+                "{:?}",
+                script.host_errors()
+            );
+        } else {
+            eprintln!("SKIP: no converted skeletal data or anim notifies");
+        }
+        // The worm pawn's collision in Darkcave.
+        if let Ok((game, _)) = load_level_with_kismet(&dir, "AG-Darkcave") {
+            let npcs = game.npcs().unwrap();
+            assert_eq!(npcs.pawn_colliders().len(), 1);
+            let worm = &npcs.scene().worms[0];
+            let c = npcs.scene().pawn_collision[0];
+            assert_eq!((c.radius, c.half_height), (200.0, 500.0));
+            let shape = CollisionShape {
+                radius: 21.0,
+                half_height: 44.0,
+            };
+            // From above the worm's cylinder straight down onto its top.
+            let top = worm.location + Vec3::Z * (c.half_height + 300.0);
+            let hit = game
+                .world
+                .sweep_capsule(top, worm.location, shape)
+                .expect("the worm blocks");
+            assert_eq!(hit.surface.actor, Some(worm.id));
+            assert!(
+                (hit.position.z - (worm.location.z + 544.0)).abs() < 0.1,
+                "{hit:?}"
+            );
+        }
+    }
+
+    /// Gated on converted data: on AG-Darkcave the *moving* player is kept
+    /// out of the worm pawn's placed cylinder (radius 200 + the player's
+    /// 21), from every direction it can be reached from, while the same
+    /// flight without the NPCs passes straight through that space; the
+    /// worm's cylinder does not stop zero-extent traces (the grapple).
+    #[test]
+    fn converted_worm_blocks_the_moving_player() {
+        let Some(dir) = converted_dir() else {
+            eprintln!("SKIP: ASAMU_CONVERTED_DIR with converted Kismet not set");
+            return;
+        };
+        let Ok((game, Some(_))) = load_level_with_kismet(&dir, "AG-Darkcave") else {
+            eprintln!("SKIP: AG-Darkcave not converted");
+            return;
+        };
+        let (worm, cyl) = {
+            let npcs = game.npcs().unwrap();
+            (
+                npcs.scene().worms[0].location,
+                npcs.scene().pawn_collision[0],
+            )
+        };
+        let reach = cyl.radius + 21.0;
+        // Fly at the worm's axis from `from` (at the worm's own height) for
+        // half a second; the closest the player gets to the axis, or `None`
+        // when the level's own geometry is in the way first.
+        let fly = |npcs: bool, dir_xy: Vec3| -> Option<f32> {
+            let options = LevelOptions {
+                npcs,
+                time_trial: false,
+            };
+            let (mut game, script) =
+                load_level_with_kismet_options(&dir, "AG-Darkcave", options).ok()?;
+            let mut script = script?;
+            game.start();
+            let start = worm - dir_xy * (reach + 150.0);
+            // The start must be free of the level's geometry.
+            let shape = CollisionShape {
+                radius: 21.0,
+                half_height: 44.0,
+            };
+            if game.world.overlaps(start, shape) {
+                return None;
+            }
+            game.player.position = start;
+            game.player.velocity = dir_xy * 1500.0;
+            let mut closest = f32::MAX;
+            for _ in 0..30 {
+                script.tick(&mut game, &InputFrame::default())?;
+                let p = game.player.position;
+                if !p.is_finite() {
+                    return None;
+                }
+                closest = closest.min(((p.x - worm.x).powi(2) + (p.y - worm.y).powi(2)).sqrt());
+                // Keep flying level: this checks the side of the cylinder.
+                game.player.position.z = start.z;
+                game.player.velocity.z = 0.0;
+            }
+            Some(closest)
+        };
+        let mut blocked = 0usize;
+        for k in 0..8 {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            let dir_xy = Vec3::new(a.cos(), a.sin(), 0.0);
+            let (Some(with), Some(without)) = (fly(true, dir_xy), fly(false, dir_xy)) else {
+                continue;
+            };
+            assert!(
+                with >= reach - 0.1,
+                "direction {k}: the player got {with} from the worm's axis (cylinders touch at {reach})"
+            );
+            // Only directions the level leaves open show the pawn at work.
+            if without < reach - 10.0 {
+                assert!(
+                    with < reach + 2.0,
+                    "direction {k}: stopped at {with}, before the worm ({reach})"
+                );
+                blocked += 1;
+            }
+        }
+        println!(
+            "AG-Darkcave: the worm's {} x {} cylinder stopped the flying player from {blocked} of 8 directions",
+            cyl.radius, cyl.half_height
+        );
+        assert!(blocked >= 1, "no free approach to the worm was found");
+        // Zero-extent traces pass through the pawn.
+        let from = worm - Vec3::X * (reach + 150.0);
+        assert!(
+            game.world
+                .raycast(from, Vec3::X, reach + 150.0)
+                .is_none_or(|h| h.surface.actor != Some(game.npcs().unwrap().scene().worms[0].id))
+        );
     }
 
     fn converted_dir() -> Option<std::path::PathBuf> {
