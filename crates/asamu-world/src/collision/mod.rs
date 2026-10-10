@@ -1,35 +1,99 @@
-//! Triangle-mesh collision for converted levels.
+//! Collision for converted levels: triangle meshes, convex hulls and pawn
+//! cylinders, queried with rays, a swept upright cylinder and a swept
+//! axis-aligned box.
 //!
 //! A [`CollisionScene`] holds unique collision meshes in their local space
 //! (static-mesh kDOP triangles, BSP triangles, convex hulls of blocking
-//! volumes), placed by [`Instance`]s with their `LocalToWorld` transform.
-//! Static instances sit in a top-level BVH; each mesh has its own BVH over
-//! its triangles. Instances whose transform changes during play (falling
-//! rocks) are passed separately to every query as a small "dynamic" list and
-//! tested by brute force.
+//! volumes and of simple-collision bodies), placed by [`Instance`]s with
+//! their `LocalToWorld` transform. Static instances sit in a top-level BVH;
+//! each mesh has its own BVH over its triangles. Instances whose transform
+//! changes during play (falling rocks) are passed separately to every query
+//! as a small "dynamic" list and tested by brute force.
 //!
-//! Queries ([`CollisionScene::sweep_cylinder`], [`CollisionScene::raycast`],
-//! [`CollisionScene::overlaps_cylinder`]) transform candidate triangles to
-//! world space in `f64` and run the exact tests of [`cylinder`].
+//! Queries transform candidate geometry to world space in `f64` and run the
+//! exact tests of [`cylinder`] and [`box_sweep`]:
+//!
+//! - [`CollisionScene::sweep_box`], [`CollisionScene::overlaps_box`]: an
+//!   axis-aligned box, the shape the original sweeps the pawn as
+//!   (`docs/PARITY_FINDINGS.md` P4). Hit times are the exact first contact;
+//!   the original's pull-back (P3) is the caller's.
+//! - [`CollisionScene::sweep_cylinder`], [`CollisionScene::overlaps_cylinder`]:
+//!   the upright cylinder used before P4 was known; kept unchanged until the
+//!   movement code has switched over.
+//! - [`CollisionScene::raycast`]: zero-extent traces.
+//!
+//! # Shapes
+//!
+//! - **Triangle meshes** ([`CollisionSceneBuilder::add_mesh`]): two-sided.
+//! - **Convex hulls** ([`CollisionSceneBuilder::add_convex_mesh`],
+//!   [`CollisionSceneBuilder::add_convex_hull`],
+//!   [`CollisionSceneBuilder::add_box_mesh`]): closed convex polyhedra.
+//!   Rays and the cylinder see their triangles one-sided (see [`cylinder`]);
+//!   the box sweep tests the solid ([`hull::ConvexHull`]): its face
+//!   directions, its edge directions and the box's axes. A mesh passed as
+//!   convex that is not closed and convex has no solid and is swept triangle
+//!   by triangle, one-sided.
+//! - **Pawn cylinders** ([`CollisionScene::add_cylinder_mesh`]).
+//!
+//! The simple-collision bodies of the original's meshes are made of convex
+//! elements, boxes, spheres and sphyls (capsules). Convex elements and boxes
+//! are the hulls above. Spheres and sphyls are not represented, and for the
+//! pawn they need nothing: the original's sphere and sphyl checks (in the
+//! user's macOS executable at 0x100AA6710 and 0x100AA7510) report "no hit"
+//! at once for any non-zero extent, so they never block a box sweep
+//! (CONFIRMED, read locally). They do answer zero-extent line checks, so a
+//! mesh whose line traces go to its simple body would need a ray against a
+//! sphere and a ray against a capsule here. The user's data has 2,439 convex
+//! elements in 315 meshes, one sphere (the engine's own sphere mesh), no box
+//! and no sphyl (counted from the 882 meshes of a local conversion).
+//!
+//! # Primitive kinds
+//!
+//! Every instance carries a [`PrimitiveKind`], repeated in every
+//! [`SceneHit`]: which of the original's collision routines the instance
+//! stands for. The original reports a hit short of the true contact by an
+//! amount that depends on the routine (P3; the constants are in the user's
+//! executable, `docs/PARITY_FINDINGS.md` V2 and V4), and the caller applies
+//! that from the kind:
+//!
+//! | kind | box (extent) traces | zero-extent traces |
+//! |---|---|---|
+//! | [`PrimitiveKind::Bsp`] | min(0.1 × length, 1.0) | flat 0.5 |
+//! | [`PrimitiveKind::BrushHull`] | min(0.1 × length, 1.0) | min(0.1 × length, 1.0), TENTATIVE |
+//! | [`PrimitiveKind::SimpleHull`] | min(0.1 × length, 1.0) | the same per V2; not read separately for zero extent |
+//! | [`PrimitiveKind::TriangleMesh`] | min(0.1 × length, 4.0) | min(0.1 × length, 4.0) |
+//! | [`PrimitiveKind::PawnCylinder`] | 0.001 × length (NPCS.md §12) | the same |
+//!
+//! (For traces shorter than 1 uu the first four rows use a flat 0.1.)
+//!
+//! # Collision flags and the enabled switch
+//!
+//! Every instance carries [`InstanceInfo::blocks_pawn`] (non-zero-extent
+//! checks: the player's moves) and [`InstanceInfo::blocks_traces`]
+//! (zero-extent checks: grapple and aim traces); [`QueryFilter`] selects one,
+//! plus a mask of loaded sub-levels. A mesh that the original collides with
+//! differently for the two (its simple body for the pawn, its triangles for
+//! bullet traces: P1, P2) is two instances of the same actor, one per flag.
+//!
+//! [`Instance::enabled`] switches an instance off for every query without
+//! removing it (blocking volumes that level script toggles, P5):
+//! [`CollisionScene::set_static_enabled`], [`CollisionScene::set_actor_enabled`],
+//! [`CollisionScene::set_enabled`]; dynamic instances are the caller's and
+//! can be switched through the field.
 //!
 //! # Determinism
 //!
 //! The BVHs depend only on their input (see [`bvh`]); a query's result is
 //! the minimum of `(time, instance, triangle)` in lexicographic order over
 //! every candidate, so the traversal order cannot change it, and the brute
-//! force reference [`CollisionScene::sweep_cylinder_brute_force`] returns
-//! bit-identical results.
-//!
-//! # Collision flags
-//!
-//! Every instance carries [`InstanceInfo::blocks_pawn`] (non-zero-extent
-//! checks: the player's moves) and [`InstanceInfo::blocks_traces`]
-//! (zero-extent checks: grapple and aim traces); [`QueryFilter`] selects one,
-//! plus a mask of loaded sub-levels.
+//! force references ([`CollisionScene::sweep_cylinder_brute_force`],
+//! [`CollisionScene::sweep_box_brute_force`]) return bit-identical results.
 
 pub mod affine;
+pub mod box_sweep;
 pub mod bvh;
 pub mod cylinder;
+pub mod hull;
 
 use std::cell::Cell;
 
@@ -38,6 +102,7 @@ use serde::{Deserialize, Serialize};
 
 pub use affine::Affine;
 pub use bvh::{Aabb3, Bvh};
+pub use hull::ConvexHull;
 
 use crate::SurfaceTag;
 
@@ -128,12 +193,81 @@ impl QueryFilter {
     }
 }
 
+/// Which of the original's collision routines an instance stands for (see
+/// the module docs for what the caller derives from it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimitiveKind {
+    /// Level BSP.
+    Bsp,
+    /// The brush of a volume (blocking volumes).
+    BrushHull,
+    /// The simple-collision body of a mesh (its convex and box elements).
+    SimpleHull,
+    /// The triangles of a static mesh.
+    TriangleMesh,
+    /// A pawn's collision cylinder.
+    PawnCylinder,
+}
+
+impl PrimitiveKind {
+    /// The kind of an instance nobody gave one: a cylinder mesh is a pawn
+    /// cylinder, the world's own geometry is BSP, any other convex mesh is
+    /// a brush (the only convex meshes before simple bodies existed) and
+    /// the rest are mesh triangles. Simple bodies must be named
+    /// ([`InstanceOptions::kind`]).
+    #[must_use]
+    pub fn default_for(class: CollisionClass, mesh: &CollisionMesh) -> Self {
+        if mesh.cylinder.is_some() {
+            Self::PawnCylinder
+        } else if class == CollisionClass::WorldGeometry {
+            Self::Bsp
+        } else if mesh.is_convex() {
+            Self::BrushHull
+        } else {
+            Self::TriangleMesh
+        }
+    }
+}
+
+/// What an instance is besides its mesh, transform and [`InstanceInfo`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstanceOptions {
+    /// `None` = [`PrimitiveKind::default_for`].
+    pub kind: Option<PrimitiveKind>,
+    /// `false` = starts switched off (see [`Instance::enabled`]).
+    pub enabled: bool,
+}
+
+impl Default for InstanceOptions {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            enabled: true,
+        }
+    }
+}
+
+impl InstanceOptions {
+    /// Switched on, of the given kind.
+    #[must_use]
+    pub fn of_kind(kind: PrimitiveKind) -> Self {
+        Self {
+            kind: Some(kind),
+            enabled: true,
+        }
+    }
+}
+
 /// Convex-hull data of a one-sided mesh.
 #[derive(Clone, Debug, PartialEq)]
 struct Convex {
     centroid: DVec3,
     /// Outward unit normal and offset (`n · p = w` on the plane).
     planes: Vec<(DVec3, f64)>,
+    /// The mesh as a solid, when it is closed and convex (for the box
+    /// sweep).
+    hull: Option<ConvexHull>,
 }
 
 /// A collision mesh in its local space.
@@ -172,6 +306,13 @@ impl CollisionMesh {
     pub fn is_convex(&self) -> bool {
         self.convex.is_some()
     }
+    /// The mesh as a convex solid, when it was added as convex and is one
+    /// (see [`CollisionSceneBuilder::add_convex_mesh`]): what the box sweep
+    /// tests instead of the triangles.
+    #[must_use]
+    pub fn hull(&self) -> Option<&ConvexHull> {
+        self.convex.as_ref().and_then(|c| c.hull.as_ref())
+    }
 
     fn triangle_local(&self, i: u32) -> Option<[Vec3; 3]> {
         let t = self.triangles.get(i as usize)?;
@@ -196,6 +337,11 @@ pub struct Instance {
     pub bounds: Aabb3,
     /// What queries see.
     pub info: InstanceInfo,
+    /// Which of the original's collision routines this stands for.
+    pub kind: PrimitiveKind,
+    /// Switched on. A disabled instance is skipped by every query (sweeps,
+    /// rays, overlaps) whatever its flags, and blocks again once enabled.
+    pub enabled: bool,
 }
 
 /// Which instance a hit belongs to (statics order before dynamics).
@@ -210,7 +356,8 @@ pub enum InstanceRef {
 /// A query result.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SceneHit {
-    /// Fraction of the motion / ray before contact, `[0, 1]`.
+    /// Fraction of the motion / ray before contact, `[0, 1]`: the exact
+    /// first contact, with nothing held back.
     pub t: f64,
     /// Unit normal pointing towards the mover / ray origin.
     pub normal: DVec3,
@@ -218,11 +365,21 @@ pub struct SceneHit {
     pub penetrating: bool,
     /// The instance hit.
     pub instance: InstanceRef,
-    /// Triangle index in the instance's mesh.
+    /// Triangle index in the instance's mesh (0 for a pawn cylinder and for
+    /// a box sweep against a convex solid).
     pub triangle: u32,
+    /// The kind of the instance hit.
+    pub kind: PrimitiveKind,
 }
 
 impl SceneHit {
+    /// Where the swept shape's centre (or the ray) is at the contact.
+    #[must_use]
+    pub fn point(&self, start: Vec3, end: Vec3) -> DVec3 {
+        let s = start.as_dvec3();
+        s + (end.as_dvec3() - s) * self.t
+    }
+
     fn key(&self) -> (f64, InstanceRef, u32) {
         (self.t, self.instance, self.triangle)
     }
@@ -324,17 +481,13 @@ impl CollisionSceneBuilder {
         Some(index)
     }
 
-    /// Adds the closed convex hull `vertices`/`triangles` as a one-sided
-    /// mesh (outward normals point away from the vertex centroid).
-    pub fn add_convex_mesh(
+    /// A one-sided mesh of cleaned triangles with its plane data.
+    fn push_convex(
         &mut self,
         vertices: Vec<Vec3>,
         triangles: Vec<[u32; 3]>,
+        hull: Option<ConvexHull>,
     ) -> Option<u32> {
-        let triangles = clean_triangles(&vertices, triangles);
-        if triangles.is_empty() {
-            return None;
-        }
         // The centroid of the vertices the triangles use (all finite after
         // cleaning; an unused non-finite or far-away vertex must not decide
         // which way the faces point).
@@ -374,10 +527,77 @@ impl CollisionSceneBuilder {
             vertices,
             triangles,
             bvh,
-            convex: Some(Convex { centroid, planes }),
+            convex: Some(Convex {
+                centroid,
+                planes,
+                hull,
+            }),
             cylinder: None,
         });
         Some(index)
+    }
+
+    /// Adds the closed convex hull `vertices`/`triangles` as a one-sided
+    /// mesh (outward normals point away from the vertex centroid). When the
+    /// triangles really are a closed convex polyhedron the mesh is also a
+    /// solid for the box sweep ([`CollisionMesh::hull`]).
+    pub fn add_convex_mesh(
+        &mut self,
+        vertices: Vec<Vec3>,
+        triangles: Vec<[u32; 3]>,
+    ) -> Option<u32> {
+        let triangles = clean_triangles(&vertices, triangles);
+        if triangles.is_empty() {
+            return None;
+        }
+        let hull = ConvexHull::from_triangles(&vertices, &triangles);
+        self.push_convex(vertices, triangles, hull)
+    }
+
+    /// [`Self::add_convex_mesh`] for a convex element that comes with its
+    /// own face-normal and edge directions (the original stores both per
+    /// element and tests exactly those, in that order): the box sweep uses
+    /// the lists as given and the hull of the vertices the triangles use.
+    /// Empty or unusable lists fall back to what the triangles give.
+    pub fn add_convex_hull(
+        &mut self,
+        vertices: Vec<Vec3>,
+        triangles: Vec<[u32; 3]>,
+        face_directions: &[Vec3],
+        edge_directions: &[Vec3],
+    ) -> Option<u32> {
+        let triangles = clean_triangles(&vertices, triangles);
+        if triangles.is_empty() {
+            return None;
+        }
+        let mut used = vec![false; vertices.len()];
+        for t in &triangles {
+            for &i in t {
+                if let Some(u) = used.get_mut(i as usize) {
+                    *u = true;
+                }
+            }
+        }
+        let points: Vec<Vec3> = vertices
+            .iter()
+            .zip(&used)
+            .filter(|(_, u)| **u)
+            .map(|(v, _)| *v)
+            .collect();
+        let hull = ConvexHull::with_directions(&points, face_directions, edge_directions)
+            .or_else(|| ConvexHull::from_triangles(&vertices, &triangles));
+        self.push_convex(vertices, triangles, hull)
+    }
+
+    /// Adds the box `[-half_extents, half_extents]` as a convex mesh (a
+    /// simple-collision box element; its instance's transform places and
+    /// turns it). `None` for a non-positive or non-finite size.
+    pub fn add_box_mesh(&mut self, half_extents: Vec3) -> Option<u32> {
+        if !(half_extents.is_finite() && half_extents.cmpgt(Vec3::ZERO).all()) {
+            return None;
+        }
+        let (vertices, triangles) = hull::box_mesh(half_extents);
+        self.add_convex_mesh(vertices, triangles)
     }
 
     /// The mesh `index`.
@@ -386,21 +606,36 @@ impl CollisionSceneBuilder {
         self.meshes.get(index as usize)
     }
 
-    /// An instance of `mesh` placed by `to_world`. A transform without an
-    /// inverse (zero scale on an axis) is baked: the mesh is copied in world
-    /// space and placed with the identity. `None` for an unknown mesh or a
-    /// non-finite transform.
+    /// An instance of `mesh` placed by `to_world`, switched on and of the
+    /// default kind (see [`Self::instance_with`]).
     pub fn instance(
         &mut self,
         mesh: u32,
         to_world: Affine,
         info: InstanceInfo,
     ) -> Option<Instance> {
+        self.instance_with(mesh, to_world, info, InstanceOptions::default())
+    }
+
+    /// An instance of `mesh` placed by `to_world`. A transform without an
+    /// inverse (zero scale on an axis) is baked: the mesh is copied in world
+    /// space and placed with the identity. `None` for an unknown mesh or a
+    /// non-finite transform.
+    pub fn instance_with(
+        &mut self,
+        mesh: u32,
+        to_world: Affine,
+        info: InstanceInfo,
+        options: InstanceOptions,
+    ) -> Option<Instance> {
         if !to_world.is_finite() {
             return None;
         }
         let m = self.meshes.get(mesh as usize)?;
         let local = m.bvh.bounds()?;
+        let kind = options
+            .kind
+            .unwrap_or_else(|| PrimitiveKind::default_for(info.class, m));
         match to_world.inverse() {
             Some(to_local) => {
                 let (lo, hi) = to_world.transform_aabb(local.min.as_dvec3(), local.max.as_dvec3());
@@ -411,6 +646,8 @@ impl CollisionSceneBuilder {
                     to_local,
                     bounds: Aabb3 { min, max },
                     info,
+                    kind,
+                    enabled: options.enabled,
                 })
             }
             None => {
@@ -433,6 +670,8 @@ impl CollisionSceneBuilder {
                     to_local: Affine::IDENTITY,
                     bounds: b,
                     info,
+                    kind,
+                    enabled: options.enabled,
                 })
             }
         }
@@ -440,7 +679,19 @@ impl CollisionSceneBuilder {
 
     /// Adds a static instance (see [`Self::instance`]); returns its index.
     pub fn add_static(&mut self, mesh: u32, to_world: Affine, info: InstanceInfo) -> Option<u32> {
-        let inst = self.instance(mesh, to_world, info)?;
+        self.add_static_with(mesh, to_world, info, InstanceOptions::default())
+    }
+
+    /// Adds a static instance with its kind and switch (see
+    /// [`Self::instance_with`]); returns its index.
+    pub fn add_static_with(
+        &mut self,
+        mesh: u32,
+        to_world: Affine,
+        info: InstanceInfo,
+        options: InstanceOptions,
+    ) -> Option<u32> {
+        let inst = self.instance_with(mesh, to_world, info, options)?;
         let index = u32::try_from(self.statics.len()).ok()?;
         self.statics.push(inst);
         Some(index)
@@ -467,14 +718,97 @@ pub struct CollisionScene {
     tlas: Bvh,
 }
 
+/// The shape a query sweeps or places.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// Upright cylinder: radius and half height.
+    Cylinder { r: f64, h: f64 },
+    /// Axis-aligned box: half extents.
+    Box { e: DVec3 },
+}
+
+impl Shape {
+    /// The shape against a pawn's cylinder. The original adds the trace
+    /// extent to that cylinder (`Extent.X` to its radius, `Extent.Z` to its
+    /// half height; see [`CollisionScene::add_cylinder_mesh`]), so a box
+    /// counts as the cylinder of its X and Z half extents there.
+    fn as_cylinder(self) -> (f64, f64) {
+        match self {
+            Self::Cylinder { r, h } => (r, h),
+            Self::Box { e } => (e.x, e.z),
+        }
+    }
+
+    /// Half extents of the shape itself.
+    fn extent(self) -> DVec3 {
+        match self {
+            Self::Cylinder { r, h } => DVec3::new(r, r, h),
+            Self::Box { e } => e,
+        }
+    }
+
+    /// Half extents of a box that holds the shape in each of its roles: a
+    /// box with unequal X and Y still reaches its X extent sideways against
+    /// a pawn cylinder ([`Self::as_cylinder`]).
+    fn reach(self) -> DVec3 {
+        match self {
+            Self::Cylinder { r, h } => DVec3::new(r, r, h),
+            Self::Box { e } => DVec3::new(e.x, e.y.max(e.x), e.z),
+        }
+    }
+}
+
 /// Per-query constants of a sweep.
 struct SweepQuery {
     s: DVec3,
     d: DVec3,
-    r: f64,
-    h: f64,
+    shape: Shape,
     tol: f64,
     pad: DVec3,
+}
+
+/// A convex solid in world space; the buffers are reused between the
+/// instances of one query.
+#[derive(Default)]
+struct HullScratch {
+    vertices: Vec<DVec3>,
+    faces: Vec<DVec3>,
+    edges: Vec<DVec3>,
+}
+
+impl HullScratch {
+    fn load(&mut self, hull: &ConvexHull, inst: &Instance) {
+        self.vertices.clear();
+        self.vertices
+            .extend(hull.vertices().iter().map(|v| inst.to_world.point(*v)));
+        // Plane normals map with the inverse transpose: component `j` of the
+        // world normal is the local normal against the local image of world
+        // axis `j`.
+        self.faces.clear();
+        let rows = inst.to_local.rows;
+        self.faces
+            .extend(hull.face_directions().iter().filter_map(|n| {
+                DVec3::new(rows[0].dot(*n), rows[1].dot(*n), rows[2].dot(*n)).try_normalize()
+            }));
+        self.edges.clear();
+        self.edges.extend(
+            hull.edge_directions()
+                .iter()
+                .filter_map(|e| inst.to_world.vector(*e).try_normalize()),
+        );
+    }
+}
+
+/// How an instance meets a swept shape.
+enum Whole {
+    /// As one body (a pawn cylinder, a convex solid): the contact, if any.
+    Tested(Option<cylinder::Contact>),
+    /// Triangle by triangle.
+    Triangles,
+}
+
+fn visible(filter: &QueryFilter, inst: &Instance) -> bool {
+    inst.enabled && filter.accepts(&inst.info)
 }
 
 impl CollisionScene {
@@ -518,12 +852,61 @@ impl CollisionScene {
         self.tlas.bounds()
     }
 
+    /// Switches the static instance `index` on or off (see
+    /// [`Instance::enabled`]); `false` for an unknown index. Nothing is
+    /// rebuilt: the instance stays where it is in the hierarchy.
+    pub fn set_static_enabled(&mut self, index: u32, enabled: bool) -> bool {
+        match self.statics.get_mut(index as usize) {
+            Some(inst) => {
+                inst.enabled = enabled;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Switches every static instance of the actor `actor` on or off;
+    /// returns how many there are.
+    pub fn set_actor_enabled(&mut self, actor: u32, enabled: bool) -> usize {
+        let mut n = 0;
+        for inst in &mut self.statics {
+            if inst.info.actor == Some(actor) {
+                inst.enabled = enabled;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Switches the instance a hit or a listing referred to; `false` when
+    /// there is none.
+    pub fn set_enabled(
+        &mut self,
+        dynamic: &mut [Instance],
+        which: InstanceRef,
+        enabled: bool,
+    ) -> bool {
+        match which {
+            InstanceRef::Static(i) => self.set_static_enabled(i, enabled),
+            InstanceRef::Dynamic(i) => match dynamic.get_mut(i as usize) {
+                Some(inst) => {
+                    inst.enabled = enabled;
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
     /// Removes the static instances whose actor id is in `actors` (keeping
     /// the order of the rest) and rebuilds the top-level BVH; returns the
     /// removed instances in their former order. Used before play to turn
     /// actors that Kismet moves (Matinee) or removes into dynamic
     /// instances. Static instance indices change; no hit should be kept
-    /// across this call.
+    /// across this call. The returned instances keep their kind and switch
+    /// and are usable as dynamic instances as they are; rebuilding one with
+    /// [`Self::dynamic_instance`] would reset both, so use
+    /// [`Self::place_dynamic`] to move them.
     pub fn take_actor_statics(
         &mut self,
         actors: &std::collections::BTreeSet<u32>,
@@ -540,14 +923,27 @@ impl CollisionScene {
         taken
     }
 
-    /// A dynamic instance of `mesh` (for the list passed to the queries);
-    /// `None` for an unknown mesh or a transform without an inverse.
+    /// A dynamic instance of `mesh` (for the list passed to the queries),
+    /// switched on and of the default kind; `None` for an unknown mesh or a
+    /// transform without an inverse.
     #[must_use]
     pub fn dynamic_instance(
         &self,
         mesh: u32,
         to_world: Affine,
         info: InstanceInfo,
+    ) -> Option<Instance> {
+        self.dynamic_instance_with(mesh, to_world, info, InstanceOptions::default())
+    }
+
+    /// [`Self::dynamic_instance`] with its kind and switch.
+    #[must_use]
+    pub fn dynamic_instance_with(
+        &self,
+        mesh: u32,
+        to_world: Affine,
+        info: InstanceInfo,
+        options: InstanceOptions,
     ) -> Option<Instance> {
         let m = self.meshes.get(mesh as usize)?;
         let local = m.bvh.bounds()?;
@@ -560,13 +956,22 @@ impl CollisionScene {
             to_local,
             bounds: Aabb3 { min, max },
             info,
+            kind: options
+                .kind
+                .unwrap_or_else(|| PrimitiveKind::default_for(info.class, m)),
+            enabled: options.enabled,
         })
     }
 
-    /// Moves a dynamic instance to `to_world` (bounds updated); returns
-    /// `false` (and leaves it unchanged) for a transform without an inverse.
+    /// Moves a dynamic instance to `to_world` (bounds updated; kind and
+    /// switch kept); returns `false` (and leaves it unchanged) for a
+    /// transform without an inverse.
     pub fn place_dynamic(&self, inst: &mut Instance, to_world: Affine) -> bool {
-        match self.dynamic_instance(inst.mesh, to_world, inst.info) {
+        let options = InstanceOptions {
+            kind: Some(inst.kind),
+            enabled: inst.enabled,
+        };
+        match self.dynamic_instance_with(inst.mesh, to_world, inst.info, options) {
             Some(n) => {
                 *inst = n;
                 true
@@ -585,10 +990,12 @@ impl CollisionScene {
     /// locally decompiled `UCylinderComponent::LineCheck`: the trace extent
     /// is added to the cylinder — `Extent.X` to the radius, `Extent.Z` to
     /// the half height — and the line is clipped against the two caps and
-    /// the circle). The start-contact rules are ours, those of the triangle
-    /// sweeps; the engine instead blocks a start inside only against radial
-    /// inward motion and pulls every hit time back by 0.001 of the move
-    /// (NPCS.md §12). `None` for a non-positive or non-finite size.
+    /// the circle), which is why a swept box counts as the cylinder of its
+    /// X and Z half extents against it. The start-contact rules are ours,
+    /// those of the triangle sweeps; the engine instead blocks a start
+    /// inside only against radial inward motion and pulls every hit time
+    /// back by 0.001 of the move (NPCS.md §12). `None` for a non-positive
+    /// or non-finite size.
     pub fn add_cylinder_mesh(&mut self, radius: f32, half_height: f32) -> Option<u32> {
         if !(radius.is_finite() && half_height.is_finite() && radius > 0.0 && half_height > 0.0) {
             return None;
@@ -641,34 +1048,82 @@ impl CollisionScene {
         })
     }
 
+    /// One triangle against the query's shape.
+    fn sweep_triangle(
+        q: &SweepQuery,
+        w: &[DVec3; 3],
+        outward: Option<DVec3>,
+        limit: f64,
+    ) -> Option<cylinder::Contact> {
+        match q.shape {
+            Shape::Cylinder { r, h } => {
+                cylinder::sweep_within(q.s, q.d, r, h, w, outward, q.tol, limit)
+            }
+            Shape::Box { e } => box_sweep::sweep_triangle(q.s, q.d, e, w, outward, q.tol, limit),
+        }
+    }
+
+    /// The instance as a whole (a pawn cylinder, or a convex solid for a
+    /// box) against the query's shape, with the contact if there is one
+    /// before `limit`.
+    fn sweep_whole(
+        inst: &Instance,
+        mesh: &CollisionMesh,
+        q: &SweepQuery,
+        scratch: &mut HullScratch,
+        limit: f64,
+    ) -> Whole {
+        if let Some((cr, ch)) = mesh.cylinder {
+            let (r, h) = q.shape.as_cylinder();
+            return Whole::Tested(cylinder_sweep(
+                q.s,
+                q.d,
+                r + cr,
+                h + ch,
+                inst.to_world.translation,
+                q.tol,
+                limit,
+            ));
+        }
+        if let (Shape::Box { e }, Some(hull)) = (q.shape, mesh.hull()) {
+            scratch.load(hull, inst);
+            return Whole::Tested(box_sweep::sweep_hull(
+                q.s,
+                q.d,
+                e,
+                &scratch.vertices,
+                &scratch.faces,
+                &scratch.edges,
+                q.tol,
+                limit,
+            ));
+        }
+        Whole::Triangles
+    }
+
     fn sweep_instance(
         &self,
         inst: &Instance,
         which: InstanceRef,
         q: &SweepQuery,
+        scratch: &mut HullScratch,
         best: &mut Option<SceneHit>,
     ) {
         let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
             return;
         };
-        if let Some((cr, ch)) = mesh.cylinder {
-            let limit = best.map_or(1.0, |b| b.t);
-            if let Some(c) = cylinder_sweep(
-                q.s,
-                q.d,
-                q.r + cr,
-                q.h + ch,
-                inst.to_world.translation,
-                q.tol,
-                limit,
-            ) {
-                let hit = SceneHit {
-                    t: c.t,
-                    normal: c.normal,
-                    penetrating: c.penetrating,
-                    instance: which,
-                    triangle: 0,
-                };
+        let make = |c: cylinder::Contact, triangle: u32| SceneHit {
+            t: c.t,
+            normal: c.normal,
+            penetrating: c.penetrating,
+            instance: which,
+            triangle,
+            kind: inst.kind,
+        };
+        let limit = best.map_or(1.0, |b| b.t);
+        if let Whole::Tested(contact) = Self::sweep_whole(inst, mesh, q, scratch, limit) {
+            if let Some(c) = contact {
+                let hit = make(c, 0);
                 if best.is_none_or(|b| hit.better_than(&b)) {
                     *best = Some(hit);
                 }
@@ -703,16 +1158,8 @@ impl CollisionScene {
                     None
                 };
                 let limit = cell.get().map_or(1.0, |b| b.t);
-                if let Some(c) =
-                    cylinder::sweep_within(q.s, q.d, q.r, q.h, &w, outward, q.tol, limit)
-                {
-                    let hit = SceneHit {
-                        t: c.t,
-                        normal: c.normal,
-                        penetrating: c.penetrating,
-                        instance: which,
-                        triangle: tri,
-                    };
+                if let Some(c) = Self::sweep_triangle(q, &w, outward, limit) {
+                    let hit = make(c, tri);
                     if cell.get().is_none_or(|b| hit.better_than(&b)) {
                         cell.set(Some(hit));
                     }
@@ -722,12 +1169,14 @@ impl CollisionScene {
         *best = cell.get();
     }
 
-    fn sweep_query(start: Vec3, end: Vec3, radius: f32, half_height: f32) -> Option<SweepQuery> {
+    fn sweep_query(start: Vec3, end: Vec3, shape: Shape) -> Option<SweepQuery> {
         let s = start.as_dvec3();
         let d = end.as_dvec3() - s;
-        let r = f64::from(radius);
-        let h = f64::from(half_height);
-        if !(s.is_finite() && d.is_finite() && r > 0.0 && h > 0.0 && r.is_finite() && h.is_finite())
+        let extent = shape.extent();
+        if !(s.is_finite()
+            && d.is_finite()
+            && extent.is_finite()
+            && extent.cmpgt(DVec3::ZERO).all())
         {
             return None;
         }
@@ -736,11 +1185,121 @@ impl CollisionScene {
         Some(SweepQuery {
             s,
             d,
-            r,
-            h,
+            shape,
             tol,
-            pad: DVec3::new(r + margin, r + margin, h + margin),
+            pad: shape.reach() + DVec3::splat(margin),
         })
+    }
+
+    fn sweep_shape(
+        &self,
+        dynamic: &[Instance],
+        q: &SweepQuery,
+        filter: QueryFilter,
+    ) -> Option<SceneHit> {
+        let inv = bvh::reciprocal(q.d);
+        let mut best: Option<SceneHit> = None;
+        let mut scratch = HullScratch::default();
+        let mut candidates: Vec<u32> = Vec::new();
+        self.tlas.query_ordered(
+            |b| bvh::segment_box_entry(q.s, inv, b, q.pad, 1.0),
+            || 1.0,
+            |i| candidates.push(i),
+        );
+        // Instances in order of their entry parameter, so the pruning limit
+        // tightens early.
+        let mut ordered: Vec<(f64, u32)> = candidates
+            .into_iter()
+            .filter_map(|i| {
+                let inst = self.statics.get(i as usize)?;
+                if !visible(&filter, inst) {
+                    return None;
+                }
+                bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0).map(|t| (t, i))
+            })
+            .collect();
+        ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (t, i) in ordered {
+            if best.is_some_and(|b| t > b.t) {
+                break;
+            }
+            if let Some(inst) = self.statics.get(i as usize) {
+                self.sweep_instance(inst, InstanceRef::Static(i), q, &mut scratch, &mut best);
+            }
+        }
+        for (i, inst) in dynamic.iter().enumerate() {
+            let Ok(i) = u32::try_from(i) else { break };
+            if !visible(&filter, inst) {
+                continue;
+            }
+            if bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0).is_some() {
+                self.sweep_instance(inst, InstanceRef::Dynamic(i), q, &mut scratch, &mut best);
+            }
+        }
+        best
+    }
+
+    fn sweep_shape_brute_force(
+        &self,
+        dynamic: &[Instance],
+        q: &SweepQuery,
+        filter: QueryFilter,
+    ) -> Option<SceneHit> {
+        let mut best: Option<SceneHit> = None;
+        let mut scratch = HullScratch::default();
+        let all = self
+            .statics
+            .iter()
+            .enumerate()
+            .map(|(i, inst)| (InstanceRef::Static(i as u32), inst))
+            .chain(
+                dynamic
+                    .iter()
+                    .enumerate()
+                    .map(|(i, inst)| (InstanceRef::Dynamic(i as u32), inst)),
+            );
+        for (which, inst) in all {
+            if !visible(&filter, inst) {
+                continue;
+            }
+            let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
+                continue;
+            };
+            let make = |c: cylinder::Contact, triangle: u32| SceneHit {
+                t: c.t,
+                normal: c.normal,
+                penetrating: c.penetrating,
+                instance: which,
+                triangle,
+                kind: inst.kind,
+            };
+            if let Whole::Tested(contact) = Self::sweep_whole(inst, mesh, q, &mut scratch, 1.0) {
+                if let Some(c) = contact {
+                    let hit = make(c, 0);
+                    if best.is_none_or(|b| hit.better_than(&b)) {
+                        best = Some(hit);
+                    }
+                }
+                continue;
+            }
+            for tri in 0..mesh.triangles.len() as u32 {
+                let Some(w) = self.world_triangle(inst, tri) else {
+                    continue;
+                };
+                let outward = if mesh.convex.is_some() {
+                    self.outward(inst, &w)
+                } else {
+                    None
+                };
+                if let Some(c) = Self::sweep_triangle(q, &w, outward, 1.0) {
+                    let hit = make(c, tri);
+                    if best.is_none_or(|b| hit.better_than(&b)) {
+                        best = Some(hit);
+                    }
+                }
+            }
+        }
+        best
     }
 
     /// Sweeps an upright cylinder from `start` to `end` and returns the
@@ -756,46 +1315,12 @@ impl CollisionScene {
         half_height: f32,
         filter: QueryFilter,
     ) -> Option<SceneHit> {
-        let q = Self::sweep_query(start, end, radius, half_height)?;
-        let inv = bvh::reciprocal(q.d);
-        let mut best: Option<SceneHit> = None;
-        let mut candidates: Vec<u32> = Vec::new();
-        self.tlas.query_ordered(
-            |b| bvh::segment_box_entry(q.s, inv, b, q.pad, 1.0),
-            || 1.0,
-            |i| candidates.push(i),
-        );
-        // Instances in order of their entry parameter, so the pruning limit
-        // tightens early.
-        let mut ordered: Vec<(f64, u32)> = candidates
-            .into_iter()
-            .filter_map(|i| {
-                let inst = self.statics.get(i as usize)?;
-                if !filter.accepts(&inst.info) {
-                    return None;
-                }
-                bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0).map(|t| (t, i))
-            })
-            .collect();
-        ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        for (t, i) in ordered {
-            if best.is_some_and(|b| t > b.t) {
-                break;
-            }
-            if let Some(inst) = self.statics.get(i as usize) {
-                self.sweep_instance(inst, InstanceRef::Static(i), &q, &mut best);
-            }
-        }
-        for (i, inst) in dynamic.iter().enumerate() {
-            let Ok(i) = u32::try_from(i) else { break };
-            if !filter.accepts(&inst.info) {
-                continue;
-            }
-            if bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0).is_some() {
-                self.sweep_instance(inst, InstanceRef::Dynamic(i), &q, &mut best);
-            }
-        }
-        best
+        let shape = Shape::Cylinder {
+            r: f64::from(radius),
+            h: f64::from(half_height),
+        };
+        let q = Self::sweep_query(start, end, shape)?;
+        self.sweep_shape(dynamic, &q, filter)
     }
 
     /// Reference implementation of [`Self::sweep_cylinder`] without any
@@ -811,54 +1336,60 @@ impl CollisionScene {
         half_height: f32,
         filter: QueryFilter,
     ) -> Option<SceneHit> {
-        let q = Self::sweep_query(start, end, radius, half_height)?;
-        let mut best: Option<SceneHit> = None;
-        let all = self
-            .statics
-            .iter()
-            .enumerate()
-            .map(|(i, inst)| (InstanceRef::Static(i as u32), inst))
-            .chain(
-                dynamic
-                    .iter()
-                    .enumerate()
-                    .map(|(i, inst)| (InstanceRef::Dynamic(i as u32), inst)),
-            );
-        for (which, inst) in all {
-            if !filter.accepts(&inst.info) {
-                continue;
-            }
-            let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
-                continue;
-            };
-            if mesh.cylinder.is_some() {
-                self.sweep_instance(inst, which, &q, &mut best);
-                continue;
-            }
-            for tri in 0..mesh.triangles.len() as u32 {
-                let Some(w) = self.world_triangle(inst, tri) else {
-                    continue;
-                };
-                let outward = if mesh.convex.is_some() {
-                    self.outward(inst, &w)
-                } else {
-                    None
-                };
-                if let Some(c) = cylinder::sweep(q.s, q.d, q.r, q.h, &w, outward, q.tol) {
-                    let hit = SceneHit {
-                        t: c.t,
-                        normal: c.normal,
-                        penetrating: c.penetrating,
-                        instance: which,
-                        triangle: tri,
-                    };
-                    if best.is_none_or(|b| hit.better_than(&b)) {
-                        best = Some(hit);
-                    }
-                }
-            }
+        let shape = Shape::Cylinder {
+            r: f64::from(radius),
+            h: f64::from(half_height),
+        };
+        let q = Self::sweep_query(start, end, shape)?;
+        self.sweep_shape_brute_force(dynamic, &q, filter)
+    }
+
+    /// Sweeps the axis-aligned box with half extents `half_extents` (the
+    /// pawn's are `(21, 21, 44)`) from `start` to `end` and returns the
+    /// first contact with an enabled instance accepted by `filter` (static
+    /// or in `dynamic`): triangle meshes and BSP triangle by triangle,
+    /// convex solids as solids, pawn cylinders as cylinders. The time is
+    /// the exact first contact and the normal follows the original's rule
+    /// (the separating axis that was entered last; see [`box_sweep`]).
+    /// `None` without a contact, for `start == end` and for non-finite or
+    /// non-positive input.
+    #[must_use]
+    pub fn sweep_box(
+        &self,
+        dynamic: &[Instance],
+        start: Vec3,
+        end: Vec3,
+        half_extents: Vec3,
+        filter: QueryFilter,
+    ) -> Option<SceneHit> {
+        let q = Self::box_query(start, end, half_extents)?;
+        self.sweep_shape(dynamic, &q, filter)
+    }
+
+    /// Reference implementation of [`Self::sweep_box`] without any
+    /// acceleration structure (every triangle and every solid of every
+    /// accepted instance). Returns bit-identical results; used by tests.
+    #[must_use]
+    pub fn sweep_box_brute_force(
+        &self,
+        dynamic: &[Instance],
+        start: Vec3,
+        end: Vec3,
+        half_extents: Vec3,
+        filter: QueryFilter,
+    ) -> Option<SceneHit> {
+        let q = Self::box_query(start, end, half_extents)?;
+        self.sweep_shape_brute_force(dynamic, &q, filter)
+    }
+
+    fn box_query(start: Vec3, end: Vec3, half_extents: Vec3) -> Option<SweepQuery> {
+        if start == end {
+            return None;
         }
-        best
+        let shape = Shape::Box {
+            e: half_extents.as_dvec3(),
+        };
+        Self::sweep_query(start, end, shape)
     }
 
     fn ray_instance(
@@ -872,15 +1403,17 @@ impl CollisionScene {
         let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
             return;
         };
+        let make = |t: f64, normal: DVec3, triangle: u32| SceneHit {
+            t,
+            normal,
+            penetrating: false,
+            instance: which,
+            triangle,
+            kind: inst.kind,
+        };
         if let Some((cr, ch)) = mesh.cylinder {
             if let Some((t, normal)) = cylinder_ray(o, dv, cr, ch, inst.to_world.translation) {
-                let hit = SceneHit {
-                    t,
-                    normal,
-                    penetrating: false,
-                    instance: which,
-                    triangle: 0,
-                };
+                let hit = make(t, normal, 0);
                 if best.is_none_or(|b| hit.better_than(&b)) {
                     *best = Some(hit);
                 }
@@ -905,13 +1438,7 @@ impl CollisionScene {
                     None
                 };
                 if let Some((t, n)) = cylinder::ray(o, dv, &w, outward) {
-                    let hit = SceneHit {
-                        t,
-                        normal: n,
-                        penetrating: false,
-                        instance: which,
-                        triangle: tri,
-                    };
+                    let hit = make(t, n, tri);
                     if cell.get().is_none_or(|b| hit.better_than(&b)) {
                         cell.set(Some(hit));
                     }
@@ -921,8 +1448,8 @@ impl CollisionScene {
         *best = cell.get();
     }
 
-    /// First triangle hit by the segment `origin → end` among the instances
-    /// accepted by `filter`.
+    /// First triangle hit by the segment `origin → end` among the enabled
+    /// instances accepted by `filter`.
     #[must_use]
     pub fn raycast(
         &self,
@@ -949,7 +1476,7 @@ impl CollisionScene {
             .into_iter()
             .filter_map(|i| {
                 let inst = self.statics.get(i as usize)?;
-                if !filter.accepts(&inst.info) {
+                if !visible(&filter, inst) {
                     return None;
                 }
                 bvh::segment_box_entry(o, inv, &inst.bounds, pad, 1.0).map(|t| (t, i))
@@ -966,7 +1493,7 @@ impl CollisionScene {
         }
         for (i, inst) in dynamic.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else { break };
-            if filter.accepts(&inst.info)
+            if visible(&filter, inst)
                 && bvh::segment_box_entry(o, inv, &inst.bounds, pad, 1.0).is_some()
             {
                 self.ray_instance(inst, InstanceRef::Dynamic(i), o, dv, &mut best);
@@ -1002,7 +1529,7 @@ impl CollisionScene {
                     .map(|(i, inst)| (InstanceRef::Dynamic(i as u32), inst)),
             );
         for (which, inst) in all {
-            if !filter.accepts(&inst.info) {
+            if !visible(&filter, inst) {
                 continue;
             }
             let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
@@ -1028,6 +1555,7 @@ impl CollisionScene {
                         penetrating: false,
                         instance: which,
                         triangle: tri,
+                        kind: inst.kind,
                     };
                     if best.is_none_or(|b| hit.better_than(&b)) {
                         best = Some(hit);
@@ -1042,16 +1570,27 @@ impl CollisionScene {
         &self,
         inst: &Instance,
         c: DVec3,
-        r: f64,
-        h: f64,
+        shape: Shape,
         world_box: &Aabb3,
+        scratch: &mut HullScratch,
     ) -> bool {
         let Some(mesh) = self.meshes.get(inst.mesh as usize) else {
             return false;
         };
         if let Some((cr, ch)) = mesh.cylinder {
+            let (r, h) = shape.as_cylinder();
             let p = c - inst.to_world.translation;
             return DVec2::new(p.x, p.y).length() < r + cr && p.z.abs() < h + ch;
+        }
+        if let (Shape::Box { e }, Some(hull)) = (shape, mesh.hull()) {
+            scratch.load(hull, inst);
+            return box_sweep::overlaps_hull(
+                c,
+                e,
+                &scratch.vertices,
+                &scratch.faces,
+                &scratch.edges,
+            );
         }
         if let Some(cv) = &mesh.convex {
             let lc = inst.to_local.point(c);
@@ -1069,7 +1608,10 @@ impl CollisionScene {
             |b| b.overlaps(&local_box),
             |tri| {
                 if let Some(w) = self.world_triangle(inst, tri)
-                    && cylinder::overlaps(c, r, h, &w)
+                    && match shape {
+                        Shape::Cylinder { r, h } => cylinder::overlaps(c, r, h, &w),
+                        Shape::Box { e } => box_sweep::overlaps_triangle(c, e, &w),
+                    }
                 {
                     hit = true;
                     return false;
@@ -1078,6 +1620,43 @@ impl CollisionScene {
             },
         );
         hit
+    }
+
+    fn overlaps_shape(
+        &self,
+        dynamic: &[Instance],
+        c: DVec3,
+        shape: Shape,
+        filter: QueryFilter,
+    ) -> bool {
+        let e = shape.extent();
+        if !(c.is_finite() && e.is_finite() && e.cmpgt(DVec3::ZERO).all()) {
+            return false;
+        }
+        let reach = shape.reach();
+        let (min, max) = affine::round_out(c - reach, c + reach);
+        let world_box = Aabb3 { min, max };
+        let mut scratch = HullScratch::default();
+        let mut hit = false;
+        self.tlas.query(
+            |b| b.overlaps(&world_box),
+            |i| {
+                if let Some(inst) = self.statics.get(i as usize)
+                    && visible(&filter, inst)
+                    && inst.bounds.overlaps(&world_box)
+                    && self.overlaps_instance(inst, c, shape, &world_box, &mut scratch)
+                {
+                    hit = true;
+                    return false;
+                }
+                true
+            },
+        );
+        hit || dynamic.iter().any(|inst| {
+            visible(&filter, inst)
+                && inst.bounds.overlaps(&world_box)
+                && self.overlaps_instance(inst, c, shape, &world_box, &mut scratch)
+        })
     }
 
     /// `true` when the upright cylinder at `center` overlaps (by more than
@@ -1092,36 +1671,31 @@ impl CollisionScene {
         half_height: f32,
         filter: QueryFilter,
     ) -> bool {
-        let c = center.as_dvec3();
         let tol = contact_tolerance(center);
-        let r = f64::from(radius) - tol;
-        let h = f64::from(half_height) - tol;
-        if !(c.is_finite() && r > 0.0 && h > 0.0) {
-            return false;
-        }
-        let e = DVec3::new(r, r, h);
-        let (min, max) = affine::round_out(c - e, c + e);
-        let world_box = Aabb3 { min, max };
-        let mut hit = false;
-        self.tlas.query(
-            |b| b.overlaps(&world_box),
-            |i| {
-                if let Some(inst) = self.statics.get(i as usize)
-                    && filter.accepts(&inst.info)
-                    && inst.bounds.overlaps(&world_box)
-                    && self.overlaps_instance(inst, c, r, h, &world_box)
-                {
-                    hit = true;
-                    return false;
-                }
-                true
-            },
-        );
-        hit || dynamic.iter().any(|inst| {
-            filter.accepts(&inst.info)
-                && inst.bounds.overlaps(&world_box)
-                && self.overlaps_instance(inst, c, r, h, &world_box)
-        })
+        let shape = Shape::Cylinder {
+            r: f64::from(radius) - tol,
+            h: f64::from(half_height) - tol,
+        };
+        self.overlaps_shape(dynamic, center.as_dvec3(), shape, filter)
+    }
+
+    /// `true` when the axis-aligned box at `center` overlaps (by more than
+    /// the contact tolerance) an enabled instance accepted by `filter`: a
+    /// triangle, a convex solid (anywhere inside counts) or a pawn
+    /// cylinder.
+    #[must_use]
+    pub fn overlaps_box(
+        &self,
+        dynamic: &[Instance],
+        center: Vec3,
+        half_extents: Vec3,
+        filter: QueryFilter,
+    ) -> bool {
+        let tol = contact_tolerance(center);
+        let shape = Shape::Box {
+            e: half_extents.as_dvec3() - DVec3::splat(tol),
+        };
+        self.overlaps_shape(dynamic, center.as_dvec3(), shape, filter)
     }
 }
 
