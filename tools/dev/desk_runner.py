@@ -101,6 +101,11 @@ MAX_QUEUED = 16
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_PROCESSES_PER_JOB = 64
 MAX_INBOX_ENTRIES_PER_SCAN = 64
+MAX_INBOX_ENTRIES_EXAMINED = 4096
+MAX_REMEMBERED_NAMES = 4096
+EARLY_CANCEL_KEEP_S = 120.0
+MAX_EARLY_CANCELS = 256
+CONSOLE_BACKLOG_LINES = 2000
 HEARTBEAT_PERIOD_S = 2.0
 HEARTBEAT_STALE_S = 15.0
 POLL_PERIOD_S = 0.25
@@ -113,8 +118,8 @@ EXIT_RUNNER = 125
 EXIT_NOT_STARTED = 126
 EXIT_CANCELLED = 130
 
-ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-ENV_NAME_RE = re.compile(r"^(ASAMU_[A-Z0-9_]{1,56}|WGPU_[A-Z0-9_]{1,56}|BEVY_[A-Z0-9_]{1,56}|RUST_BACKTRACE|RUST_LOG)$")
+ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+ENV_NAME_RE = re.compile(r"\A(ASAMU_[A-Z0-9_]{1,56}|WGPU_[A-Z0-9_]{1,56}|BEVY_[A-Z0-9_]{1,56}|RUST_BACKTRACE|RUST_LOG)\Z")
 JOB_KEYS = frozenset({"version", "id", "program", "args", "cwd", "timeout_seconds", "env"})
 REQUIRED_JOB_KEYS = ("version", "program", "args", "cwd", "timeout_seconds")
 TERMINAL_STATES = frozenset(
@@ -136,7 +141,7 @@ DENIED_PROGRAM_STEMS = frozenset(
     steam steamservice steamwebhelper asamu-win32-shipping udk udklift
     """.split()
 )
-_PYTHON_STEM_RE = re.compile(r"^python[0-9.]*w?$")
+_PYTHON_STEM_RE = re.compile(r"\Apython[0-9.]*w?\Z")
 _WIN_RESERVED_NAMES = frozenset(
     ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
     + [f"COM{i}" for i in range(1, 10)]
@@ -146,6 +151,16 @@ _WIN_RESERVED_NAMES = frozenset(
 
 class JobRejected(Exception):
     """A job that will not run; the text is the reason shown to both sides."""
+
+
+def is_job_id(text: object) -> bool:
+    """1 to 64 letters, digits, '-' or '_', and not the name of a device: on
+    Windows a file called `nul.status.json` or `com1.stdout.txt` can be the
+    device and not a file, whatever folder it is in."""
+    return isinstance(text, str) and ID_RE.match(text) is not None and text.upper() not in _WIN_RESERVED_NAMES
+
+
+BAD_JOB_ID = "job id must be 1 to 64 letters, digits, '-' or '_', and not a device name such as NUL or COM1"
 
 
 class LaunchError(Exception):
@@ -350,8 +365,8 @@ def parse_job_bytes(data: bytes) -> dict[str, Any]:
 
 def validate_job(obj: dict[str, Any], job_id: str, root_real: str, policy: Policy) -> Job:
     """Every rule a job has to meet. `root_real` is the resolved root folder."""
-    if not ID_RE.match(job_id):
-        raise JobRejected("job id must be 1 to 64 letters, digits, '-' or '_'")
+    if not is_job_id(job_id):
+        raise JobRejected(BAD_JOB_ID)
     unknown = sorted(str(key) for key in obj if key not in JOB_KEYS)
     if unknown:
         raise JobRejected(f"unknown field(s): {printable(', '.join(unknown), 80)}")
@@ -380,7 +395,11 @@ def validate_job(obj: dict[str, Any], job_id: str, root_real: str, policy: Polic
             raise JobRejected("an argument contains a NUL character")
 
     timeout = obj["timeout_seconds"]
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout):
+    # An integer of hundreds of digits is valid JSON and cannot become a float:
+    # only a float is asked whether it is finite.
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise JobRejected("'timeout_seconds' must be a number")
+    if isinstance(timeout, float) and not math.isfinite(timeout):
         raise JobRejected("'timeout_seconds' must be a number")
     if not 1 <= timeout <= MAX_TIMEOUT_S:
         raise JobRejected(f"'timeout_seconds' must be between 1 and {int(MAX_TIMEOUT_S)}")
@@ -455,6 +474,14 @@ class _WinApi:
     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
     PROCESS_TERMINATE = 0x0001
     PROCESS_SET_QUOTA = 0x0100
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    FILE_LIST_DIRECTORY = 0x0001
+    FILE_SHARE_READ_WRITE = 0x0001 | 0x0002
+    OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FILE_ATTRIBUTE_DIRECTORY = 0x0010
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
     THREAD_SUSPEND_RESUME = 0x0002
     TH32CS_SNAPTHREAD = 0x0004
     CREATE_SUSPENDED = 0x0004
@@ -501,8 +528,23 @@ class _WinApi:
                 ("dwFlags", u32),
             ]
 
+        class FileInformation(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", u32),
+                ("ftCreationTime", ctypes.c_uint64),
+                ("ftLastAccessTime", ctypes.c_uint64),
+                ("ftLastWriteTime", ctypes.c_uint64),
+                ("dwVolumeSerialNumber", u32),
+                ("nFileSizeHigh", u32),
+                ("nFileSizeLow", u32),
+                ("nNumberOfLinks", u32),
+                ("nFileIndexHigh", u32),
+                ("nFileIndexLow", u32),
+            ]
+
         self.ExtendedLimit = ExtendedLimit
         self.ThreadEntry = ThreadEntry
+        self.FileInformation = FileInformation
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         self.k32 = k32
         for name, restype, argtypes in (
@@ -517,6 +559,10 @@ class _WinApi:
             ("Thread32Next", c_int, [vp, ctypes.POINTER(ThreadEntry)]),
             ("OpenThread", vp, [u32, c_int, u32]),
             ("ResumeThread", u32, [vp]),
+            ("QueryFullProcessImageNameW", c_int, [vp, u32, ctypes.c_wchar_p, ctypes.POINTER(u32)]),
+            ("CreateFileW", vp, [ctypes.c_wchar_p, u32, u32, vp, u32, u32, vp]),
+            ("GetFileInformationByHandle", c_int, [vp, ctypes.POINTER(FileInformation)]),
+            ("GetFinalPathNameByHandleW", u32, [vp, ctypes.c_wchar_p, u32, u32]),
         ):
             func = getattr(k32, name)
             func.restype = restype
@@ -553,6 +599,59 @@ class _WinApi:
                 raise self.fail("AssignProcessToJobObject")
         finally:
             self.k32.CloseHandle(handle)
+
+    def image_path(self, pid: int) -> str:
+        """The file a process was really made from, links and junctions
+        followed by the system itself at the moment it was created."""
+        handle = self.k32.OpenProcess(self.PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+        if not handle:
+            raise self.fail("OpenProcess")
+        try:
+            size = ctypes.c_uint32(32768)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if not self.k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                raise self.fail("QueryFullProcessImageName")
+            return buf.value
+        finally:
+            self.k32.CloseHandle(handle)
+
+    def pin_folder(self, path: str) -> int:
+        """Hold a folder in place: while the handle is open, the folder and
+        the folders above it can be neither renamed nor removed, so nothing
+        can put a link where they are. Files in it can still come and go.
+        A link or a junction is refused (it is opened itself, not followed)."""
+        handle = self.k32.CreateFileW(
+            path,
+            self.FILE_LIST_DIRECTORY,
+            self.FILE_SHARE_READ_WRITE,
+            None,
+            self.OPEN_EXISTING,
+            self.FILE_FLAG_BACKUP_SEMANTICS | self.FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            raise self.fail("opening the folder")
+        info = self.FileInformation()
+        if not self.k32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            err = self.fail("GetFileInformationByHandle")
+            self.k32.CloseHandle(handle)
+            raise err
+        attributes = info.dwFileAttributes
+        if not attributes & self.FILE_ATTRIBUTE_DIRECTORY or attributes & self.FILE_ATTRIBUTE_REPARSE_POINT:
+            self.k32.CloseHandle(handle)
+            raise LaunchError("it is a link or not a folder")
+        return int(handle)
+
+    def final_path(self, handle: int) -> str:
+        """The real path of what an open handle refers to."""
+        buf = ctypes.create_unicode_buffer(32768)
+        length = self.k32.GetFinalPathNameByHandleW(handle, buf, 32768, 0)
+        if length == 0 or length >= 32768:
+            raise self.fail("GetFinalPathNameByHandle")
+        return buf.value
+
+    def unpin(self, handle: int) -> None:
+        self.k32.CloseHandle(handle)
 
     def resume(self, pid: int) -> None:
         """Resume the threads of a process that was created suspended."""
@@ -626,11 +725,33 @@ class RunningProcess:
         self._files = []
 
 
+def same_windows_path(one: str, other: str) -> bool:
+    """Whether two resolved Windows paths are the same text, ignoring case,
+    the kind of slash and the long-path prefix of a path that came from a
+    handle."""
+
+    def plain(path: str) -> str:
+        path = path.replace("/", "\\")
+        if path.startswith("\\\\?\\") and not path.upper().startswith("\\\\?\\UNC\\"):
+            path = path[4:]
+        return path.lower()
+
+    return plain(one) == plain(other)
+
+
 class ProcessLauncher:
     """Starts an argument list without a shell, confined so that its whole
     process tree can be ended: a job object on Windows (the tree also ends if
     the runner dies), a new session and process group elsewhere (a child that
-    starts its own session escapes the group; Windows has no such gap)."""
+    starts its own session escapes the group; Windows has no such gap).
+
+    `argv[0]` and `cwd` are the resolved paths that passed the checks. On
+    Windows the start itself is checked against them, because a folder on the
+    way can be swapped for a junction after the check: the working directory
+    is held in place while the process is created, and the new process stays
+    suspended until the system confirms which file it was made from. A
+    program from anywhere else is ended before it has run one instruction.
+    Elsewhere (Linux, macOS: used for the tests) that last gap stays open."""
 
     def __init__(self) -> None:
         self._win = _WinApi() if os.name == "nt" else None
@@ -641,26 +762,41 @@ class ProcessLauncher:
         files: list[BinaryIO] = []
         job: int | None = None
         try:
-            files.append(open(stdout_path, "wb"))
-            files.append(open(stderr_path, "wb"))
+            files.append(os.fdopen(open_own_file(stdout_path, "new"), "wb"))
+            files.append(os.fdopen(open_own_file(stderr_path, "new"), "wb"))
             if self._win is not None:
                 job = self._win.create_job()
-                popen = subprocess.Popen(
-                    argv,
-                    executable=argv[0],
-                    cwd=cwd,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=files[0],
-                    stderr=files[1],
-                    shell=False,
-                    close_fds=True,
-                    creationflags=self._win.CREATE_SUSPENDED
-                    | self._win.CREATE_NEW_PROCESS_GROUP
-                    | self._win.CREATE_NO_WINDOW,
-                )
+                try:
+                    pin = self._win.pin_folder(cwd)
+                except LaunchError as err:
+                    raise LaunchError(f"the working directory cannot be held in place: {err}") from None
+                try:
+                    if not same_windows_path(self._win.final_path(pin), cwd):
+                        raise LaunchError("the working directory is not the folder that was checked (a link was put in its place)")
+                    popen = subprocess.Popen(
+                        argv,
+                        executable=argv[0],
+                        cwd=cwd,
+                        env=env,
+                        stdin=subprocess.DEVNULL,
+                        stdout=files[0],
+                        stderr=files[1],
+                        shell=False,
+                        close_fds=True,
+                        creationflags=self._win.CREATE_SUSPENDED
+                        | self._win.CREATE_NEW_PROCESS_GROUP
+                        | self._win.CREATE_NO_WINDOW,
+                    )
+                finally:
+                    self._win.unpin(pin)
                 try:
                     self._win.assign(job, popen.pid)
+                    image = self._win.image_path(popen.pid)
+                    if not same_windows_path(image, argv[0]):
+                        raise LaunchError(
+                            f"the program that was about to run is {printable(image, 200)}, not the file that was "
+                            "checked (a link was put in its place); it was ended before it ran"
+                        )
                     self._win.resume(popen.pid)
                 except LaunchError:
                     popen.kill()
@@ -694,11 +830,94 @@ class ProcessLauncher:
 # Files the two sides share
 
 
+def _is_link(info: os.stat_result) -> bool:
+    """A symbolic link, or on Windows any reparse point (junctions included)."""
+    return stat.S_ISLNK(info.st_mode) or bool((getattr(info, "st_file_attributes", 0) or 0) & 0x400)
+
+
+_WIN_FILE_API: list[Any] = []
+
+
+def _win_open_no_follow(path: str, access: int, disposition: int, flags: int) -> int:
+    """CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT, as a file descriptor.
+    The C runtime's own open() follows a symbolic link, even a dangling one
+    and even when asked to create exclusively."""
+    import msvcrt
+
+    if not _WIN_FILE_API:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CreateFileW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        _WIN_FILE_API.append(k32)
+    k32 = _WIN_FILE_API[0]
+    # Share reading and writing (as the C runtime does), normal attributes,
+    # and open a link itself instead of what it points to.
+    handle = k32.CreateFileW(path, access, 0x1 | 0x2, None, disposition, 0x80 | 0x00200000, None)
+    if not handle or handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
+    try:
+        return msvcrt.open_osfhandle(handle, flags | os.O_BINARY | os.O_NOINHERIT)  # type: ignore[attr-defined]
+    except OSError:
+        k32.CloseHandle(handle)
+        raise
+
+
+def open_own_file(path: str, mode: str) -> int:
+    """Open one of the files the runner or its client writes, never through a
+    link, and return the file descriptor.
+
+    "new"     whatever has that name is removed first (a link itself, never
+              what it points to), then the file is created;
+    "append"  opened for appending, created when missing (the logs);
+    "lock"    opened for reading and writing, created when missing.
+
+    A planted link would otherwise send the write to any file the account can
+    reach. What was opened is checked as well: it must be a regular file, no
+    link, with this one name only."""
+    if mode == "new":
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    if os.name == "nt":
+        access, disposition, flags = {
+            "new": (0x40000000, 1, os.O_WRONLY),  # GENERIC_WRITE, CREATE_NEW
+            "append": (0x0004 | 0x0080 | 0x00100000, 4, os.O_WRONLY | os.O_APPEND),  # FILE_APPEND_DATA, OPEN_ALWAYS
+            "lock": (0x80000000 | 0x40000000, 4, os.O_RDWR),
+        }[mode]
+        fd = _win_open_no_follow(path, access, disposition, flags)
+    else:
+        flags = {
+            "new": os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            "append": os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+            "lock": os.O_RDWR | os.O_CREAT,
+        }[mode]
+        # O_NONBLOCK: a named pipe put in the file's place must not hold up the open.
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or _is_link(info) or info.st_nlink != 1:
+            raise OSError(f"{path} is a link, or not a plain file with one name")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
 def write_json_atomic(path: str, obj: object) -> None:
     """Write next to the target, then rename over it, so a reader never sees
     half a file. A reader on Windows can hold the old file for a moment."""
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+    with os.fdopen(open_own_file(tmp, "new"), "w", encoding="utf-8", newline="\n") as handle:
         json.dump(obj, handle, indent=1, sort_keys=True)
         handle.write("\n")
     for attempt in range(20):
@@ -745,12 +964,27 @@ class InstanceLock:
         return True
 
     def acquire(self) -> bool:
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
-        if self._try_lock(fd):
+        """True when this process now holds the lock. Raises OSError when the
+        lock file is a link or cannot be opened."""
+        fd = open_own_file(self.path, "lock")
+        if self._try_lock(fd) and self._is_the_named_file(fd):
             self._fd = fd
             return True
         os.close(fd)
         return False
+
+    def _is_the_named_file(self, fd: int) -> bool:
+        try:
+            return os.path.samestat(os.fstat(fd), os.lstat(self.path))
+        except OSError:
+            return False
+
+    def still_in_place(self) -> bool:
+        """Whether the lock file's name still leads to the file this process
+        locked. Where a file that is open can be deleted (Linux, macOS), a
+        deleted lock file would let a second runner start; the first one has
+        to notice and stop."""
+        return self._fd is not None and self._is_the_named_file(self._fd)
 
     def release(self) -> None:
         if self._fd is not None:
@@ -920,7 +1154,11 @@ class Runner:
         self._active: dict[str, _Active] = {}
         self._queue: list[_Queued] = []
         self._ignored: set[str] = set()
+        self._said_once: set[str] = set()
         self._undeletable: dict[str, int] = {}
+        self._early_cancels: dict[str, float] = {}
+        self._pins: list[int] = []
+        self._winapi = _WinApi() if os.name == "nt" else None
         self._last_beat: float | None = None
         self._started_unix = 0.0
         self._digest = own_digest()
@@ -955,10 +1193,15 @@ class Runner:
         except OSError:
             pass
         try:
-            with open(path, "a", encoding="utf-8", newline="\n") as handle:
+            with os.fdopen(open_own_file(path, "append"), "a", encoding="utf-8", newline="\n") as handle:
                 handle.write(line + "\n")
         except OSError:
             pass
+
+    def _say_once(self, key: str, text: str) -> None:
+        if key not in self._said_once:
+            self._said_once.add(key)
+            self.say(text)
 
     def banner(self) -> list[str]:
         """What the owner reads in the console window."""
@@ -1003,21 +1246,79 @@ class Runner:
         """The runner's folders must be real folders in place: a link there
         would send its writes somewhere else."""
         for folder in (self.layout.base, self.layout.inbox, self.layout.outbox):
+            self._check_own_folder(folder)
+
+    @staticmethod
+    def _check_own_folder(folder: str) -> None:
+        try:
+            info = os.lstat(folder)
+            real = os.path.realpath(folder, strict=True)
+        except OSError as err:
+            raise RunnerError(f"folder {printable(folder)} is missing ({type(err).__name__})") from None
+        if not stat.S_ISDIR(info.st_mode) or _is_link(info) or os.path.normcase(real) != os.path.normcase(folder):
+            raise RunnerError(f"folder {printable(folder)} is a link or not a folder; refusing to use it")
+
+    def _check_own_files(self) -> None:
+        """The files the runner keeps writing must be plain files of its own
+        (or not exist yet): through a link its writes would land elsewhere."""
+        for path in (self.layout.lock, self.layout.log, self.layout.rejected_log, self.layout.heartbeat):
             try:
-                info = os.lstat(folder)
-                real = os.path.realpath(folder, strict=True)
+                info = os.lstat(path)
+            except FileNotFoundError:
+                continue
             except OSError as err:
-                raise RunnerError(f"folder {printable(folder)} is missing ({type(err).__name__})") from None
-            if not stat.S_ISDIR(info.st_mode) or os.path.normcase(real) != os.path.normcase(folder):
-                raise RunnerError(f"folder {printable(folder)} is a link or not a folder; refusing to use it")
+                raise RunnerError(f"file {printable(path)} cannot be examined ({type(err).__name__})") from None
+            if not stat.S_ISREG(info.st_mode) or _is_link(info) or info.st_nlink != 1:
+                raise RunnerError(f"file {printable(path)} is a link or not a plain file; refusing to use it")
+
+    def _pin_own_folders(self) -> None:
+        """Windows: hold the runner's folders in place for as long as it runs,
+        so that none of them (nor the root above them) can be renamed away and
+        replaced by a link between one check and the next write. Elsewhere
+        the check at the start of every round has to do."""
+        if self._winapi is None:
+            return
+        for folder in (self.layout.base, self.layout.inbox, self.layout.outbox):
+            try:
+                self._pins.append(self._winapi.pin_folder(folder))
+            except LaunchError as err:
+                raise RunnerError(f"folder {printable(folder)} cannot be held in place: {err}") from None
+
+    def _unpin_own_folders(self) -> None:
+        while self._pins:
+            handle = self._pins.pop()
+            if self._winapi is not None:
+                self._winapi.unpin(handle)
 
     def startup(self) -> None:
+        try:
+            self._startup()
+        except RunnerError:
+            self._unpin_own_folders()
+            raise
+
+    def _startup(self) -> None:
+        # One level at a time, each checked before the next is made: nothing
+        # is created through a link that was put where a folder belongs.
         for folder in (self.layout.base, self.layout.inbox, self.layout.outbox):
-            os.makedirs(folder, exist_ok=True)
+            try:
+                os.mkdir(folder)
+            except FileExistsError:
+                pass
+            except OSError as err:
+                raise RunnerError(f"folder {printable(folder)} cannot be made ({type(err).__name__})") from None
+            self._check_own_folder(folder)
+        self._pin_own_folders()
         self._check_own_folders()
+        self._check_own_files()
         for _ in range(5):
-            if self._lock.acquire():
-                break
+            try:
+                if self._lock.acquire():
+                    break
+            except OSError as err:
+                raise RunnerError(
+                    f"the lock file {printable(self.layout.lock)} cannot be used ({type(err).__name__}: {printable(err, 120)})"
+                ) from None
             time.sleep(0.2)
         else:
             other = read_json(self.layout.heartbeat) or {}
@@ -1090,6 +1391,7 @@ class Runner:
                 pass
         self._lock.release()
         self.say("stopped")
+        self._unpin_own_folders()
 
     def run(self) -> int:
         try:
@@ -1128,6 +1430,10 @@ class Runner:
             # on it writes nothing at all, ends its jobs and stops.
             self._no_writes = True
             raise
+        if not self._lock.still_in_place():
+            raise RunnerError(
+                "the lock file was removed or replaced, so a second runner could start; stopping so that two never work at once"
+            )
         self._scan_inbox()
         self._poll_active()
         self._start_queued()
@@ -1176,8 +1482,14 @@ class Runner:
     def _report_ignored(self, name: str, why: str) -> None:
         if name in self._ignored:
             return
-        if len(self._ignored) < 4096:
-            self._ignored.add(name)
+        if len(self._ignored) >= MAX_REMEMBERED_NAMES:
+            # Not remembered, so it would be reported again every round.
+            self._say_once(
+                "ignored-full",
+                f"more than {MAX_REMEMBERED_NAMES} inbox entries have been ignored; further ones are not reported one by one",
+            )
+            return
+        self._ignored.add(name)
         self.jobs_refused += 1
         self.say(f"IGNORED inbox entry '{printable(name, 80)}': {why}")
         self._append(
@@ -1196,7 +1508,7 @@ class Runner:
             self.layout.rejected_log,
             json.dumps({"time": utc_text(self.clock.time()), "name": printable(job_id, 120), "reason": reason}),
         )
-        if ID_RE.match(job_id) and (replace_status or not os.path.lexists(self.layout.status(job_id))):
+        if is_job_id(job_id) and (replace_status or not os.path.lexists(self.layout.status(job_id))):
             fields: dict[str, Any] = {"state": "rejected", "reason": reason}
             if isinstance(program, str):
                 fields["program"] = printable(program, 300)
@@ -1215,25 +1527,42 @@ class Runner:
 
     def _scan_inbox(self) -> None:
         try:
-            entries = list(os.scandir(self.layout.inbox))
+            listing = os.scandir(self.layout.inbox)
         except OSError as err:
             raise RunnerError(f"cannot read the inbox ({type(err).__name__})") from None
         found: list[tuple[float, str, int]] = []
-        for entry in entries:
-            name = entry.name
-            if name in self._ignored:
-                continue
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            # 0x400: a reparse point (Windows), such as a junction or a link.
-            if not stat.S_ISREG(info.st_mode) or (getattr(info, "st_file_attributes", 0) or 0) & 0x400:
-                self._report_ignored(name, "not a regular file (links and folders are never followed)")
-                continue
-            if name.endswith(".json.tmp") or name.endswith(".cancel.tmp"):
-                continue
-            found.append((info.st_mtime, name, info.st_size))
+        examined = 0
+        try:
+            for entry in listing:
+                # A bound on the work of one round: the time limits of the
+                # running jobs are enforced by this same loop.
+                examined += 1
+                if examined > MAX_INBOX_ENTRIES_EXAMINED:
+                    self._say_once(
+                        "inbox-full",
+                        f"the inbox holds more than {MAX_INBOX_ENTRIES_EXAMINED} entries; only that many are looked at "
+                        "each round (remove what does not belong there)",
+                    )
+                    break
+                name = entry.name
+                if name in self._ignored:
+                    continue
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode) or _is_link(info):
+                    self._report_ignored(name, "not a regular file (links and folders are never followed)")
+                    continue
+                if name.endswith(".json.tmp") or name.endswith(".cancel.tmp"):
+                    continue
+                found.append((info.st_mtime, name, info.st_size))
+        except OSError as err:
+            raise RunnerError(f"cannot read the inbox ({type(err).__name__})") from None
+        finally:
+            close = getattr(listing, "close", None)
+            if close is not None:
+                close()
         # Oldest first; within one round jobs before cancellations, so that a
         # cancellation never overtakes the job it is meant for.
         found.sort()
@@ -1264,7 +1593,8 @@ class Runner:
             self._accept(job_id, data)
 
     def _read_job_file(self, path: str) -> bytes | None:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        # O_NONBLOCK: a named pipe swapped in after the check must not hold up the open.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
             fd = os.open(path, flags)
         except OSError:
@@ -1302,8 +1632,8 @@ class Runner:
         return True
 
     def _accept(self, job_id: str, data: bytes) -> None:
-        if not ID_RE.match(job_id):
-            self._refuse(job_id, "bad job file name (1 to 64 letters, digits, '-' or '_', then .json)")
+        if not is_job_id(job_id):
+            self._refuse(job_id, "bad job file name (1 to 64 letters, digits, '-' or '_', no device name, then .json)")
             return
         if job_id in self._active or any(q.job_id == job_id for q in self._queue):
             self._refuse(job_id, "a job with this id is already running or waiting")
@@ -1312,6 +1642,12 @@ class Runner:
             self.jobs_refused += 1
             self.say(f"REFUSED job '{job_id}': a result with this id already exists (it is kept)")
             return
+        cancelled_at = self._early_cancels.pop(job_id, None)
+        if cancelled_at is not None and self.clock.monotonic() - cancelled_at <= EARLY_CANCEL_KEEP_S:
+            self.jobs_refused += 1
+            self.say(f"CANCELLED job {job_id} (its cancellation arrived before it did)")
+            self._write_status(job_id, {"state": "cancelled", "reason": "cancelled before it arrived"})
+            return
         program: object = None
         try:
             obj = parse_job_bytes(data)
@@ -1319,6 +1655,9 @@ class Runner:
             validate_job(obj, job_id, self.root, self.policy)
         except JobRejected as err:
             self._refuse(job_id, str(err), program)
+            return
+        except Exception as err:  # noqa: BLE001 - no job file, however odd, may end the runner
+            self._refuse(job_id, f"could not be checked ({type(err).__name__})", program)
             return
         if len(self._active) < self.max_jobs and not self._queue:
             self._start(job_id, obj)
@@ -1345,6 +1684,9 @@ class Runner:
             job = validate_job(obj, job_id, self.root, self.policy)
         except JobRejected as err:
             self._refuse(job_id, str(err), obj.get("program"), replace_status=was_queued)
+            return
+        except Exception as err:  # noqa: BLE001 - as in _accept
+            self._refuse(job_id, f"could not be checked ({type(err).__name__})", obj.get("program"), replace_status=was_queued)
             return
         env = dict(os.environ)
         env.update(dict(job.env))
@@ -1387,6 +1729,14 @@ class Runner:
                 self.say(f"CANCELLED job {job_id} (it had not started)")
                 self._beat(force=True)
                 return
+        # A cancellation can arrive before its job (the sender was interrupted
+        # while the job file was still on its way): remember it for a while.
+        if is_job_id(job_id) and not os.path.lexists(self.layout.status(job_id)):
+            now = self.clock.monotonic()
+            for old in [key for key, at in self._early_cancels.items() if now - at > EARLY_CANCEL_KEEP_S]:
+                del self._early_cancels[old]
+            if len(self._early_cancels) < MAX_EARLY_CANCELS:
+                self._early_cancels[job_id] = now
 
     def _output_size(self, job_id: str) -> int:
         total = 0
@@ -1498,13 +1848,82 @@ def _prepare_console(runner: Runner, done: threading.Event) -> list[object]:
     return keep
 
 
+class BackgroundWriter:
+    """Console output that never holds up the runner.
+
+    A console window blocks the program at its next write while its text is
+    being selected or its output is paused. The job loop enforces the time
+    limits, so it must not wait for the window: lines go into a bounded
+    backlog that a thread of its own writes out. When the backlog is full,
+    lines are dropped and counted (runner.log still has every one)."""
+
+    def __init__(self, target: TextIO, limit: int = CONSOLE_BACKLOG_LINES):
+        self._target = target
+        self._limit = limit
+        self._lines: list[str] = []
+        self._dropped = 0
+        self._busy = False
+        self._closed = False
+        self._changed = threading.Condition()
+        self._thread = threading.Thread(target=self._drain, name="desk-runner-console", daemon=True)
+        self._thread.start()
+
+    def write(self, text: str) -> int:
+        with self._changed:
+            if len(self._lines) >= self._limit:
+                self._dropped += 1
+            else:
+                self._lines.append(text)
+            self._changed.notify_all()
+        return len(text)
+
+    def flush(self) -> None:
+        """Nothing to do: the thread flushes what it writes."""
+
+    def _drain(self) -> None:
+        while True:
+            with self._changed:
+                while not self._lines and not self._dropped and not self._closed:
+                    self._changed.wait()
+                if not self._lines and not self._dropped:
+                    return
+                batch, self._lines = self._lines, []
+                dropped, self._dropped = self._dropped, 0
+                self._busy = True
+            try:
+                self._target.write("".join(batch))
+                if dropped:
+                    self._target.write(f"... {dropped} line(s) were not shown while this window was busy; runner.log has them\n")
+                self._target.flush()
+            except (OSError, ValueError):
+                pass
+            with self._changed:
+                self._busy = False
+                self._changed.notify_all()
+
+    def close(self, seconds: float) -> bool:
+        """Write out what is left, waiting at most `seconds`. False when the
+        window did not take it in that time."""
+        deadline = time.monotonic() + seconds
+        with self._changed:
+            self._closed = True
+            self._changed.notify_all()
+            while self._lines or self._dropped or self._busy:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._changed.wait(left)
+        return True
+
+
 def command_run(root: str, max_jobs: int) -> int:
     try:
         sys.stdout.reconfigure(errors="backslashreplace")  # type: ignore[union-attr]
     except (AttributeError, ValueError):
         pass
+    console = BackgroundWriter(sys.stdout)
     try:
-        runner = Runner(root, max_jobs=max_jobs)
+        runner = Runner(root, max_jobs=max_jobs, out=console)  # type: ignore[arg-type]
     except RunnerError as err:
         print(f"desk runner: {err}")
         return 2
@@ -1513,6 +1932,7 @@ def command_run(root: str, max_jobs: int) -> int:
     try:
         return runner.run()
     finally:
+        console.close(2.0)
         done.set()
         del keep
 
@@ -1680,8 +2100,13 @@ def command_submit(
         return EXIT_RUNNER
     job_fields = dict(job_fields)
     job_id = job_fields.pop("id", None) or new_job_id(clock)
-    if not isinstance(job_id, str) or not ID_RE.match(job_id):
-        note("refused before sending: job id must be 1 to 64 letters, digits, '-' or '_'")
+    if not is_job_id(job_id):
+        note(f"refused before sending: {BAD_JOB_ID}")
+        return EXIT_RUNNER
+    if os.path.lexists(layout.status(job_id)):
+        # The runner keeps the first result of an id and would not run this
+        # one; waiting would then hand back the old result as if it were new.
+        note(f"refused before sending: a job with the id {job_id} already has a result; use a new id")
         return EXIT_RUNNER
     obj = {"version": PROTOCOL_VERSION, "id": job_id, **job_fields}
     try:
@@ -1697,7 +2122,7 @@ def command_submit(
         )
     target = os.path.join(layout.inbox, job_id + ".json")
     try:
-        with open(target + ".tmp", "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(open_own_file(target + ".tmp", "new"), "w", encoding="utf-8", newline="\n") as handle:
             json.dump(obj, handle)
         os.replace(target + ".tmp", target)
     except OSError as problem:
@@ -1766,7 +2191,7 @@ def _wait_for_job(
 def request_cancel(layout: Layout, job_id: str) -> None:
     """Ask the runner to end a job (written like a job file: whole or not at all)."""
     target = os.path.join(layout.inbox, job_id + ".cancel")
-    with open(target + ".tmp", "w", encoding="ascii") as handle:
+    with os.fdopen(open_own_file(target + ".tmp", "new"), "w", encoding="ascii") as handle:
         handle.write("cancel\n")
     os.replace(target + ".tmp", target)
 
@@ -1789,13 +2214,17 @@ def command_status(root: str, as_json: bool, out: TextIO | None = None, clock: A
     where = "in a desktop session" if beat.get("interactive") else "NOT in a desktop session (no window will be visible)"
     if beat.get("interactive") is None:
         where = "session kind unknown on this platform"
+    # The heartbeat is a file anyone with the folder can write: nothing in it
+    # is trusted to have the right type, and its text is escaped.
+    running = beat.get("running") if isinstance(beat.get("running"), list) else []
+    queued = beat.get("queued") if isinstance(beat.get("queued"), list) else []
     out.write(
-        f"desk: runner is running (process {beat.get('pid')}, heartbeat {state['heartbeat_age_seconds']:.1f} s ago, "
-        f"{where}, window station '{printable(beat.get('window_station'), 40)}', session {beat.get('session_id')}); "
-        f"{len(beat.get('running', []))} job(s) running, {len(beat.get('queued', []))} waiting, "
-        f"{beat.get('jobs_started')} started and {beat.get('jobs_refused')} refused since it began\n"
+        f"desk: runner is running (process {printable(beat.get('pid'), 12)}, heartbeat {state['heartbeat_age_seconds']:.1f} s ago, "
+        f"{where}, window station '{printable(beat.get('window_station'), 40)}', session {printable(beat.get('session_id'), 12)}); "
+        f"{len(running)} job(s) running, {len(queued)} waiting, "
+        f"{printable(beat.get('jobs_started'), 12)} started and {printable(beat.get('jobs_refused'), 12)} refused since it began\n"
     )
-    for entry in beat.get("running", []):
+    for entry in running[:HARD_MAX_JOBS]:
         if isinstance(entry, dict):
             out.write(f"desk:   job {printable(entry.get('id'), 70)}: {printable(entry.get('program'), 200)}\n")
     if beat.get("script_sha256") != own_digest():
@@ -1819,7 +2248,7 @@ def command_stop(root: str, out: TextIO | None = None, clock: Any = None, wait_s
         out.write("desk: no runner is running; nothing to stop\n")
         return 0
     try:
-        with open(layout.stop, "w", encoding="ascii") as handle:
+        with os.fdopen(open_own_file(layout.stop, "new"), "w", encoding="ascii") as handle:
             handle.write("stop\n")
     except OSError as problem:
         out.write(f"desk: could not write the stop file ({type(problem).__name__})\n")
@@ -1836,7 +2265,7 @@ def command_stop(root: str, out: TextIO | None = None, clock: Any = None, wait_s
 
 def command_cancel(root: str, job_id: str, out: TextIO | None = None) -> int:
     out = out or sys.stdout
-    if not ID_RE.match(job_id):
+    if not is_job_id(job_id):
         out.write("desk: that is not a job id\n")
         return 2
     try:
@@ -1864,6 +2293,8 @@ def start_cmd_text(python_exe: str | None) -> str:
         "rem Written by 'desk_runner.py install'. It changes nothing on this computer;",
         "rem delete this file and the 'runner' folder to be rid of it.",
         "title ASAMU-decomp desk runner",
+        "setlocal",
+        'set "ASAMU_DESK_PY="',
     ]
     safe = python_exe is not None and re.fullmatch(r"[A-Za-z]:\\[A-Za-z0-9 _.()\\-]+\.exe", python_exe) is not None
     if safe:
@@ -1873,10 +2304,13 @@ def start_cmd_text(python_exe: str | None) -> str:
             "goto done",
             ":launcher",
         ]
+    # `%%~$PATH:P` looks in the folders of PATH only. A bare `py` would be
+    # looked for in the current folder first, which on a double-click is the
+    # root: a file called py.cmd or py.exe there would be run instead.
     lines += [
-        "where py >nul 2>nul",
-        "if errorlevel 1 goto nopython",
-        'py -3 -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."',
+        'for %%P in (py.exe) do if not "%%~$PATH:P"=="" set "ASAMU_DESK_PY=%%~$PATH:P"',
+        "if not defined ASAMU_DESK_PY goto nopython",
+        '"%ASAMU_DESK_PY%" -3 -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."',
         "goto done",
         ":nopython",
         "echo Python 3 was not found on this computer, so the desk runner cannot start.",
@@ -1894,16 +2328,22 @@ def command_install(root: str, out: TextIO | None = None) -> int:
     try:
         root_real = resolve_root(root)
         layout = Layout(root_real)
-        os.makedirs(layout.base, exist_ok=True)
+        try:
+            os.mkdir(layout.base)
+        except FileExistsError:
+            pass
+        Runner._check_own_folder(layout.base)
         source = os.path.abspath(__file__)
         if os.path.normcase(os.path.realpath(source)) != os.path.normcase(os.path.realpath(layout.script)):
             with open(source, "rb") as src:
                 data = src.read()
-            with open(layout.script, "wb") as dst:
+            with os.fdopen(open_own_file(layout.script + ".tmp", "new"), "wb") as dst:
                 dst.write(data)
+            os.replace(layout.script + ".tmp", layout.script)
         python_exe = sys.executable if os.name == "nt" else None
-        with open(layout.start_cmd, "w", encoding="ascii", errors="replace", newline="") as handle:
+        with os.fdopen(open_own_file(layout.start_cmd + ".tmp", "new"), "w", encoding="ascii", errors="replace", newline="") as handle:
             handle.write(start_cmd_text(python_exe))
+        os.replace(layout.start_cmd + ".tmp", layout.start_cmd)
     except (RunnerError, OSError) as problem:
         out.write(f"desk: install failed: {printable(problem)}\n")
         return EXIT_RUNNER

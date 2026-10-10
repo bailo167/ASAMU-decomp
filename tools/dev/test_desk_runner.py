@@ -957,6 +957,8 @@ class HostileInbox(RunnerCase):
         self.assertIn("is a link", str(caught.exception))
         self.assertEqual(sorted(os.listdir(self.outside)), [os.path.basename(self.outside_program)])
 
+    @unittest.skipIf(WINDOWS, "on Windows the runner holds its folders in place while it runs, so this swap cannot "
+                              "be made at all: see test_hostile_swap_of_a_runner_folder_cannot_even_be_made")
     def test_hostile_inbox_swapped_for_a_link_while_running(self):
         self.start()
         os.rmdir(self.layout.inbox)
@@ -969,6 +971,8 @@ class HostileInbox(RunnerCase):
         self.nothing_ran()
         self.assertTrue(os.path.exists(os.path.join(self.outside, "planted.json")))
 
+    @unittest.skipIf(WINDOWS, "on Windows the runner holds its folders in place while it runs, so this swap cannot "
+                              "be made at all: see test_hostile_swap_of_a_runner_folder_cannot_even_be_made")
     def test_hostile_outbox_swapped_for_a_link_while_a_job_runs(self):
         if not try_symlink(self.outside, os.path.join(self.root, "probe"), is_dir=True):
             self.skipTest("this account may not create symbolic links")
@@ -1190,7 +1194,10 @@ class ClientSide(RootCase):
         for odd in (None, 'C:\\a"b\\python.exe', "C:\\a%PATH%\\python.exe", "C:\\a&b\\python.exe", "python.exe", "\\\\srv\\s\\python.exe"):
             fallback = dr.start_cmd_text(odd)
             self.assertEqual(fallback.count("desk_runner.py\" run"), 1, odd)
-            self.assertIn("py -3 -I", fallback)
+            self.assertIn('"%ASAMU_DESK_PY%" -3 -I', fallback)
+            for line in fallback.split("\r\n"):
+                # A bare `py` or `where` is looked for in the current folder first (the root, on a double-click).
+                self.assertFalse(line.lower().startswith(("py ", "where ")), line)
 
     def test_install_writes_the_script_and_the_batch_file(self):
         out = io.StringIO()
@@ -1457,7 +1464,7 @@ class RealProcesses(RealProcessCase):
             launcher.start([os.path.join(self.root, "bin", "absent.exe")], self.work, dict(os.environ), out, err)
 
 
-class EndToEnd(RealProcessCase):
+class EndToEndCase(RealProcessCase):
     """Runner and client as two parties with the real clock: the runner loop
     in a thread, `submit` as the tools call it."""
 
@@ -1484,6 +1491,8 @@ class EndToEnd(RealProcessCase):
         code = dr.command_submit(self.root, fields, out=out, err=err)
         return code, out.getvalue(), err.buffer.getvalue().decode("utf-8")
 
+
+class EndToEnd(EndToEndCase):
     def test_arguments_output_and_exit_code_make_the_round_trip(self):
         script = self.script("echo.py", ECHO_SCRIPT)
         nasty = ["two words", 'quote"inside', "a&b|c>d<e", "%PATH%", "$(id)", "`id`", "trailing\\", "x;y", "*", "naïve"]
@@ -1671,6 +1680,880 @@ class RunnerProcess(RealProcessCase):
         self.assertEqual(dr.read_json(self.layout.heartbeat)["state"], "stopped")
         self.assertEqual(self.wait_all_gone(pids), [])
         self.assertFalse(dr.InstanceLock.held_by_someone(self.layout.lock))
+
+
+# --------------------------------------------------------------------------
+# Attacks tried by the verification pass. Each test is one way in which a
+# hostile job file, a planted link, a second start or a busy window was used
+# against the runner; those marked "got through" did before they were fixed.
+
+
+def dir_link(target: str, link: str) -> bool:
+    """A link to a folder: a symbolic link, or on Windows a junction."""
+    if try_symlink(target, link, is_dir=True):
+        return True
+    if WINDOWS:
+        return subprocess.run(["cmd", "/c", "mklink", "/J", link, target], capture_output=True).returncode == 0
+    return False
+
+
+def remove_dir_link(link: str) -> None:
+    if os.path.lexists(link):
+        try:
+            os.unlink(link)
+        except OSError:
+            os.rmdir(link)
+
+
+class AttackCase(RunnerCase):
+    """A runner with fakes, and outside the root a file that must stay as it is."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.victim = os.path.join(self.outside, "victim.txt")
+        with open(self.victim, "w") as handle:
+            handle.write("PRECIOUS\n")
+        self.absent = os.path.join(self.outside, "not-there.txt")
+        self.outside_before = tree_snapshot(self.outside)
+
+    def link(self, link: str, target: str | None = None) -> None:
+        if not try_symlink(target if target is not None else self.victim, link):
+            self.skipTest("this account may not create symbolic links")
+
+    def outside_untouched(self) -> None:
+        self.assertEqual(tree_snapshot(self.outside), self.outside_before, "something outside the root was written")
+        with open(self.victim) as handle:
+            self.assertEqual(handle.read(), "PRECIOUS\n")
+
+    def reason(self, job_id: str) -> str:
+        status = self.status(job_id)
+        self.assertEqual(status["state"], "rejected")
+        return status["reason"]
+
+
+class HostileValues(AttackCase):
+    def test_hostile_time_limit_of_hundreds_of_digits_does_not_end_the_runner(self):
+        """Got through: an integer too large for a float raised OverflowError
+        in the check, and the runner ended with a traceback."""
+        self.start()
+        good = json.dumps(self.job()).encode("utf-8")
+        self.assertIn(b'"timeout_seconds": 60', good)
+        cases = {
+            "big": b"1" + b"0" * 400,
+            "negative": b"-1" + b"0" * 400,
+            "digits": b"1" + b"0" * 6000,
+            "exponent": b"1e999",
+            "huge-float": b"1" + b"0" * 400 + b".5",
+        }
+        for job_id, number in cases.items():
+            self.drop(job_id, raw=good.replace(b'"timeout_seconds": 60', b'"timeout_seconds": ' + number))
+        self.assertTrue(self.runner.step())
+        for job_id in cases:
+            self.assertEqual(self.state(job_id), "rejected", job_id)
+        self.assertIn("must be between", self.reason("big"))
+        self.assertEqual(self.launcher.calls, [])
+        self.drop("fine")
+        self.assertTrue(self.runner.step(), "the runner goes on")
+        self.assertEqual(self.state("fine"), "running")
+
+    def test_hostile_job_that_breaks_a_check_is_refused_and_the_runner_goes_on(self):
+        self.start()
+        with mock.patch.object(dr, "validate_job", side_effect=RecursionError("too deep")):
+            self.drop("odd")
+            self.assertTrue(self.runner.step())
+        self.assertIn("could not be checked (RecursionError)", self.reason("odd"))
+        # The same at the moment a job that waited is started.
+        for name in ("a", "b", "waits"):
+            self.drop(name)
+        self.runner.step()
+        self.assertEqual(self.state("waits"), "queued")
+        self.launcher.procs[0].exit_code = 0
+        with mock.patch.object(dr, "validate_job", side_effect=OverflowError("too large")):
+            self.assertTrue(self.runner.step())
+        self.assertIn("could not be checked (OverflowError)", self.reason("waits"))
+        self.assertEqual(len(self.launcher.calls), 2)
+        self.assertTrue(self.runner.step())
+
+    def test_hostile_names_that_end_in_a_line_feed(self):
+        """Got through: `$` in a pattern also matches before a final line feed."""
+        for name in ("RUST_LOG\n", "ASAMU_X\n", "RUST_BACKTRACE\n", "WGPU_BACKEND\n"):
+            self.refused(self.job(env={name: "1"}), "is not allowed")
+        self.assertFalse(dr.is_job_id("job-1\n"))
+        self.refused(self.job(), "job id must be", job_id="job-1\n")
+        self.assertEqual(dr.command_cancel(self.root, "job-1\n", io.StringIO()), 2)
+        if WINDOWS:
+            return  # no file name there can hold a line feed
+        self.start()
+        with open(os.path.join(self.layout.inbox, "nl\n.json"), "w") as handle:
+            json.dump(self.job(), handle)
+        self.runner.step()
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(os.listdir(self.layout.outbox), [], "no status file under such a name")
+        self.assertIn("bad job file name", self.console.getvalue())
+        self.assertNotIn("nl\n", self.console.getvalue())
+
+    def test_hostile_job_ids_that_are_device_names(self):
+        """Got through: `nul.json` or `com1.json` was taken as a job, and its
+        status and output files were opened under the device's name."""
+        for name in ("con", "NUL", "aux", "Prn", "com1", "LPT9"):
+            self.assertFalse(dr.is_job_id(name), name)
+            self.refused(self.job(), "device name", job_id=name)
+            self.assertEqual(dr.command_cancel(self.root, name, io.StringIO()), 2)
+        for name in ("console", "com10", "nul-1", "lpt", "a"):
+            self.assertTrue(dr.is_job_id(name), name)
+        self.start()
+        dropped = 0
+        for name in ("aux", "com1", "nul"):
+            try:
+                self.drop(name)
+                dropped += 1
+            except OSError:
+                pass  # an older Windows cannot make such a file at all
+        self.runner.step()
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(os.listdir(self.layout.outbox), [])
+        self.assertEqual(self.console.getvalue().count("bad job file name"), dropped)
+        fields = {k: v for k, v in self.job().items() if k != "version"}
+        fields.update(env={}, id="aux")
+        err = io.StringIO()
+        self.assertEqual(dr.command_submit(self.root, fields, out=io.BytesIO(), err=err, clock=self.clock), dr.EXIT_RUNNER)
+        self.assertIn("device name", err.getvalue())
+        self.assertEqual(os.listdir(self.layout.inbox), [])
+
+    def test_hostile_job_that_sets_path_or_comspec(self):
+        names = ("PATH", "Path", "path", "COMSPEC", "ComSpec", "PATHEXT", "SystemRoot", "windir", "TEMP", "TMP",
+                 "USERPROFILE", "APPDATA", "PYTHONSTARTUP", "__COMPAT_LAYER", "VK_ICD_FILENAMES", "VK_LAYER_PATH",
+                 "ASAMU_X=1;PATH", "ASAMU_X\x00PATH", " ASAMU_X", "ASAMU_X ", "ASAMU_\u00e9", "RUST_LOG2", "rust_log")
+        for name in names:
+            self.refused(self.job(env={name: self.outside}), "is not allowed")
+        self.start()
+        self.drop("path", self.job(env={"PATH": self.outside}))
+        self.drop("comspec", self.job(env={"ASAMU_OK": "1", "COMSPEC": self.outside_program}))
+        self.drop("good", self.job(env={"ASAMU_OK": "1"}))
+        self.runner.step()
+        self.assertIn("is not allowed", self.reason("path"))
+        self.assertIn("is not allowed", self.reason("comspec"))
+        self.assertEqual(len(self.launcher.calls), 1)
+        env = self.launcher.calls[0]["env"]
+        self.assertEqual(env.get("PATH"), os.environ.get("PATH"), "a job gets the runner's own PATH, never one it asked for")
+        self.assertEqual(env.get("COMSPEC"), os.environ.get("COMSPEC"))
+        self.assertEqual(env["ASAMU_OK"], "1")
+
+    def test_hostile_environment_variables_in_paths_are_not_expanded(self):
+        for text in (r"%SystemRoot%\System32\cmd.exe", r"%ASAMU_ROOT%\tool.exe", r"$env:SystemRoot\cmd.exe", r"~\tool.exe",
+                     r"%D%:\asamu\tool.exe"):
+            with self.assertRaises(dr.JobRejected):
+                dr.check_path_text(text, "program", WIN)
+        literal = r"D:\asamu\%SystemRoot%\cmd.exe"
+        self.assertEqual(dr.check_path_text(literal, "program", WIN), literal, "kept as the literal name it is")
+        for text in ("$HOME/tool", "~/tool", "${ASAMU_ROOT}/tool"):
+            with self.assertRaises(dr.JobRejected):
+                dr.check_path_text(text, "program", POSIX)
+        # On this host, with a variable that would lead to a real program if anything expanded it.
+        with mock.patch.dict(os.environ, {"ASAMU_TEST_DIR": "bin"}):
+            name = os.path.basename(self.program)
+            for folder in ("%ASAMU_TEST_DIR%", "$ASAMU_TEST_DIR", "${ASAMU_TEST_DIR}"):
+                self.refused(self.job(program=os.path.join(self.root, folder, name)), "does not exist")
+                self.refused(self.job(cwd=os.path.join(self.root, folder)), "does not exist")
+
+    def test_hostile_mixed_separators_and_odd_spellings(self):
+        cases = {
+            "D:/asamu\\..//Windows\\System32/cmd.exe": "'..' component",
+            "D:\\asamu/work\\..\\..\\Windows/notepad.exe": "'..' component",
+            "D:/asamu/.\\tool.exe": "'.' component",
+            "//?/D:/asamu/tool.exe": "network (UNC) or device path",
+            "\\/server/share/tool.exe": "network (UNC) or device path",
+            "/\\server\\share\\tool.exe": "network (UNC) or device path",
+            "\\\\.\\D:\\asamu\\tool.exe": "network (UNC) or device path",
+            "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\asamu\\tool.exe": "network (UNC) or device path",
+            "\\??\\D:\\asamu\\tool.exe": "absolute path with a drive letter",
+            "D:\\asamu\\tool.exe::$DATA": "alternate data stream",
+            "D:\\asamu\\bin:$I30:$INDEX_ALLOCATION\\tool.exe": "alternate data stream",
+            "D:\\asamu\\tool.exe . .": "space or a dot",
+            "D:\\asamu\\bin.\\tool.exe": "space or a dot",
+            "D:\\asamu\\bin \\tool.exe": "space or a dot",
+            "D:\\asamu\\...\\tool.exe": "space or a dot",
+            "D:\\asamu\\aux\\tool.exe": "reserved device",
+            "D:\\asamu\\CONIN$": "reserved device",
+            "D:\\asamu\\tool?.exe": "not allowed in a file name",
+            "D:\\asamu\\tool.exe|more": "not allowed in a file name",
+            "D:\\asamu\\<tool>.exe": "not allowed in a file name",
+        }
+        for text, part in cases.items():
+            with self.assertRaises(dr.JobRejected, msg=text) as caught:
+                dr.check_path_text(text, "program", WIN)
+            self.assertIn(part, str(caught.exception), text)
+
+    @unittest.skipUnless(WINDOWS, "8.3 short names exist only on Windows")
+    def test_hostile_short_name_spelling_is_judged_by_the_real_name(self):
+        import ctypes
+
+        def short(path: str) -> str:
+            buf = ctypes.create_unicode_buffer(1024)
+            ctypes.WinDLL("kernel32").GetShortPathNameW(path, buf, 1024)  # type: ignore[attr-defined]
+            return buf.value
+
+        folder = os.path.join(self.root, "a folder with a long name")
+        shell = make_program(folder, "powershell")
+        good = make_program(folder, "a program with a long name")
+        if os.path.normcase(short(good)) == os.path.normcase(good):
+            self.skipTest("this volume makes no 8.3 short names")
+        self.refused(self.job(program=short(shell)), "is a shell")
+        self.assertEqual(self.check(self.job(program=short(good))).program, good)
+        self.assertEqual(self.check(self.job(cwd=short(folder))).cwd, folder)
+
+
+class HostileLinks(AttackCase):
+    """Got through, all of them: the runner's folders were checked for links,
+    its files were not, and a file opened for writing follows a link."""
+
+    def test_hostile_link_where_a_jobs_output_goes(self):
+        self.start()
+        out, err = self.layout.stdout("j1"), self.layout.stderr("j1")
+        self.link(out)
+        self.link(err, self.absent)
+        with self.assertRaises(dr.LaunchError):  # the file is no program; its output files are opened first
+            dr.ProcessLauncher().start([self.program, "x"], self.work, dict(os.environ), out, err)
+        self.outside_untouched()
+        for path in (out, err):
+            self.assertTrue(stat.S_ISREG(os.lstat(path).st_mode), "the link was replaced by a file of the runner's own")
+
+    def test_hostile_link_where_a_status_or_the_heartbeat_is_written(self):
+        self.start()
+        self.link(self.layout.status("bad") + ".tmp")
+        self.link(self.layout.heartbeat + ".tmp", self.absent)
+        self.drop("bad", raw=b"{")
+        self.runner.step()
+        self.clock.advance(dr.HEARTBEAT_PERIOD_S + 1)
+        self.runner.step()
+        self.assertEqual(self.state("bad"), "rejected")
+        self.assertEqual(dr.read_json(self.layout.heartbeat)["beat_unix"], self.clock.now)
+        self.outside_untouched()
+
+    def test_hostile_links_in_place_of_the_runners_own_files(self):
+        os.makedirs(self.layout.base)
+        for name in ("runner.lock", "runner.log", "rejected.log", "heartbeat.json"):
+            for target in (self.victim, self.absent):
+                with self.subTest(name=name, dangling=target == self.absent):
+                    path = os.path.join(self.layout.base, name)
+                    self.link(path, target)
+                    runner = self.make_runner(out=io.StringIO())
+                    with self.assertRaises(dr.RunnerError) as caught:
+                        runner.startup()
+                    self.assertIn("is a link or not a plain file", str(caught.exception))
+                    self.assertEqual(runner.run(), 3, "and it says so instead of starting")
+                    self.outside_untouched()
+                    os.unlink(path)
+        self.runner.startup()  # with the links gone it starts
+        self.outside_untouched()
+
+    def test_hostile_second_name_for_a_log(self):
+        """A hard link has no target to follow: the log would simply be the other file."""
+        os.makedirs(self.layout.base)
+        try:
+            os.link(self.victim, self.layout.log)
+        except (OSError, NotImplementedError):
+            self.skipTest("hard links cannot be made here")
+        with self.assertRaises(dr.RunnerError) as caught:
+            self.runner.startup()
+        self.assertIn("is a link or not a plain file", str(caught.exception))
+        with open(self.victim) as handle:
+            self.assertEqual(handle.read(), "PRECIOUS\n")
+
+    def test_hostile_link_put_in_place_of_a_log_while_running(self):
+        self.start()
+        os.unlink(self.layout.log)
+        self.link(self.layout.log)
+        self.link(self.layout.rejected_log, self.absent)
+        self.drop("bad", raw=b"{")
+        self.assertTrue(self.runner.step())
+        self.assertIn("REFUSED job 'bad'", self.console.getvalue(), "the window still says what happened")
+        self.assertEqual(self.state("bad"), "rejected")
+        self.outside_untouched()
+
+    def test_hostile_link_in_place_of_the_whole_runner_folder(self):
+        """Got through: the inbox and outbox were created through the link
+        before the folders were checked."""
+        if not dir_link(self.outside, self.layout.base):
+            self.skipTest("this account may not create links to folders")
+        self.addCleanup(remove_dir_link, self.layout.base)
+        with self.assertRaises(dr.RunnerError) as caught:
+            self.runner.startup()
+        self.assertIn("is a link", str(caught.exception))
+        self.outside_untouched()
+        self.assertEqual(dr.command_install(self.root, io.StringIO()), dr.EXIT_RUNNER)
+        self.outside_untouched()
+        self.assertFalse(os.path.lexists(self.layout.start_cmd))
+
+    def test_hostile_links_where_the_client_writes(self):
+        self.start()
+        self.link(os.path.join(self.layout.inbox, "c1.json.tmp"))
+        self.link(os.path.join(self.layout.inbox, "c1.cancel.tmp"), self.absent)
+        self.link(self.layout.stop)
+        fields = {k: v for k, v in self.job().items() if k != "version"}
+        fields.update(env={}, id="c1")
+        err = io.StringIO()
+        self.assertEqual(dr.command_submit(self.root, fields, wait=False, out=io.BytesIO(), err=err, clock=self.clock), 0, err.getvalue())
+        dr.request_cancel(self.layout, "c1")
+        self.assertEqual(dr.command_stop(self.root, io.StringIO(), self.clock, wait_seconds=0.0), 1)
+        self.outside_untouched()
+        for name in ("c1.json", "c1.cancel"):
+            self.assertTrue(stat.S_ISREG(os.lstat(os.path.join(self.layout.inbox, name)).st_mode))
+        self.assertTrue(stat.S_ISREG(os.lstat(self.layout.stop).st_mode))
+        self.assertFalse(self.runner.step(), "the stop file stops the runner")
+        self.outside_untouched()
+
+    def test_hostile_links_where_install_writes(self):
+        os.makedirs(self.layout.base)
+        self.link(self.layout.start_cmd)
+        self.link(self.layout.script, self.absent)
+        self.assertEqual(dr.command_install(self.root, io.StringIO()), 0)
+        self.outside_untouched()
+        for path in (self.layout.start_cmd, self.layout.script):
+            self.assertTrue(stat.S_ISREG(os.lstat(path).st_mode))
+        with open(self.layout.script, "rb") as installed, open(dr.__file__, "rb") as source:
+            self.assertEqual(installed.read(), source.read())
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes in the file system are a POSIX notion")
+    def test_hostile_named_pipe_where_a_file_is_expected_does_not_hold_up_the_runner(self):
+        """Opening a named pipe waits for its other end; nobody comes."""
+        self.start()
+        os.unlink(self.layout.log)
+        os.mkfifo(self.layout.log)
+        pipe_job = os.path.join(self.layout.inbox, "pipe.json")
+        os.mkfifo(pipe_job)
+        self.addCleanup(lambda: [os.path.lexists(p) and os.unlink(p) for p in (self.layout.log, pipe_job)])
+        result: list[object] = []
+        finished = threading.Event()
+
+        def work() -> None:
+            result.append(self.runner._read_job_file(pipe_job))
+            self.drop("bad", raw=b"{")
+            result.append(self.runner.step())
+            finished.set()
+
+        threading.Thread(target=work, daemon=True).start()
+        self.assertTrue(finished.wait(15), "the runner hangs on a named pipe")
+        self.assertEqual(result, [None, True])
+        self.assertEqual(self.state("bad"), "rejected")
+        self.assertEqual(self.launcher.calls, [])
+
+
+class HostileFlood(AttackCase):
+    def test_hostile_inbox_full_of_folders_is_not_reported_for_ever(self):
+        """Got through: past the number of names it remembers, the runner
+        reported every such entry again in every round."""
+        self.start()
+        with mock.patch.object(dr, "MAX_REMEMBERED_NAMES", 8):
+            for index in range(20):
+                os.mkdir(os.path.join(self.layout.inbox, f"folder-{index:02}"))
+            for _ in range(6):
+                self.assertTrue(self.runner.step())
+        text = self.console.getvalue()
+        self.assertEqual(text.count("IGNORED inbox entry"), 8)
+        self.assertEqual(text.count("further ones are not reported"), 1)
+        with open(self.layout.rejected_log, encoding="utf-8") as handle:
+            self.assertEqual(len(handle.readlines()), 8)
+        self.assertEqual(len(os.listdir(self.layout.inbox)), 20, "never deleted, never entered")
+
+    def test_hostile_inbox_with_more_entries_than_a_round_looks_at(self):
+        """The loop that reads the inbox also enforces the time limits: the
+        work of one round is bounded however full the inbox is."""
+        self.start()
+        self.drop("slow", self.job(timeout_seconds=30))
+        self.runner.step()
+        for index in range(60):
+            with open(os.path.join(self.layout.inbox, f"junk-{index:02}.txt"), "w"):
+                pass
+        real_scandir = os.scandir
+        taken: list[str] = []
+
+        def counting(path):
+            with real_scandir(path) as listing:
+                for entry in listing:
+                    taken.append(entry.name)
+                    yield entry
+
+        with mock.patch.object(dr, "MAX_INBOX_ENTRIES_EXAMINED", 10), mock.patch.object(os, "scandir", counting):
+            self.clock.advance(31)
+            self.assertTrue(self.runner.step())
+            self.assertLessEqual(len(taken), 11)
+            self.assertEqual(self.state("slow"), "timed_out", "the time limit is enforced in that same round")
+            for _ in range(8):
+                self.runner.step()
+        self.assertEqual(self.console.getvalue().count("the inbox holds more than 10 entries"), 1)
+        self.assertEqual(os.listdir(self.layout.inbox), [], "what does not belong there is cleared round by round")
+
+    def test_hostile_flood_of_cancellations_is_bounded(self):
+        self.start()
+        for index in range(dr.MAX_EARLY_CANCELS + 40):
+            dr.request_cancel(self.layout, f"none-{index}")
+        for _ in range(8):
+            self.runner.step()
+        self.assertEqual(os.listdir(self.layout.inbox), [])
+        self.assertLessEqual(len(self.runner._early_cancels), dr.MAX_EARLY_CANCELS)
+        self.assertEqual(os.listdir(self.layout.outbox), [])
+
+
+class BusyWindow(RunnerCase):
+    def test_a_window_that_takes_no_output_does_not_stop_the_time_limits(self):
+        """Got through: the runner wrote to its console in the job loop. A
+        console whose text is being selected blocks the write, and with it
+        the loop that ends jobs at their time limit."""
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        class Stuck(io.StringIO):
+            def write(self, text: str) -> int:
+                gate.wait(60)
+                return super().write(text)
+
+        window = Stuck()
+        writer = dr.BackgroundWriter(window)
+        runner = self.make_runner(out=writer)
+        finished = threading.Event()
+
+        def work() -> None:
+            runner.startup()
+            self.drop("slow", self.job(timeout_seconds=30))
+            runner.step()
+            self.clock.advance(31)
+            runner.step()
+            finished.set()
+
+        threading.Thread(target=work, daemon=True).start()
+        self.assertTrue(finished.wait(15), "the job loop waits for the window")
+        self.assertEqual(self.state("slow"), "timed_out")
+        self.assertEqual(self.launcher.procs[0].kills, 1)
+        self.assertEqual(window.getvalue(), "")
+        self.assertFalse(writer.close(0.2), "the window has taken nothing yet")
+        gate.set()
+        self.assertTrue(writer.close(15))
+        shown = window.getvalue()
+        for part in ("ASAMU-decomp desk runner", "START job slow", "ENDED job slow"):
+            self.assertIn(part, shown)
+        with open(self.layout.log, encoding="utf-8") as handle:
+            self.assertIn("ENDED job slow", handle.read())
+
+    def test_the_backlog_of_a_busy_window_is_bounded(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        class Stuck(io.StringIO):
+            def write(self, text: str) -> int:
+                gate.wait(60)
+                return super().write(text)
+
+        window = Stuck()
+        writer = dr.BackgroundWriter(window, limit=5)
+        for index in range(40):
+            writer.write(f"line {index}\n")
+        with writer._changed:
+            self.assertLessEqual(len(writer._lines), 5)
+        gate.set()
+        self.assertTrue(writer.close(15))
+        shown = window.getvalue()
+        self.assertIn("line 0\n", shown)
+        self.assertRegex(shown, r"\.\.\. 3[45] line\(s\) were not shown")
+        self.assertNotIn("line 39", shown)
+
+    def test_a_window_that_is_gone_does_not_end_the_runner(self):
+        class Gone(io.StringIO):
+            def write(self, text: str) -> int:
+                raise OSError("the window is gone")
+
+        writer = dr.BackgroundWriter(Gone())
+        runner = self.make_runner(out=writer)
+        runner.startup()
+        self.drop("job-1")
+        self.assertTrue(runner.step())
+        self.assertEqual(self.state("job-1"), "running")
+        self.assertTrue(writer.close(15))
+
+
+class StartedTwice(AttackCase):
+    def test_hostile_second_start_through_another_spelling_of_the_root(self):
+        self.start()
+        spellings = [self.root + os.sep, os.path.join(self.root, "work", ".."), os.path.join(self.root, ".")]
+        if os.path.exists(self.root.upper()) and os.path.exists(self.root.lower()):
+            spellings += [self.root.upper(), self.root.lower()]
+        alias = os.path.join(self.base, "alias")
+        if dir_link(self.root, alias):
+            self.addCleanup(remove_dir_link, alias)
+            spellings.append(alias)
+        for spelling in spellings:
+            second = dr.Runner(spelling, clock=self.clock, launcher=self.launcher, out=io.StringIO())
+            with self.assertRaises(dr.RunnerError, msg=spelling) as caught:
+                second.startup()
+            self.assertIn("already running", str(caught.exception), spelling)
+        self.assertTrue(self.runner.step(), "the first runner is not disturbed")
+
+    def test_hostile_removal_of_the_lock_file_does_not_leave_two_runners(self):
+        """Got through (not on Windows): with the lock file deleted a second
+        runner started beside the first, and both went on."""
+        if WINDOWS:
+            self.start()
+            with self.assertRaises(OSError):
+                os.unlink(self.layout.lock)
+            with self.assertRaises(OSError):
+                os.rename(self.layout.lock, self.layout.lock + ".away")
+            self.assertTrue(self.runner.step())
+            return
+        test = self
+        seen: list[object] = []
+
+        class Scripted(FakeClock):
+            def sleep(self, seconds: float) -> None:
+                super().sleep(seconds)
+                if self.slept == dr.POLL_PERIOD_S:
+                    test.drop("job-1")
+                elif self.slept == 3 * dr.POLL_PERIOD_S:
+                    os.unlink(test.layout.lock)
+                    second = dr.Runner(test.root, clock=FakeClock(), launcher=FakeLauncher(), out=io.StringIO())
+                    test.addCleanup(second.shutdown, "test over")
+                    second.startup()  # cannot be prevented where an open file can be deleted
+                    seen.append(second)
+                elif self.slept > 100:
+                    raise AssertionError("the first runner went on beside the second")
+
+        runner = self.make_runner(clock=Scripted())
+        self.assertEqual(runner.run(), 1, "the first runner stops with an error")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual([p.kills for p in self.launcher.procs], [1], "and ends its job")
+        self.assertIn("lock file was removed or replaced", self.console.getvalue())
+        self.assertEqual(self.state("job-1"), "runner_stopped")
+        self.assertTrue(seen[0].step(), "the second one is now the only one")
+
+    def test_hostile_replacement_of_the_lock_file(self):
+        if WINDOWS:
+            self.skipTest("a lock file that is held cannot be deleted or renamed on Windows (see the test above)")
+        self.start()
+        os.rename(self.layout.lock, self.layout.lock + ".away")
+        with open(self.layout.lock, "w"):
+            pass
+        with self.assertRaises(dr.RunnerError) as caught:
+            self.runner.step()
+        self.assertIn("lock file was removed or replaced", str(caught.exception))
+
+    @unittest.skipUnless(WINDOWS, "an open handle holds a folder in place only on Windows; elsewhere a swap is "
+                                  "noticed at the start of the next round (HostileInbox)")
+    def test_hostile_swap_of_a_runner_folder_cannot_even_be_made(self):
+        self.start()
+        for folder in (self.layout.inbox, self.layout.outbox, self.layout.base, self.root):
+            with self.assertRaises(OSError, msg=folder):
+                os.rename(folder, folder + ".away")
+        with self.assertRaises(OSError):
+            os.rmdir(self.layout.inbox)
+        self.drop("job-1")
+        self.assertTrue(self.runner.step())
+        self.assertEqual(self.state("job-1"), "running", "files in those folders still come and go")
+        self.runner.shutdown("test")
+        os.rename(self.layout.outbox, self.layout.outbox + ".away")  # free again once it has stopped
+
+    @unittest.skipUnless(WINDOWS, "an open handle holds a folder in place only on Windows")
+    def test_a_runner_that_could_not_start_holds_nothing(self):
+        self.start()
+        second = self.make_runner(out=io.StringIO())
+        with self.assertRaises(dr.RunnerError):
+            second.startup()
+        self.runner.shutdown("test")
+        os.rename(self.layout.inbox, self.layout.inbox + ".away")  # neither runner holds it any more
+
+
+class ClientAttacks(AttackCase):
+    def test_a_used_job_id_is_refused_and_no_old_result_is_handed_back(self):
+        """Got through: the runner keeps the first result of an id and does
+        not run a second job under it; the waiting client then returned the
+        old exit code and the old output as if they were new."""
+        self.start()
+        dr.write_json_atomic(self.layout.status("old"), {"state": "finished", "exit_code": 0})
+        with open(self.layout.stdout("old"), "w") as handle:
+            handle.write("STALE OUTPUT\n")
+        fields = {k: v for k, v in self.job().items() if k != "version"}
+        fields.update(env={}, id="old")
+        out, err = io.BytesIO(), io.StringIO()
+        self.assertEqual(dr.command_submit(self.root, fields, out=out, err=err, clock=self.clock), dr.EXIT_RUNNER)
+        self.assertEqual(out.getvalue(), b"")
+        self.assertIn("already has a result", err.getvalue())
+        self.assertEqual(os.listdir(self.layout.inbox), [])
+
+    def test_hostile_heartbeat_does_not_break_the_status_command(self):
+        """Got through: a heartbeat whose "running" is a number ended `status` with a traceback."""
+        self.start()
+        forged_values = (
+            {"running": 5, "queued": 7},
+            {"running": "x" * 100, "queued": {"a": 1}},
+            {"running": [1, None, {"id": "\x1b[2J", "program": ["x"]}], "queued": None},
+            {"pid": "\x1b[2J" * 50, "session_id": ["x"], "window_station": {"x": 1}, "jobs_started": "\x1b[0m"},
+            {"running": [{"id": "x", "program": "y"}] * 5000},
+        )
+        for forged in forged_values:
+            beat = dr.read_json(self.layout.heartbeat)
+            assert beat is not None
+            beat.update(forged)
+            dr.write_json_atomic(self.layout.heartbeat, beat)
+            out = io.StringIO()
+            self.assertEqual(dr.command_status(self.root, False, out, self.clock), 0)
+            self.assertNotIn("\x1b", out.getvalue())
+            self.assertLess(out.getvalue().count("\n"), 10)
+            self.runner._beat(force=True)
+
+    def test_a_cancellation_that_arrives_before_its_job_still_stops_it(self):
+        """The sender was interrupted while its job file was still on its way:
+        the cancellation must not be lost, or the job runs with nobody waiting."""
+        self.start()
+        dr.request_cancel(self.layout, "early")
+        self.runner.step()
+        self.assertEqual(os.listdir(self.layout.outbox), [])
+        self.drop("early")
+        self.runner.step()
+        self.assertEqual(self.state("early"), "cancelled")
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(dr.exit_code_for(self.status("early")), dr.EXIT_CANCELLED)
+        # Only for a while: an old cancellation does not block the id for ever.
+        dr.request_cancel(self.layout, "late")
+        self.runner.step()
+        self.clock.advance(dr.EARLY_CANCEL_KEEP_S + 1)
+        self.drop("late")
+        self.runner.step()
+        self.assertEqual(self.state("late"), "running")
+        # And the cancellation of a job that is over is not kept for the next one.
+        self.launcher.procs[0].exit_code = 0
+        self.runner.step()
+        dr.request_cancel(self.layout, "late")
+        self.runner.step()
+        self.assertEqual(self.runner._early_cancels, {})
+
+
+@unittest.skipUnless(WINDOWS, "the start is checked against what the system really used only on Windows (a suspended "
+                              "process, its image path, a held working directory); elsewhere the moment between "
+                              "check and start stays open, as the module says")
+class LastMomentSwap(RealProcessCase):
+    """An executable or a folder replaced between the check and the start."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.clock = FakeClock()
+        self.console = io.StringIO()
+        self.runner = dr.Runner(self.root, clock=self.clock, out=self.console)
+        self.addCleanup(self.runner.shutdown, "test over")
+        self.runner.startup()
+        self.marker = os.path.join(self.outside, "ran.txt")
+
+    def wait_state(self, job_id: str, seconds: float = 30.0) -> dict:
+        deadline = time.monotonic() + seconds
+        status: dict = {}
+        while time.monotonic() < deadline:
+            self.runner.step()
+            status = dr.read_json(self.layout.status(job_id)) or {}
+            if status.get("state") in dr.TERMINAL_STATES:
+                break
+            time.sleep(0.05)
+        return status
+
+    def test_hostile_program_folder_swapped_for_a_junction_between_check_and_start(self):
+        """Got through: the path that was checked was resolved again by the
+        system when the process was created."""
+        good_dir = os.path.dirname(self.native)
+        evil_dir = os.path.join(self.outside, "bin")
+        os.makedirs(evil_dir)
+        shutil.copyfile(self.native, os.path.join(evil_dir, os.path.basename(self.native)))
+        real_popen = subprocess.Popen
+        swapped: list[int] = []
+
+        def swapping(*args, **kwargs):
+            if not swapped:
+                swapped.append(1)
+                os.rename(good_dir, good_dir + ".moved")
+                made = subprocess.run(["cmd", "/c", "mklink", "/J", good_dir, evil_dir], capture_output=True)
+                swapped.append(made.returncode)
+            return real_popen(*args, **kwargs)
+
+        self.addCleanup(lambda: os.path.isdir(good_dir + ".moved") and (remove_dir_link(good_dir), os.rename(good_dir + ".moved", good_dir)))
+        code = f"open({self.marker!r}, 'w').close()"
+        with open(os.path.join(self.layout.inbox, "swap.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + ["-c", code]), handle)
+        with mock.patch.object(subprocess, "Popen", swapping):
+            self.runner.step()
+        self.assertEqual(swapped, [1, 0], "the swap was made at the last moment")
+        status = self.wait_state("swap")
+        self.assertEqual(status.get("state"), "failed_to_start", status)
+        self.assertIn("not the file that was checked", status["reason"])
+        time.sleep(1.0)
+        self.assertFalse(os.path.exists(self.marker), "the program from outside the root ran")
+        self.assertIn("FAILED job swap", self.console.getvalue())
+
+    def test_hostile_working_directory_swapped_for_a_junction_before_the_start(self):
+        real_pin = dr._WinApi.pin_folder
+        swapped: list[int] = []
+        work = self.work
+
+        def swapping(api, path):
+            if not swapped and os.path.normcase(path) == os.path.normcase(work):
+                os.rename(work, work + ".moved")
+                swapped.append(subprocess.run(["cmd", "/c", "mklink", "/J", work, self.outside], capture_output=True).returncode)
+            return real_pin(api, path)
+
+        self.addCleanup(lambda: os.path.isdir(work + ".moved") and (remove_dir_link(work), os.rename(work + ".moved", work)))
+        code = f"import os; open({self.marker!r}, 'w').write(os.getcwd())"
+        with open(os.path.join(self.layout.inbox, "cwd.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + ["-c", code]), handle)
+        with mock.patch.object(dr._WinApi, "pin_folder", swapping):
+            self.runner.step()
+        self.assertEqual(swapped, [0])
+        status = self.wait_state("cwd")
+        self.assertEqual(status.get("state"), "failed_to_start", status)
+        self.assertIn("working directory", status["reason"])
+        time.sleep(1.0)
+        self.assertFalse(os.path.exists(self.marker), "the program ran in a folder outside the root")
+
+    def test_the_working_directory_is_held_in_place_while_the_process_is_made(self):
+        real_popen = subprocess.Popen
+        tried: list[str] = []
+
+        def trying(*args, **kwargs):
+            if not tried:
+                try:
+                    os.rename(self.work, self.work + ".moved")
+                    tried.append("renamed")
+                except OSError as err:
+                    tried.append(type(err).__name__)
+            return real_popen(*args, **kwargs)
+
+        script = self.script("echo.py", ECHO_SCRIPT)
+        with open(os.path.join(self.layout.inbox, "held.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + [script]), handle)
+        with mock.patch.object(subprocess, "Popen", trying):
+            self.runner.step()
+        self.assertEqual(tried, ["PermissionError"])
+        status = self.wait_state("held")
+        self.assertEqual(status.get("state"), "finished", status)
+        with open(self.layout.stdout("held"), encoding="utf-8") as handle:
+            self.assertEqual(os.path.realpath(json.loads(handle.read())["cwd"]), self.work)
+
+    def test_same_path_comparison(self):
+        same = dr.same_windows_path
+        self.assertTrue(same(r"D:\asamu\target-h4\release\asamu.exe", r"d:/ASAMU/target-h4/release/Asamu.exe"))
+        self.assertTrue(same("\\\\?\\D:\\asamu\\work", r"D:\asamu\work"))
+        self.assertFalse(same(r"D:\asamu\work", r"D:\asamu\work2"))
+        self.assertFalse(same("\\\\?\\UNC\\server\\share\\x", r"server\share\x"))
+        self.assertFalse(same(r"C:\Windows\System32\cmd.exe", r"D:\asamu\bin\cmd.exe"))
+
+
+class RealOutput(RealProcessCase):
+    """Real programs whose output goes where a link was planted, or is large."""
+
+    def run_to_end(self, runner: dr.Runner, job_id: str, seconds: float = 60.0) -> dict:
+        deadline = time.monotonic() + seconds
+        status: dict = {}
+        while time.monotonic() < deadline:
+            runner.step()
+            status = dr.read_json(self.layout.status(job_id)) or {}
+            if status.get("state") in dr.TERMINAL_STATES:
+                break
+            time.sleep(0.05)
+        return status
+
+    def test_hostile_links_where_a_real_jobs_output_and_status_go(self):
+        victim = os.path.join(self.outside, "victim.txt")
+        with open(victim, "w") as handle:
+            handle.write("PRECIOUS\n")
+        runner = dr.Runner(self.root, clock=FakeClock(), out=io.StringIO())
+        self.addCleanup(runner.shutdown, "test over")
+        runner.startup()
+        for name in ("real.stdout.txt", "real.stderr.txt", "real.status.json.tmp"):
+            if not try_symlink(victim, os.path.join(self.layout.outbox, name)):
+                self.skipTest("this account may not create symbolic links")
+        before = tree_snapshot(self.outside)
+        script = self.script("echo.py", ECHO_SCRIPT)
+        with open(os.path.join(self.layout.inbox, "real.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + [script, "hello"]), handle)
+        status = self.run_to_end(runner, "real")
+        self.assertEqual(status.get("state"), "finished", status)
+        with open(self.layout.stdout("real"), encoding="utf-8") as handle:
+            self.assertEqual(json.loads(handle.read())["args"], ["hello"])
+        with open(self.layout.stderr("real"), encoding="utf-8") as handle:
+            self.assertIn("to stderr", handle.read())
+        self.assertEqual(tree_snapshot(self.outside), before)
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), "PRECIOUS\n")
+
+    def test_a_job_that_never_stops_writing_is_ended_at_the_output_limit(self):
+        runner = dr.Runner(self.root, clock=FakeClock(), out=io.StringIO())
+        self.addCleanup(runner.shutdown, "test over")
+        runner.startup()
+        pid_file = os.path.join(self.scratch, "pid.txt")
+        script = self.script("flood.py", "import os, sys\n"
+                             "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+                             "block = b'x' * 65536\n"
+                             "while True:\n    sys.stdout.buffer.write(block)\n")
+        with open(os.path.join(self.layout.inbox, "flood.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + [script, pid_file], timeout_seconds=600), handle)
+        with mock.patch.object(dr, "MAX_OUTPUT_BYTES", 2 * 1024 * 1024):
+            status = self.run_to_end(runner, "flood")
+        self.assertEqual(status.get("state"), "output_limit", status)
+        self.assertTrue(status["process_tree_ended"])
+        self.assertEqual(dr.exit_code_for(status), dr.EXIT_RUNNER)
+        with open(pid_file) as handle:
+            self.pids = [int(handle.read())]
+        self.assertEqual(self.wait_all_gone(self.pids), [])
+        size = os.path.getsize(self.layout.stdout("flood"))
+        time.sleep(0.5)
+        self.assertEqual(os.path.getsize(self.layout.stdout("flood")), size, "nothing is written any more")
+
+
+class LargeOutput(EndToEndCase):
+    def test_large_output_arrives_whole_and_in_order(self):
+        import hashlib
+
+        script = self.script("large.py", "import hashlib, sys\n"
+                             "digest = hashlib.sha256()\n"
+                             "for index in range(int(sys.argv[1])):\n"
+                             "    block = (b'%08d ' % index) * 7281 + b'\\n'\n"
+                             "    digest.update(block)\n"
+                             "    sys.stdout.buffer.write(block)\n"
+                             "    if index % 64 == 0:\n        sys.stderr.write('progress %d\\n' % index)\n"
+                             "sys.stdout.buffer.flush()\n"
+                             "sys.stderr.write('sha256 ' + digest.hexdigest() + '\\n')\n"
+                             "sys.exit(5)\n")
+        blocks = 320  # 65530 bytes each: about 21 MB
+        code, out, err = self.submit(program=self.native, args=self.prefix + [script, str(blocks)], timeout_seconds=300)
+        self.assertEqual(code, 5, err[-2000:])
+        self.assertEqual(len(out), blocks * 65530)
+        self.assertIn("sha256 " + hashlib.sha256(out).hexdigest(), err)
+        self.assertEqual(err.count("progress "), 5)
+        self.assertTrue(out.startswith(b"00000000 ") and out.endswith(b"00000319 \n"))
+
+
+@unittest.skipUnless(WINDOWS, "start-runner.cmd is a Windows batch file")
+class StartCmd(RootCase):
+    def test_hostile_py_file_in_the_root_is_not_what_the_batch_file_starts(self):
+        """Got through (in the fallback used when the recorded python.exe is
+        gone): a double-click runs the batch file with the root as the current
+        folder, and a bare `py` is looked for there first."""
+        if shutil.which("py") is None:
+            self.skipTest("no py launcher on PATH, so the batch file's fallback has nothing to start")
+        marker = os.path.join(self.outside, "planted-ran.txt")
+        for name in ("py.cmd", "py.bat", "where.cmd"):
+            with open(os.path.join(self.root, name), "w", newline="") as handle:
+                handle.write(f'@echo planted> "{marker}"\r\n')
+        self.assertEqual(dr.command_install(self.root, io.StringIO()), 0)
+        with open(self.layout.start_cmd, "w", encoding="ascii", newline="") as handle:
+            handle.write(dr.start_cmd_text(None))
+        proc = subprocess.Popen(["cmd", "/d", "/c", self.layout.start_cmd], cwd=self.root, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        deadline = time.monotonic() + 60
+        while not dr.runner_state(self.root)["alive"] and time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.1)
+        alive = dr.runner_state(self.root)["alive"]
+        self.assertEqual(dr.command_stop(self.root, io.StringIO()), 0)
+        shown = proc.communicate(timeout=60)[0]
+        self.assertFalse(os.path.exists(marker), "a file planted in the root was run")
+        self.assertTrue(alive, shown)
+        self.assertIn(b"ASAMU-decomp desk runner", shown)
+        self.assertIn(b"not running any more", shown)
+        self.assertEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":
