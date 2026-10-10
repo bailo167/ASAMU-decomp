@@ -226,8 +226,38 @@ says so in the notes.
 
 ## 4. Recording on this Mac (Route A): step by step
 
-The person at the Mac does every step below; nothing here may be automated by an agent (it launches the game and
-needs the user's own authorisation). Steam offline mode, single player.
+**Who does what (owner's decision, 2026-10-10).** Automation is preferred for all terminal, debugger and
+analysis work: an agent may launch the original game, attach LLDB read-only, run the recorder, convert, replay,
+compare and update the docs. The person at the Mac does only two things: answers macOS authorisation prompts
+(password / Developer Tools / Privacy & Security), and plays when a scenario needs gameplay input. The
+original game's files are read-only throughout. Single player; Steam only has to be running.
+
+### 4.0 Launching on modern macOS (session of 2026-10-10, macOS 26.6 on Apple silicon)
+
+| Finding | Evidence | Confidence |
+|---|---|---|
+| The build runs under Rosetta 2 **only with `-ONETHREAD`**. Without it the rendering thread crashes at once: `FFullScreenMovieGFx::Tick` → `FOpenGLDynamicRHI::Clear` → `glClear` faults at address 0 (no current GL context on that thread). | three crash reports with that stack; with `-ONETHREAD` the menu and levels run (~58 fps in the menu) | CONFIRMED |
+| A map can be started directly by passing its name as the first argument (`AG-Darkcave` loads into gameplay with the level's own Kismet state: 3 grapples, story mode off). | observed; `asamu-rec check` reported the map, `ASAMUPlayerController`, `ASAMUPawn`, `max_grapples 3` | CONFIRMED |
+| The bundled SDL2 (hg-9168, 2014) has no mapping for the PS5 DualSense; `SDL_GAMECONTROLLERCONFIG` with GUID `4c05000000000000e60c000000000000` (that SDL's format for vendor 054c / product 0ce6) and the PS4 button layout makes it a game controller. | a probe program linked against the game's own SDL: `isGameController` 0 → 1; the owner confirmed the pad works in game | CONFIRMED |
+| Sound crackles with the default OpenAL Soft 1.15.1 settings (output over AirPlay at 44.1 kHz); `ALSOFT_CONF` with `frequency=44100`, `resampler=linear`, larger buffers is applied by the launcher. | owner's report before; not explicitly re-confirmed after | TENTATIVE |
+| Every `process attach` raises a macOS authorisation prompt while Developer Mode is off; attach **once per game session** and keep the driver attached. | four attaches, four prompts | CONFIRMED |
+
+`tools/trace-recorder/launch_original.sh [MAP]` applies all of the above (fullscreen at the main display's
+resolution by default, `ASAMU_WINDOWED=1` for a 1280×720 window) and prints the game's pid.
+`tools/trace-recorder/asamu_drive.py` is a headless LLDB driver: it attaches, loads the recorder and executes
+commands written to a control file (`rec <args>`, `recrun <args>`, `lldb <cmd>`, `interrupt`, `continue`,
+`detach`), so a session can be scripted. In LLDB's async mode a breakpoint's script callback only runs when its
+stop event is taken off the listener, so the driver must drain events immediately: the first version polled
+every 0.2 s and froze the game during a recording (0 frames recorded). The loop was rewritten to block on the
+listener; **the rewritten loop has not been run against the live game yet**.
+
+**Feasibility gate so far (4.4):** F1 pass (with `-ONETHREAD`), F2 pass (`GIsBenchmarking=True`,
+`GFixedDeltaTime` = 1/60), F3 pass (map, controller, pawn, location, physics 1, base actor, view rotation, FOV
+camera 90 / controller 85, grapple-gun state, 64 bindings, `layout sentinels: ok` — this upgrades E19 and E20),
+F4–F6 not yet measured (the only recording attempt hit the driver bug above). The session was ended at the
+owner's request; the Windows route (section 6) is being prepared because the owner can play natively there.
+
+The manual steps below remain valid and are what the scripts automate.
 
 ### 4.1 One-time setup
 
@@ -456,9 +486,11 @@ in PARITY.md for that scenario. A divergence is a finding, not a failure of the 
   files only in its output folder and refuses one inside the install. No cheats, no achievement or statistics
   changes. Back up saves first (4.1).
 - **macOS protections stay on.** Never disable SIP or code signing checks; grant Developer Tools access to
-  Terminal only for recording sessions. An agent never types or asks for the user's password; the person at the
-  Mac answers the authorisation dialog.
-- **Agents do not launch the game.** Recording is a human session; agents prepare, check and analyse.
+  Terminal (or the app hosting the agent) only for recording sessions. An agent never types or asks for the
+  user's password; the person at the Mac answers the authorisation dialog.
+- **Automation boundary.** Agents may launch the game, attach read-only, record and analyse (section 4). The
+  owner answers OS authorisation prompts and provides gameplay input. Original game files are never modified;
+  launch-time environment variables and command-line options are the only things that differ from a normal run.
 - **What may be kept.** Raw recordings and traces are numeric behavioural measurements and contain no addresses
   or pointers. They stay under the git-ignored `research/local/traces/`; only small curated canonical traces may
   be committed as parity fixtures, after review and `repo-hygiene`. Never commit memory dumps, executables,
@@ -466,7 +498,8 @@ in PARITY.md for that scenario. A divergence is a finding, not a failure of the 
 
 ## 10. Next steps
 
-1. Feasibility session on the Mac (4.4), run by the user; record the outcome in docs/STATUS.md.
+1. Feasibility on the Mac (4.4): F1–F3 passed on 2026-10-10 (4.0); F4–F6 and the first traces are pending,
+   either on the Mac with the rewritten driver or on Windows (section 6).
 2. First traces: A1, A3, A4-x, T1, T3; replay, compare, publish the measured numbers in PARITY.md with
    `asamu-trace report`.
 3. Schema v2 for fields that make mid-trace replays exact (physics mode, base, grapple budget, boots and jump
