@@ -28,7 +28,7 @@ console commands (6.1).
 | # | Finding | Confidence |
 |---|---|---|
 | 1 | Four save files, all in one folder `ASAMU/Saves/` below the per-user game directory: `SaveGame.bin` (world/checkpoint snapshot), `PlayerProgression.bin` (unlocks, collectibles, achievements, finished flag), `GeneralSave.bin` (current chapter pointer + Kismet integer flags), `TTS.bin` (time-trial best times). | CONFIRMED (cdo, src) |
-| 2 | macOS per-user directory: `~/Library/Application Support/A Story About My Uncle/` (Application Support + `MyDocumentsSubDirName`). Every file write under the install root is redirected there; reads try it first and fall back to the install. Saves therefore land in `~/Library/Application Support/A Story About My Uncle/ASAMU/Saves/`. | CONFIRMED (native) redirection rule; STRONG final path |
+| 2 | macOS per-user directory: `~/Library/Application Support/A Story About My Uncle/` (Application Support + `MyDocumentsSubDirName`). Every file write under the install root is redirected there; reads try it first and fall back to the install. Saves therefore land in `~/Library/Application Support/A Story About My Uncle/ASAMU/Saves/`. | CONFIRMED (native) redirection rule; final path **not what was observed** on the first real run, see 1.2a |
 | 3 | Windows: `Documents\My Games\A Story About My Uncle\ASAMU\Saves\*.bin`; Steam Auto-Cloud syncs exactly that folder (`*.bin`, root `WinMyDocuments`) **on Windows only**. | CONFIRMED (steam, config) |
 | 4 | Container: optional 4-byte magic `0xC0DEDBAD` (bytes `AD DB DE C0`), then AES-256-ECB (32-byte ASCII key compiled into the executable, zero padding to 16) over `i32 version` + one UObject serialized as tagged properties with names and object references written as strings. `SaveGame.bin`, `PlayerProgression.bin`, `GeneralSave.bin` are encrypted; `TTS.bin` is plain. Versions must match exactly: 3, 3, 1, 3. | CONFIRMED (native, src) |
 | 5 | Most real data is JSON text stored inside string properties (UE3 `JsonObject`: numbers/bools as unquoted values, case-insensitive keys). The world snapshot is an array of JSON strings: checkpoint table, grapple/boots state, savable actors, **every Kismet event and variable of the map**, every Matinee. | CONFIRMED (src) |
@@ -48,6 +48,28 @@ console commands (6.1).
 | `[Windows.StandardUser] MyDocumentsSubDirName` | `A Story About My Uncle` | **Yes**, on both platforms (1.2, 1.3) |
 | `[OnlineSubsystemGameSpy.OnlineSubsystemGameSpy] ProfileDataDirectory` / `ProfileDataExtension` | `../ASAMU/SaveData` / `.ue3profile` | No evidence of use: the game runs on the Steamworks subsystem and no ASAMU script references profile data. TENTATIVE |
 | `[URL]` maps | `Map=ASAMUFrontEndMap.asamu`, `LocalMap=ASAMULegal.asamu`, `TransitionMap=ASAMUEntry.asamu` | boot flow (see LEVELS.md) |
+
+### 1.2a Observed on the first real run (2026-10-10) [CONFIRMED by observation]
+
+The Mac build was run on this machine for the first time (Rosetta 2, launched directly with `-ONETHREAD`; see
+`docs/TRACE_CAPTURE.md` 4.0). It did **not** create `~/Library/Application Support/A Story About My Uncle/`.
+It wrote its runtime output inside the app bundle's own game directory instead:
+
+| Path under `…/Contents/Resources/ASAMU/` | Files |
+|---|---|
+| `Saves/` | `GeneralSave.bin` (276 B), `PlayerProgression.bin` (612 B), `SaveGame.bin` (28,820 B) |
+| `Config/` | `Mac-ASAMUEngine.ini`, `Mac-ASAMUGame.ini`, `Mac-ASAMUInput.ini`, `Mac-ASAMUSystemSettings.ini`, `ASAMUSettings.ini`, `ASAMUController.ini` |
+| `Logs/` | `benchmark.log` |
+| `Cloud/` | `CloudStorage.ini` |
+
+No original file changed (all 1,636 inventoried files are still present with identical hashes; the
+`asamu-inventory` real-install test now checks exactly that and tolerates these runtime files). So the
+redirection described in 1.2 does not apply in this configuration — why is UNKNOWN (candidates: the bundle is
+writable, the direct launch outside Steam, or the redirect only covering some file classes); the native code
+should be re-read before relying on 1.2. Consequences: (1) an importer must look for Mac saves in the bundle
+as well as in Application Support; (2) three real save files now exist locally, so the byte-level layout of
+section 3 can be checked against real data (not done yet); (3) the user-config file names that were TENTATIVE
+are now known: `Mac-ASAMU{Engine,Game,Input,SystemSettings}.ini`, `ASAMUSettings.ini`, `ASAMUController.ini`.
 
 ### 1.2 macOS per-user directory [CONFIRMED (native) unless marked]
 
