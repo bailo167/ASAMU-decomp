@@ -12,7 +12,7 @@
 
 mod common;
 
-use asamu_player::movement::LocomotionIntent;
+use asamu_player::movement::{ClassDefaults, Landing, LocomotionIntent, PawnHooks};
 use asamu_player::ue3_movement::{
     MOVE_RADIUS_INFLATION, PawnPhysicsState, PhysicsMode, TickStats, Ue3PawnMovement,
 };
@@ -1302,6 +1302,135 @@ fn flying_velocity_is_the_displacement_times_the_f32_reciprocal_of_dt() {
     assert_eq!(s.velocity.y, 0.0);
     assert_eq!(s.velocity.z, 0.0);
     assert_eq!(s.position.z, start.z);
+}
+
+/// [`PawnHooks`] with the class defaults that keeps what the pawn's `Landed`
+/// event is told (the velocity and location at the landing, before the rest
+/// of the tick is walked).
+struct LandingRecorder {
+    defaults: ClassDefaults,
+    landings: Vec<Landing>,
+}
+
+impl PawnHooks for LandingRecorder {
+    fn ground_speed(&self) -> f32 {
+        self.defaults.ground_speed
+    }
+
+    fn air_control(&self) -> f32 {
+        self.defaults.air_control
+    }
+
+    fn air_speed(&self) -> f32 {
+        self.defaults.air_speed
+    }
+
+    fn landed(&mut self, landing: &Landing) {
+        self.landings.push(*landing);
+    }
+}
+
+#[test]
+fn landing_velocity_is_the_displacement_times_the_f32_reciprocal_of_the_contact_time() {
+    // 4.4 with 2.4: a landing after `step·Hit.Time` > 0.003 s with
+    // `Hit.Time` > 0.1 replaces the velocity by the displacement of the
+    // sub-step × (1 / (step·Hit.Time)): one f32 reciprocal, three products
+    // (Mac 0x100AE0747, Win32 0xB2899B). No recording shows this velocity
+    // (the rest of the landing frame is walked), so the rule rests on the
+    // native code; this test keeps the port on it.
+    //
+    // Nothing here is taken from the code under test except what it reports
+    // about the landing: where the pawn was (`Landing::location`) and how
+    // much time it handed back (`returned_time`, spec 1.4/5.2:
+    // step·(1 − Hit.Time)). With a tick of 1/32 s (one sub-step, a power of
+    // two) and `Hit.Time` ≥ 0.5 every operation that leads from the returned
+    // time back to the contact time is exact in f32:
+    //   returned · 32 = 1 − Hit.Time   (scaling by a power of two; the
+    //                                   difference of 1 and a float in
+    //                                   [0.5, 1] is exact)
+    //   Hit.Time = 1 − returned · 32,  contact = Hit.Time / 32.
+    // The expected velocity is then written out from the native rule. The
+    // cases differ in height and speed so that the contact time and the
+    // displacement change; the division form gives another float in some of
+    // them, and the test requires that at least one case tells the two
+    // forms apart. If a change of the contact rule (the hit pull-back) ever
+    // leaves none, add cases; the expected value does not change.
+    let step = 1.0_f32 / 32.0;
+    let params = PlayerParams::default();
+    let g = gravity(&params);
+    let world = BoxWorld::new().with_ground(0.0, false);
+    let mut decided = 0;
+    for case in 0..12_u8 {
+        let k = f32::from(case);
+        let start = Vec3::new(0.0, 0.0, hh(&params) + 14.0 + 0.5 * k);
+        let v0 = Vec3::new(150.0 + 10.0 * k, -37.5, -700.0 - 6.25 * k);
+        let mut s = airborne(start, v0);
+        let mut hooks = LandingRecorder {
+            defaults: ClassDefaults::new(&params.movement),
+            landings: Vec::new(),
+        };
+        let mut events = StepEvents::default();
+        let stats = Ue3PawnMovement.advance_scripted_with_stats(
+            &mut s,
+            &no_input(),
+            Vec3::ZERO,
+            &params.movement,
+            &mut hooks,
+            &world,
+            step,
+            &mut events,
+        );
+        assert_eq!(hooks.landings.len(), 1, "case {case}: one landing");
+        let landing = hooks.landings[0];
+        let first = stats.substeps()[0];
+        assert_eq!(
+            (first.mode, first.time),
+            (PhysicsMode::Falling, step),
+            "case {case}"
+        );
+
+        // The contact time, from the time handed back.
+        let untravelled = stats.returned_time * 32.0;
+        assert!(
+            untravelled > 0.0 && untravelled <= 0.5,
+            "case {case}: Hit.Time must be in [0.5, 1) for the exact derivation, 1 - t = {untravelled}"
+        );
+        let hit_time = 1.0 - untravelled;
+        let contact = step * hit_time;
+        assert!(contact > 0.003 && hit_time > 0.1, "case {case}");
+        // The landing location is the start plus that fraction of the
+        // sub-step's move (4.3: V1 = V0 + g·step, move V1·step).
+        let moved = landing.location - start;
+        let full_move_z = (f64::from(v0.z) + g * f64::from(step)) * f64::from(step);
+        close(
+            f64::from(moved.z),
+            full_move_z * f64::from(hit_time),
+            1e-4,
+            "fraction of the move",
+        );
+
+        let reciprocal = 1.0 / contact;
+        let expected = [
+            moved.x * reciprocal,
+            moved.y * reciprocal,
+            moved.z * reciprocal,
+        ];
+        let divided = [moved.x / contact, moved.y / contact, moved.z / contact];
+        assert_eq!(
+            landing.velocity.to_array().map(f32::to_bits),
+            expected.map(f32::to_bits),
+            "case {case}: landing velocity {:?}, reciprocal form {expected:?}, division form {divided:?}",
+            landing.velocity
+        );
+        assert_eq!(events.landed, Some(landing.velocity.z), "case {case}");
+        if expected.map(f32::to_bits) != divided.map(f32::to_bits) {
+            decided += 1;
+        }
+    }
+    assert!(
+        decided >= 1,
+        "no case tells the reciprocal form from the division form: add cases"
+    );
 }
 
 // ---------------------------------------------------------------------------
