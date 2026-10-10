@@ -34,6 +34,8 @@ pub use steam::{AppManifest, Depot, LibraryFolder};
 pub const APP_ID: u32 = 278360;
 /// The Mac depot observed on the analysis machine (see docs/reverse-engineering/INVENTORY.md).
 pub const MAC_DEPOT_ID: u32 = 278362;
+/// The Windows depot observed on a Windows Steam install (same document).
+pub const WINDOWS_DEPOT_ID: u32 = 278361;
 /// Default `installdir` under `steamapps/common`.
 pub const DEFAULT_INSTALL_DIR: &str = "A Story About My Uncle";
 /// Name of the macOS application bundle inside the install folder.
@@ -53,7 +55,10 @@ pub enum Layout {
     /// `A Story About My Uncle.app/Contents/{MacOS/ASAMU, Resources/ASAMU, Resources/Engine}`.
     /// CONFIRMED on the analysis machine (depot 278362, build 1822049).
     MacApp,
-    /// `Binaries/Win32|Win64/*.exe`, `ASAMU/CookedPC*`. Expected, UNVERIFIED here.
+    /// `Binaries/Win32|Win64/*.exe`, `ASAMU/CookedPC*`. CONFIRMED for the Windows depot
+    /// (278361, build 1822049): `Binaries/Win32/ASAMU-Win32-Shipping.exe`, `ASAMU/CookedPC`,
+    /// `Engine`, all directly in the install folder. Other shapes (Win64, other executable
+    /// names, `CookedPCConsole`) are accepted with a warning.
     Windows,
     /// `Binaries/Linux*`. UNVERIFIED (no Linux depot has been observed).
     Linux,
@@ -493,8 +498,14 @@ fn first_existing_file(base: &Path, candidates: &[&[&str]]) -> Option<PathBuf> {
     None
 }
 
-/// Expected Windows executables, most specific first. `ASAMU-Win32-Shipping.exe` is named in
-/// the shipped `PCTOC.txt` (STRONG); the others are conventional UE3/UDK names (TENTATIVE).
+/// The executable of the Windows depot (278361, build 1822049; CONFIRMED on a Steam install,
+/// see docs/reverse-engineering/INVENTORY.md).
+const VERIFIED_WINDOWS_EXECUTABLE: &[&str] = &["Binaries", "Win32", "ASAMU-Win32-Shipping.exe"];
+/// The cooked folder of that depot.
+const VERIFIED_WINDOWS_COOKED_DIR: &str = "CookedPC";
+
+/// Windows executables, most specific first. `ASAMU-Win32-Shipping.exe` is what the Windows
+/// depot ships (CONFIRMED); the others are conventional UE3/UDK names (TENTATIVE).
 const WINDOWS_EXECUTABLES: &[&[&str]] = &[
     &["Binaries", "Win32", "ASAMU-Win32-Shipping.exe"],
     &["Binaries", "Win32", "ASAMU.exe"],
@@ -594,11 +605,24 @@ fn detect_loose(root: PathBuf) -> Result<DetectedPaths, String> {
         Layout::Linux => first_existing_file(&root, LINUX_EXECUTABLES),
         Layout::MacApp | Layout::Loose => None,
     };
-    if matches!(layout, Layout::Windows | Layout::Linux) {
-        warnings.push(format!(
-            "{} layout detection is UNVERIFIED (only the Mac depot has been examined)",
-            layout.label()
-        ));
+    match layout {
+        // The Windows depot (278361, build 1822049) has exactly this shape; any other
+        // Windows-looking tree (Win64, another executable name, CookedPCConsole) is a guess.
+        Layout::Windows
+            if first_existing_file(&root, &[VERIFIED_WINDOWS_EXECUTABLE]).is_some()
+                && cooked_dir.file_name().is_some_and(|n| {
+                    n.to_string_lossy()
+                        .eq_ignore_ascii_case(VERIFIED_WINDOWS_COOKED_DIR)
+                }) => {}
+        Layout::Windows => warnings.push(format!(
+            "windows layout detection is UNVERIFIED for this tree (the examined Windows depot \
+             has {} and ASAMU/{VERIFIED_WINDOWS_COOKED_DIR})",
+            VERIFIED_WINDOWS_EXECUTABLE.join("/")
+        )),
+        Layout::Linux => warnings.push(
+            "linux layout detection is UNVERIFIED (no Linux depot has been examined)".to_string(),
+        ),
+        Layout::MacApp | Layout::Loose => {}
     }
     Ok(finish_paths(
         root.clone(),
@@ -1110,28 +1134,32 @@ mod tests {
     #[test]
     fn windows_backslash_paths_in_vdf_are_unescaped() {
         // Library paths for another OS are parsed correctly and then skipped (they do not
-        // exist here); discovery falls through to the root library.
+        // exist here); discovery falls through to the root library. The path is not Steam's
+        // default one: on a Windows machine with Steam installed that library exists, and
+        // the test would find the real game instead of nothing.
+        const LIBRARY: &str = r"C:\No Such Folder (asamu-locate test)\Steam Library";
         let tmp = TempDir::new().unwrap();
         let steam = tmp.path().join("Steam");
         fs::create_dir_all(steam.join("steamapps")).unwrap();
         fs::write(
             steam.join("steamapps/libraryfolders.vdf"),
-            "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n\t\t\"apps\" { \"278360\" \"1\" }\n\t}\n}\n",
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"apps\" {{ \"278360\" \"1\" }}\n\t}}\n}}\n",
+                // VDF escapes every backslash.
+                LIBRARY.replace('\\', r"\\")
+            ),
         )
         .unwrap();
         let mut notes = Vec::new();
         let libs = libraries_for_root(&steam, &mut notes);
-        assert!(
-            libs.iter()
-                .any(|l| l.path == Path::new(r"C:\Program Files (x86)\Steam"))
-        );
+        assert!(libs.iter().any(|l| l.path == Path::new(LIBRARY)));
         // The listed library comes first because it claims the app.
-        assert_eq!(libs[0].path, PathBuf::from(r"C:\Program Files (x86)\Steam"));
+        assert_eq!(libs[0].path, PathBuf::from(LIBRARY));
 
         let err = locate_with(&opts_steam(&steam)).unwrap_err();
         let msg = err.to_string();
         assert!(matches!(err, LocateError::NotInstalled { .. }), "{msg}");
-        assert!(msg.contains(r"C:\Program Files (x86)\Steam"), "{msg}");
+        assert!(msg.contains(LIBRARY), "{msg}");
         assert!(msg.contains("no steamapps/ folder"), "{msg}");
     }
 
@@ -1338,7 +1366,59 @@ mod tests {
                 .unwrap()
                 .ends_with("Binaries/Win32/ASAMU-Win32-Shipping.exe")
         );
-        assert!(install.warnings.iter().any(|w| w.contains("UNVERIFIED")));
+        // The shape of the examined Windows depot: no warning at all.
+        assert!(install.warnings.is_empty(), "{:?}", install.warnings);
+        assert_eq!(
+            install.maps_dir,
+            install.cooked_dir.join("Maps"),
+            "maps folder inside the cooked folder"
+        );
+    }
+
+    #[test]
+    fn unexamined_windows_and_linux_shapes_warn() {
+        let tmp = TempDir::new().unwrap();
+        // Windows data without the depot's executable.
+        let no_exe = tmp.path().join("no-exe");
+        touch(&no_exe.join("Binaries/Win32/Other.exe"));
+        touch(&no_exe.join("ASAMU/CookedPC/Maps/ASAMUEntry.asamu"));
+        touch(&no_exe.join("ASAMU/Config/DefaultEngine.ini"));
+        touch(&no_exe.join("ASAMU/Localization/INT/ASAMU.int"));
+        touch(&no_exe.join("Engine/Config/BaseEngine.ini"));
+        // The depot's executable with another cooked folder.
+        let console = tmp.path().join("console");
+        touch(&console.join("Binaries/Win32/ASAMU-Win32-Shipping.exe"));
+        touch(&console.join("ASAMU/CookedPCConsole/Maps/ASAMUEntry.asamu"));
+        touch(&console.join("ASAMU/Config/DefaultEngine.ini"));
+        touch(&console.join("ASAMU/Localization/INT/ASAMU.int"));
+        touch(&console.join("Engine/Config/BaseEngine.ini"));
+        for root in [&no_exe, &console] {
+            let install = from_original_dir(root).unwrap();
+            assert_eq!(install.layout, Layout::Windows);
+            let unverified: Vec<&String> = install
+                .warnings
+                .iter()
+                .filter(|w| w.contains("UNVERIFIED"))
+                .collect();
+            assert_eq!(unverified.len(), 1, "{:?}", install.warnings);
+            assert!(
+                unverified[0].starts_with("windows layout"),
+                "{unverified:?}"
+            );
+        }
+        let linux = tmp.path().join("linux");
+        touch(&linux.join("Binaries/Linux/ASAMU"));
+        touch(&linux.join("ASAMU/CookedPC/x.u"));
+        let install = from_original_dir(&linux).unwrap();
+        assert_eq!(install.layout, Layout::Linux);
+        assert!(
+            install
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("linux layout") && w.contains("UNVERIFIED")),
+            "{:?}",
+            install.warnings
+        );
     }
 
     #[test]
@@ -1650,20 +1730,38 @@ mod tests {
         assert_eq!(install.app_id, APP_ID);
         assert!(install.cooked_dir.is_dir());
         assert!(install.game_dir.is_dir());
-        if install.layout == Layout::MacApp {
+        if matches!(install.layout, Layout::MacApp | Layout::Windows) {
             assert!(install.executable.as_ref().is_some_and(|p| p.is_file()));
         }
         // Build/depot fields exist only when a Steam manifest was read. The expected values
-        // describe the Mac depot inventoried in docs/reverse-engineering/INVENTORY.md; a
-        // Windows/Linux install has other depots, and a newer build needs re-inventorying
-        // (reported, like the inventory's real-data test, instead of failing).
+        // describe the Mac and Windows depots inventoried in
+        // docs/reverse-engineering/INVENTORY.md; a Linux install has another depot, and a
+        // newer build needs re-inventorying (reported, like the inventory's real-data test,
+        // instead of failing).
         const INVENTORIED_BUILD: u64 = 1822049;
+        let expected_depot = match install.layout {
+            Layout::MacApp => Some(MAC_DEPOT_ID),
+            Layout::Windows => Some(WINDOWS_DEPOT_ID),
+            Layout::Linux | Layout::Loose => None,
+        };
         if install.manifest.is_none() {
             eprintln!("NOTE real_install_if_present: no app manifest; build/depot not checked");
+        } else if let Some(depot) = expected_depot.filter(|_| {
+            install.build_id == Some(INVENTORIED_BUILD) && install.layout == Layout::Windows
+        }) {
+            assert!(
+                install.depots.iter().any(|d| d.depot_id == depot),
+                "expected depot {depot}: {:?}",
+                install.depots
+            );
+            // The examined Windows depot is located without any warning.
+            assert!(install.warnings.is_empty(), "{:?}", install.warnings);
+            assert!(install.cooked_dir.ends_with("CookedPC"));
         } else if install.layout != Layout::MacApp {
             eprintln!(
                 "NOTE real_install_if_present: {} layout, build {:?}, depots {:?} (only the Mac \
-                 depot {MAC_DEPOT_ID} has been inventoried)",
+                 depot {MAC_DEPOT_ID} and the Windows depot {WINDOWS_DEPOT_ID} of build \
+                 {INVENTORIED_BUILD} have been inventoried)",
                 install.layout.label(),
                 install.build_id,
                 install.depots
