@@ -55,7 +55,8 @@ Commands:
   submit --root ROOT ... -- ARGS       enqueue a job, wait, stream its output,
                                        exit with its exit code (124 timed out,
                                        125 runner problem or refusal, 126 could
-                                       not start, 130 cancelled)
+                                       not start, 130 cancelled); interrupting
+                                       the wait cancels the job
   status / stop / cancel ID / install  see `--help`
   pack ... -- ARGS                     encode a job for `submit --packed`
                                        (used by tools/dev/win_host.sh)
@@ -71,7 +72,6 @@ import ctypes
 import hashlib
 import json
 import math
-import ntpath
 import os
 import re
 import secrets
@@ -926,6 +926,8 @@ class Runner:
         self._digest = own_digest()
         self._running = False
         self.stop_reason = ""
+        self.stop_request_reason = "its window was closed"
+        self._no_writes = False
         self.jobs_started = 0
         self.jobs_refused = 0
 
@@ -945,6 +947,8 @@ class Runner:
         self._append(self.layout.log, f"{utc_text(self.clock.time())} {text}")
 
     def _append(self, path: str, line: str) -> None:
+        if self._no_writes:
+            return
         try:
             if os.path.getsize(path) > LOG_ROTATE_BYTES:
                 os.replace(path, path + ".1")
@@ -1079,10 +1083,11 @@ class Runner:
             self._write_status(queued.job_id, {"state": "runner_stopped", "reason": f"the runner stopped ({reason})"})
         self._queue = []
         self._beat(force=True, state="stopped")
-        try:
-            os.unlink(self.layout.stop)
-        except OSError:
-            pass
+        if not self._no_writes:
+            try:
+                os.unlink(self.layout.stop)
+            except OSError:
+                pass
         self._lock.release()
         self.say("stopped")
 
@@ -1111,12 +1116,18 @@ class Runner:
         if not self._running:
             return False
         if self.stop_requested.is_set():
-            self.shutdown("its window was closed")
+            self.shutdown(self.stop_request_reason)
             return False
         if os.path.lexists(self.layout.stop):
             self.shutdown("stop file")
             return False
-        self._check_own_folders()
+        try:
+            self._check_own_folders()
+        except RunnerError:
+            # One of the runner's folders now leads somewhere else: from here
+            # on it writes nothing at all, ends its jobs and stops.
+            self._no_writes = True
+            raise
         self._scan_inbox()
         self._poll_active()
         self._start_queued()
@@ -1125,6 +1136,8 @@ class Runner:
 
     def _beat(self, force: bool = False, state: str = "running") -> None:
         now = self.clock.monotonic()
+        if self._no_writes:
+            return
         if not force and self._last_beat is not None and now - self._last_beat < HEARTBEAT_PERIOD_S:
             return
         self._last_beat = now
@@ -1190,6 +1203,8 @@ class Runner:
             self._write_status(job_id, fields)
 
     def _write_status(self, job_id: str, fields: dict[str, Any]) -> None:
+        if self._no_writes:
+            return
         now = self.clock.time()
         status = {"protocol": PROTOCOL_VERSION, "id": job_id, "updated_unix": now, "updated_utc": utc_text(now)}
         status.update(fields)
@@ -1219,8 +1234,12 @@ class Runner:
             if name.endswith(".json.tmp") or name.endswith(".cancel.tmp"):
                 continue
             found.append((info.st_mtime, name, info.st_size))
+        # Oldest first; within one round jobs before cancellations, so that a
+        # cancellation never overtakes the job it is meant for.
         found.sort()
-        for _mtime, name, size in found[:MAX_INBOX_ENTRIES_PER_SCAN]:
+        found = found[:MAX_INBOX_ENTRIES_PER_SCAN]
+        found.sort(key=lambda item: item[1].endswith(".cancel"))
+        for _mtime, name, size in found:
             path = os.path.join(self.layout.inbox, name)
             if name.endswith(".cancel"):
                 if self._remove_inbox_file(name, path):
@@ -1460,8 +1479,11 @@ def _prepare_console(runner: Runner, done: threading.Event) -> list[object]:
 
         handler_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint32)  # type: ignore[attr-defined]
 
+        reasons = {1: "Ctrl+Break", 2: "its window was closed", 5: "the user signed out", 6: "the machine shut down"}
+
         def on_event(event: int) -> int:
-            if event in (2, 5, 6):  # window closed, sign-out, shutdown
+            if event in reasons:
+                runner.stop_request_reason = reasons[event]
                 runner.stop_requested.set()
                 done.wait(4.0)
                 return 1
@@ -1535,20 +1557,35 @@ def not_running_message(root_real: str, state: dict[str, Any]) -> str:
         age = state["heartbeat_age_seconds"]
         shown = "none" if age is None else f"{age:.0f} s old"
         return (
-            f"desk runner on {host} is not responding (heartbeat {shown}): close its window "
+            f"the desk runner on {host} is not responding (heartbeat {shown}): close its window "
             f"\"ASAMU-decomp desk runner\" and double-click {layout.start_cmd} again"
         )
     if not state["installed"]:
-        return f"desk runner is not installed on {host}: run \"tools/dev/win_host.sh desk-install\" first"
+        return f"the desk runner is not installed on {host}: run \"tools/dev/win_host.sh desk-install\" first"
     return (
-        f"desk runner is not running on {host}: at that machine's own screen, double-click "
+        f"the desk runner is not running on {host}: at that machine's own screen, double-click "
         f"{layout.start_cmd} (once per sign-in), leave its window open, then run this again"
     )
 
 
-def pack_job(program: str, args: list[str], cwd: str, timeout: float, env: dict[str, str]) -> str:
-    """A job as one token that survives any command line (URL-safe base64 of JSON)."""
-    obj = {"program": program, "args": list(args), "cwd": cwd, "timeout_seconds": timeout, "env": dict(env)}
+PACKED_KEYS = frozenset({"program", "args", "cwd", "timeout_seconds", "env"})
+
+
+def pack_job(
+    program: str, args: list[str], cwd: str, timeout: float, env: dict[str, str], job_id: str | None = None
+) -> str:
+    """A job as one token that survives any command line (URL-safe base64 of
+    JSON). With `job_id` the sender chooses the id, so that it can cancel
+    the job without having heard back."""
+    obj: dict[str, Any] = {
+        "program": program,
+        "args": list(args),
+        "cwd": cwd,
+        "timeout_seconds": timeout,
+        "env": dict(env),
+    }
+    if job_id is not None:
+        obj["id"] = job_id
     return base64.urlsafe_b64encode(json.dumps(obj).encode("utf-8")).decode("ascii")
 
 
@@ -1557,7 +1594,7 @@ def unpack_job(token: str) -> dict[str, Any]:
         obj = json.loads(base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
     except (ValueError, UnicodeError) as err:
         raise JobRejected(f"--packed is not a packed job ({type(err).__name__})") from None
-    if not isinstance(obj, dict) or set(obj) != {"program", "args", "cwd", "timeout_seconds", "env"}:
+    if not isinstance(obj, dict) or set(obj) - {"id"} != PACKED_KEYS:
         raise JobRejected("--packed is not a packed job")
     return obj
 
@@ -1621,7 +1658,8 @@ def command_submit(
     clock: Any = None,
 ) -> int:
     """Enqueue one job; by default wait for it, stream its output and return
-    its exit code."""
+    its exit code. `job_fields` may carry an "id" chosen by the caller.
+    Interrupting the wait (Ctrl+C) asks the runner to end the job."""
     clock = clock or RealClock()
     out = out if out is not None else sys.stdout.buffer
     err = err if err is not None else sys.stderr
@@ -1640,7 +1678,11 @@ def command_submit(
     if not state["alive"]:
         note(not_running_message(root_real, state))
         return EXIT_RUNNER
-    job_id = new_job_id(clock)
+    job_fields = dict(job_fields)
+    job_id = job_fields.pop("id", None) or new_job_id(clock)
+    if not isinstance(job_id, str) or not ID_RE.match(job_id):
+        note("refused before sending: job id must be 1 to 64 letters, digits, '-' or '_'")
+        return EXIT_RUNNER
     obj = {"version": PROTOCOL_VERSION, "id": job_id, **job_fields}
     try:
         job = validate_job(obj, job_id, root_real, Policy.host())
@@ -1667,6 +1709,23 @@ def command_submit(
         out.flush()
         return 0
 
+    try:
+        return _wait_for_job(root_real, job_id, out, err, note, clock)
+    except KeyboardInterrupt:
+        try:
+            request_cancel(layout, job_id)
+            note(f"interrupted: asked the runner to end job {job_id}")
+        except OSError:
+            note(f"interrupted; job {job_id} goes on until it ends or its time limit passes")
+        return EXIT_CANCELLED
+
+
+def _wait_for_job(
+    root_real: str, job_id: str, out: BinaryIO, err: TextIO, note: Callable[[str], None], clock: Any
+) -> int:
+    """Follow a job to its end: its state changes on `err`, its output as it
+    is written, and at the end the exit code for it."""
+    layout = Layout(root_real)
     stderr_sink = getattr(err, "buffer", None)
     offsets = [0, 0]
     announced = ""
@@ -1674,24 +1733,22 @@ def command_submit(
     while True:
         status = read_json(layout.status(job_id)) or {}
         current = str(status.get("state", ""))
-        offsets[0] = _pump(layout.stdout(job_id), offsets[0], out)
-        if stderr_sink is not None:
-            offsets[1] = _pump(layout.stderr(job_id), offsets[1], stderr_sink)
         if current != announced and current in ("queued", "running"):
             announced = current
             note(f"job {job_id} is {current}" + (f" (process {status.get('pid')})" if current == "running" else ""))
+        # The state was read before the output: once the state says the job
+        # is over, everything it wrote is in the files.
+        offsets[0] = _pump(layout.stdout(job_id), offsets[0], out)
+        if stderr_sink is not None:
+            offsets[1] = _pump(layout.stderr(job_id), offsets[1], stderr_sink)
         if current in TERMINAL_STATES:
-            offsets[0] = _pump(layout.stdout(job_id), offsets[0], out)
-            if stderr_sink is not None:
-                _pump(layout.stderr(job_id), offsets[1], stderr_sink)
-            code = exit_code_for(status)
             took = status.get("duration_seconds")
             after = f" after {took} s" if took is not None else ""
             if current == "finished":
                 note(f"job {job_id} finished: exit code {status.get('exit_code')}{after}")
             else:
                 note(f"job {job_id} {current.replace('_', ' ')}{after}: {printable(status.get('reason'), 300)}")
-            return code
+            return exit_code_for(status)
         if clock.monotonic() - last_alive_check >= HEARTBEAT_PERIOD_S:
             last_alive_check = clock.monotonic()
             now_state = runner_state(root_real, clock)
@@ -1704,6 +1761,14 @@ def command_submit(
                 note(not_running_message(root_real, now_state))
                 return EXIT_RUNNER
         clock.sleep(0.2)
+
+
+def request_cancel(layout: Layout, job_id: str) -> None:
+    """Ask the runner to end a job (written like a job file: whole or not at all)."""
+    target = os.path.join(layout.inbox, job_id + ".cancel")
+    with open(target + ".tmp", "w", encoding="ascii") as handle:
+        handle.write("cancel\n")
+    os.replace(target + ".tmp", target)
 
 
 def command_status(root: str, as_json: bool, out: TextIO | None = None, clock: Any = None) -> int:
@@ -1775,11 +1840,7 @@ def command_cancel(root: str, job_id: str, out: TextIO | None = None) -> int:
         out.write("desk: that is not a job id\n")
         return 2
     try:
-        layout = Layout(resolve_root(root))
-        target = os.path.join(layout.inbox, job_id + ".cancel")
-        with open(target + ".tmp", "w", encoding="ascii") as handle:
-            handle.write("cancel\n")
-        os.replace(target + ".tmp", target)
+        request_cancel(Layout(resolve_root(root)), job_id)
     except (RunnerError, OSError) as problem:
         out.write(f"desk: could not ask for the cancellation ({printable(problem)})\n")
         return EXIT_RUNNER
@@ -1788,7 +1849,7 @@ def command_cancel(root: str, job_id: str, out: TextIO | None = None) -> int:
 
 
 OWNER_INSTRUCTIONS = (
-    "1. On the laptop itself (signed in, at its own screen), open {root} in File Explorer and double-click start-runner.cmd.",
+    "1. At that machine's own screen, signed in: open {root} in File Explorer and double-click start-runner.cmd.",
     '2. A console window titled "ASAMU-decomp desk runner" opens and says what it will and will not run. Leave it open (minimise it) while testing or playing.',
     "3. To stop it, close that window: everything it started ends with it. Start it again after each sign-in or restart.",
 )
@@ -1862,6 +1923,7 @@ def _job_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds before the job is ended")
     parser.add_argument("--env", action="append", default=[], metavar="NAME=VALUE", help="ASAMU_*, WGPU_*, BEVY_*, RUST_BACKTRACE, RUST_LOG")
     parser.add_argument("--env-list", default="", metavar="A=1;B=2", help="several --env settings separated by ';'")
+    parser.add_argument("--id", help="job id (default: made from the time and a random part)")
     parser.add_argument("args", nargs=argparse.REMAINDER, help="-- then the program's arguments")
 
 
@@ -1872,13 +1934,16 @@ def _job_fields(ns: argparse.Namespace) -> dict[str, Any]:
     if args and args[0] == "--":
         args = args[1:]
     pairs = list(ns.env) + [p for p in ns.env_list.split(";") if p.strip()]
-    return {
+    fields = {
         "program": ns.program,
         "args": args,
         "cwd": ns.cwd,
         "timeout_seconds": ns.timeout,
         "env": parse_env_pairs(pairs),
     }
+    if ns.id:
+        fields["id"] = ns.id
+    return fields
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1923,7 +1988,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if ns.command == "pack":
             fields = _job_fields(ns)
-            print(pack_job(fields["program"], fields["args"], fields["cwd"], fields["timeout_seconds"], fields["env"]))
+            print(
+                pack_job(
+                    fields["program"],
+                    fields["args"],
+                    fields["cwd"],
+                    fields["timeout_seconds"],
+                    fields["env"],
+                    fields.get("id"),
+                )
+            )
             return 0
         fields = unpack_job(ns.packed) if ns.packed else _job_fields(ns)
     except JobRejected as problem:

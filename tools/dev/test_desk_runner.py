@@ -969,6 +969,41 @@ class HostileInbox(RunnerCase):
         self.nothing_ran()
         self.assertTrue(os.path.exists(os.path.join(self.outside, "planted.json")))
 
+    def test_hostile_outbox_swapped_for_a_link_while_a_job_runs(self):
+        if not try_symlink(self.outside, os.path.join(self.root, "probe"), is_dir=True):
+            self.skipTest("this account may not create symbolic links")
+        os.unlink(os.path.join(self.root, "probe"))
+        outside_before = tree_snapshot(self.outside)
+        seen: dict[str, dict] = {}
+        test = self
+
+        def own_files() -> dict:
+            return {k: v for k, v in tree_snapshot(test.layout.base).items() if not k.startswith("outbox")}
+
+        class Scripted(FakeClock):
+            """The loop's pauses are where the outside world acts."""
+
+            def sleep(self, seconds: float) -> None:
+                super().sleep(seconds)
+                if self.slept == dr.POLL_PERIOD_S:
+                    test.drop("job-1")
+                elif self.slept == 3 * dr.POLL_PERIOD_S:
+                    for name in os.listdir(test.layout.outbox):
+                        os.unlink(os.path.join(test.layout.outbox, name))
+                    os.rmdir(test.layout.outbox)
+                    os.symlink(test.outside, test.layout.outbox, target_is_directory=True)
+                    seen["before"] = own_files()
+                elif self.slept > 100:
+                    raise AssertionError("the loop did not stop")
+
+        runner = self.make_runner(clock=Scripted())
+        self.assertEqual(runner.run(), 1, "the loop stops with an error")
+        self.assertEqual([p.kills for p in self.launcher.procs], [1], "its job is ended")
+        self.assertEqual(tree_snapshot(self.outside), outside_before, "nothing is written through the link")
+        self.assertEqual(own_files(), seen["before"], "and nothing anywhere else either")
+        self.assertFalse(dr.InstanceLock.held_by_someone(self.layout.lock))
+        self.assertIn("is a link", self.console.getvalue())
+
 
 # --------------------------------------------------------------------------
 
@@ -988,7 +1023,7 @@ class Source(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
         allowed = {"__future__", "argparse", "base64", "ctypes", "dataclasses", "fcntl", "hashlib", "json", "math",
-                   "msvcrt", "ntpath", "os", "re", "secrets", "signal", "stat", "subprocess", "sys", "threading",
+                   "msvcrt", "os", "re", "secrets", "signal", "stat", "subprocess", "sys", "threading",
                    "time", "typing"}
         self.assertEqual(imported - allowed, set())
         for network in ("socket", "http", "urllib", "asyncio", "ssl", "socketserver", "xmlrpc", "multiprocessing"):
@@ -1072,6 +1107,35 @@ class ClientSide(RootCase):
         self.assertIn("refused before sending", err.getvalue())
         self.assertEqual(os.listdir(self.layout.inbox), [])
 
+    def test_interrupting_the_wait_cancels_the_job(self):
+        clock = FakeClock()
+        launcher = FakeLauncher()
+        runner = dr.Runner(self.root, clock=clock, launcher=launcher, out=io.StringIO())
+        self.addCleanup(runner.shutdown, "test over")
+        runner.startup()
+        fields = {k: v for k, v in self.job().items() if k != "version"}
+        fields.update(env={}, id="chosen-id")
+        err = io.StringIO()
+        with mock.patch.object(clock, "sleep", side_effect=KeyboardInterrupt):
+            code = dr.command_submit(self.root, fields, out=io.BytesIO(), err=err, clock=clock)
+        self.assertEqual(code, dr.EXIT_CANCELLED)
+        self.assertIn("interrupted: asked the runner to end job chosen-id", err.getvalue())
+        self.assertEqual(sorted(os.listdir(self.layout.inbox)), ["chosen-id.cancel", "chosen-id.json"])
+        for name in os.listdir(self.layout.inbox):
+            os.utime(os.path.join(self.layout.inbox, name), (clock.now, clock.now))
+        runner.step()
+        status = dr.read_json(self.layout.status("chosen-id"))
+        assert status is not None
+        self.assertEqual(status["state"], "cancelled", "the cancellation does not overtake its job")
+        self.assertEqual([p.kills for p in launcher.procs], [1])
+        self.assertEqual(os.listdir(self.layout.inbox), [])
+
+        fields["id"] = "../chosen"
+        err = io.StringIO()
+        self.assertEqual(dr.command_submit(self.root, fields, out=io.BytesIO(), err=err, clock=clock), dr.EXIT_RUNNER)
+        self.assertIn("job id must be", err.getvalue())
+        self.assertEqual(os.listdir(self.layout.inbox), [])
+
     def test_packed_job_survives_any_argument(self):
         args = ["two words", 'quote"inside', "trailing\\", "a&b|c", "%PATH%", "$HOME", "", "naïve ünïcode", "--x=y"]
         token = dr.pack_job("D:\\asamu\\a.exe", args, "D:\\asamu\\work", 30.0, {"ASAMU_X": "a b"})
@@ -1080,19 +1144,23 @@ class ClientSide(RootCase):
         self.assertEqual(obj["args"], args)
         self.assertEqual(obj["program"], "D:\\asamu\\a.exe")
         self.assertEqual(obj["env"], {"ASAMU_X": "a b"})
-        for bad in ("", "not base64 !!", "e30=", "WzFd"):
+        self.assertNotIn("id", obj)
+        with_id = dr.unpack_job(dr.pack_job("D:\\asamu\\a.exe", [], "D:\\asamu", 30.0, {}, "my-id"))
+        self.assertEqual(with_id["id"], "my-id")
+        for bad in ("", "not base64 !!", "e30=", "WzFd", "eyJpZCI6ICJ4In0="):
             with self.assertRaises(dr.JobRejected):
                 dr.unpack_job(bad)
 
     def test_pack_command_line(self):
         out = io.StringIO()
         with mock.patch.object(sys, "stdout", out):
-            code = dr.main(["pack", "--program", "D:\\asamu\\a.exe", "--cwd", "D:\\asamu", "--timeout", "5",
+            code = dr.main(["pack", "--id", "20261010-1", "--program", "D:\\asamu\\a.exe", "--cwd", "D:\\asamu", "--timeout", "5",
                             "--env", "ASAMU_A=1", "--env-list", "ASAMU_B=2;RUST_BACKTRACE=1", "--", "--help", "-x", "--"])
         self.assertEqual(code, 0)
         obj = dr.unpack_job(out.getvalue().strip())
         self.assertEqual(obj["args"], ["--help", "-x", "--"])
         self.assertEqual(obj["timeout_seconds"], 5.0)
+        self.assertEqual(obj["id"], "20261010-1")
         self.assertEqual(obj["env"], {"ASAMU_A": "1", "ASAMU_B": "2", "RUST_BACKTRACE": "1"})
 
     def test_exit_codes(self):
@@ -1477,6 +1545,132 @@ class EndToEnd(RealProcessCase):
         code, _out, err = self.submit()
         self.assertEqual(code, dr.EXIT_RUNNER)
         self.assertIn("is not", err)
+
+
+CTRL_BREAK_DRIVER = r"""
+# Runs in a console of its own: starts the runner in that console, waits for
+# the 'go' file, sends Ctrl+Break to the runner and reports how it ended.
+import os, signal, subprocess, sys, time
+go, command = sys.argv[1], sys.argv[2:]
+runner = subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+deadline = time.monotonic() + 120
+while not os.path.exists(go) and time.monotonic() < deadline and runner.poll() is None:
+    time.sleep(0.05)
+if runner.poll() is None:
+    os.kill(runner.pid, signal.CTRL_BREAK_EVENT)
+try:
+    sys.exit(100 + runner.wait(20))
+except subprocess.TimeoutExpired:
+    runner.kill()
+    sys.exit(99)
+"""
+
+
+class RunnerProcess(RealProcessCase):
+    """The runner as the owner starts it: a process of its own."""
+
+    def runner_command(self) -> list[str]:
+        return [sys.executable, "-I", "-X", "utf8", "-B", os.path.abspath(dr.__file__), "run", "--root", self.root]
+
+    def wait_alive(self, proc: "subprocess.Popen[bytes]") -> None:
+        deadline = time.monotonic() + 30
+        while not dr.runner_state(self.root)["alive"] and time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertTrue(dr.runner_state(self.root)["alive"], "the runner process did not come up")
+
+    def end(self, proc: "subprocess.Popen[bytes]") -> None:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(20)
+
+    def spawn(self) -> "subprocess.Popen[bytes]":
+        self.console_path = os.path.join(self.scratch, "runner-console.txt")
+        log = open(self.console_path, "wb")
+        self.addCleanup(log.close)
+        proc = subprocess.Popen(self.runner_command(), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        self.addCleanup(self.end, proc)
+        self.wait_alive(proc)
+        return proc
+
+    def submit_tree(self, job_id: str) -> list[int]:
+        script = self.script("hostile.py", HOSTILE_SCRIPT)
+        pid_dir = os.path.join(self.scratch, "pids")
+        fields = {
+            "id": job_id,
+            "program": self.native,
+            "args": self.prefix + [script, pid_dir, "2", "stay"],
+            "cwd": self.work,
+            "timeout_seconds": 600,
+            "env": {},
+        }
+        err = io.StringIO()
+        self.assertEqual(dr.command_submit(self.root, fields, wait=False, out=io.BytesIO(), err=err), 0, err.getvalue())
+        return self.read_pids(pid_dir, 5)
+
+    def test_start_refuse_a_second_one_run_a_job_stop(self):
+        proc = self.spawn()
+        second = subprocess.run(self.runner_command(), stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+        self.assertEqual(second.returncode, 3)
+        self.assertIn(b"already running", second.stdout)
+        self.assertNotIn(b"WHAT IT RUNS", second.stdout)
+        self.assertIsNone(proc.poll(), "the first runner is not disturbed")
+
+        script = self.script("echo.py", ECHO_SCRIPT)
+        out, err = io.BytesIO(), io.StringIO()
+        fields = {"program": self.native, "args": self.prefix + [script, "a b"], "cwd": self.work,
+                  "timeout_seconds": 60, "env": {"ASAMU_TEST_EXIT": "3"}}
+        self.assertEqual(dr.command_submit(self.root, fields, out=out, err=err), 3, err.getvalue())
+        self.assertEqual(json.loads(out.getvalue().decode("utf-8"))["args"], ["a b"])
+
+        stopped = io.StringIO()
+        self.assertEqual(dr.command_stop(self.root, stopped), 0)
+        self.assertEqual(proc.wait(20), 0)
+        with open(self.console_path, encoding="utf-8") as handle:
+            console = handle.read()
+        for part in ("ASAMU-decomp desk runner", "WHAT IT NEVER RUNS", "START job", "exit code 3", "stopping: stop file"):
+            self.assertIn(part, console)
+
+    @unittest.skipUnless(WINDOWS, "only a Windows job object ends a job when the runner itself is killed; "
+                                  "elsewhere a job's process group outlives a killed runner until its own end")
+    def test_killing_the_runner_ends_its_jobs(self):
+        proc = self.spawn()
+        pids = self.submit_tree("orphan")
+        self.assertEqual([pid for pid in pids if not pid_alive(pid)], [])
+        proc.kill()
+        proc.wait(20)
+        self.assertEqual(self.wait_all_gone(pids), [], "nothing the runner started outlives it")
+        self.assertFalse(dr.runner_state(self.root)["alive"])
+        self.assertFalse(dr.InstanceLock.held_by_someone(self.layout.lock), "the lock is never stale")
+        again = self.spawn()
+        self.assertIsNone(again.poll(), "a new runner starts after the crash")
+
+    @unittest.skipUnless(WINDOWS, "console control events are a Windows notion; elsewhere Ctrl+C is covered by "
+                                  "the KeyboardInterrupt path")
+    def test_console_event_stops_the_runner_in_an_orderly_way(self):
+        """The path taken when the owner closes the window, driven by the
+        one console event a program may send (Ctrl+Break), in a real console."""
+        go = os.path.join(self.scratch, "go")
+        info = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+        info.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
+        info.wShowWindow = 0  # SW_HIDE: no window flashes up when this runs on a desktop
+        driver = subprocess.Popen(
+            [sys.executable, "-I", "-c", CTRL_BREAK_DRIVER, go] + self.runner_command(),
+            creationflags=subprocess.CREATE_NEW_CONSOLE,  # type: ignore[attr-defined]
+            startupinfo=info,
+        )
+        self.addCleanup(self.end, driver)
+        self.wait_alive(driver)
+        pids = self.submit_tree("windowed")
+        with open(go, "w"):
+            pass
+        self.assertEqual(driver.wait(60), 100, "the runner ended with exit code 0 after the console event")
+        status = dr.read_json(self.layout.status("windowed"))
+        assert status is not None
+        self.assertEqual(status["state"], "runner_stopped")
+        self.assertIn("Ctrl+Break", status["reason"])
+        self.assertEqual(dr.read_json(self.layout.heartbeat)["state"], "stopped")
+        self.assertEqual(self.wait_all_gone(pids), [])
+        self.assertFalse(dr.InstanceLock.held_by_someone(self.layout.lock))
 
 
 if __name__ == "__main__":
