@@ -1110,28 +1110,31 @@ mod tests {
     #[test]
     fn windows_backslash_paths_in_vdf_are_unescaped() {
         // Library paths for another OS are parsed correctly and then skipped (they do not
-        // exist here); discovery falls through to the root library.
+        // exist here); discovery falls through to the root library. The library must not
+        // exist on a Windows machine either, so it is not Steam's real default folder: with
+        // that one, a machine that has the game installed there finds it and the test fails.
+        const LIBRARY: &str = r"C:\No Such Folder (asamu-locate test)\Steam";
         let tmp = TempDir::new().unwrap();
         let steam = tmp.path().join("Steam");
         fs::create_dir_all(steam.join("steamapps")).unwrap();
         fs::write(
             steam.join("steamapps/libraryfolders.vdf"),
-            "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n\t\t\"apps\" { \"278360\" \"1\" }\n\t}\n}\n",
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"apps\" {{ \"278360\" \"1\" }}\n\t}}\n}}\n",
+                LIBRARY.replace('\\', r"\\")
+            ),
         )
         .unwrap();
         let mut notes = Vec::new();
         let libs = libraries_for_root(&steam, &mut notes);
-        assert!(
-            libs.iter()
-                .any(|l| l.path == Path::new(r"C:\Program Files (x86)\Steam"))
-        );
+        assert!(libs.iter().any(|l| l.path == Path::new(LIBRARY)));
         // The listed library comes first because it claims the app.
-        assert_eq!(libs[0].path, PathBuf::from(r"C:\Program Files (x86)\Steam"));
+        assert_eq!(libs[0].path, PathBuf::from(LIBRARY));
 
         let err = locate_with(&opts_steam(&steam)).unwrap_err();
         let msg = err.to_string();
         assert!(matches!(err, LocateError::NotInstalled { .. }), "{msg}");
-        assert!(msg.contains(r"C:\Program Files (x86)\Steam"), "{msg}");
+        assert!(msg.contains(LIBRARY), "{msg}");
         assert!(msg.contains("no steamapps/ folder"), "{msg}");
     }
 
