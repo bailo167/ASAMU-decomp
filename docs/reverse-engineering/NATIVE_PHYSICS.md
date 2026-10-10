@@ -302,9 +302,15 @@ recordings (13 Workshop frames, 3 elsewhere). Two more places show the same thin
 the 2000 uu/s cap of flying (7,742 capped frames; the position differs between the forms on 15, the
 Windows form matches 15 of 15, the Mac form none) and the unit vector of the gun's pull, which is
 script-side (`Normal`): of the 9,481 attached pairs the two forms give a different recorded velocity
-on 776, the Windows form matches 773, the Mac form none (the code of the script-side helper was not
-read: STRONG that it is the same routine). The port in `asamu-player` uses the Mac form, so against a
-Windows recording about 8% of the attached frames differ in the last place of the velocity.
+on 776, the Windows form matches 773, the Mac form none. The script-side helper has the same code in
+the Win32 executable (the `Normal` native at 0x588CC0, found through its entry in the native name
+table at 0x29A8768: squared length exactly 1 returns the input, below 1e-8 returns zero, else the
+estimate at 0x588DCF with the same refinement). The port in `asamu-player` uses the Mac form, so
+against a Windows recording about 8% of the attached frames differ in the last place of the velocity.
+The estimate is a property of the processor, not of the game: the table read out on the recording
+machine (an Intel processor) reproduces the recordings, and another processor family may return other
+estimates (the instruction is specified by an error bound only), so the Windows build need not be
+bit-reproducible across machines at these places.
 
 Reproduce (local executables, read-only; `$WIN_EXE` is `Binaries/Win32/ASAMU-Win32-Shipping.exe` of a
 Windows install):
