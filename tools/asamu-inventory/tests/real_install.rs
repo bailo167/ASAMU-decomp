@@ -1,7 +1,8 @@
 //! Real-data check: re-inventories the original install and checks that every original file of
 //! the committed sanitized inventory is still present and identical; files the game itself
 //! writes when it runs (generated ini files, logs, saves) are tolerated. Skips (passes with a note) when the game is not installed, as on CI,
-//! or when the installed build is not the one the committed inventory describes.
+//! or when the installed build is not the one the committed inventory describes (another
+//! Steam build, or the Windows depot of the same build).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -73,6 +74,17 @@ fn real_install_matches_committed_inventory() {
             return;
         }
     };
+    // The committed inventory lists the files of the Mac depot (an app bundle). Steam gives
+    // the Windows depot of the same release the same build id, so the build id alone does
+    // not tell them apart: the Windows install has other files (executables, DLLs, no bundle).
+    if install.layout != asamu_locate::Layout::MacApp {
+        eprintln!(
+            "SKIP real_install_matches_committed_inventory: {COMMITTED} describes the Mac depot; \
+             the installed game has the {} layout",
+            install.layout.label()
+        );
+        return;
+    }
     if install.build_id != Some(BUILD) {
         eprintln!(
             "SKIP real_install_matches_committed_inventory: installed build {:?} is not {BUILD}",
