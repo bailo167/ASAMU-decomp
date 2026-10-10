@@ -307,7 +307,8 @@ $D --start-address=0x18B779E --stop-address=0x18B7870 "$WIN_EXE"    # Win32 spee
 
 `APawn::physWalking(dt, Iterations) @ 0x100ADA470` (not overridden by UDK). All steps CONFIRMED unless
 labelled. "Floor" is the stored floor normal (Pawn+0x37C). Traces use the collision cylinder extent
-(radius, radius, half-height) unless noted.
+(radius, radius, half-height) unless noted; world geometry answers such a trace with the axis-aligned
+box of that extent, not with a cylinder (10.1).
 
 ### 3.1 Algorithm
 
@@ -958,12 +959,13 @@ DefaultGravityZ (−520.0 config).
 
 ### 9.2 World queries the Rust model needs
 
-1. **Swept cylinder move** (`MoveActor`): sweep a vertical cylinder (radius ×1.001 horizontally,
-   half-height) by Delta; stop at the first blocking hit; return Time ∈ [0,1], Normal, hit actor,
+1. **Swept box move** (`MoveActor`): sweep the axis-aligned box of the collision cylinder's extent
+   (radius ×1.001 on X and Y, half-height on Z; a box, not a cylinder: 10.1) by Delta; stop at the
+   first blocking hit; return Time ∈ [0,1], Normal, hit actor,
    material/physical-material friction, "started penetrating". The original's collision primitives
    keep a small skin; the walking code relies on hovering 1.9–2.4 uu above floors, so our sweep must be
    conservative in the same way [exact skin UNKNOWN].
-2. **Cylinder line check** (`SingleLineCheck` with extent): floor probe (length MaxStepHeight + 2),
+2. **Extent line check** (`SingleLineCheck` with extent; the same box, 10.1): floor probe (length MaxStepHeight + 2),
    air-control wall probe (world only), landing sanity probe (0.9× extent), base search (8 uu).
 3. **Point/small-extent probes** for ledge checks (only needed for crouch/slow walk).
 4. **Encroachment test** for crouch growth, **teleport** (`FarMoveActor`) for uncrouch/revert.
@@ -1021,6 +1023,101 @@ serve non-pawn actors and AI. `APawn::physicsRotation @ 0x100AD9000` is supersed
 If script ever switches the player into one of these modes (e.g. ladders, swimming, grapple via
 Flying/Spider), that routine must be specified next.
 
+### 10.1 Extent (box) checks of world geometry: shape, contact normal, start rules
+
+Every move and every extent trace of the pawn reaches the world's primitives as a line check with a
+non-zero extent. The primitives treat that extent as an **axis-aligned box in world space** with the
+extent as half sizes, `(21, 21, 44)` for the player (DEFAULTS.md), not as a cylinder. The first
+recordings agree (`docs/PARITY_FINDINGS.md` P4: CONFIRMED on floors, STRONG on walls). Only another
+pawn's `CylinderComponent` treats the extent as a circle (NPCS.md, "NPC pawn collision").
+
+All of the following was read in the Mac executable and, for the triangle and convex routines, checked
+by running the routine's own instructions in a local interpreter on random inputs and comparing every
+returned flag, time and normal bit for bit with the rule as written here: 6,000 cases for the triangle
+routine, 1,500 for the convex one, no difference. [CONFIRMED] unless labelled.
+
+**Triangles** (static meshes on the per-triangle path). The kDOP box check
+(`TkDOPNodeCompact<FStaticMeshCollisionDataProvider,…>::BoxCheck @ 0x100C5B650`) calls
+`FindSeparatingAxis @ 0x1007889D0` (the overload with nine vectors) per triangle, in the mesh's own
+space with the box's three edge directions carried into that space.
+
+- 13 axes in this order: the box's three face axes (the cross products Y×X, Z×Y, X×Z of its edge
+  directions: Z, X, Y for a world-aligned box), the triangle's normal (E0×E1), then X×E0, X×E1,
+  X×E2, Y×E0, Y×E1, Y×E2, Z×E0, Z×E1, Z×E2, with the edges `E0 = V1 − V0`, `E1 = V2 − V1`,
+  `E2 = V0 − V2` normalised first. An axis shorter than 1e-8 in squared length (f64 at
+  0x101645800) is skipped.
+- On each axis the box's centre is projected at the start and at the end, the triangle's three
+  corners are projected and widened by the box's projected half size, and the entry and exit times
+  of the centre into that range follow. The routine keeps the latest entry and its axis, updating
+  only on a strictly later entry (the earlier axis wins a tie), and the earliest exit and its axis.
+  It reports no hit as soon as the earliest exit is negative or earlier than the latest entry.
+- The hit time is the latest entry; the **normal is the axis of the latest entry, signed against
+  the motion**, returned unnormalised. `UStaticMeshComponent::LineCheck @ 0x100C58790` maps it to
+  world space with the transpose adjoint of the mesh's matrix, flips it when the matrix mirrors,
+  and normalises it. A triangle replaces the best hit so far only with a strictly earlier time.
+- So: a box face against a triangle vertex or edge gives a world axis; a box vertex or edge on the
+  triangle's face gives the triangle's normal; a box edge crossing a triangle edge gives the unit
+  vector perpendicular to both; a corner against an edge or a vertex gives whichever of the 13 axes
+  entered last. No normal ever points "radially" from a vertex or an edge.
+
+**Convex elements** (the simple-collision body of a mesh: `FKAggregateGeom::LineCheck @ 0x100AA4840`
+calls `FKConvexElem::LineCheck @ 0x100AA5A70` per element; the per-axis test is
+`FConvexSweptBoxSeparatingAxisCheck::TestConvexSweptBoxSeparatingAxis @ 0x100AAD350` and
+`@ 0x100AB3D60`). The same rule with these axes, in this order: the box's face axes (X×Y, Y×Z, Z×X:
+Z, X, Y), every entry of the element's `FaceNormalDirections`, then for every entry E of its
+`EdgeDirections` the three cross products E×X, E×Y, E×Z. The element's range on an axis is the range
+of its vertices. An axis shorter than 1e-4 in squared length (f64 at 0x1016393A0) is skipped. The
+aggregate check tests convex elements first, then spheres, boxes and sphyls, taking a later one only
+with a strictly earlier time, and maps and normalises the normal as above.
+
+**Spheres and sphyls** (`FKSphereElem::LineCheck @ 0x100AA6710`, `FKSphylElem::LineCheck
+@ 0x100AA7510`) return "no hit" at once when any component of the extent is non-zero: they never
+block a pawn move, only zero-extent traces.
+
+**Box elements** (`FKBoxElem::LineCheck @ 0x100AA69A0` with
+`FBoxSweptBoxSeparatingAxisCheck::FindSeparatingAxis @ 0x100AAC780`): fifteen calls of one per-axis
+test, the first three with the axes of one of the two boxes. The same family of test [STRONG]; its
+axis order and start rules were not read [UNKNOWN]. The user's data has no box element (0 boxes, 0
+sphyls, 1 sphere, 2,439 convex elements in the 882 converted meshes).
+
+**BSP** (`UModel::LineCheck @ 0x10092BD20` → `FBoxLineCheckInfo::BoxLineCheck @ 0x10092C440`,
+`FBoxLineCheckInfo::ClipTo @ 0x10092E920`): per convex leaf hull, the line is clipped against the
+hull's planes pushed out by the box, then against the six axis-aligned planes of the hull's bounds,
+then against bevel planes built from pairs of hull planes and the world axes. The same construction
+with the solid's faces tested before the world axes [STRONG: structure read, not emulated].
+
+**A sweep that starts in contact** (triangle and convex routines):
+
+- Overlapping on every axis at the start (the latest entry is negative): a hit at time 0 whose
+  normal is the reversed, normalised direction of motion. Exception: no hit, with the time reported
+  as 1, when the negated latest entry is greater than the earliest exit and the motion has a
+  positive component along that exit's axis (the box is already most of the way out). The convex
+  routine also sets the result's "started penetrating" flag.
+- "Close and parallel": when the motion projected on an axis is below a threshold in size and the
+  start lies outside the widened range on that axis by less than the same threshold, the axis is
+  remembered: threshold 1e-4 for triangles (f32 at 0x10163FED8; the first such axis is kept), 0.01
+  for convex elements (f32 at 0x101633DA8; the last such axis is kept). If such an axis exists and
+  either the latest entry is within the sweep or the latest-entry axis is that same axis (either
+  sign), the result is a hit at time 0 with the normal `axis − 0.05 × direction` (0.05: f32 at
+  0x101636058), normalised. The aggregate geometry carries a switch that turns this off for its
+  convex elements (first bit of the byte at +0x48).
+- When the projected motion on an axis is below 1e-8 (f64 at 0x101645800) the axis only decides
+  "separated or not" from the start position and takes no part in entry and exit.
+
+These rules have no tolerance of their own; the original relies on every hit having been pulled back
+(9.5 item 7, `docs/PARITY_FINDINGS.md` P3), so a pawn normally starts 0.1 uu or more from everything.
+
+**Ours** (`crates/asamu-world/src/collision/box_sweep.rs`, `CollisionScene::sweep_box`): the same
+axes in the same order with the same tie rule, in `f64` and in world space, for triangles (static
+meshes and BSP surfaces alike) and for convex solids; exact first-contact times, the pull-back left
+to the caller. Our own kernel's rule, run beside the rule above on 20,000 sweeps that start clear,
+gave the same hit or miss every time and the same normal on all 9,797 hits (largest time difference
+8.2e-7, the original's single precision). Differences: BSP goes through the triangle test (its leaf
+hulls are not in the converted data); a start in contact follows this code base's tolerance rule
+instead of the two rules above (documented in the module); box elements use the convex rule.
+[TENTATIVE that nothing observable follows; a recording of a walk into the outer corner of a BSP
+wall at an angle, and one of a pawn pushed into geometry by a mover, would settle it.]
+
 ## 11. Verification log
 
 An independent adversarial pass (2026-10-09) re-read the local decompilation, the disassembly and the
@@ -1073,3 +1170,7 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
 - 2026-10-10: section 2.4 (float form of every velocity derived from a displacement; the normalisation
   helper of the two builds), from the disassembly of both executables and the first recordings; the
   statements in 3.1, 4.4, 4.5, 4.6, 9.3 and verification row 14 now point to it.
+- 2026-10-10: section 10.1 (the box checks of triangles, convex elements, spheres, sphyls, box
+  elements and BSP: shape, axis order, contact normal, rules for a start in contact), from the
+  disassembly and from running the triangle and convex routines in a local interpreter; 3 and 9.2
+  now say "box" where they said "cylinder".
