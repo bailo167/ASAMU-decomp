@@ -1120,7 +1120,11 @@ fn real_stage_arguments_parse_with_the_module_args() {
     parse_stage_args::<crate::particles::Args>(&argv(StageId::Particles)).unwrap();
     parse_stage_args::<crate::decals::Args>(&argv(StageId::Decals)).unwrap();
     parse_stage_args::<crate::localization::Args>(&argv(StageId::Localization)).unwrap();
-    // Only stages that read nothing but packages may use the package cache.
+    // Only stages that read nothing but packages may use the package cache
+    // (it holds nothing else). Levels is not one of them: it reads the
+    // install's engine configuration for the default post-process chain, and
+    // through the cache it wrote scenes without it (the levels digest of a
+    // real install differed with `--package-cache`).
     let cache_ok: Vec<StageId> = st
         .iter()
         .filter(|s| s.packages_only)
@@ -1131,7 +1135,6 @@ fn real_stage_arguments_parse_with_the_module_args() {
         [
             StageId::Meshes,
             StageId::Materials,
-            StageId::Levels,
             StageId::Audio,
             StageId::Matinee,
             StageId::Skeletal

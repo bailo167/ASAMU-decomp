@@ -21,14 +21,19 @@
 //! install. The cache is bounded (`--package-cache-max-mib`): if every
 //! package does not fit, the cache is removed and not used for the run.
 //!
-//! Measured on the analysis machine (Mac build 1822049, release build): the
-//! six package-only stages (meshes, materials, levels, audio, matinee,
-//! skeletal) finish 3.0-3.6 s sooner per forced run with a warm cache (for
-//! example skeletal 1.9 s -> 1.0-1.4 s, matinee 1.25 s -> 0.9 s); building the
-//! cache once takes about 1.6 s and 1.5 GB of disk. Reruns with nothing to do
-//! skip every stage anyway, so the cache only pays off for repeated forced
-//! or post-update imports, hence opt-in. The run manifest's output digests
-//! are identical with and without the cache.
+//! The stages that read nothing but packages are meshes, materials, audio,
+//! matinee and skeletal. (Levels was one of them until it began to read the
+//! install's engine configuration; through the cache it then wrote scenes
+//! without the default post-process chain, so it reads the install again.)
+//!
+//! Measured on the analysis machine (Mac build 1822049, release build) when
+//! levels was still among them: the six stages finished 3.0-3.6 s sooner per
+//! forced run with a warm cache (for example skeletal 1.9 s -> 1.0-1.4 s,
+//! matinee 1.25 s -> 0.9 s); building the cache once takes about 1.6 s and
+//! 1.5 GB of disk. Reruns with nothing to do skip every stage anyway, so the
+//! cache only pays off for repeated forced or post-update imports, hence
+//! opt-in. The run manifest's output digests are identical with and without
+//! the cache (measured for all twelve stages on the Windows build).
 //!
 //! This is decompressed original game data: it stays in the user-local
 //! converted directory and must never be redistributed.

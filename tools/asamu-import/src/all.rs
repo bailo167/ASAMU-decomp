@@ -226,7 +226,10 @@ pub struct Stage {
     /// File (inside `dir`) whose presence marks a finished stage; `None`:
     /// any entry in `dir`.
     pub key_file: Option<&'static str>,
-    /// Reads nothing but packages (may use the package cache).
+    /// Reads nothing but packages (may use the package cache). A stage that
+    /// also reads any other file of the install (configuration, texture
+    /// file caches, localization text) must not set this: the cache holds
+    /// packages only, and a missing file would change the output silently.
     pub packages_only: bool,
     /// Canonical arguments (part of the fingerprint).
     pub args: Vec<String>,
@@ -308,10 +311,15 @@ pub fn real_stages(args: &Args) -> Vec<Stage> {
             Vec::new(),
             crate::materials::run,
         ),
+        // Reads the packages and the install's engine configuration files
+        // (they name the default post-process chain), which the package
+        // cache does not hold: pointed at the cache it silently wrote
+        // scenes without that chain (found by comparing digests with and
+        // without `--package-cache`), so it reads the install.
         stage(
             StageId::Levels,
             manifest,
-            true,
+            false,
             Vec::new(),
             crate::levels::run,
         ),
