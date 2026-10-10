@@ -1201,10 +1201,24 @@ fn real_install_matches_the_committed_inventory() {
     let r = execute(&env, real_stages(&a), &a).unwrap();
     assert!(!out.exists());
     let v = &r.manifest.verification;
-    if install.cooked_dir.ends_with("CookedMac") {
+    // The two inventoried depots of Steam build 1822049 (macOS, Windows).
+    let expected = if install.cooked_dir.ends_with("CookedMac") {
+        Some("mac-depot278362-build1822049")
+    } else if install.cooked_dir.ends_with("CookedPC") && install.build_id == Some(1_822_049) {
+        Some("win-depot278361-build1822049")
+    } else {
+        None
+    };
+    if let Some(id) = expected {
         assert_eq!(v.status, VerifyStatus::Match, "{v:?}");
-        assert_eq!(v.checked, 45);
+        assert_eq!(v.inventory.as_deref(), Some(id));
+        assert_eq!((v.checked, v.matched), (45, 45));
         assert_eq!(r.manifest.install.inputs.files, 45);
+        // Both depots ship the same 45 files, so the input fingerprint is the same.
+        assert_eq!(
+            r.manifest.install.inputs.sha256,
+            "604eea70f27bfa8397c6ded72b834dbfb3fef63fb4b7ed4730d449de6309c521"
+        );
     }
     assert_eq!(r.actions.len(), StageId::ALL.len());
 }
