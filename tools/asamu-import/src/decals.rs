@@ -882,6 +882,26 @@ mod tests {
         assert_eq!((m.scale, m.bias), (1.0, 0.0));
     }
 
+    /// The decode must not depend on the system's C library: the macOS
+    /// `powf` returns the neighbouring value for the bytes 71 and 180
+    /// (measured: `0x3D810B68` and `0x3EE9AEB7`), the Windows one and the
+    /// portable one return the correctly rounded value. With the platform
+    /// `powf` this test fails on macOS.
+    #[test]
+    fn srgb_decode_has_the_same_bits_on_every_platform() {
+        assert_eq!(srgb_to_linear(71).to_bits(), 0x3D81_0B67);
+        assert_eq!(srgb_to_linear(180).to_bits(), 0x3EE9_AEB6);
+        // The same function as the light map decoder's, bit for bit (that
+        // one's whole table is pinned by a hash in `asamu_ue3::portable_math`).
+        for b in 0..=255u8 {
+            assert_eq!(
+                srgb_to_linear(b).to_bits(),
+                asamu_ue3::lightmap::srgb_to_linear(b).to_bits(),
+                "byte {b}"
+            );
+        }
+    }
+
     #[test]
     fn mask_values_follow_the_channel_and_the_colour_space() {
         let source = |channel| MaskSource {

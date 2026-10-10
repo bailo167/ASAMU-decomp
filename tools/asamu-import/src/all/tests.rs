@@ -636,6 +636,39 @@ fn a_folder_with_an_open_file_is_renamed_once_the_file_is_closed() {
     assert!(!from.exists());
 }
 
+/// Windows only (same reason): the swap itself waits. A file of the old
+/// output, then a file of the staged output, is open for a moment (a virus
+/// scanner, a viewer being closed); both renames of the swap go through once
+/// it is closed, and nothing is left behind. Without the retries in
+/// `swap_in` this fails with "Access is denied".
+#[cfg(windows)]
+#[test]
+fn the_swap_waits_for_a_file_that_is_closed_a_moment_later() {
+    for old_output_is_held in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, produced) = swap_fixture(tmp.path());
+        let held = if old_output_is_held {
+            out.join("textures")
+        } else {
+            produced.clone()
+        };
+        let reader = std::fs::File::open(held.join("manifest.json")).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(reader);
+        });
+        swap_in(&out, "textures", &produced).unwrap();
+        closer.join().unwrap();
+        assert_eq!(
+            std::fs::read(out.join("textures/manifest.json")).unwrap(),
+            b"new",
+            "old output held: {old_output_is_held}"
+        );
+        assert!(!produced.exists());
+        assert!(!out.join(REPLACED_DIR).exists());
+    }
+}
+
 /// Windows only (same reason): a program that keeps a converted file open
 /// makes the stage fail with a hint, and the old output stays in place.
 #[cfg(windows)]
