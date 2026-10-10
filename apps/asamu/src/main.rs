@@ -1255,6 +1255,7 @@ fn fixed_tick(
     mut reports: MessageWriter<ui::GameTick>,
     mut frames: MessageWriter<kismet::KismetFrame>,
     presentation: Option<Res<kismet::Presentation>>,
+    pads: Option<Res<gamepad::GamepadActions>>,
 ) {
     // `--walk`: start at once and hold forward for the given simulated time.
     let scripted = walk.0 > 0.0;
@@ -1291,6 +1292,12 @@ fn fixed_tick(
         power_jump_held: mouse.pressed(MouseButton::Right),
         use_pressed: std::mem::take(&mut pending.use_key),
     };
+    // The gamepad's move axes and held buttons join the keyboard's (axes
+    // add and clamp, buttons combine), before the cinematic filter so that
+    // it blocks the gamepad too.
+    if let Some(pads) = &pads {
+        pads.merge_into(&mut input);
+    }
     // Cinematic mode (`SeqAct_ToggleCinematicMode`): the flags it sets block
     // movement, turning and buttons while active.
     if let Some(p) = &presentation {
@@ -1940,6 +1947,73 @@ mod tests {
             }
         }
         eprintln!("{bsp_floors} levels start on a BSP floor (hover checked)");
+    }
+
+    /// A headless app with what `fixed_tick` needs and a started graybox
+    /// game.
+    fn tick_app() -> App {
+        let mut app = App::new();
+        let mut game = Game::graybox().unwrap();
+        game.start();
+        app.insert_resource(Sim::new(game, String::new()))
+            .init_resource::<PendingInput>()
+            .init_resource::<ScriptedWalk>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<ui::GameTick>()
+            .add_message::<kismet::KismetFrame>()
+            .add_systems(Update, fixed_tick);
+        app
+    }
+
+    /// Horizontal distance the player covers in `ticks` ticks of `app`.
+    fn travelled(app: &mut App, ticks: usize) -> f32 {
+        let start = app.world().resource::<Sim>().game.player().position;
+        for _ in 0..ticks {
+            app.update();
+        }
+        let end = app.world().resource::<Sim>().game.player().position;
+        (end - start).truncate().length()
+    }
+
+    #[test]
+    fn the_gamepad_stick_moves_the_player() {
+        // Without a gamepad resource, or with a centred stick, the player
+        // stands still.
+        assert_eq!(travelled(&mut tick_app(), 30), 0.0);
+        let mut idle = tick_app();
+        idle.init_resource::<gamepad::GamepadActions>();
+        assert_eq!(travelled(&mut idle, 30), 0.0);
+        // A stick pushed forward walks, exactly as the W key does.
+        let mut pad = tick_app();
+        pad.insert_resource(gamepad::GamepadActions {
+            move_forward: 1.0,
+            ..default()
+        });
+        let by_pad = travelled(&mut pad, 30);
+        assert!(by_pad > 10.0, "{by_pad}");
+        let mut key = tick_app();
+        key.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        assert_eq!(travelled(&mut key, 30), by_pad);
+        // The held buttons reach the tick too: the trigger fires the grapple.
+        let mut fire = tick_app();
+        fire.insert_resource(gamepad::GamepadActions {
+            grapple_held: true,
+            ..default()
+        });
+        fire.update();
+        let report = fire
+            .world_mut()
+            .resource_mut::<Messages<ui::GameTick>>()
+            .drain()
+            .last()
+            .map(|t| t.0);
+        assert!(
+            report.is_some_and(|r| r.events.gun.fire.is_some()),
+            "the trigger did not reach the grapple gun"
+        );
     }
 
     #[test]

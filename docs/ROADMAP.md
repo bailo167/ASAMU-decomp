@@ -39,7 +39,7 @@ per workstream, with tracker updates. `docs/STATUS.md` has the session-by-sessio
 | 5 ✅ | Runtime world (triangle collision, scene loading, streaming), level rendering, materials, audio decoding, Matinee curves, skeletal meshes and animations | M9 |
 | 6 ✅ | Kismet runtime and Matinee movers, runtime audio with narration and adaptive music, menus and saves, lightmaps, NPCs and the worm, skinned rendering, one-command importer, release workflow | M10 |
 | 7 ✅ | Integration into one connected game: frame order, level transitions, story chain in the smoke harness | M11 (partial) |
-| 8 ✅ | Particles, decals, gameplay VFX, localized text, camera animations and anim notifies, NPC collision, time trial, gamepad mapping (not yet wired into the simulation tick), water and foliage | M11 (partial) |
+| 8 ✅ | Particles, decals, gameplay VFX, localized text, camera animations and anim notifies, NPC collision, time trial, gamepad, water and foliage | M11 (partial) |
 
 ## What is next
 

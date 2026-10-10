@@ -47,7 +47,7 @@ With your own copy imported, this works today:
 | **Rendering** | Static meshes, approximate materials, the original baked lightmaps, skinned characters with their animations, particle systems, decals, water and foliage, height fog, the levels' colour grading and bloom. |
 | **Characters** | Maddie, the villagers, the Dark Cave worm, collectibles and story interactables, and the first-person hand with its animations. |
 | **Audio** | Sound cues, ambient sound, narration with subtitles, and the adaptive music system. |
-| **Game shell** | Main menu, chapter select, pause and settings; saving and progression; text in the game's 14 languages; time trial with medals (unlocked by finishing the game, as in the original); keyboard and mouse with the original bindings. Gamepad support is partial: look, jump, pause and checkpoint restart work; stick movement, grapple, sprint and power jump are mapped from the original bindings but not connected to the simulation yet. |
+| **Game shell** | Main menu, chapter select, pause and settings; saving and progression; text in the game's 14 languages; time trial with medals (unlocked by finishing the game, as in the original); keyboard/mouse and gamepad with the original bindings (the menus need keyboard or mouse; the gamepad path is covered by tests but has not been tried with a real controller yet). |
 | **Campaign path** | The scripted exit of every level leads to the next, from the Workshop to the Epilogue, in an automated run. |
 | **Platforms** | Every push is built on Windows, Linux and macOS (Apple silicon), with an Intel-macOS compile check; the library and tool crates' tests run on all three. |
 
@@ -220,7 +220,7 @@ parity comparisons pass.
 | Kismet | 6 | 6 | 3 | 0 | 100% | 50% |
 | Maps | 7 | 7 | 6 | 0 | 100% | 85% |
 | Assets | 10 | 10 | 10 | 0 | 100% | 100% |
-| Player | 10 | 9 | 0 | 1 | 90% | 0% |
+| Player | 10 | 10 | 0 | 0 | 100% | 0% |
 | Grapple | 8 | 8 | 0 | 0 | 100% | 0% |
 | World | 13 | 13 | 0 | 0 | 100% | 0% |
 | Rendering | 12 | 12 | 1 | 0 | 100% | 8% |
@@ -229,7 +229,7 @@ parity comparisons pass.
 | Importer | 7 | 7 | 5 | 0 | 100% | 71% |
 | Platforms | 5 | 5 | 0 | 0 | 100% | 0% |
 | Tests | 10 | 9 | 3 | 1 | 90% | 30% |
-| **Overall** | **143** | **141** | **62** | **2** | **98%** | **43%** |
+| **Overall** | **143** | **142** | **62** | **1** | **99%** | **43%** |
 
 <!-- progress-table:end -->
 

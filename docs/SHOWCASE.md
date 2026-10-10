@@ -69,8 +69,8 @@ check keeps game data out of the repository.
 - Sound cues, ambient sound, narration with subtitles, adaptive music
 - Main menu, chapter select, pause, settings, saves and progression, time trial with medals (unlocked by finishing
   the game)
-- Text in the game's 14 languages; keyboard and mouse with the original bindings (gamepad support is partial:
-  look and jump work, movement and grapple are not connected yet)
+- Text in the game's 14 languages; keyboard/mouse and gamepad with the original bindings (menus need keyboard or
+  mouse; the gamepad has not been tried with a real controller yet)
 - One-command importer (`asamu-import all`): about a minute, 2.3 GB, resumable, verifies your install first
 - Builds on Windows, Linux and macOS (Apple silicon) in CI, with the library and tool tests run on each
 

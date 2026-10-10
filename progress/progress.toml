@@ -721,9 +721,9 @@ note = "DefaultInput.ini actions; mouse-look scaling formula not ported (documen
 [[category.item]]
 id = "gamepad"
 name = "Gamepad input per DefaultInput.ini"
-status = "partial"
-evidence = "apps/asamu/src/gamepad.rs"
-note = "Bindings from DefaultInput.ini are mapped and unit-tested. Look, the jump press, pause and checkpoint restart reach the game; the move axes and the held buttons (grapple, sprint, power jump, jump hold) are not merged into the simulation tick yet. Menus have no gamepad navigation. Not tested with a real controller in our runtime."
+status = "implemented"
+evidence = "apps/asamu/src/gamepad.rs; apps/asamu/src/main.rs (tests::the_gamepad_stick_moves_the_player)"
+note = "Bindings from DefaultInput.ini: look, the jump press, pause and checkpoint restart go through the per-frame input; the move axes and held buttons (grapple, sprint, power jump, jump hold) are merged into each simulation tick. Menus have no gamepad navigation. Not yet tried with a real controller in our runtime."
 [[category]]
 id = "grapple"
 name = "Grapple"

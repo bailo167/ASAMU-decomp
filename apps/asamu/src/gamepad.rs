@@ -114,9 +114,7 @@
 //! The analog move axes and the held buttons are published in
 //! [`GamepadActions`], which `main.rs`'s `fixed_tick` merges into each
 //! tick's [`InputFrame`] with [`GamepadActions::merge_into`] (axes add and
-//! clamp like the original's axis sums; buttons combine with OR). Until
-//! that call is wired, a gamepad turns, looks, pauses and jumps (short
-//! jumps only: the hold is not seen) but does not move. Start pauses and
+//! clamp like the original's axis sums; buttons combine with OR). Start pauses and
 //! resumes; Back is the checkpoint restart (the original's `QuickLoad`:
 //! disabled in Workshop and Epilogue and while Kismet has switched the
 //! HUD's restart-from-checkpoint option off, [`quick_load_allowed`]). Menu
@@ -410,12 +408,8 @@ impl GamepadActions {
 
     /// Adds these actions to a tick's input (axes add and clamp to
     /// `[-1, 1]`, as the original sums every binding into one axis;
-    /// buttons combine with OR). Call before the cinematic-mode filter so
-    /// that it blocks the gamepad too.
-    #[allow(
-        dead_code,
-        reason = "integration point: called by main.rs fixed_tick once wired (module docs)"
-    )]
+    /// buttons combine with OR). Called by `fixed_tick` before the
+    /// cinematic-mode filter, so that it blocks the gamepad too.
     pub fn merge_into(&self, input: &mut InputFrame) {
         let add = |a: f32, b: f32| {
             let s = a + if b.is_finite() { b } else { 0.0 };

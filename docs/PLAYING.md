@@ -122,11 +122,10 @@ The story order of the maps is: `AG-Workshop`, `AG-ParadiseCave`, `AG-BeautifulC
 
 **Controls** follow the original bindings. Keyboard and mouse: WASD move, mouse look, Space jump (in the air it
 fires the rocket boots when you have them), left Shift sprint, left mouse button grapple (release the button to
-let go), hold the right mouse button to power jump, E or Enter use, F7 respawn at the last checkpoint. Gamepad
-(partial, not yet enough to play): right stick look, A jump (always the short jump), Back restart from the
-checkpoint, Start pause. Left-stick movement, right-trigger grapple, right-shoulder power jump and left-shoulder
-sprint are mapped from the original bindings but not connected to the simulation yet; the menus need keyboard or
-mouse. Click into the window to capture the mouse; Esc pauses and
+let go), hold the right mouse button to power jump, E or Enter use, F7 respawn at the last checkpoint. Gamepad:
+left stick move, right stick look, A jump, right trigger grapple, right shoulder power jump, left shoulder sprint,
+Back restart from the checkpoint, Start pause (the menus need keyboard or mouse; the gamepad path has not been
+tried with a real controller yet). Click into the window to capture the mouse; Esc pauses and
 releases it.
 
 Developer keys (not in the original): F1 shows a read-out of the simulation's state and the key list, R respawn,
