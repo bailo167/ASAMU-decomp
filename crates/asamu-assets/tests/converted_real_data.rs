@@ -8,7 +8,8 @@
 //! Besides structural invariants, every plan is compared with values
 //! recomputed **independently** from the raw files (`serde_json::Value` and
 //! the BSP binary read here, not through the crate's parsers): which
-//! components are drawn, each draw's render placement of the mesh's local
+//! components are drawn (an instanced foliage component once per instance of
+//! its list), each draw's render placement of the mesh's local
 //! origin and axes (row-vector UE3 matrix → `(y, z, −x)` axes at 50 UU per
 //! render unit), mirroring, the player start the simulation's rule picks,
 //! the light count, and the BSP triangle count and texture rule (1/128).
@@ -162,11 +163,35 @@ fn independent_checks(dir: &ConvertedDir, level: &str, plan: &LevelPlan, manifes
     let raw = read_json(&scene_path);
     let actors = raw["actors"].as_array().cloned().unwrap_or_default();
 
+    // Instance lists of the instanced static mesh components (foliage), by
+    // actor slot and component name; a component listed twice keeps its
+    // first list (docs/reverse-engineering/WATER_FOLIAGE.md).
+    let mut instance_lists: HashMap<(u64, String), Vec<[[f32; 4]; 4]>> = HashMap::new();
+    for im in raw["foliage"]["instanced_meshes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let key = (
+            im["slot"].as_u64().unwrap_or(u64::MAX),
+            im["component"].as_str().unwrap_or_default().to_owned(),
+        );
+        instance_lists.entry(key).or_insert_with(|| {
+            im["instances"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| raw_matrix(&i["local_to_world"]))
+                .collect()
+        });
+    }
+
     // Drawn static mesh components of the persistent level, in order.
     let mut drawn = Vec::new();
     let mut lights = 0usize;
     for a in &actors {
         let hidden = a["hidden"].as_bool().unwrap_or(false);
+        let slot = a["slot"].as_u64().unwrap_or(u64::MAX);
         for c in a["components"].as_array().into_iter().flatten() {
             if !c["light"].is_null() {
                 lights += 1;
@@ -177,11 +202,28 @@ fn independent_checks(dir: &ConvertedDir, level: &str, plan: &LevelPlan, manifes
             if c["static_mesh"].as_str().is_none_or(str::is_empty) {
                 continue;
             }
+            // An instanced component is drawn once per instance of its
+            // list, each at the instance's own matrix and never at the
+            // component's; without a list it is not drawn at all.
+            let list =
+                instance_lists.remove(&(slot, c["name"].as_str().unwrap_or_default().to_owned()));
+            let instanced_class = c["class"]
+                .as_str()
+                .and_then(|class| class.rsplit('.').next())
+                .is_some_and(|name| name.eq_ignore_ascii_case("InstancedStaticMeshComponent"));
+            if instanced_class || list.is_some() {
+                for m in list.into_iter().flatten() {
+                    if m.iter().flatten().all(|x| x.is_finite()) {
+                        drawn.push((slot, m));
+                    }
+                }
+                continue;
+            }
             let Some(m) = raw_matrix(&c["local_to_world"]) else {
                 continue;
             };
             if m.iter().flatten().all(|x| x.is_finite()) {
-                drawn.push((a["slot"].as_u64().unwrap_or(u64::MAX), m));
+                drawn.push((slot, m));
             }
         }
     }
