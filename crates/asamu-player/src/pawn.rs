@@ -902,16 +902,22 @@ pub fn set_zoom_available(state: &mut PlayerState, enabled: bool) {
 /// recording.
 ///
 /// The pawn is started first if it has not been (as [`enter_story_mode`]
-/// does). No-op without pawn parameters, and for a factor that is not
-/// finite (a guard of ours: a parsed command cannot produce one).
+/// does). No-op without pawn parameters, and when the product is not finite
+/// (a guard of ours, so that the state stays finite: a factor that is not
+/// finite, or one large enough to overflow, e.g. `setspeed 1e38`; none of
+/// the maps' commands is near that).
 pub fn set_speed(state: &mut PlayerState, params: &PlayerParams, factor: f32) -> bool {
-    if params.pawn.is_none() || !factor.is_finite() {
+    if params.pawn.is_none() {
+        return false;
+    }
+    let ground_speed = params.movement.max_ground_speed.value * factor;
+    if !ground_speed.is_finite() {
         return false;
     }
     if !state.script.started {
         start(state, params);
     }
-    state.script.ground_speed = params.movement.max_ground_speed.value * factor;
+    state.script.ground_speed = ground_speed;
     true
 }
 

@@ -221,12 +221,36 @@ fn without_the_script_layer_or_with_a_bad_factor_nothing_happens() {
         ConsoleCommand::NotHandled
     );
     assert_eq!(s, before);
-    // A factor that is not finite would make the state non-finite.
+    // A factor that is not finite would make the state non-finite, and so
+    // would a finite one whose product with 440 overflows an f32 (the
+    // largest f32 is 3.4e38, so from 7.8e35 on).
     let params = original();
     let mut s = standing(&params, &world);
     let before = s;
-    for factor in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-        assert!(!pawn::set_speed(&mut s, &params, factor));
-        assert_eq!(s, before);
+    for factor in [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::MAX,
+        f32::MIN,
+        1.0e36,
+        -1.0e36,
+    ] {
+        assert!(!pawn::set_speed(&mut s, &params, factor), "{factor}");
+        assert_eq!(s, before, "{factor}");
     }
+    for line in ["setspeed 1e36", "setspeed -1e38", "setspeed 1e39"] {
+        assert_eq!(
+            pawn::console_command(&mut s, &params, line),
+            ConsoleCommand::NotHandled,
+            "{line:?}"
+        );
+        assert_eq!(s, before, "{line:?}");
+    }
+    assert!(s.is_finite());
+    // Just below the overflow the command still works: 440 × 7.0e35 =
+    // 3.08e38 is finite.
+    assert!(pawn::set_speed(&mut s, &params, 7.0e35));
+    assert!(s.is_finite());
+    assert_eq!(s.script.ground_speed, 440.0 * 7.0e35_f32);
 }
