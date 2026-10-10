@@ -1131,7 +1131,9 @@ class ClientSide(RootCase):
         status = dr.read_json(self.layout.status("chosen-id"))
         assert status is not None
         self.assertEqual(status["state"], "cancelled", "the cancellation does not overtake its job")
-        self.assertEqual([p.kills for p in launcher.procs], [1])
+        # Job and cancellation were found in the same round: the program is not started at all
+        # (it used to be started and ended at once, which on a desktop is a window that flashes up).
+        self.assertEqual(launcher.procs, [])
         self.assertEqual(os.listdir(self.layout.inbox), [])
 
         fields["id"] = "../chosen"
@@ -1751,7 +1753,7 @@ class HostileValues(AttackCase):
         for job_id in cases:
             self.assertEqual(self.state(job_id), "rejected", job_id)
         self.assertIn("must be between", self.reason("big"))
-        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(len(self.launcher.calls), 0)
         self.drop("fine")
         self.assertTrue(self.runner.step(), "the runner goes on")
         self.assertEqual(self.state("fine"), "running")
@@ -1787,7 +1789,7 @@ class HostileValues(AttackCase):
         with open(os.path.join(self.layout.inbox, "nl\n.json"), "w") as handle:
             json.dump(self.job(), handle)
         self.runner.step()
-        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(len(self.launcher.calls), 0)
         self.assertEqual(os.listdir(self.layout.outbox), [], "no status file under such a name")
         self.assertIn("bad job file name", self.console.getvalue())
         self.assertNotIn("nl\n", self.console.getvalue())
@@ -1810,7 +1812,7 @@ class HostileValues(AttackCase):
             except OSError:
                 pass  # an older Windows cannot make such a file at all
         self.runner.step()
-        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(len(self.launcher.calls), 0)
         self.assertEqual(os.listdir(self.layout.outbox), [])
         self.assertEqual(self.console.getvalue().count("bad job file name"), dropped)
         fields = {k: v for k, v in self.job().items() if k != "version"}
@@ -2036,7 +2038,7 @@ class HostileLinks(AttackCase):
         self.assertTrue(finished.wait(15), "the runner hangs on a named pipe")
         self.assertEqual(result, [None, True])
         self.assertEqual(self.state("bad"), "rejected")
-        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(len(self.launcher.calls), 0)
 
 
 class HostileFlood(AttackCase):
@@ -2277,6 +2279,35 @@ class ClientAttacks(AttackCase):
         self.assertIn("already has a result", err.getvalue())
         self.assertEqual(os.listdir(self.layout.inbox), [])
 
+    def test_a_job_the_runner_never_takes_is_not_waited_for_for_ever(self):
+        """An inbox flooded with other files can keep a job from being seen
+        (the runner says so in its window); the client must not hang on it."""
+        self.start()
+        runner, clock = self.runner, self.clock
+        fields = {k: v for k, v in self.job().items() if k != "version"}
+        fields.update(env={}, id="unseen")
+        real_sleep = clock.sleep
+
+        def sleep_while_the_runner_goes_on(seconds: float) -> None:
+            real_sleep(seconds)
+            runner.step()
+            if clock.slept > 600:
+                raise AssertionError("the client waits for ever")
+
+        out, err = io.BytesIO(), io.StringIO()
+        with mock.patch.object(runner, "_scan_inbox"), mock.patch.object(clock, "sleep", sleep_while_the_runner_goes_on):
+            code = dr.command_submit(self.root, fields, out=out, err=err, clock=clock)
+        self.assertEqual(code, dr.EXIT_RUNNER)
+        self.assertIn("did not take job unseen", err.getvalue())
+        self.assertLess(clock.slept, dr.NOT_TAKEN_AFTER_S + 5)
+        # The job was withdrawn: once the runner looks again it does not start with nobody waiting.
+        for name in os.listdir(self.layout.inbox):
+            os.utime(os.path.join(self.layout.inbox, name), (clock.now, clock.now))
+        runner.step()
+        self.assertEqual(len(self.launcher.calls), 0)
+        self.assertEqual(self.state("unseen"), "cancelled")
+        self.assertEqual(os.listdir(self.layout.inbox), [])
+
     def test_hostile_heartbeat_does_not_break_the_status_command(self):
         """Got through: a heartbeat whose "running" is a number ended `status` with a traceback."""
         self.start()
@@ -2308,7 +2339,7 @@ class ClientAttacks(AttackCase):
         self.drop("early")
         self.runner.step()
         self.assertEqual(self.state("early"), "cancelled")
-        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(len(self.launcher.calls), 0)
         self.assertEqual(dr.exit_code_for(self.status("early")), dr.EXIT_CANCELLED)
         # Only for a while: an old cancellation does not block the id for ever.
         dr.request_cancel(self.layout, "late")

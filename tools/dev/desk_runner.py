@@ -17,13 +17,22 @@ It is deliberately small and strict (Python standard library only):
   (`D:\\asamu` on the owner's laptop); on Windows it must be an `.exe`, and
   shells, script hosts and interpreters are refused by name. The working
   directory must resolve inside the root too.
+* On Windows the start itself is checked as well, because a folder on the
+  way can be swapped for a junction after the check: the working directory
+  is held in place while the process is created, and the process stays
+  suspended until the system says which file it was made from.
 * Every job has a time limit. When it passes, the whole process tree of the
   job is ended (a Windows job object; a process group elsewhere). Nothing a
-  job started outlives the job or the runner.
+  job started outlives the job or the runner. The loop that enforces the
+  limits never waits for the console window, and does a bounded amount of
+  work per round however full the inbox is.
 * At most a few jobs run at once; a few more wait in a queue.
 * Job files that are too large, malformed or that try to leave the root are
-  refused, and the refusal is shown and written down.
-* The runner opens no network port, and writes only inside `<root>/runner`.
+  refused, and the refusal is shown and written down. No job file, however
+  odd, ends the runner.
+* The runner opens no network port, and writes only inside `<root>/runner`,
+  never through a link: a link where one of its files goes is removed or
+  refused, and on Windows its folders are held in place while it runs.
 * It writes a heartbeat file, stops when `<root>/runner/stop` appears or when
   its window is closed, and refuses to start twice.
 
@@ -38,7 +47,8 @@ Protocol (version 1), all below `<root>/runner`:
                            {"version": 1, "program": "<absolute path>",
                             "args": ["..."], "cwd": "<absolute path>",
                             "timeout_seconds": 900, "env": {"ASAMU_X": "1"}}
-  inbox/<id>.cancel        ends job <id> (running or waiting)
+  inbox/<id>.cancel        ends job <id> (running or waiting; one that comes
+                           before its job is remembered for two minutes)
   outbox/<id>.status.json  state (queued, running, finished, timed_out,
                            cancelled, rejected, failed_to_start, output_limit,
                            runner_stopped), exit code, reason, start and end
@@ -104,6 +114,7 @@ MAX_INBOX_ENTRIES_PER_SCAN = 64
 MAX_INBOX_ENTRIES_EXAMINED = 4096
 MAX_REMEMBERED_NAMES = 4096
 EARLY_CANCEL_KEEP_S = 120.0
+NOT_TAKEN_AFTER_S = 60.0
 MAX_EARLY_CANCELS = 256
 CONSOLE_BACKLOG_LINES = 2000
 HEARTBEAT_PERIOD_S = 2.0
@@ -531,9 +542,9 @@ class _WinApi:
         class FileInformation(ctypes.Structure):
             _fields_ = [
                 ("dwFileAttributes", u32),
-                ("ftCreationTime", ctypes.c_uint64),
-                ("ftLastAccessTime", ctypes.c_uint64),
-                ("ftLastWriteTime", ctypes.c_uint64),
+                ("ftCreationTime", u32 * 2),
+                ("ftLastAccessTime", u32 * 2),
+                ("ftLastWriteTime", u32 * 2),
                 ("dwVolumeSerialNumber", u32),
                 ("nFileSizeHigh", u32),
                 ("nFileSizeLow", u32),
@@ -1568,6 +1579,7 @@ class Runner:
         found.sort()
         found = found[:MAX_INBOX_ENTRIES_PER_SCAN]
         found.sort(key=lambda item: item[1].endswith(".cancel"))
+        withdrawn = {name[: -len(".cancel")] for _mtime, name, _size in found if name.endswith(".cancel")}
         for _mtime, name, size in found:
             path = os.path.join(self.layout.inbox, name)
             if name.endswith(".cancel"):
@@ -1580,6 +1592,13 @@ class Runner:
                     self._ignored.discard(name)
                 continue
             job_id = name[: -len(".json")]
+            if job_id in withdrawn and is_job_id(job_id) and not os.path.lexists(self.layout.status(job_id)):
+                # Its cancellation is already here: it is not started at all.
+                if self._remove_inbox_file(name, path):
+                    self.jobs_refused += 1
+                    self.say(f"CANCELLED job {job_id} (it was withdrawn before it started)")
+                    self._write_status(job_id, {"state": "cancelled", "reason": "cancelled before it started"})
+                continue
             if size > MAX_JOB_FILE_BYTES:
                 if self._remove_inbox_file(name, path):
                     self._refuse(job_id, f"job file is larger than {MAX_JOB_FILE_BYTES} bytes ({size} bytes); not read")
@@ -2154,10 +2173,22 @@ def _wait_for_job(
     stderr_sink = getattr(err, "buffer", None)
     offsets = [0, 0]
     announced = ""
-    last_alive_check = clock.monotonic()
+    sent_at = last_alive_check = clock.monotonic()
     while True:
         status = read_json(layout.status(job_id)) or {}
         current = str(status.get("state", ""))
+        if not current and clock.monotonic() - sent_at >= NOT_TAKEN_AFTER_S:
+            # A runner that is alive takes a job within a second. Do not wait
+            # for ever, and do not leave the job to start later unattended.
+            try:
+                request_cancel(layout, job_id)
+            except OSError:
+                pass
+            note(
+                f"the runner is alive but did not take job {job_id} within {NOT_TAKEN_AFTER_S:g} s (look at its window: "
+                "is its inbox full of other files?); the job was withdrawn"
+            )
+            return EXIT_RUNNER
         if current != announced and current in ("queued", "running"):
             announced = current
             note(f"job {job_id} is {current}" + (f" (process {status.get('pid')})" if current == "running" else ""))

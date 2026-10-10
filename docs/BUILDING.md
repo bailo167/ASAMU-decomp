@@ -165,20 +165,37 @@ What the runner does, and refuses (the module comment in `desk_runner.py` has th
   reserved device names, batch files and scripts, and shells, interpreters and system tools by name (`cmd`,
   `powershell`, `python`, `rundll32`, `reg`, `schtasks`, ..., also Steam and the original game's executable) are
   refused. Only `ASAMU_*`, `WGPU_*`, `BEVY_*`, `RUST_BACKTRACE` and `RUST_LOG` may be set in the environment.
+- The start itself is checked too, because a folder on the way can be swapped for a junction after the check:
+  the working directory is held in place while the process is created, and the new process stays suspended
+  until Windows confirms which file it was made from. A program from anywhere else is ended before it has run.
 - Each job runs in a Windows job object: at the time limit, on cancellation, when the program has ended, when
   the runner stops and when the runner dies, every process the job started is ended. At most two jobs run at
-  once and sixteen wait; a job file larger than 64 KiB is refused unread; 64 MiB of output ends a job.
+  once and sixteen wait; a job file larger than 64 KiB is refused unread; 64 MiB of output ends a job (the
+  size is looked at four times a second, so a fast writer gets some way past it: 81 MB arrived in one test).
 - It opens no network port, writes only inside `<root>\runner` (inbox, outbox, heartbeat, log), refuses to
   start twice (a lock the operating system drops with the process), rejects jobs that were waiting before it
   started, and shows every start, end and refusal in its window and in `runner.log` / `rejected.log`.
-- It is not a sandbox: whoever can write job files can also put a program under `<root>`, and that account can
-  already run anything over SSH. The rules keep the tooling honest; they do not defend against its own account.
+- None of its files is written through a link (a link planted where an output, a status or a log goes is
+  removed or refused, never followed), and while it runs it holds its folders in place, so that they cannot be
+  renamed away and replaced by a junction. Its window never holds up the job loop: text being selected in a
+  console blocks the program that writes to it, so the window is written from a thread of its own.
+- It is not a sandbox: whoever can write job files can also put a program under `<root>` (or replace the runner
+  script itself), and that account can already run anything over SSH. The rules keep the tooling honest; they do
+  not defend against its own account. Known limits: the arguments of a job are not judged (our own program can
+  be told to write a screenshot anywhere it is allowed to); a process that some other program starts on a job's
+  behalf (COM, WMI) is not in its job object; and on Linux and macOS, where the runner only runs for its tests,
+  the moment between check and start stays open and a killed runner does not take its jobs with it.
 
-Tests: `python3 tools/dev/test_desk_runner.py` (83 tests; run on macOS and on Windows): the checks with
+Tests: `python3 tools/dev/test_desk_runner.py` (123 tests; run on macOS and on Windows): the checks with
 hostile job files (path traversal, UNC, a program outside the root, links and junctions out of the root, a
 50 MB job file, command strings), the life cycle with a fake clock, and real processes (a tree of five
 processes that ignores every signal is ended at the limit; killing the runner ends its jobs; a console event
-stops it in an orderly way). The protocol was also exercised end to end over SSH with the runner started in
+stops it in an orderly way). A second pass attacked the runner and added each attack as a test; those that got
+through and were fixed: a time limit of hundreds of digits ended the runner; links planted in its folder sent
+its writes to other files; a program folder swapped for a junction between check and start ran a program from
+outside the root; a busy console window stopped the time limits; a deleted lock file allowed a second runner
+(not on Windows); a reused job id was answered with the old result; `start-runner.cmd` ran a `py.cmd` planted
+in the root. The protocol was also exercised end to end over SSH with the runner started in
 the SSH session on a temporary root (console programs and the offscreen screenshot). **Not yet observed:** the
 runner started by double-click in a real desktop session, and a visible window opened through it; that needs
 the owner at the machine.

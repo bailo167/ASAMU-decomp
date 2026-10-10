@@ -167,6 +167,8 @@ case "$cmd" in
         ;;
       desk-cancel)
         [ $# -eq 1 ] || die "usage: desk-cancel ID"
+        # Checked here as well: the id becomes part of a command line on the way.
+        [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || die "desk-cancel: '$1' is not a job id (see desk-status)"
         ps_run "$(desk_ps "cancel --root \$root $(psq "$1")")"
         ;;
       desk)
