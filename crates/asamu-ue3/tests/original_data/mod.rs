@@ -7,9 +7,13 @@
 //! - macOS: `<root>/A Story About My Uncle.app/Contents/Resources/{ASAMU/CookedMac, Engine}`
 //! - Windows: `<root>/{ASAMU/CookedPC, Engine}`
 //!
-//! The Mac depot reuses the PC cook (docs/reverse-engineering/INVENTORY.md:
-//! the 42 packages have the same sizes and SHA-256 in both installs), so the
-//! counts these tests assert hold for either build and no test is tied to one.
+//! The Mac depot reuses the PC cook. CONFIRMED on 2026-10-10 for Steam build
+//! 1822049: `asamu-inventory` run on a Windows install (depot 278361) gives,
+//! for all 48 files of `ASAMU/CookedPC` (the 42 packages among them), the
+//! size and SHA-256 that the committed Mac inventory
+//! (docs/reverse-engineering/data/inventory) lists under `CookedMac`. The
+//! counts these tests assert therefore hold for either build, and no test is
+//! tied to one.
 
 #![allow(dead_code)] // each test file uses a part of this module
 
