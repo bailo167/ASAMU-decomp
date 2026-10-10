@@ -795,12 +795,23 @@ fn a_cm_2_view_pitch_is_limited_to_18000_rotator_units() {
     tick(&mut s, &up, &params, &world);
     let limit = (18_000.0_f32 * 360.0 / 65_536.0).to_radians();
     assert_eq!(s.pitch, limit);
+    assert_eq!(s.pitch_units(), 18_000);
+    // Looking down in steps of 1 rad (10430 units, fraction dropped): 7570,
+    // −2860, −13290, then −23720, which the limit moves to the lower end.
+    // That end is 65535 + ViewPitchMin = 47535 on the 16-bit circle, one
+    // unit beyond −18000 (ABILITIES.md A-CM-2).
     let down = InputFrame {
-        look_pitch_delta: -6.0,
+        look_pitch_delta: -1.0,
         ..input()
     };
-    tick(&mut s, &down, &params, &world);
-    assert_eq!(s.pitch, -limit);
+    for expected in [7_570, -2_860, -13_290, -18_001, -18_001] {
+        tick(&mut s, &down, &params, &world);
+        assert_eq!(s.pitch_units(), expected);
+    }
+    assert_eq!(
+        s.pitch,
+        asamu_core::rotator::rotator_units_to_radians(-18_001)
+    );
 }
 
 // ---------------------------------------------------------------------------

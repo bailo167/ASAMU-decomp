@@ -29,6 +29,21 @@
 //!   magnitudes), the state is left exactly as it was and
 //!   [`StepEvents::non_finite_rejected`] is set.
 //!
+//! # Rotator angles (script layer)
+//!
+//! The original keeps every rotation as integer rotator units (65536 per
+//! turn) and turns a rotation into direction vectors through a table of
+//! 16384 sines that drops the low two bits of each angle. With the script
+//! layer the view angles are therefore integers too: [`apply_look`] decodes
+//! the unit a public radian field holds ([`view_units`]), adds the look delta
+//! as an integer ([`look_delta_units`]), applies the original's pitch limit
+//! ([`limit_view_pitch`]) and stores the exact radian image of the result,
+//! so nothing accumulates in floating point. The directions the script layer
+//! derives from rotations ([`rotator_axes_flat`], [`rotator_vector`]) use
+//! the table ([`angle_table_index`], [`angle_table_entry`]). Evidence:
+//! `docs/reverse-engineering/ABILITIES.md` A-WK-1, A-CM-2, A-CM-8 and
+//! A-CM-9. The raw pipeline below keeps its own exact-radian arithmetic.
+//!
 //! # Raw physics vs the ASAMU script layer
 //!
 //! When [`PlayerParams::pawn`] is `Some` (the original parameter set,
@@ -60,7 +75,10 @@
 //!    tick reports nothing.
 
 use asamu_core::coords::{ue_forward_flat, ue_right_flat, ue_view_direction};
-use asamu_core::rotator::wrap_radians;
+use asamu_core::det_math;
+use asamu_core::rotator::{
+    normalize_rotator_axis, radians_to_rotator_units, rotator_units_to_radians, wrap_radians,
+};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +92,236 @@ use crate::pawn::{LandingOutcome, PawnScript, PowerJumpEvent};
 use crate::rocket_boots::BootsEvent;
 use crate::ue3_movement::PawnPhysicsState;
 use crate::world::CollisionWorld;
+
+// ---------------------------------------------------------------------------
+// Rotator angles as the original uses them.
+// ---------------------------------------------------------------------------
+
+/// Low bits of a rotator angle that the original's sine table ignores.
+///
+/// NativeCode `FRotator::Vector @ 0x1000FC740` and `UObject::execGetAxes @
+/// 0x1000C3C80` (macOS build): each angle is shifted right by this many bits
+/// and masked to [`ANGLE_TABLE_ENTRIES`]` − 1` before the lookup, so an angle
+/// is floored to a multiple of 4 units (towards −∞, also for negative angles:
+/// the shift works on the two's-complement bits) and everything above bit 15
+/// is dropped. CONFIRMED (native); measured on the Windows recordings (the
+/// floor fits 2,192 of 2,192 on-axis accelerations, truncation towards zero
+/// none of the 1,109 with a negative yaw that is no multiple of 4).
+pub const ANGLE_TABLE_SHIFT: u32 = 2;
+
+/// Entries of the original's sine table (one per 4 rotator units).
+///
+/// NativeCode `FGlobalMath::FGlobalMath @ 0x1000FA0A0` (loop bound 0x4000;
+/// the Windows build's constructor at `0x5B1E70` is the same). CONFIRMED
+/// (native).
+pub const ANGLE_TABLE_ENTRIES: u32 = 16_384;
+
+/// A quarter turn in rotator units: the table has no cosines, a cosine is
+/// the sine entry of the angle plus this (same two native routines as
+/// [`ANGLE_TABLE_SHIFT`], immediate 0x4000). CONFIRMED (native).
+pub const QUARTER_TURN_UNITS: i32 = 16_384;
+
+/// The table index the original uses for a rotator angle: bits 2 to 15 of
+/// its two's-complement value ([`ANGLE_TABLE_SHIFT`]).
+#[must_use]
+pub fn angle_table_index(units: i32) -> u16 {
+    // The mask keeps 14 bits, so the value always fits.
+    ((units as u32 >> ANGLE_TABLE_SHIFT) & (ANGLE_TABLE_ENTRIES - 1)) as u16
+}
+
+/// Entry `index` (taken modulo [`ANGLE_TABLE_ENTRIES`]) of the original's
+/// sine table.
+///
+/// The constructor computes, for `i` in `0..16384`, the single-precision
+/// sine of the argument `f32(f64(f32(i) · 2) · π · (1 / 16384))`: the index
+/// is doubled as an `f32`, widened, multiplied by the `f64` π and by 2⁻¹⁴,
+/// and narrowed to `f32` before the sine. That argument rounding is part of
+/// the values: the entry for 180° is `sin(f32(π))` = −8.742278e-8, not 0.
+/// NativeCode `FGlobalMath::FGlobalMath @ 0x1000FA0A0` (constants π at
+/// `0x101645730`, 2⁻¹⁴ at `0x101645740`; the Windows constructor at
+/// `0x5B1E70` reads 2.0, π and 2⁻¹⁴ the same way). CONFIRMED (native);
+/// measured: with these entries 2,192 of 2,192 recorded on-axis
+/// accelerations are within 3 ulp, with the exact sine of the floored angle
+/// 1,803.
+///
+/// The sine itself is the platform's in the original (`sinf` on macOS,
+/// `__libm_sse2_sinf` of the Visual C++ 2010 runtime on Windows, which
+/// evaluates in double precision and narrows once); ours is
+/// [`det_math::sin`], the same on every platform. That the two agree in the
+/// last bit of every entry is STRONG, not CONFIRMED (the game's table has
+/// not been read out).
+#[must_use]
+pub fn angle_table_entry(index: u16) -> f32 {
+    let i = u32::from(index) & (ANGLE_TABLE_ENTRIES - 1);
+    // Exact: `i` < 2¹⁴ and its double are integers an `f32` holds.
+    let doubled = i as f32 + i as f32;
+    let argument = (f64::from(doubled)
+        * core::f64::consts::PI
+        * (1.0 / f64::from(ANGLE_TABLE_ENTRIES))) as f32;
+    det_math::sin(argument)
+}
+
+/// Sine of a rotator angle as the original looks it up
+/// ([`angle_table_entry`] of [`angle_table_index`]).
+#[must_use]
+pub fn rotator_sin(units: i32) -> f32 {
+    angle_table_entry(angle_table_index(units))
+}
+
+/// Cosine of a rotator angle as the original looks it up: the sine entry a
+/// quarter turn on ([`QUARTER_TURN_UNITS`]).
+#[must_use]
+pub fn rotator_cos(units: i32) -> f32 {
+    angle_table_entry(angle_table_index(units.wrapping_add(QUARTER_TURN_UNITS)))
+}
+
+/// The unit vector of a rotation without roll as the original builds it
+/// (UnrealScript `vector(rotation)`): `(cos p · cos y, cos p · sin y, sin p)`
+/// with table sines and cosines and single-precision products; the result is
+/// not normalised again. NativeCode `FRotator::Vector @ 0x1000FC740`, reached
+/// from `UObject::execRotatorToVector @ 0x1000C03E0`. CONFIRMED (native).
+#[must_use]
+pub fn rotator_vector(pitch_units: i32, yaw_units: i32) -> Vec3 {
+    let (sp, cp) = (rotator_sin(pitch_units), rotator_cos(pitch_units));
+    let (sy, cy) = (rotator_sin(yaw_units), rotator_cos(yaw_units));
+    Vec3::new(cp * cy, cp * sy, sp)
+}
+
+/// Forward and right axes of a rotation with yaw only, as the original's
+/// `GetAxes` builds them: `X = (cos y, sin y, 0)`, `Y = (−sin y, cos y, 0)`
+/// with table values. NativeCode `UObject::execGetAxes @ 0x1000C3C80`; with
+/// pitch and roll 0 its general rows `X = (cp·cy, cp·sy, sp)`,
+/// `Y = (sr·sp·cy − cr·sy, sr·sp·sy + cr·cy, −sr·cp)` reduce to these bit for
+/// bit, because the table's entries for 0° and 90° are exactly 0 and 1.
+/// CONFIRMED (native).
+#[must_use]
+pub fn rotator_axes_flat(yaw_units: i32) -> (Vec3, Vec3) {
+    let (sy, cy) = (rotator_sin(yaw_units), rotator_cos(yaw_units));
+    (Vec3::new(cy, sy, 0.0), Vec3::new(-sy, cy, 0.0))
+}
+
+/// Rotator units per radian.
+const UNITS_PER_RADIAN: f64 = 65_536.0 / core::f64::consts::TAU;
+
+/// The rotator unit a radian value stands for: the nearest unit, reduced to
+/// the low 16 bits as a signed value (`[-32768, 32767]`).
+///
+/// Every angle the script layer stores is the radian image
+/// (`asamu_core::rotator::rotator_units_to_radians`) of such a unit, and this
+/// returns that unit exactly; a value written from outside (a teleport, a
+/// test) is taken as its nearest unit. The original's view yaw is not
+/// reduced (it keeps counting turns), but every reader of it drops the bits
+/// above 15 ([`ANGLE_TABLE_SHIFT`]), so the reduction changes nothing.
+#[must_use]
+pub fn view_units(radians: f32) -> i32 {
+    normalize_rotator_axis(radians_to_rotator_units(radians))
+}
+
+/// Relative size of the `f32` rounding of a radian value: a look delta
+/// within this of a whole number of units is that number
+/// ([`look_delta_units`]). A numerical bound of the radian interface
+/// (one `f32` ulp), not a value of the game.
+pub const LOOK_DELTA_SNAP: f64 = f32::EPSILON as f64;
+
+/// The integer rotator delta of a look input given in radians.
+///
+/// The original computes the turn of a frame as a float in rotator units
+/// and assigns it to the integer rotator: the fraction is dropped, towards
+/// zero, every frame (stock `PlayerController.UpdateRotation`, a
+/// float-to-int cast in its bytecode; NativeCode `UObject::execFloatToInt @
+/// 0x1000B8AB0` truncates). CONFIRMED (src, native); in the recordings every
+/// delta is a whole number of units (45,223 of 45,223 ticks).
+///
+/// Our interface carries radians, which cannot hold a whole number of units
+/// exactly, so a value within [`LOOK_DELTA_SNAP`] (relative) of a whole
+/// number is that number; anything else is truncated towards zero like the
+/// original's cast. Out-of-range values saturate, a non-finite one is 0.
+#[must_use]
+pub fn look_delta_units(delta_radians: f32) -> i32 {
+    let units = f64::from(delta_radians) * UNITS_PER_RADIAN;
+    if !units.is_finite() {
+        return 0;
+    }
+    let nearest = units.round();
+    let whole = (units - nearest).abs() <= units.abs() * LOOK_DELTA_SNAP;
+    // Float → int casts saturate in Rust.
+    if whole {
+        nearest as i32
+    } else {
+        units.trunc() as i32
+    }
+}
+
+/// The original's view pitch limit for a pitch in rotator units.
+///
+/// The pitch is reduced to `0..=65535`; a value strictly above `max_units`
+/// (`ViewPitchMax`) and strictly below `65535 − max_units`
+/// (`65535 + ViewPitchMin`, with `ViewPitchMin = −ViewPitchMax`) is moved to
+/// the nearer end: to `max_units` below half a turn, else to
+/// `65535 − max_units`. Returned as a signed 16-bit value, so the limits are
+/// `+max_units` and `−max_units − 1` (the lower one is one unit further out
+/// because the rule adds the minimum to 65535, not to 65536): +18000 and
+/// −18001 for the original's 18000. Stock `PlayerController.LimitViewRotation`
+/// (the controller class does not override it), called for the pawn by
+/// `Pawn.ProcessViewRotation`. CONFIRMED (src); the upper limit is measured
+/// (50 records at exactly 18000, none above), the lower one is in no
+/// recording.
+///
+/// It is a forbidden band, not a saturating clamp: a delta of more than
+/// 162° in one tick can jump across it. Invalid limits (not finite, or not
+/// in `0..32768`) give an arbitrary but finite result.
+#[must_use]
+pub fn limit_view_pitch(pitch_units: i32, max_units: f32) -> i32 {
+    let pitch = pitch_units & 0xFFFF;
+    // The original compares the integer with the two float limits.
+    let value = pitch as f32;
+    let lower = 65_535.0 - max_units;
+    let limited = if value > max_units && value < lower {
+        // Float → int assignment: truncation (saturating in Rust).
+        if pitch < 32_768 {
+            max_units as i32
+        } else {
+            lower as i32
+        }
+    } else {
+        pitch
+    };
+    normalize_rotator_axis(limited)
+}
+
+/// `ViewPitchMax` in rotator units, from the camera parameter (degrees):
+/// exactly 18000 for the original's value.
+fn view_pitch_max_units(params: &PlayerParams) -> f32 {
+    (f64::from(params.camera.max_pitch_degrees.value) * (65_536.0 / 360.0)) as f32
+}
+
+/// The controller's look update of the script layer, in rotator units
+/// (stock `PlayerController.UpdateRotation` → `Pawn.ProcessViewRotation`):
+/// the integer delta ([`look_delta_units`]) is added to the yaw and to the
+/// pitch, and the pitch is limited ([`limit_view_pitch`]).
+///
+/// The integers are decoded from and stored back into the public radian
+/// fields ([`view_units`] and its exact inverse), so a replay that feeds
+/// whole-unit deltas reproduces yaw and pitch exactly on every tick. A field
+/// whose unit does not change is left bit for bit as it is (a yaw outside
+/// `[-π, π)` is wrapped as before).
+pub fn apply_look(state: &mut PlayerState, input: &InputFrame, params: &PlayerParams) {
+    let yaw = view_units(state.yaw);
+    let new_yaw = normalize_rotator_axis(yaw.wrapping_add(look_delta_units(input.look_yaw_delta)));
+    if new_yaw != yaw {
+        state.yaw = rotator_units_to_radians(new_yaw);
+    } else if !(-core::f32::consts::PI..core::f32::consts::PI).contains(&state.yaw) {
+        state.yaw = wrap_radians(state.yaw);
+    }
+    let pitch = view_units(state.pitch);
+    let new_pitch = limit_view_pitch(
+        pitch.wrapping_add(look_delta_units(input.look_pitch_delta)),
+        view_pitch_max_units(params),
+    );
+    if new_pitch != pitch {
+        state.pitch = rotator_units_to_radians(new_pitch);
+    }
+}
 
 /// Complete simulation state of the player. All values in UE3 axes / UU.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -126,14 +374,39 @@ impl PlayerState {
         ue_view_direction(self.yaw, self.pitch)
     }
 
-    /// Unit aim direction of the script layer during a tick: the camera's
-    /// cached point-of-view rotation ([`PawnScript::pov_yaw`], the view as
-    /// the previous tick ended; GRAPPLE.md G-TG-1). Without the script layer
-    /// it is [`Self::view_direction`].
+    /// View yaw in rotator units ([`view_units`] of [`Self::yaw`]): with the
+    /// script layer the integer the look update works on.
+    #[must_use]
+    pub fn yaw_units(&self) -> i32 {
+        view_units(self.yaw)
+    }
+
+    /// View pitch in rotator units ([`view_units`] of [`Self::pitch`]).
+    #[must_use]
+    pub fn pitch_units(&self) -> i32 {
+        view_units(self.pitch)
+    }
+
+    /// The direction the original builds from the current view rotation
+    /// ([`rotator_vector`]: table angles, each floored to 4 units). What a
+    /// fire trace issued by the next tick's input events aims along.
+    #[must_use]
+    pub fn native_view_direction(&self) -> Vec3 {
+        rotator_vector(self.pitch_units(), self.yaw_units())
+    }
+
+    /// Aim direction of the script layer during a tick: the vector the
+    /// original builds ([`rotator_vector`]) from the camera's cached
+    /// point-of-view rotation ([`PawnScript::pov_yaw`], the view as the
+    /// previous tick ended; GRAPPLE.md G-TG-1). Without the script layer it
+    /// is [`Self::view_direction`].
     #[must_use]
     pub fn aim_direction(&self) -> Vec3 {
         if self.script.started {
-            ue_view_direction(self.script.pov_yaw, self.script.pov_pitch)
+            rotator_vector(
+                view_units(self.script.pov_pitch),
+                view_units(self.script.pov_yaw),
+            )
         } else {
             self.view_direction()
         }
