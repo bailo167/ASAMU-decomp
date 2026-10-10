@@ -30,9 +30,19 @@ pub struct InputFrame {
     #[serde(with = "asamu_core::exact_f32")]
     pub move_right: f32,
     /// Yaw change this tick in radians (UE3 convention: + turns right).
+    ///
+    /// With the script layer the view turns by whole rotator units, as in
+    /// the original: a value that stands for a whole number of units (what a
+    /// converted recording holds) is applied exactly, and the fraction of
+    /// any other value is dropped towards zero
+    /// ([`crate::sim::look_delta_units`]).
     #[serde(with = "asamu_core::exact_f32")]
     pub look_yaw_delta: f32,
-    /// Pitch change this tick in radians (+ looks up).
+    /// Pitch change this tick in radians (+ looks up); whole rotator units
+    /// with the script layer, like [`Self::look_yaw_delta`]. The view pitch
+    /// limit is the original's band on the 16-bit circle
+    /// ([`crate::sim::limit_view_pitch`]), so a delta of more than 162° in
+    /// one tick can jump across it.
     #[serde(with = "asamu_core::exact_f32")]
     pub look_pitch_delta: f32,
     /// Jump was *pressed* (edge) since the previous tick.
