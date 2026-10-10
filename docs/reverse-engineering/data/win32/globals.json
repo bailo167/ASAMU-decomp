@@ -1,0 +1,249 @@
+{
+ "schema": "asamu-decomp/win32/globals/v1",
+ "build": "Win32 (Steam build 1822049)",
+ "game_build": "steam-1822049-win32",
+ "image_base": "0x00400000",
+ "address_rule": "runtime address = module base + rva",
+ "notes": [
+  "pointer = 4 bytes; tarray = {data pointer +0, i32 count +4, i32 max +8}; u64/f64 = 8 bytes little endian.",
+  "MSVC RTTI exists only for a few non-UObject classes, so objects are identified by vtable or by their Class pointer (class_sizes.json)."
+ ],
+ "globals": [
+  {
+   "name": "GEngine",
+   "rva": 40929544,
+   "rva_hex": "0x02708908",
+   "va_at_preferred_base": "0x02B08908",
+   "type": "pointer",
+   "size": 4,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "FEngineLoop::Init: after Parse(appCmdLine(), L\"FPS=\", f) the block loads this pointer, stores (int)f into the object (MatineeCaptureFPS) and stores 1/f to GFixedDeltaTime",
+   "cross_checks": [
+    "FEngineLoop::Tick calls three virtual functions on it with (float)GDeltaTime; the last one (vtable +0x134) is UGameEngine::Tick in UGameEngine's vtable",
+    "appUpdateTimeAndHandleMaxTickRate calls a virtual function on it with the frame time (GetMaxTickRate)",
+    "UWorld::Tick reads its GamePlayers array"
+   ],
+   "confidence": "CONFIRMED",
+   "code_references": 1461
+  },
+  {
+   "name": "GWorld",
+   "rva": 40944784,
+   "rva_hex": "0x0270C490",
+   "va_at_preferred_base": "0x02B0C490",
+   "type": "pointer",
+   "size": 4,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "UGameEngine::Tick: loaded into ecx for GWorld->Tick(LEVELTICK_All = 2, DeltaSeconds), the single direct call that follows UObject::StaticTick and GSeamlessTravelHandler.Tick()",
+   "cross_checks": [
+    "the same function starts with a call on it right after the GForceLowGore test (GetGameInfo on the Mac)",
+    "UGameEngine::LoadMap (literal \"LoadMap: %s\") uses it"
+   ],
+   "confidence": "CONFIRMED",
+   "code_references": 3312
+  },
+  {
+   "name": "GFrameCounter",
+   "rva": 40172064,
+   "rva_hex": "0x0264FA20",
+   "va_at_preferred_base": "0x02A4FA20",
+   "type": "u64",
+   "size": 8,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "FEngineLoop::Tick: 64-bit increment (mov eax,[lo]; add eax,1; adc [hi],0; mov [lo],eax) after GEngine->Tick",
+   "cross_checks": [
+    "the same function compares it with this->MaxFrameCounter when GIsBenchmarking is set, before the time update",
+    "read by FNxContactReport::onContactNotify and PrintOutSkelMeshLODs (identified by their literals), as on the Mac",
+    "written by FEngineLoop::Tick only"
+   ],
+   "confidence": "CONFIRMED",
+   "functions_referencing": 7
+  },
+  {
+   "name": "GDeltaTime",
+   "rva": 39485040,
+   "rva_hex": "0x025A7E70",
+   "va_at_preferred_base": "0x029A7E70",
+   "type": "f64",
+   "size": 8,
+   "section": ".data",
+   "initialised_in_file": true,
+   "how_found": "appUpdateTimeAndHandleMaxTickRate: receives GFixedDeltaTime in the fixed-step branch (movsd xmm0,[GFixedDeltaTime]; movsd [GDeltaTime],xmm0)",
+   "cross_checks": [
+    "FEngineLoop::Tick converts it to float for each GEngine virtual call, including GEngine->Tick",
+    "written by appUpdateTimeAndHandleMaxTickRate only"
+   ],
+   "confidence": "CONFIRMED",
+   "file_value_f64": 0.03333333333333333
+  },
+  {
+   "name": "GFixedDeltaTime",
+   "rva": 39485032,
+   "rva_hex": "0x025A7E68",
+   "va_at_preferred_base": "0x029A7E68",
+   "type": "f64",
+   "size": 8,
+   "section": ".data",
+   "initialised_in_file": true,
+   "how_found": "FEngineLoop::Init: movsd [GFixedDeltaTime], xmm0 with xmm0 = 1 / FPS= value",
+   "cross_checks": [
+    "appUpdateTimeAndHandleMaxTickRate copies it to GDeltaTime when fixed stepping",
+    "its value in the file is 1/30"
+   ],
+   "confidence": "CONFIRMED",
+   "file_value_f64": 0.03333333333333333
+  },
+  {
+   "name": "GIsBenchmarking",
+   "rva": 40137100,
+   "rva_hex": "0x0264718C",
+   "va_at_preferred_base": "0x02A4718C",
+   "type": "u32",
+   "size": 4,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "FEngineLoop::PreInit: receives the result of ParseParam(appCmdLine(), L\"BENCHMARK\")",
+   "cross_checks": [
+    "appUpdateTimeAndHandleMaxTickRate tests it first (GIsBenchmarking || GUseFixedTimeStep)",
+    "FEngineLoop::Tick tests it for the frame limit"
+   ],
+   "confidence": "CONFIRMED",
+   "functions_referencing": 18
+  },
+  {
+   "name": "GUseFixedTimeStep",
+   "rva": 40172132,
+   "rva_hex": "0x0264FA64",
+   "va_at_preferred_base": "0x02A4FA64",
+   "type": "u32",
+   "size": 4,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "appUpdateTimeAndHandleMaxTickRate: the second flag of bUseFixedTimeStep, compared right after GIsBenchmarking",
+   "cross_checks": [
+    "exactly three functions read it and each also reads GIsBenchmarking (Mac: DrawUnitTimes, appUpdateTimeAndHandleMaxTickRate, UGameViewportClient::SetDropDetail)",
+    "one of them is DrawUnitTimes (literal \"Game thread time\")",
+    "no instruction stores to it (4 references, all loads/compares)"
+   ],
+   "confidence": "CONFIRMED"
+  },
+  {
+   "name": "FName::Names",
+   "rva": 40563888,
+   "rva_hex": "0x026AF4B0",
+   "va_at_preferred_base": "0x02AAF4B0",
+   "type": "tarray",
+   "size": 12,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "function holding the literal that starts \"Hardcoded name\": the three most used .data words are consecutive (data, count, max)",
+   "cross_checks": [
+    "FShaderParameter::Bind and FShaderResourceParameter::Bind (literals that start \"Failure to bind non-optional shader parameter\") index the same array, as on the Mac",
+    "small accessors compare an index with the word at +4 and load data[index*4] from the word at +0"
+   ],
+   "confidence": "CONFIRMED",
+   "functions_referencing": 41
+  },
+  {
+   "name": "UObject::GObjObjects",
+   "rva": 40835016,
+   "rva_hex": "0x026F17C8",
+   "va_at_preferred_base": "0x02AF17C8",
+   "type": "tarray",
+   "size": 12,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "UObject::StaticInit (configuration key literal \"MaxObjectsNotConsideredByGC\"): passed as this (mov ecx, imm) to the array presize call right after GObjFirstGCIndex is stored",
+   "cross_checks": [
+    "UObject::StaticExit (literal that starts \"Object subsystem successfully closed\") walks the same array",
+    "the same StaticInit uses UPackage::PrivateStaticClass at the address found independently by the class scan"
+   ],
+   "confidence": "CONFIRMED",
+   "code_references": 2322,
+   "functions_referencing": 519
+  },
+  {
+   "name": "UObject::GObjFirstGCIndex",
+   "rva": 40834956,
+   "rva_hex": "0x026F178C",
+   "va_at_preferred_base": "0x02AF178C",
+   "type": "i32",
+   "size": 4,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "UObject::StaticInit: receives the MaxObjectsNotConsideredByGC value read from the configuration",
+   "cross_checks": [],
+   "confidence": "STRONG"
+  },
+  {
+   "name": "GCurrentTime",
+   "rva": 40171960,
+   "rva_hex": "0x0264F9B8",
+   "va_at_preferred_base": "0x02A4F9B8",
+   "type": "f64",
+   "size": 8,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "appUpdateTimeAndHandleMaxTickRate: copied to GLastTime at the top, advanced by GDeltaTime when fixed stepping",
+   "cross_checks": [],
+   "confidence": "STRONG"
+  },
+  {
+   "name": "GLastTime",
+   "rva": 40171968,
+   "rva_hex": "0x0264F9C0",
+   "va_at_preferred_base": "0x02A4F9C0",
+   "type": "f64",
+   "size": 8,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "appUpdateTimeAndHandleMaxTickRate: GLastTime = GCurrentTime",
+   "cross_checks": [],
+   "confidence": "STRONG"
+  },
+  {
+   "name": "GDebugger",
+   "rva": 40137088,
+   "rva_hex": "0x02647180",
+   "va_at_preferred_base": "0x02A47180",
+   "type": "pointer",
+   "size": 4,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "export table (name GDebugger)",
+   "cross_checks": [
+    "UGameEngine::Tick calls through it before Client->Tick, at the position where the Mac build uses GDebugger"
+   ],
+   "confidence": "CONFIRMED"
+  },
+  {
+   "name": "GSeamlessTravelHandler",
+   "rva": 40945008,
+   "rva_hex": "0x0270C570",
+   "va_at_preferred_base": "0x02B0C570",
+   "type": "struct",
+   "size": null,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "UGameEngine::Tick: tested and passed as this between UObject::StaticTick and UWorld::Tick (same order as the Mac build)",
+   "cross_checks": [],
+   "confidence": "STRONG"
+  },
+  {
+   "name": "GMalloc",
+   "rva": 40104156,
+   "rva_hex": "0x0263F0DC",
+   "va_at_preferred_base": "0x02A3F0DC",
+   "type": "pointer",
+   "size": 4,
+   "section": ".data",
+   "initialised_in_file": false,
+   "how_found": "three class registration functions allocate the UClass through its vtable (+8) with (size, alignment 8) instead of calling the allocation function",
+   "cross_checks": [],
+   "confidence": "STRONG"
+  }
+ ]
+}

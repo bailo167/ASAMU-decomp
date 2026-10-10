@@ -1,0 +1,230 @@
+{
+ "schema": "asamu-decomp/win32/functions/v1",
+ "build": "Win32 (Steam build 1822049)",
+ "game_build": "steam-1822049-win32",
+ "image_base": "0x00400000",
+ "address_rule": "runtime address = module base + rva",
+ "functions": [
+  {
+   "name": "UWorld::Tick",
+   "rva": 6509648,
+   "rva_hex": "0x00635450",
+   "va_at_preferred_base": "0x00A35450",
+   "how_found": "the only GWorld->f(2, DeltaSeconds) call of UGameEngine::Tick; starts with GetWorldInfo(0) and the GEngine->GamePlayers loop like the Mac function",
+   "confidence": "CONFIRMED",
+   "calling_convention": "thiscall: ecx = UWorld*, [esp+4] = ELevelTick TickType, [esp+8] = float DeltaSeconds; ret 8",
+   "role": "frame boundary: once per frame, after input dispatch (Client->Tick), before any actor ticks",
+   "direct_call_sites": 3,
+   "calling_functions": [
+    "UGameEngine::Tick",
+    "UEditorEngine::Tick"
+   ],
+   "end_rva": 6516165
+  },
+  {
+   "name": "UGameEngine::Tick",
+   "rva": 5805856,
+   "rva_hex": "0x00589720",
+   "va_at_preferred_base": "0x00989720",
+   "how_found": "slot +0x134 of UGameEngine's vtable, the slot FEngineLoop::Tick calls on GEngine with (float)GDeltaTime last before GFrameCounter is incremented",
+   "confidence": "CONFIRMED",
+   "calling_convention": "thiscall: ecx = UGameEngine*, [esp+4] = float DeltaSeconds; ret 4",
+   "vtable_offset": 308,
+   "end_rva": 5810671
+  },
+  {
+   "name": "FEngineLoop::Tick",
+   "rva": 21662912,
+   "rva_hex": "0x014A8CC0",
+   "va_at_preferred_base": "0x018A8CC0",
+   "how_found": "the caller of appUpdateTimeAndHandleMaxTickRate that increments GFrameCounter",
+   "confidence": "CONFIRMED",
+   "gframecounter_increment_rva": 21663505,
+   "time_update_call_rva": 21663168,
+   "gengine_tick_call_slot_load_rva": 21663453,
+   "message_pump_call_rva": 21663871
+  },
+  {
+   "name": "appUpdateTimeAndHandleMaxTickRate",
+   "rva": 21653536,
+   "rva_hex": "0x014A6820",
+   "va_at_preferred_base": "0x018A6820",
+   "how_found": "reads GIsBenchmarking and GUseFixedTimeStep, copies GFixedDeltaTime to GDeltaTime",
+   "confidence": "CONFIRMED",
+   "direct_callers": 3
+  },
+  {
+   "name": "appWinPumpMessages",
+   "rva": 2218080,
+   "rva_hex": "0x0021D860",
+   "va_at_preferred_base": "0x0061D860",
+   "how_found": "called by FEngineLoop::Tick after the counter increment; calls PeekMessageW",
+   "confidence": "STRONG"
+  },
+  {
+   "name": "UObject::StaticTick",
+   "rva": 2022464,
+   "rva_hex": "0x001EDC40",
+   "va_at_preferred_base": "0x005EDC40",
+   "how_found": "direct call with DeltaSeconds between Client->Tick and GSeamlessTravelHandler (Mac order)",
+   "confidence": "STRONG"
+  },
+  {
+   "name": "FSeamlessTravelHandler::Tick",
+   "rva": 9107696,
+   "rva_hex": "0x008AF8F0",
+   "va_at_preferred_base": "0x00CAF8F0",
+   "how_found": "called on GSeamlessTravelHandler right before UWorld::Tick (Mac order)",
+   "confidence": "STRONG"
+  },
+  {
+   "name": "UWorld::GetWorldInfo",
+   "rva": 9057136,
+   "rva_hex": "0x008A3370",
+   "va_at_preferred_base": "0x00CA3370",
+   "how_found": "first call of UWorld::Tick, argument 0 (Mac order)",
+   "confidence": "STRONG"
+  },
+  {
+   "name": "UWorld::GetGameInfo",
+   "rva": 9069312,
+   "rva_hex": "0x008A6300",
+   "va_at_preferred_base": "0x00CA6300",
+   "how_found": "first call of UGameEngine::Tick, on GWorld (Mac order)",
+   "confidence": "STRONG"
+  },
+  {
+   "name": "UWorld::IsPaused",
+   "rva": 6393296,
+   "rva_hex": "0x00618DD0",
+   "va_at_preferred_base": "0x00A18DD0",
+   "how_found": "called by UWorld::Tick after RealTimeSeconds is advanced; its result gates AudioTimeSeconds and TimeSeconds",
+   "confidence": "STRONG"
+  },
+  {
+   "name": "UWindowsClient::Tick",
+   "rva": 21313232,
+   "rva_hex": "0x014536D0",
+   "va_at_preferred_base": "0x018536D0",
+   "how_found": "slot +0x138 of UWindowsClient's vtable, the slot UGameEngine::Tick calls on Engine.Client",
+   "confidence": "STRONG",
+   "vtable_offset": 312
+  },
+  {
+   "name": "UEditorEngine::Tick",
+   "rva": 16982944,
+   "rva_hex": "0x010323A0",
+   "va_at_preferred_base": "0x014323A0",
+   "how_found": "slot +0x134 of UEditorEngine's vtable; the only other caller of UWorld::Tick (editor only, not on the game's path)",
+   "confidence": "STRONG",
+   "vtable_offset": 308
+  },
+  {
+   "name": "UObject::StaticInit",
+   "rva": 2062304,
+   "rva_hex": "0x001F77E0",
+   "va_at_preferred_base": "0x005F77E0",
+   "how_found": "holds the literal \"MaxObjectsNotConsideredByGC\"",
+   "confidence": "CONFIRMED"
+  },
+  {
+   "name": "UObject::StaticExit",
+   "rva": 2054224,
+   "rva_hex": "0x001F5850",
+   "va_at_preferred_base": "0x005F5850",
+   "how_found": "holds the literal \"Object subsystem successfully closed\"",
+   "confidence": "CONFIRMED"
+  },
+  {
+   "name": "UObject::GetOutermost",
+   "rva": 2041648,
+   "rva_hex": "0x001F2730",
+   "va_at_preferred_base": "0x005F2730",
+   "how_found": "export table (name GetOutermost)",
+   "confidence": "CONFIRMED"
+  },
+  {
+   "name": "UClass::UClass(EC_StaticConstructor)",
+   "rva": 1748048,
+   "rva_hex": "0x001AAC50",
+   "va_at_preferred_base": "0x005AAC50",
+   "how_found": "callee of every native class registration",
+   "confidence": "CONFIRMED",
+   "direct_callers": 2103
+  },
+  {
+   "name": "InitializePrivateStaticClass",
+   "rva": 1580400,
+   "rva_hex": "0x00181D70",
+   "va_at_preferred_base": "0x00581D70",
+   "how_found": "shared tail of every Initialize<Class>PrivateStaticClass",
+   "confidence": "CONFIRMED"
+  },
+  {
+   "name": "FEngineLoop::PreInit",
+   "rva": 21675632,
+   "rva_hex": "0x014ABE70",
+   "va_at_preferred_base": "0x018ABE70",
+   "how_found": "function holding the push of the literal \"BENCHMARK\"",
+   "confidence": "STRONG",
+   "benchmark_parse_site_rva": 21686893
+  },
+  {
+   "name": "FEngineLoop::Init",
+   "rva": 21668224,
+   "rva_hex": "0x014AA180",
+   "va_at_preferred_base": "0x018AA180",
+   "how_found": "function holding the push of the literal \"FPS=\"",
+   "confidence": "STRONG",
+   "fps_parse_site_rva": 21669529
+  },
+  {
+   "name": "UGameEngine::LoadMap",
+   "rva": 5860848,
+   "rva_hex": "0x00596DF0",
+   "va_at_preferred_base": "0x00996DF0",
+   "how_found": "function holding the literal \"LoadMap: %s\"",
+   "confidence": "STRONG"
+  },
+  {
+   "name": "DrawUnitTimes",
+   "rva": 5597472,
+   "rva_hex": "0x00556920",
+   "va_at_preferred_base": "0x00956920",
+   "how_found": "function holding the literal \"Game thread time\"",
+   "confidence": "STRONG"
+  }
+ ],
+ "frame": {
+  "order": [
+   "FEngineLoop::Tick: frame-limit test (GIsBenchmarking, GFrameCounter)",
+   "appUpdateTimeAndHandleMaxTickRate() writes GDeltaTime",
+   "GEngine virtual +0x150 and +0x154 with (float)GDeltaTime",
+   "GEngine->Tick((float)GDeltaTime) = UGameEngine::Tick (vtable +0x134)",
+   "  UGameEngine::Tick: Engine.Client->Tick(DeltaSeconds) (vtable +0x138, UWindowsClient::Tick)",
+   "  UGameEngine::Tick: UObject::StaticTick(DeltaSeconds), GSeamlessTravelHandler.Tick()",
+   "  UGameEngine::Tick: GWorld->Tick(LEVELTICK_All, DeltaSeconds), exactly one direct call",
+   "  UGameEngine::Tick: loop over Engine.GamePlayers, later viewport and other work",
+   "GFrameCounter += 1",
+   "appWinPumpMessages() (PeekMessageW loop)"
+  ],
+  "matches_mac_order": true,
+  "gengine_virtual_calls_with_delta_time": [
+   336,
+   340,
+   308
+  ],
+  "uworld_tick_time_updates": {
+   "order": [
+    "RealTimeSeconds += DeltaSeconds",
+    "AudioTimeSeconds += DeltaSeconds (not paused)",
+    "DeltaSeconds *= TimeDilation, clamped",
+    "WorldInfo.DeltaSeconds = DeltaSeconds",
+    "TimeSeconds += DeltaSeconds (not paused)"
+   ],
+   "real_time_seconds_store_rva": 6510657,
+   "time_seconds_store_rva": 6510838,
+   "note": "all four stores come before the first tick-group work of UWorld::Tick"
+  }
+ }
+}

@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! asamu-trace convert RAW.raw.jsonl [--out FILE | --out-dir DIR] [--segment N] [--level NAME] [--list]
-//! asamu-trace replay TRACE --out OURS [--converted DIR [--map NAME] [--kismet]] [--tick-rate HZ]
+//! asamu-trace replay TRACE --out OURS [--converted DIR [--map NAME] [--kismet]]
+//!                    [--tick-rate HZ | --variable-dt]
 //!                    [--from-tick T] [--ticks N] [--no-init] [--max-grapples N] [--placeholder]
 //!                    [--compare [--json SUMMARY] [--tol-*]]
 //! asamu-trace compare A B [--tol-position UU] [--tol-velocity UU/S] [--tol-angle RAD] [--tol-fov DEG]
@@ -11,6 +12,11 @@
 //! asamu-trace validate FILE...
 //! asamu-trace check-recorder [--binary PATH] [--repo DIR] [--verbose]
 //! ```
+//!
+//! `replay` steps a fixed-rate trace with fixed ticks and a trace without a
+//! fixed rate (`tick_rate: null`, the original without benchmark mode) with
+//! each sample's own frame length; `--tick-rate` forces fixed ticks,
+//! `--variable-dt` forces the frame lengths (see `asamu_trace::replay`).
 
 use std::fs::File;
 use std::io::BufReader;
@@ -21,9 +27,10 @@ use anyhow::{Context, Result, bail};
 use asamu_player::Trace;
 use asamu_player::trace::CompareTolerances;
 use asamu_trace::compare::{CompareSummary, Verdict, compare_traces, render_text};
-use asamu_trace::convert::{ConvertOptions, convert, output_names};
+use asamu_trace::convert::{ConvertOptions, convert, output_names, raw_timing};
 use asamu_trace::raw::{RawFile, looks_raw};
-use asamu_trace::replay::{ReplayLevel, ReplayOptions, replay};
+use asamu_trace::replay::{ReplayLevel, ReplayOptions, Stepping, replay};
+use asamu_trace::timestep::StepStats;
 use asamu_trace::{layout, read_trace, report, write_trace};
 use clap::{Args, Parser, Subcommand};
 
@@ -118,12 +125,18 @@ enum Cmd {
         /// Map in the converted data (default: the trace's level).
         #[arg(long, requires = "converted")]
         map: Option<String>,
-        /// Run the map's Kismet (60 Hz traces only).
+        /// Run the map's Kismet (replays with fixed 60 Hz ticks only).
         #[arg(long, requires = "converted")]
         kismet: bool,
-        /// Tick rate, Hz (required for variable-rate traces).
+        /// Replay with fixed ticks at this rate, Hz, whatever the trace says
+        /// (default: the trace's rate; a trace without a fixed rate is
+        /// replayed with each sample's own frame length).
         #[arg(long)]
         tick_rate: Option<f64>,
+        /// Step with each sample's own frame length (time[k] - time[k-1])
+        /// even if the trace has a fixed tick rate.
+        #[arg(long, conflicts_with = "tick_rate")]
+        variable_dt: bool,
         /// Ignore the trace's init: note (grapple capacity, boots).
         #[arg(long)]
         no_init: bool,
@@ -225,12 +238,13 @@ fn cmd_convert(
     if list {
         for (i, s) in segs.iter().enumerate() {
             println!(
-                "segment {i}: frames {}..={} ({} samples, level {:?}, tick rate {:?})",
+                "segment {i}: frames {}..={} ({} samples, level {:?}, tick rate {:?}, frame lengths {})",
                 s.first_frame,
                 s.last_frame,
                 s.trace.samples.len(),
                 s.trace.meta.level,
-                s.trace.meta.tick_rate
+                s.trace.meta.tick_rate,
+                StepStats::of_samples(&s.trace.samples).describe()
             );
         }
         return Ok(());
@@ -280,16 +294,30 @@ fn cmd_validate(files: &[PathBuf]) -> Result<bool> {
                 let segs = convert(&f, &ConvertOptions::default())?;
                 Ok((f, segs))
             }) {
-                Ok((f, segs)) => println!(
-                    "{}: raw v{} ({}), {} records, {} usable, {} convertible segment(s), {} bindings",
-                    p.display(),
-                    f.header.version,
-                    f.header.recorder,
-                    f.records.len(),
-                    f.records.iter().filter(|r| r.usable()).count(),
-                    segs.len(),
-                    f.header.bindings.len()
-                ),
+                Ok((f, segs)) => {
+                    let t = raw_timing(&f);
+                    let arg_check = if t.arg_checked > 0 {
+                        format!(
+                            "; DeltaSeconds = clamp(tick argument x TimeDilation, 0.0005, 0.4) on {} of {} frames ({} clamped)",
+                            t.arg_equal, t.arg_checked, t.arg_clamped
+                        )
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "{}: raw v{} ({}), {} records, {} usable, {} convertible segment(s), {} bindings, \
+                         benchmarking {:?}, frame lengths {}{arg_check}",
+                        p.display(),
+                        f.header.version,
+                        f.header.recorder,
+                        f.records.len(),
+                        f.records.iter().filter(|r| r.usable()).count(),
+                        segs.len(),
+                        f.header.bindings.len(),
+                        f.header.benchmarking,
+                        t.lengths.describe()
+                    );
+                }
                 Err(e) => {
                     all_ok = false;
                     println!("{}: INVALID raw recording: {e:#}", p.display());
@@ -301,10 +329,10 @@ fn cmd_validate(files: &[PathBuf]) -> Result<bool> {
                     let gaps = t
                         .samples
                         .windows(2)
-                        .filter(|w| w[1].tick != w[0].tick + 1)
+                        .filter(|w| w[0].tick.checked_add(1) != Some(w[1].tick))
                         .count();
                     println!(
-                        "{}: trace v{} source {:?}, level {:?}, tick rate {:?}, {} samples, ticks {:?}..={:?}, {gaps} gap(s)",
+                        "{}: trace v{} source {:?}, level {:?}, tick rate {:?}, {} samples, ticks {:?}..={:?}, {gaps} gap(s), frame lengths {}",
                         p.display(),
                         t.meta.schema_version,
                         t.meta.source,
@@ -312,7 +340,8 @@ fn cmd_validate(files: &[PathBuf]) -> Result<bool> {
                         t.meta.tick_rate,
                         t.samples.len(),
                         t.samples.first().map(|s| s.tick),
-                        t.samples.last().map(|s| s.tick)
+                        t.samples.last().map(|s| s.tick),
+                        StepStats::of_samples(&t.samples).describe()
                     );
                 }
                 Err(e) => {
@@ -361,6 +390,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             map,
             kismet,
             tick_rate,
+            variable_dt,
             no_init,
             max_grapples,
             placeholder,
@@ -383,6 +413,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let opts = ReplayOptions {
                 level,
                 tick_rate,
+                variable_dt,
                 use_init: !no_init,
                 max_grapples,
                 placeholder,
@@ -391,8 +422,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             let r = replay(&original, &opts)?;
             write_trace(&r.trace, &out)?;
+            let stepping = match (r.stepping, &r.variable) {
+                (Stepping::Fixed(rate), _) => format!("fixed {rate} Hz ticks"),
+                (Stepping::PerSample, Some(v)) => {
+                    let mut text = format!("per-sample frame lengths {}", v.lengths.describe());
+                    if v.clamped > 0 {
+                        text.push_str(&format!(", {} clamped", v.clamped));
+                    }
+                    if v.no_op > 0 {
+                        text.push_str(&format!(", {} without time", v.no_op));
+                    }
+                    text
+                }
+                (Stepping::PerSample, None) => "per-sample frame lengths".to_owned(),
+            };
             println!(
-                "{}: {} samples{}{}",
+                "{}: {} samples, {stepping}{}{}",
                 out.display(),
                 r.trace.samples.len(),
                 r.stopped_at_gap

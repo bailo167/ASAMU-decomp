@@ -1,8 +1,10 @@
 """Core of the ASAMU trace recorder: memory layout, sampling, raw format, conversion.
 
 Pure Python 3.8+, no third-party modules and no ``lldb`` import, so it can be
-tested without a debugger. ``asamu_lldb.py`` is the thin LLDB front end; a
-future Windows debugger loop can reuse this module with its own layout file.
+tested without a debugger. ``asamu_lldb.py`` is the thin LLDB front end (Mac
+build, one breakpoint per frame); ``asamu_win.py`` is the Windows front end
+(32-bit build, read-only polling with ``layout_win_x86.json``). Pointer size,
+array, string and name-entry shapes all come from the layout file.
 
 What it does
 ------------
@@ -21,7 +23,7 @@ What it does
 Command line (no debugger needed)::
 
     python3 -I asamu_recorder_core.py convert RAW.raw.jsonl [--out-dir DIR]
-    python3 -I asamu_recorder_core.py selftest
+    python3 -I asamu_recorder_core.py selftest [--layout layout_win_x86.json]
 
 Raw records never contain addresses or pointers; see docs/TRACE_CAPTURE.md.
 """
@@ -223,6 +225,7 @@ class Offsets:
         self.arr_count = L.st("TArray", "count")
         self.fname_index = L.st("FName", "index")
         self.fname_number = L.st("FName", "number")
+        self.fname_size = L.st_size("FName")
         self.entry_index = L.st("FNameEntry", "index")
         self.entry_chars = L.st("FNameEntry", "chars")
         self.entry_wide_mask = int(L.st_attr("FNameEntry", "wide_flag_mask"))
@@ -363,10 +366,14 @@ class Names:
             return self.cache[index]
         if index < 0:
             return None
-        if index >= self.count:
-            self.refresh()
-            if index >= self.count:
-                return None
+        # The table is a growing array: when it grows the engine moves it, so
+        # the data pointer read earlier may point at freed memory. Entries
+        # themselves never move or change, hence the cache by index; every
+        # miss reads the table's header again (two reads, and misses are rare
+        # after the first frames).
+        self.refresh()
+        if index >= self.count or not self.data:
+            return None
         ptr = self.mem.ptr(self.data + index * self.mem.ptr_size)
         if ptr == 0:
             return None
@@ -438,6 +445,10 @@ class Sampler:
         self.sentinel_failures = []
         self.pawn_ids = {}
         self.bindings = None
+        # Addresses of the objects the last ``sample`` call walked (controller,
+        # pawn, world_info, input), for a front end that reads more from the
+        # same objects. Process-local: never written to a record.
+        self.objects = {}
 
     # -- objects
     def obj_name(self, ptr):
@@ -583,6 +594,37 @@ class Sampler:
             self.pawn_ids[pawn] = len(self.pawn_ids)
         return self.pawn_ids[pawn]
 
+    def pressed_keys(self, input_ptr, strict=False):
+        """Names of ``PlayerInput.PressedKeys`` (the keys currently held).
+
+        ``strict``: an array that cannot be a key list (a negative count, more
+        than MAX_KEYS entries, entries without a data pointer, a name that
+        does not resolve) raises ReadError instead of being read as "fewer
+        keys". For a reader that samples a running process and must tell
+        "no keys" from "could not read the keys".
+        """
+        o = self.o
+        keys = []
+        kd, kc = self.tarray(input_ptr + o.pressed_keys)
+        if strict and (kc < 0 or kc > MAX_KEYS or (kc > 0 and not kd)):
+            raise ReadError("PressedKeys is not a key list (count %d)" % kc)
+        if kd and 0 < kc <= MAX_KEYS:
+            step = o.fname_size
+            raw = self.mem.raw(kd, kc * step)
+            for i in range(kc):
+                idx, num = struct.unpack("<ii", raw[i * step : i * step + 8])
+                n = self.names.name(idx, num)
+                if n is not None:
+                    keys.append(n)
+                elif strict:
+                    raise ReadError("PressedKeys[%d] has no name (index %d)" % (i, idx))
+        return keys
+
+    def pressed_jump(self, controller_ptr):
+        """``PlayerController.bPressedJump`` read on its own."""
+        off, bit = self.o.pressed_jump
+        return bool((self.mem.u32(controller_ptr + off) >> bit) & 1)
+
     def sample(self, frame, dt_arg=None, world_ptr=None):
         """One raw record, or None when there is nothing to record this frame.
 
@@ -590,32 +632,37 @@ class Sampler:
         word saying why the frame was skipped.
         """
         o = self.o
+        P = self.mem.ptr_size
+        self.objects = {}
         objs = self.resolve()
         if objs is None:
             return None, "no-player"
         pc, pawn = objs["controller"], objs["pawn"]
+        self.objects = dict(objs)
         if world_ptr is not None:
             gworld = self.world()
             if gworld and gworld != world_ptr:
                 return None, "other-world"
 
         cb = Block(self.mem, pc, *span(
-            (o.cls, 8), (o.rotation, 12), (o.world_info, self.mem.ptr_size), (o.player_camera, 8),
-            (o.pressed_jump[0], 4), (o.fov_angle, 4), (o.player_input, 8)))
+            (o.cls, P), (o.rotation, 12), (o.world_info, P), (o.player_camera, P),
+            (o.pressed_jump[0], 4), (o.fov_angle, 4), (o.player_input, P)))
         wi = cb.ptr(o.world_info)
         if not wi:
             return None, "no-worldinfo"
+        self.objects["world_info"] = wi
+        self.objects["input"] = cb.ptr(o.player_input)
         wb = Block(self.mem, wi, *span(
             (o.time_dilation, 4), (o.time_seconds, 4), (o.real_time_seconds, 4),
-            (o.delta_seconds, 4), (o.pauser, 8)))
+            (o.delta_seconds, 4), (o.pauser, P)))
         if wb.ptr(o.pauser):
             return None, "paused"
 
         pb = Block(self.mem, pawn, *span(
-            (o.cls, 8), (o.location, 12), (o.rotation, 12), (o.physics, 1), (o.base, 8),
+            (o.cls, P), (o.location, 12), (o.rotation, 12), (o.physics, 1), (o.base, P),
             (o.velocity, 12), (o.acceleration, 12), (o.walkable_floor_z, 4),
             (o.ground_speed, 4), (o.air_speed, 4), (o.jump_z, 4), (o.air_control, 4),
-            (o.eye_height, 4), (o.weapon, 8)))
+            (o.eye_height, 4), (o.weapon, P)))
         controller_class = self.class_name_of(cb.ptr(o.cls))
         pawn_class = self.class_name_of(pb.ptr(o.cls))
 
@@ -629,14 +676,7 @@ class Sampler:
         if inp:
             if not self.ignore_sentinels and not self.check_sentinels("input", inp):
                 return None, "sentinel-mismatch"
-            kd, kc = self.tarray(inp + o.pressed_keys)
-            if kd and 0 < kc <= MAX_KEYS:
-                raw = self.mem.raw(kd, kc * 8)
-                for i in range(kc):
-                    idx, num = struct.unpack("<ii", raw[i * 8 : i * 8 + 8])
-                    n = self.names.name(idx, num)
-                    if n is not None:
-                        keys.append(n)
+            keys = self.pressed_keys(inp)
             ib = Block(self.mem, inp, *span(
                 (o.a_base_y, 4), (o.a_mouse_x, 4), (o.a_mouse_y, 4), (o.a_forward, 4),
                 (o.a_turn, 4), (o.a_strafe, 4), (o.a_look_up, 4)))
@@ -665,7 +705,7 @@ class Sampler:
                 return None, "sentinel-mismatch"
             gb = Block(self.mem, weapon, *span(
                 (o.gun_grappling[0], 4), (o.gun_location, 12), (o.gun_distance, 4),
-                (o.gun_hit_loc_actor, 8), (o.gun_times, 4), (o.gun_max, 4)))
+                (o.gun_hit_loc_actor, P), (o.gun_times, 4), (o.gun_max, 4)))
             helper = gb.ptr(o.gun_hit_loc_actor)
             anchor = None
             if helper:
@@ -684,7 +724,7 @@ class Sampler:
         pawn_flags = None
         boots = None
         if pawn_class == "ASAMUPawn":
-            fb = Block(self.mem, pawn, *span((o.pawn_has_jumped[0], 4), (o.pawn_rocket_boots, 8)))
+            fb = Block(self.mem, pawn, *span((o.pawn_has_jumped[0], 4), (o.pawn_rocket_boots, P)))
             pawn_flags = {
                 "has_jumped": fb.flag(o.pawn_has_jumped),
                 "power_jumped": fb.flag(o.pawn_power_jumped),
@@ -756,15 +796,16 @@ def record_is_finite(rec):
     return walk(rec)
 
 
-def make_header(layout, bindings, scenario=None, launch_options=None, timing=None, notes=None):
+def make_header(layout, bindings, scenario=None, launch_options=None, timing=None, notes=None,
+                recorder=RECORDER, sample_point=SAMPLE_POINT):
     timing = timing or {}
     return {
         "format": RAW_FORMAT,
         "version": RAW_VERSION,
-        "recorder": RECORDER,
+        "recorder": recorder,
         "layout": layout.id,
         "game_build": layout.game_build,
-        "sample_point": SAMPLE_POINT,
+        "sample_point": sample_point,
         "scenario": scenario,
         "launch_options": launch_options,
         "benchmarking": timing.get("benchmarking"),
@@ -933,6 +974,10 @@ def split_runs(records):
                 and r["player"]["pawn_id"] == prev["player"]["pawn_id"]
                 and r["player"]["controller_class"] == prev["player"]["controller_class"]
                 and r["player"]["pawn_class"] == prev["player"]["pawn_class"]
+                # A world's clock never goes back: a smaller TimeSeconds is
+                # another world (the level was loaded again, possibly with its
+                # WorldInfo and pawn at the old addresses).
+                and r["world"]["time_seconds"] >= prev["world"]["time_seconds"]
             )
             if not same:
                 runs.append(cur)
@@ -1224,11 +1269,16 @@ def convert_file(raw_path, out_dir=None):
 
 
 class FakeMemory:
-    """A flat memory image for the self-test (addresses from ``base``)."""
+    """A flat memory image for the self-test (addresses from ``base``).
 
-    def __init__(self, base=0x10000000, size=1 << 20):
+    ``buf`` may be any writable buffer of bytes (default: a new bytearray);
+    ``ptr_size`` is the width ``p`` writes.
+    """
+
+    def __init__(self, base=0x10000000, size=1 << 20, ptr_size=8, buf=None):
         self.base = base
-        self.buf = bytearray(size)
+        self.buf = bytearray(size) if buf is None else buf
+        self.ptr_size = ptr_size
         self.top = base + 0x100
 
     def alloc(self, size, align=16):
@@ -1249,7 +1299,7 @@ class FakeMemory:
         return bytes(self.buf[i : i + size])
 
     def p(self, addr, v):
-        self.write(addr, struct.pack("<Q", v))
+        self.write(addr, struct.pack("<Q" if self.ptr_size == 8 else "<I", v))
 
     def f(self, addr, v):
         self.write(addr, struct.pack("<f", v))
@@ -1277,24 +1327,29 @@ class FakeGame:
         "StaticMeshActor", "Class", "ASAMURocketBoots", "Wide\u00e9Name",
     ]
 
-    def __init__(self, layout=None):
+    def __init__(self, layout=None, memory=None, symbols_at=None):
+        """``memory``: a FakeMemory to build in (default: a new one with the
+        layout's pointer size). ``symbols_at``: mangled symbol name -> address
+        for the globals (default: allocated like everything else)."""
         L = self.L = layout or Layout.load()
         o = self.o = Offsets(L)
-        m = self.m = FakeMemory()
+        m = self.m = memory or FakeMemory(ptr_size=o.ptr)
+        P = o.ptr
+        at = dict(symbols_at or {})
         self.ni = {n: i for i, n in enumerate(self.NAMES)}
-        table = m.alloc(8 * len(self.NAMES))
+        table = m.alloc(P * len(self.NAMES))
         for i, n in enumerate(self.NAMES):
             wide = any(ord(c) > 127 for c in n)
-            e = m.alloc(24 + (len(n) + 1) * (4 if wide else 1))
+            e = m.alloc(o.entry_chars + (len(n) + 1) * (o.entry_wide_size if wide else 1))
             m.write(e + o.entry_index, struct.pack("<I", (i << 1) | (1 if wide else 0)))
             if wide:
-                m.write(e + o.entry_chars, n.encode("utf-32-le") + b"\0\0\0\0")
+                m.write(e + o.entry_chars, self.text(n, o.entry_wide_size))
             else:
                 m.write(e + o.entry_chars, n.encode("ascii") + b"\0")
-            m.p(table + 8 * i, e)
-        names_sym = m.alloc(16)
-        m.p(names_sym, table)
-        m.i(names_sym + 8, len(self.NAMES))
+            m.p(table + P * i, e)
+        names_sym = at.get(o.sym_names) or m.alloc(L.st_size("TArray"))
+        m.p(names_sym + o.arr_data, table)
+        m.i(names_sym + o.arr_count, len(self.NAMES))
 
         meta_cls = self.obj(0x100, 0, "Class")
         classes = {n: self.obj(0x100, meta_cls, n) for n in (
@@ -1318,9 +1373,9 @@ class FakeGame:
             target = {"pawn": pawn, "gun": gun, "input": inp}[s["object"]]
             m.f(target + L.off(s["class"], s["name"]), float(s["expected"]))
         engine = m.alloc(0x900)
-        players = m.alloc(8)
+        players = m.alloc(P)
         player = m.alloc(0x100)
-        m.p(engine + o.game_players, players)
+        m.p(engine + o.game_players + o.arr_data, players)
         m.i(engine + o.game_players + o.arr_count, 1)
         m.p(players, player)
         m.p(player + o.player_actor, pc)
@@ -1349,23 +1404,28 @@ class FakeGame:
         for i, (n, c) in enumerate(binds):
             kb = barr + i * o.keybind_size
             m.i(kb + o.keybind_name, self.ni[n])
-            sp = m.alloc((len(c) + 1) * 4)
-            m.write(sp, c.encode("utf-32-le") + b"\0\0\0\0")
+            sp = m.alloc((len(c) + 1) * o.fstring_char_size)
+            m.write(sp, self.text(c, o.fstring_char_size))
             m.p(kb + o.keybind_command + o.fstring_data, sp)
             m.i(kb + o.keybind_command + o.fstring_count, len(c) + 1)
-        m.p(inp + o.bindings, barr)
+        m.p(inp + o.bindings + o.arr_data, barr)
         m.i(inp + o.bindings + o.arr_count, len(binds))
-        self.keys = m.alloc(8 * 4)
-        m.p(inp + o.pressed_keys, self.keys)
-        self.counter = m.alloc(8)
-        gengine = m.alloc(8)
+        self.keys = m.alloc(o.fname_size * 4)
+        m.p(inp + o.pressed_keys + o.arr_data, self.keys)
+        self.counter = at.get(o.sym_frame_counter) or m.alloc(8)
+        gengine = at.get(o.sym_engine) or m.alloc(P)
         m.p(gengine, engine)
-        gworld = m.alloc(8)
+        gworld = at.get(o.sym_world) or m.alloc(P)
         m.p(gworld, self.world)
         self.symbols = {
             o.sym_engine: gengine, o.sym_frame_counter: self.counter,
             o.sym_names: names_sym, o.sym_world: gworld,
         }
+
+    @staticmethod
+    def text(s, char_size):
+        """``s`` as a zero-terminated game string with 2- or 4-byte characters."""
+        return s.encode("utf-32-le" if char_size == 4 else "utf-16-le") + b"\0" * char_size
 
     def obj(self, size, cls_ptr, name, number=0, outer=0):
         m, o = self.m, self.o
@@ -1379,8 +1439,8 @@ class FakeGame:
     def press(self, *ks):
         m, o = self.m, self.o
         for i, k in enumerate(ks):
-            m.i(self.keys + 8 * i, self.ni[k])
-            m.i(self.keys + 8 * i + 4, 0)
+            m.i(self.keys + o.fname_size * i, self.ni[k])
+            m.i(self.keys + o.fname_size * i + 4, 0)
         m.i(self.inp + o.pressed_keys + o.arr_count, len(ks))
 
     def set_state(self, frame, keys, x, yaw, physics, grappling, pitch=0):
@@ -1427,8 +1487,8 @@ def check_selftest_trace(meta, samples):
     assert any(n.startswith("init: ") for n in meta["notes"])
 
 
-def _selftest():
-    g = FakeGame()
+def _selftest(layout_path=None):
+    g = FakeGame(Layout.load(layout_path) if layout_path else None)
     sampler = Sampler(g.L, g.m.read, g.symbols)
     lines = []
     per_frame = []
@@ -1453,6 +1513,9 @@ def _selftest():
     traces = convert_raw(header, lines)
     assert len(traces) == 1, len(traces)
     check_selftest_trace(*traces[0])
+    assert sampler.objects["world_info"] == g.wi and sampler.objects["input"] == g.inp, sampler.objects
+    assert sampler.pressed_keys(g.inp) == lines[-1]["player"]["keys"]
+    assert sampler.pressed_jump(g.pc) is lines[-1]["player"]["pressed_jump"]
     # A frame of another world (seamless travel) is skipped.
     rec, why = sampler.sample(2000, world_ptr=g.world + 8)
     assert rec is None and why == "other-world", why
@@ -1461,6 +1524,13 @@ def _selftest():
     gap[3] = dict(gap[3], frame=gap[3]["frame"] + 5)
     gap[4] = dict(gap[4], frame=gap[4]["frame"] + 5)
     assert [len(s) for _, s in convert_raw(header, gap)] == [3, 2]
+    # So does a world clock that goes back (the level was loaded again and
+    # everything landed at the old addresses): no run joins the two worlds.
+    again = [dict(r, world=dict(r["world"], time_seconds=(50.0 if i < 3 else 0.25) + i / 60.0))
+             for i, r in enumerate(lines)]
+    assert [len(s) for _, s in convert_raw(header, again)] == [3, 2]
+    steady = [dict(r, world=dict(r["world"], time_seconds=50.0)) for r in lines]
+    assert [len(s) for _, s in convert_raw(header, steady)] == [5]
     # Sentinel mismatch is detected.
     g.m.f(g.gun + g.o.gun_max_distance, 1234.0)
     sampler2 = Sampler(g.L, g.m.read, g.symbols)
@@ -1476,6 +1546,25 @@ def _selftest():
     g.m.p(g.wi + g.o.outer, g.obj(0x80, 0, "PersistentLevel", outer=new_world))
     rec, why = sampler.sample(3000, world_ptr=g.world)
     assert why is None and rec["world"]["map"] == "Camera", (why, rec and rec["world"])
+
+    # The name table grows and the engine moves it: a name first needed after
+    # that is read through the table's new address, not through the old one
+    # (here cleared, as freed memory may be).
+    o, m = g.o, g.m
+    names_sym = g.symbols[o.sym_names]
+    old_table = sampler.names.data
+    n = len(FakeGame.NAMES)
+    new_table = m.alloc(o.ptr * (n + 8))
+    m.write(new_table, m.read(old_table, o.ptr * n))
+    m.write(old_table, bytes(o.ptr * n))
+    m.p(names_sym + o.arr_data, new_table)
+    assert "PersistentLevel" not in sampler.names.cache.values()
+    floor = sampler.mem.ptr(g.pawn + o.base)
+    m.i(floor + o.name, g.ni["PersistentLevel"])
+    rec, why = sampler.sample(3001, world_ptr=g.world)
+    assert why is None and rec["player"]["base"] == "PersistentLevel_12", (why, rec and rec["player"]["base"])
+    assert sampler.names.data == new_table
+    m.i(floor + o.name, g.ni["StaticMeshActor"])
 
     # Game strings never carry invalid code points (JSON readers reject lone
     # surrogates); they become U+FFFD.
@@ -1508,8 +1597,8 @@ def _selftest():
 
     steady = per_frame[-1]
     print(
-        "selftest ok (%d memory reads for %d frames; %d per frame after warm-up)"
-        % (sampler.mem.reads, len(FakeGame.FRAMES), steady)
+        "selftest ok (layout %s, %d-byte pointers; %d memory reads for %d frames; %d per frame after warm-up)"
+        % (g.L.id, g.o.ptr, sampler.mem.reads, len(FakeGame.FRAMES), steady)
     )
     return 0
 
@@ -1522,14 +1611,15 @@ def main(argv):
     c = sub.add_parser("convert", help="raw recording -> canonical asamu-trace v1 file(s)")
     c.add_argument("raw")
     c.add_argument("--out-dir")
-    sub.add_parser("selftest", help="exercise sampler and converter on a fake memory image")
+    t = sub.add_parser("selftest", help="exercise sampler and converter on a fake memory image")
+    t.add_argument("--layout", help="layout file to build the image from (default: the Mac layout)")
     args = ap.parse_args(argv)
     if args.cmd == "convert":
         for p in convert_file(args.raw, args.out_dir):
             print(p)
         return 0
     if args.cmd == "selftest":
-        return _selftest()
+        return _selftest(args.layout)
     ap.print_help()
     return 2
 

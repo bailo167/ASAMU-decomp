@@ -1,0 +1,551 @@
+{
+ "schema": "asamu-decomp/win32/image/v1",
+ "build": "Win32 (Steam build 1822049)",
+ "game_build": "steam-1822049-win32",
+ "executable": "Binaries/Win32/ASAMU-Win32-Shipping.exe",
+ "file_size": 42971136,
+ "sha256": "17f2aeb601086089f4cbf144d2eb2b4b672c2d0594ad81f8f75ba27736d26e4e",
+ "format": "PE32 (i386)",
+ "image_base": "0x00400000",
+ "size_of_image": 44654592,
+ "entry_point_rva": 28888258,
+ "entry_point_target": "mscoree.dll!_CorExeMain",
+ "time_date_stamp": 1494838235,
+ "time_date_stamp_utc": "2017-05-15T08:50:35Z",
+ "linker_version": "10.0",
+ "os_version": "5.1",
+ "subsystem": 2,
+ "subsystem_version": "5.1",
+ "characteristics": "0x0122",
+ "large_address_aware": true,
+ "dll_characteristics": "0x8140",
+ "dynamic_base": true,
+ "nx_compatible": true,
+ "relocations_stripped": false,
+ "base_relocations_highlow": 1247113,
+ "address_rule": "runtime address = module base + rva; preferred-base address (Ghidra) = image_base + rva",
+ "sections": [
+  {
+   "name": ".text",
+   "rva": 4096,
+   "virtual_size": 31258630,
+   "raw_offset": 1024,
+   "raw_size": 31259136,
+   "characteristics": "0x60000020",
+   "entropy_bits_per_byte": 6.707
+  },
+  {
+   "name": ".rdata",
+   "rva": 31264768,
+   "virtual_size": 8213714,
+   "raw_offset": 31260160,
+   "raw_size": 8214016,
+   "characteristics": "0x40000040",
+   "entropy_bits_per_byte": 5.313
+  },
+  {
+   "name": ".data",
+   "rva": 39481344,
+   "virtual_size": 1966392,
+   "raw_offset": 39474176,
+   "raw_size": 296960,
+   "characteristics": "0xC0000040",
+   "entropy_bits_per_byte": 4.693
+  },
+  {
+   "name": ".rsrc",
+   "rva": 41451520,
+   "virtual_size": 17568,
+   "raw_offset": 39771136,
+   "raw_size": 17920,
+   "characteristics": "0x40000040",
+   "entropy_bits_per_byte": 4.987
+  },
+  {
+   "name": ".reloc",
+   "rva": 41472000,
+   "virtual_size": 3181886,
+   "raw_offset": 39789056,
+   "raw_size": 3182080,
+   "characteristics": "0x42000040",
+   "entropy_bits_per_byte": 6.021
+  }
+ ],
+ "overlay_bytes": 0,
+ "tchar": {
+  "type": "wchar_t, 2 bytes (UTF-16LE)",
+  "utf16_literals_in_rdata": 45981,
+  "utf32_shaped_runs_in_rdata": 21,
+  "note": "runs of 4+ printable units followed by a NUL unit; the few UTF-32-shaped runs are consecutive one-character UTF-16 literals or small integer tables. Every native class name is a UTF-16 literal."
+ },
+ "imports": [
+  {
+   "dll": "steam_api.dll",
+   "functions": 24
+  },
+  {
+   "dll": "wxmsw28u_core_vc_custom.dll",
+   "functions": 2008
+  },
+  {
+   "dll": "wxmsw28u_aui_vc_custom.dll",
+   "functions": 36
+  },
+  {
+   "dll": "wxmsw28u_xrc_vc_custom.dll",
+   "functions": 8
+  },
+  {
+   "dll": "wxmsw28u_richtext_vc_custom.dll",
+   "functions": 171
+  },
+  {
+   "dll": "wxmsw28u_html_vc_custom.dll",
+   "functions": 37
+  },
+  {
+   "dll": "wxmsw28u_adv_vc_custom.dll",
+   "functions": 214
+  },
+  {
+   "dll": "wxmsw28u_vc_custom.dll",
+   "functions": 236
+  },
+  {
+   "dll": "DINPUT8.dll",
+   "functions": 1
+  },
+  {
+   "dll": "XINPUT1_3.dll",
+   "functions": 2
+  },
+  {
+   "dll": "WININET.dll",
+   "functions": 17
+  },
+  {
+   "dll": "d3d9.dll",
+   "functions": 4
+  },
+  {
+   "dll": "D3DCOMPILER_43.dll",
+   "functions": 3
+  },
+  {
+   "dll": "d3dx9_43.dll",
+   "functions": 11
+  },
+  {
+   "dll": "d3dx11_43.dll",
+   "functions": 1
+  },
+  {
+   "dll": "X3DAudio1_7.dll",
+   "functions": 2
+  },
+  {
+   "dll": "XAPOFX1_5.dll",
+   "functions": 1
+  },
+  {
+   "dll": "nvtt.dll",
+   "functions": 25
+  },
+  {
+   "dll": "libvorbis.dll",
+   "functions": 17
+  },
+  {
+   "dll": "libvorbisfile.dll",
+   "functions": 7
+  },
+  {
+   "dll": "libogg.dll",
+   "functions": 6
+  },
+  {
+   "dll": "WSOCK32.dll",
+   "functions": 25
+  },
+  {
+   "dll": "dbghelp.dll",
+   "functions": 12
+  },
+  {
+   "dll": "WINMM.dll",
+   "functions": 16
+  },
+  {
+   "dll": "KERNEL32.dll",
+   "functions": 150
+  },
+  {
+   "dll": "USER32.dll",
+   "functions": 100
+  },
+  {
+   "dll": "GDI32.dll",
+   "functions": 27
+  },
+  {
+   "dll": "ADVAPI32.dll",
+   "functions": 10
+  },
+  {
+   "dll": "SHELL32.dll",
+   "functions": 4
+  },
+  {
+   "dll": "ole32.dll",
+   "functions": 9
+  },
+  {
+   "dll": "OLEAUT32.dll",
+   "functions": 4
+  },
+  {
+   "dll": "MSVCP100.dll",
+   "functions": 61
+  },
+  {
+   "dll": "MSVCR100.dll",
+   "functions": 296
+  },
+  {
+   "dll": "DSOUND.dll",
+   "functions": 1
+  },
+  {
+   "dll": "CRYPT32.dll",
+   "functions": 2
+  },
+  {
+   "dll": "IPHLPAPI.DLL",
+   "functions": 1
+  },
+  {
+   "dll": "PhysXExtensions.dll",
+   "functions": 1
+  },
+  {
+   "dll": "ApexFrameworkCHECKED_x86.dll",
+   "functions": 2
+  },
+  {
+   "dll": "EasyHook32.dll",
+   "functions": 3
+  },
+  {
+   "dll": "libresample.dll",
+   "functions": 3
+  },
+  {
+   "dll": "IMM32.dll",
+   "functions": 21
+  },
+  {
+   "dll": "PSAPI.DLL",
+   "functions": 2
+  },
+  {
+   "dll": "faultrep.dll",
+   "functions": 1
+  },
+  {
+   "dll": "mscoree.dll",
+   "functions": 1
+  }
+ ],
+ "imported_functions_total": 3583,
+ "delay_imports": [
+  "d3d11.dll",
+  "dxgi.dll",
+  "OPENGL32.dll",
+  "PhysXLoader.dll"
+ ],
+ "steam_api_imports": [
+  "SteamAPI_Init",
+  "SteamAPI_RegisterCallback",
+  "SteamAPI_RestartAppIfNecessary",
+  "SteamAPI_RunCallbacks",
+  "SteamAPI_Shutdown",
+  "SteamAPI_UnregisterCallback",
+  "SteamApps",
+  "SteamFriends",
+  "SteamGameServer",
+  "SteamGameServerNetworking",
+  "SteamGameServerStats",
+  "SteamGameServerUtils",
+  "SteamGameServer_BSecure",
+  "SteamGameServer_GetSteamID",
+  "SteamGameServer_Init",
+  "SteamGameServer_RunCallbacks",
+  "SteamGameServer_Shutdown",
+  "SteamMatchmaking",
+  "SteamMatchmakingServers",
+  "SteamNetworking",
+  "SteamRemoteStorage",
+  "SteamUser",
+  "SteamUserStats",
+  "SteamUtils"
+ ],
+ "exports": [
+  {
+   "name": "??0System@Scaleform@@QAE@ABUHeapDesc@MemoryHeap@1@PAVSysAllocBase@1@@Z",
+   "rva": 2212288,
+   "section": ".text"
+  },
+  {
+   "name": "??0System@Scaleform@@QAE@PAVSysAllocBase@1@@Z",
+   "rva": 2216768,
+   "section": ".text"
+  },
+  {
+   "name": "??1AcquireInterface@Scaleform@@UAE@XZ",
+   "rva": 2212080,
+   "section": ".text"
+  },
+  {
+   "name": "??1DefaultAcquireInterface@Scaleform@@UAE@XZ",
+   "rva": 2212080,
+   "section": ".text"
+  },
+  {
+   "name": "??1System@Scaleform@@QAE@XZ",
+   "rva": 25484336,
+   "section": ".text"
+  },
+  {
+   "name": "??_FEvent@Scaleform@@QAEXXZ",
+   "rva": 2212112,
+   "section": ".text"
+  },
+  {
+   "name": "??_FMutex@Scaleform@@QAEXXZ",
+   "rva": 2212096,
+   "section": ".text"
+  },
+  {
+   "name": "??_FSemaphore@Scaleform@@QAEXXZ",
+   "rva": 2212128,
+   "section": ".text"
+  },
+  {
+   "name": "??_FSysAllocStatic@Scaleform@@QAEXXZ",
+   "rva": 2211952,
+   "section": ".text"
+  },
+  {
+   "name": "??_FSystem@Scaleform@@QAEXXZ",
+   "rva": 2230016,
+   "section": ".text"
+  },
+  {
+   "name": "??_FThread@Scaleform@@QAEXXZ",
+   "rva": 2212144,
+   "section": ".text"
+  },
+  {
+   "name": "?GetXScale@?$Matrix2x4@M@Render@Scaleform@@QBEMXZ",
+   "rva": 2219712,
+   "section": ".text"
+  },
+  {
+   "name": "?GetYScale@?$Matrix2x4@M@Render@Scaleform@@QBEMXZ",
+   "rva": 2219728,
+   "section": ".text"
+  },
+  {
+   "name": "?Init@System@GFx@Scaleform@@SAXPAVSysAllocBase@3@@Z",
+   "rva": 2212400,
+   "section": ".text"
+  },
+  {
+   "name": "?Init@System@Scaleform@@SAXPAVSysAllocBase@2@@Z",
+   "rva": 2212320,
+   "section": ".text"
+  },
+  {
+   "name": "?Prepend@?$Matrix2x4@M@Render@Scaleform@@QAEAAV123@ABV123@@Z",
+   "rva": 12645696,
+   "section": ".text"
+  },
+  {
+   "name": "?SetIdentity@?$Matrix2x4@M@Render@Scaleform@@QAEXXZ",
+   "rva": 2215840,
+   "section": ".text"
+  },
+  {
+   "name": "?SetIdentity@?$Matrix3x4@M@Render@Scaleform@@QAEXXZ",
+   "rva": 2219760,
+   "section": ".text"
+  },
+  {
+   "name": "?SetIdentity@?$Matrix4x4@M@Render@Scaleform@@QAEXXZ",
+   "rva": 2219808,
+   "section": ".text"
+  },
+  {
+   "name": "GDebugger",
+   "rva": 40137088,
+   "section": ".data"
+  },
+  {
+   "name": "GetOutermost",
+   "rva": 2041648,
+   "section": ".text"
+  },
+  {
+   "name": "GetStackOwnerClass",
+   "rva": 11915584,
+   "section": ".text"
+  },
+  {
+   "name": "PIBGetInterface",
+   "rva": 8750992,
+   "section": ".text"
+  },
+  {
+   "name": "nFringePFO",
+   "rva": 39488272,
+   "section": ".data"
+  }
+ ],
+ "debug_pdb": {
+  "file_name": "ASAMU-Win32-Shipping.pdb",
+  "guid": "a3ad3e3e2100364989ab82a135a2811e",
+  "age": 1,
+  "shipped_with_the_game": false
+ },
+ "clr_header": {
+  "runtime_header_version": "2.5",
+  "metadata_version": "v4.0.30319",
+  "flags": "0x0",
+  "il_only": false,
+  "managed_entry_point_token": "0x06000225"
+ },
+ "rich_header": [
+  {
+   "tool_id": 147,
+   "build": 21022,
+   "count": 2
+  },
+  {
+   "tool_id": 131,
+   "build": 21022,
+   "count": 99
+  },
+  {
+   "tool_id": 132,
+   "build": 30729,
+   "count": 29
+  },
+  {
+   "tool_id": 152,
+   "build": 20115,
+   "count": 15
+  },
+  {
+   "tool_id": 158,
+   "build": 40219,
+   "count": 13
+  },
+  {
+   "tool_id": 96,
+   "build": 3077,
+   "count": 1
+  },
+  {
+   "tool_id": 156,
+   "build": 40219,
+   "count": 18
+  },
+  {
+   "tool_id": 156,
+   "build": 21202,
+   "count": 6
+  },
+  {
+   "tool_id": 123,
+   "build": 50727,
+   "count": 2
+  },
+  {
+   "tool_id": 147,
+   "build": 30729,
+   "count": 40
+  },
+  {
+   "tool_id": 171,
+   "build": 30319,
+   "count": 9
+  },
+  {
+   "tool_id": 95,
+   "build": 3077,
+   "count": 10
+  },
+  {
+   "tool_id": 109,
+   "build": 50727,
+   "count": 73
+  },
+  {
+   "tool_id": 131,
+   "build": 30729,
+   "count": 11
+  },
+  {
+   "tool_id": 156,
+   "build": 30319,
+   "count": 23
+  },
+  {
+   "tool_id": 1,
+   "build": 0,
+   "count": 3739
+  },
+  {
+   "tool_id": 170,
+   "build": 40219,
+   "count": 41
+  },
+  {
+   "tool_id": 171,
+   "build": 40219,
+   "count": 882
+  },
+  {
+   "tool_id": 155,
+   "build": 40219,
+   "count": 1
+  },
+  {
+   "tool_id": 154,
+   "build": 40219,
+   "count": 1
+  },
+  {
+   "tool_id": 151,
+   "build": 0,
+   "count": 1
+  },
+  {
+   "tool_id": 157,
+   "build": 40219,
+   "count": 1
+  }
+ ],
+ "tls_directory": false,
+ "msvc_rtti": {
+  "type_descriptors": 200,
+  "complete_object_locators": 157,
+  "vtables_with_locator": 119,
+  "native_classes_with_type_descriptor": [
+   "UObject",
+   "UObjectSerializer"
+  ],
+  "native_classes_with_locator": 0,
+  "note": "the engine is compiled without RTTI; the descriptors belong to third-party, editor and a few helper types"
+ }
+}

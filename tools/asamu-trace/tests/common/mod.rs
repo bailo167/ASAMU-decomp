@@ -4,9 +4,12 @@
 //! it runs the graybox game with scripted inputs and writes what the recorder
 //! would have read (state at the start of each frame, keys of the coming
 //! frame). Converting and replaying it must reproduce our run, which tests
-//! the whole convert → replay → compare chain. `varied_recording` is a
-//! pseudo-random recording that exercises every conversion branch, for the
-//! Python/Rust cross-check.
+//! the whole convert → replay → compare chain. `scripted_recording_variable`
+//! does the same with a different length for every frame (the original
+//! without benchmark mode), on `asamu_trace::stepper`. `varied_recording` is
+//! a pseudo-random recording that exercises every conversion branch, for the
+//! Python/Rust cross-check; `with_frame_lengths` gives any recording
+//! variable frame lengths.
 
 #![allow(dead_code)]
 
@@ -14,11 +17,14 @@ use asamu_core::glam::Vec3;
 use asamu_game::Game;
 use asamu_player::trace::TraceGrappleState;
 use asamu_player::{InputFrame, Trace};
+use asamu_player::{TraceMeta, TraceSample};
 use asamu_trace::convert::units_to_radians;
 use asamu_trace::raw::{
     RAW_FORMAT, RAW_VERSION, RawAxes, RawBinding, RawBoots, RawFile, RawGun, RawHeader,
     RawPawnFlags, RawPlayer, RawRecord, RawWorld,
 };
+use asamu_trace::stepper::VariableStepper;
+use asamu_trace::timestep::FrameLength;
 
 /// The repository root.
 pub fn repo_root() -> std::path::PathBuf {
@@ -201,23 +207,18 @@ fn base_player() -> RawPlayer {
     }
 }
 
-/// A "fake original" raw recording of `n` ticks made with our graybox game,
-/// and our own runtime trace of the same run.
-pub fn scripted_recording(n: usize, first_frame: u64) -> (RawFile, Trace) {
-    let steps = script(n);
-    let mut g = Game::graybox().expect("graybox");
-    let (max_grapples, boots) = (
-        g.player().script.gun.max_grapples,
-        g.player().script.boots.enabled,
-    );
-    g.start();
-    g.start_recording();
-    for (i, s) in steps.iter().enumerate() {
-        let prev = i.checked_sub(1).map(|j| &steps[j]);
-        g.tick(&input(s, prev)).expect("tick");
-    }
-    let ours = g.stop_recording().expect("recording");
-    assert_eq!(ours.samples.len(), n + 1);
+/// What the recorder would have read during the run `ours` (sample `i` =
+/// the state at the start of frame `first_frame + i`, with the keys of the
+/// coming step). `timing(i)` gives record `i`'s world timing and its tick
+/// argument.
+fn records_of(
+    ours: &Trace,
+    steps: &[Step],
+    first_frame: u64,
+    max_grapples: i32,
+    boots: bool,
+    timing: impl Fn(usize, u64) -> (RawWorld, Option<f32>),
+) -> Vec<RawRecord> {
     let mut records = Vec::new();
     let (mut yaw, mut pitch) = (0_i32, 0_i32);
     for (i, s) in ours.samples.iter().enumerate() {
@@ -266,13 +267,42 @@ pub fn scripted_recording(n: usize, first_frame: u64) -> (RawFile, Trace) {
             is_falling: !s.grounded,
         });
         let frame = first_frame + i as u64;
+        let (world, dt_arg) = timing(i, frame);
         records.push(RawRecord {
             frame,
-            dt_arg: Some(1.0 / 60.0),
-            world: Some(world(frame)),
+            dt_arg,
+            world: Some(world),
             player: Some(p),
         });
     }
+    records
+}
+
+/// A "fake original" raw recording of `n` ticks made with our graybox game,
+/// and our own runtime trace of the same run.
+pub fn scripted_recording(n: usize, first_frame: u64) -> (RawFile, Trace) {
+    let steps = script(n);
+    let mut g = Game::graybox().expect("graybox");
+    let (max_grapples, boots) = (
+        g.player().script.gun.max_grapples,
+        g.player().script.boots.enabled,
+    );
+    g.start();
+    g.start_recording();
+    for (i, s) in steps.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| &steps[j]);
+        g.tick(&input(s, prev)).expect("tick");
+    }
+    let ours = g.stop_recording().expect("recording");
+    assert_eq!(ours.samples.len(), n + 1);
+    let records = records_of(
+        &ours,
+        &steps,
+        first_frame,
+        max_grapples,
+        boots,
+        |_, frame| (world(frame), Some(1.0 / 60.0)),
+    );
     (
         RawFile {
             header: header(bindings()),
@@ -280,6 +310,109 @@ pub fn scripted_recording(n: usize, first_frame: u64) -> (RawFile, Trace) {
         },
         ours,
     )
+}
+
+/// Frame lengths as a game without a fixed step produces them: around
+/// `1 / fps` with a few percent of jitter, a hitch now and then, never two
+/// alike in a row.
+pub fn jittery_lengths(seed: u64, n: usize, fps: f32) -> Vec<f32> {
+    let mut r = Lcg(seed);
+    let mut last = 0.0_f32;
+    (0..n)
+        .map(|i| {
+            let mut d = 1.0 / fps * (1.0 + r.f32(0.06));
+            if i % 97 == 50 {
+                d *= 3.0;
+            }
+            if d.to_bits() == last.to_bits() {
+                d += 1e-5;
+            }
+            last = d;
+            d
+        })
+        .collect()
+}
+
+/// A "fake original" recorded **without a fixed time step**: tick `i` of the
+/// script runs with the frame length `lengths[i]` (on
+/// `asamu_trace::stepper::VariableStepper`, the graybox game with a `dt` per
+/// tick). Returns the raw recording as the recorder would have written it
+/// (each record's `DeltaSeconds` is the previous frame's length, `dt_arg`
+/// the coming frame's) and our own trace of the run (`tick_rate: null`,
+/// time = the `f64` sum of the lengths).
+pub fn scripted_recording_variable(lengths: &[f32], first_frame: u64) -> (RawFile, Trace) {
+    let n = lengths.len();
+    let steps = script(n);
+    let game = Game::graybox().expect("graybox");
+    let (max_grapples, boots) = (
+        game.player().script.gun.max_grapples,
+        game.player().script.boots.enabled,
+    );
+    let mut sim = VariableStepper::from_game(&game);
+    let mut meta = TraceMeta::runtime(Some("graybox".into()), None);
+    meta.notes
+        .push("variable frame lengths; made by the asamu-trace tests".into());
+    let mut ours = Trace::new(meta);
+    ours.samples.push(TraceSample::capture(
+        0,
+        0.0,
+        &InputFrame::default(),
+        sim.player(),
+        sim.fov(),
+    ));
+    let mut times = vec![0.0_f64];
+    for (i, s) in steps.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| &steps[j]);
+        let frame_input = input(s, prev);
+        let before = times[i];
+        let after = before + f64::from(lengths[i]);
+        sim.tick(&frame_input, FrameLength::of(after - before).dt(), after);
+        times.push(after);
+        ours.samples.push(TraceSample::capture(
+            i as u64 + 1,
+            after,
+            &frame_input,
+            sim.player(),
+            sim.fov(),
+        ));
+    }
+    let records = records_of(
+        &ours,
+        &steps,
+        first_frame,
+        max_grapples,
+        boots,
+        |i, frame| {
+            let mut w = world(frame);
+            // The length of the frame that ended at this record (the first
+            // record's is from before the recording).
+            w.delta_seconds = i.checked_sub(1).map_or(1.0 / 59.0, |j| lengths[j]);
+            w.time_seconds = 100.0 + times[i] as f32;
+            w.real_time_seconds = w.time_seconds;
+            (w, lengths.get(i).copied())
+        },
+    );
+    let mut h = header(bindings());
+    h.launch_options = Some("-WINDOWED".into());
+    h.benchmarking = Some(false);
+    h.fixed_delta_time = Some(f64::from(1.0_f32 / 30.0));
+    (RawFile { header: h, records }, ours)
+}
+
+/// Gives every record of `raw` its own `DeltaSeconds` (and a matching tick
+/// argument on the record before it), as a recording without benchmark mode
+/// has them.
+pub fn with_frame_lengths(raw: &mut RawFile, seed: u64) {
+    let lengths = jittery_lengths(seed, raw.records.len(), 60.0);
+    for (i, d) in lengths.iter().enumerate() {
+        if let Some(w) = raw.records[i].world.as_mut() {
+            w.delta_seconds = *d;
+        }
+        if let Some(prev) = i.checked_sub(1) {
+            raw.records[prev].dt_arg = Some(*d);
+        }
+    }
+    raw.header.benchmarking = Some(false);
 }
 
 /// Deterministic pseudo-random numbers (64-bit LCG, high bits).

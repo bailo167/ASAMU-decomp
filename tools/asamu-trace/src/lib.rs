@@ -18,9 +18,16 @@
 //!   segmentation at gaps). The Python recorder's converter mirrors it; a test
 //!   checks the two agree.
 //! - [`replay`]: drives [`asamu_game::Game`] (graybox or a converted level,
-//!   optionally with Kismet) with a trace's initial state and inputs.
+//!   optionally with Kismet) with a trace's initial state and inputs: with
+//!   fixed ticks for a fixed-rate trace, with each sample's own frame length
+//!   for a variable-rate one.
+//! - [`timestep`]: the frame lengths of a trace (`time[k] − time[k−1]`) and
+//!   what the simulation does with them.
+//! - [`stepper`]: a tick with a caller-supplied `dt`, rebuilt from the
+//!   public simulation API (`Game::tick` takes its step from a fixed clock).
 //! - [`compare`]: [`asamu_player::trace::compare_with`] plus per-field first
-//!   exceedances and a verdict.
+//!   exceedances, a check that both traces stepped with the same frame
+//!   lengths, and a verdict.
 //! - [`report`]: markdown tables from comparison summaries.
 //! - [`macho`] and [`layout`]: static self-checks of the recorder's symbols
 //!   and offsets against the repository's layout data and, when present, the
@@ -34,6 +41,8 @@ pub mod macho;
 pub mod raw;
 pub mod replay;
 pub mod report;
+pub mod stepper;
+pub mod timestep;
 
 use std::fs::File;
 use std::io::BufReader;

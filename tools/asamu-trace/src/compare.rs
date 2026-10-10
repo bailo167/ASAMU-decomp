@@ -6,6 +6,21 @@
 //! identities and a verdict. The summary is JSON (`asamu-trace-compare` v1)
 //! so [`crate::report`] can turn several comparisons into a markdown table.
 //! Tolerances are an analysis choice per study, not a property of the game.
+//!
+//! # Time
+//!
+//! Traces are aligned by **tick index**, never by time: sample `k` of both
+//! is the state after the same input, whatever the frame lengths were. That
+//! is also right for variable-rate traces (`tick_rate: null`), as long as
+//! both sides stepped tick `k` with the same frame length — which a
+//! per-sample replay does and a fixed-rate replay of a variable-rate
+//! recording does not. [`TimingSummary`] checks it from the sample times:
+//! the frame lengths of both traces over the ticks they share, the ticks
+//! where the two lengths differ ([`crate::timestep::same_length`]) and the
+//! largest difference in elapsed time. A mismatch does not change the
+//! verdict (the fields still are what they are); the text and the report
+//! flag it, because per-tick errors between runs with different frame
+//! lengths measure the step difference, not the simulation.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -13,6 +28,8 @@ use std::fmt::Write as _;
 use asamu_player::Trace;
 use asamu_player::trace::{CompareTolerances, TraceDiff, TraceField, TraceSource, compare_with};
 use serde::{Deserialize, Serialize};
+
+use crate::timestep::{StepStats, finite, same_length};
 
 /// Value of [`CompareSummary::format`].
 pub const SUMMARY_FORMAT: &str = "asamu-trace-compare";
@@ -66,6 +83,46 @@ pub struct Exceedance {
     pub error: f64,
 }
 
+/// The first tick both traces stepped with different frame lengths.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StepMismatch {
+    /// Tick.
+    pub tick: u64,
+    /// Frame length of the tick in the reference trace, seconds.
+    pub a: f64,
+    /// Frame length of the tick in the trace under test, seconds.
+    pub b: f64,
+}
+
+/// Frame lengths of two compared traces (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimingSummary {
+    /// Frame lengths of the reference trace (all its consecutive ticks).
+    pub a: StepStats,
+    /// Frame lengths of the trace under test.
+    pub b: StepStats,
+    /// Ticks whose frame length is known in both traces (the tick and the
+    /// one before it are in both).
+    pub compared: usize,
+    /// Of those, the ticks with different lengths.
+    pub mismatches: usize,
+    /// The first of them.
+    pub first_mismatch: Option<StepMismatch>,
+    /// Largest difference in elapsed time over the matched ticks, seconds
+    /// (elapsed = time since the first matched tick, in each trace).
+    pub max_time_skew: f64,
+    /// The tick of that largest difference.
+    pub max_time_skew_tick: Option<u64>,
+}
+
+impl TimingSummary {
+    /// `true` when no compared tick had different frame lengths.
+    #[must_use]
+    pub fn aligned(&self) -> bool {
+        self.mismatches == 0
+    }
+}
+
 /// Overall outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +158,10 @@ pub struct CompareSummary {
     pub first_exceedance: BTreeMap<String, Exceedance>,
     /// Verdict.
     pub verdict: Verdict,
+    /// Frame lengths of both traces and whether they agree (absent in
+    /// summaries written before it existed).
+    #[serde(default)]
+    pub timing: Option<TimingSummary>,
 }
 
 fn field_name(f: TraceField) -> &'static str {
@@ -145,6 +206,18 @@ pub fn compare_traces(
                 .or_insert(Exceedance { tick, error: err });
         }
     };
+    let mut timing = TimingSummary {
+        a: StepStats::of_samples(&a.samples),
+        b: StepStats::of_samples(&b.samples),
+        compared: 0,
+        mismatches: 0,
+        first_mismatch: None,
+        max_time_skew: 0.0,
+        max_time_skew_tick: None,
+    };
+    // Times of the first and of the previous matched tick, in both traces.
+    let mut first_matched: Option<(f64, f64)> = None;
+    let mut prev_matched: Option<(u64, f64, f64)> = None;
     let (mut i, mut j) = (0, 0);
     while i < a.samples.len() && j < b.samples.len() {
         let (sa, sb) = (&a.samples[i], &b.samples[j]);
@@ -157,6 +230,27 @@ pub fn compare_traces(
             continue;
         }
         let t = sa.tick;
+        let (a0, b0) = *first_matched.get_or_insert((sa.time, sb.time));
+        let skew = finite(((sa.time - a0) - (sb.time - b0)).abs());
+        if skew > timing.max_time_skew {
+            timing.max_time_skew = skew;
+            timing.max_time_skew_tick = Some(t);
+        }
+        if let Some((pt, pa, pb)) = prev_matched
+            && pt.checked_add(1) == Some(t)
+        {
+            let (da, db) = (finite(sa.time - pa), finite(sb.time - pb));
+            timing.compared += 1;
+            if !same_length(da, db) {
+                timing.mismatches += 1;
+                timing.first_mismatch.get_or_insert(StepMismatch {
+                    tick: t,
+                    a: da,
+                    b: db,
+                });
+            }
+        }
+        prev_matched = Some((t, sa.time, sb.time));
         note(
             TraceField::Position,
             t,
@@ -224,6 +318,56 @@ pub fn compare_traces(
         diff,
         first_exceedance: first,
         verdict,
+        timing: Some(timing),
+    }
+}
+
+/// How a trace steps, for people: its fixed rate, else its frame lengths.
+#[must_use]
+pub fn describe_steps(info: &TraceInfo, stats: &StepStats) -> String {
+    match info.tick_rate {
+        Some(rate) => format!("{rate} Hz"),
+        None if stats.steps == 0 => "no fixed rate".to_owned(),
+        None => format!("variable {}", stats.describe()),
+    }
+}
+
+/// The `time step:` lines of [`render_text`]: one line when both traces
+/// stepped alike, a warning with the first differing tick otherwise.
+fn render_timing(o: &mut String, s: &CompareSummary) {
+    let Some(t) = &s.timing else {
+        return;
+    };
+    let _ = writeln!(
+        o,
+        "time step: a {}, b {}",
+        describe_steps(&s.a, &t.a),
+        describe_steps(&s.b, &t.b)
+    );
+    if t.aligned() {
+        let _ = writeln!(
+            o,
+            "frame lengths agree on {} compared tick(s); max elapsed-time difference {:.3e} s",
+            t.compared, t.max_time_skew
+        );
+    } else {
+        let first = t.first_mismatch.map_or_else(String::new, |m| {
+            format!(
+                " (first at tick {}: a {:.6} s, b {:.6} s)",
+                m.tick, m.a, m.b
+            )
+        });
+        let _ = writeln!(
+            o,
+            "warning: frame lengths differ on {} of {} compared tick(s){first}; elapsed time \
+             differs by up to {:.6} s (tick {}). The traces were not stepped alike, so the \
+             per-tick errors include the step difference",
+            t.mismatches,
+            t.compared,
+            t.max_time_skew,
+            t.max_time_skew_tick
+                .map_or_else(|| "-".to_owned(), |k| k.to_string())
+        );
     }
 }
 
@@ -247,6 +391,7 @@ pub fn render_text(s: &CompareSummary) -> String {
         "matched ticks {}, only in a {}, only in b {}",
         d.matched, d.only_in_a, d.only_in_b
     );
+    render_timing(&mut o, s);
     let t = &s.tolerances;
     let _ = writeln!(
         o,
@@ -529,6 +674,139 @@ mod tests {
             };
             assert!(consistent, "round {round}: {:?}", s.verdict);
         }
+    }
+
+    /// `trace(n)` with the given frame lengths (time = their sum) and no
+    /// fixed rate.
+    fn variable(lengths: &[f64]) -> Trace {
+        let mut t = trace(lengths.len() as u64 + 1);
+        t.meta.tick_rate = None;
+        let mut time = 0.0;
+        for (s, d) in t.samples.iter_mut().skip(1).zip(lengths) {
+            time += d;
+            s.time = time;
+        }
+        t
+    }
+
+    #[test]
+    fn timing_of_fixed_and_variable_traces() {
+        // Two fixed 60 Hz traces: one with times tick / 60, one with the sum
+        // of the f32 step (as a converted recording has it). Same steps.
+        let a = trace(600);
+        let mut b = a.clone();
+        let d60 = f64::from(1.0_f32 / 60.0);
+        for s in &mut b.samples {
+            s.time = s.tick as f64 * d60;
+        }
+        let s = compare_traces("a", &a, "b", &b, &CompareTolerances::default());
+        let t = s.timing.unwrap();
+        assert!(t.aligned());
+        assert_eq!((t.compared, t.mismatches), (599, 0));
+        assert_eq!(t.first_mismatch, None);
+        assert!(t.max_time_skew > 0.0 && t.max_time_skew < 1e-6, "{t:?}");
+        assert_eq!(t.a.steps, 599);
+        assert!(t.a.uniform() && t.b.uniform());
+        assert_eq!(s.verdict, Verdict::Exact, "times are not a compared field");
+        let text = render_text(&s);
+        assert!(text.contains("time step: a 60 Hz, b 60 Hz\n"), "{text}");
+        assert!(
+            text.contains("frame lengths agree on 599 compared tick(s)"),
+            "{text}"
+        );
+        assert!(!text.contains("warning"), "{text}");
+
+        // A variable-rate trace against itself (a per-sample replay), with
+        // another time base: aligned, no skew.
+        let lengths: Vec<f64> = (0..50).map(|i| 0.012 + 0.001 * f64::from(i % 7)).collect();
+        let v = variable(&lengths);
+        let mut w = v.clone();
+        for s in &mut w.samples {
+            s.time += 1000.0;
+        }
+        let s = compare_traces("v", &v, "w", &w, &CompareTolerances::default());
+        let t = s.timing.unwrap();
+        assert!(t.aligned());
+        assert_eq!(t.compared, 50);
+        assert!(t.max_time_skew < 1e-9, "{t:?}");
+        assert!((t.a.min - 0.012).abs() < 1e-12 && (t.a.max - 0.018).abs() < 1e-12);
+        assert!(!t.a.uniform());
+        let text = render_text(&s);
+        assert!(
+            text.contains(
+                "time step: a variable 0.012000..0.018000 s (mean 0.014940 s), b variable 0.012000.."
+            ),
+            "{text}"
+        );
+
+        // The same recording against a fixed 60 Hz replay of it: every tick
+        // was stepped with another length. The verdict still is about the
+        // fields; the timing says the runs are not comparable tick by tick.
+        let fixed = trace(51);
+        let s = compare_traces("v", &v, "fixed", &fixed, &CompareTolerances::default());
+        let t = s.timing.unwrap();
+        assert!(!t.aligned());
+        assert_eq!((t.compared, t.mismatches), (50, 50));
+        let m = t.first_mismatch.unwrap();
+        assert_eq!(m.tick, 1);
+        assert!((m.a - 0.012).abs() < 1e-12 && (m.b - 1.0 / 60.0).abs() < 1e-12);
+        let elapsed: f64 = lengths.iter().sum();
+        assert!((t.max_time_skew - (50.0 / 60.0 - elapsed).abs()).abs() < 1e-9);
+        assert_eq!(t.max_time_skew_tick, Some(50));
+        assert_eq!(s.verdict, Verdict::Exact);
+        let text = render_text(&s);
+        assert!(
+            text.contains("time step: a variable 0.012000..0.018000 s (mean 0.014940 s), b 60 Hz"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "warning: frame lengths differ on 50 of 50 compared tick(s) (first at tick 1: \
+                 a 0.012000 s, b 0.016667 s)"
+            ),
+            "{text}"
+        );
+
+        // Lengths are only compared where both traces have the tick and the
+        // one before it; one differing tick is found.
+        let mut gappy = v.clone();
+        gappy.samples.remove(20);
+        gappy.samples[30].time += 0.004;
+        let s = compare_traces("v", &v, "gappy", &gappy, &CompareTolerances::default());
+        let t = s.timing.unwrap();
+        // 50 ticks, minus ticks 20 and 21 (tick 20 is missing in b).
+        assert_eq!(t.compared, 48);
+        // b's sample 30 is tick 31: its length and the next one's changed.
+        assert_eq!(t.mismatches, 2);
+        assert_eq!(t.first_mismatch.unwrap().tick, 31);
+        assert_eq!(t.b.steps, 48, "b's own lengths skip its gap");
+
+        // The summary keeps the timing through JSON; one written before the
+        // field existed still reads.
+        let json = serde_json::to_string(&s).unwrap();
+        let back: CompareSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timing, s.timing);
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        old.as_object_mut().unwrap().remove("timing");
+        let back: CompareSummary = serde_json::from_value(old).unwrap();
+        assert_eq!(back.timing, None);
+        assert!(!render_text(&back).contains("time step"));
+
+        // Degenerate times never make the summary unwritable.
+        let mut wild = v.clone();
+        wild.samples[5].time = 1e308;
+        wild.samples[6].time = -1e308;
+        let s = compare_traces("v", &v, "wild", &wild, &CompareTolerances::default());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            serde_json::from_str::<CompareSummary>(&json).is_ok(),
+            "{json}"
+        );
+        let none = Trace::new(v.meta.clone());
+        let s = compare_traces("n", &none, "n", &none, &CompareTolerances::default());
+        let t = s.timing.unwrap();
+        assert_eq!((t.compared, t.a.steps, t.max_time_skew_tick), (0, 0, None));
+        assert!(render_text(&s).contains("time step: a no fixed rate, b no fixed rate"));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! The Python recorder (tools/trace-recorder) against the Rust reference:
-//! its own self-tests, its LLDB front end against a stand-in `lldb` module,
-//! and its raw → canonical converter against `asamu_trace::convert` on
-//! pseudo-random recordings. Skips when no `python3` is on the PATH.
+//! its own self-tests (with the Mac and the Windows layout), its LLDB front
+//! end against a stand-in `lldb` module, its Windows front end against a
+//! fake 32-bit image, and its raw → canonical converter against
+//! `asamu_trace::convert` on pseudo-random recordings. Skips when no
+//! `python3` is on the PATH.
 
 #![allow(clippy::unwrap_used)]
 
@@ -58,6 +60,34 @@ fn python_self_tests() {
     let glue = dir.join("test_lldb_glue.py");
     let out = run_python(py, &[glue.as_os_str()]);
     assert!(out.contains("lldb glue test ok"), "{out}");
+    // The same core with the Windows layout (4-byte pointers, UTF-16).
+    let win_layout = dir.join("layout_win_x86.json");
+    let out = run_python(
+        py,
+        &[
+            core.as_os_str(),
+            "selftest".as_ref(),
+            "--layout".as_ref(),
+            win_layout.as_os_str(),
+        ],
+    );
+    assert!(
+        out.contains("selftest ok (layout win-x86-steam-1822049, 4-byte pointers"),
+        "{out}"
+    );
+}
+
+/// The Windows front end on its fake 32-bit image (frame order played one
+/// event per memory read; no Windows needed).
+#[test]
+fn python_windows_front_end_tests() {
+    let Some(py) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let glue = recorder_dir().join("test_win_glue.py");
+    let out = run_python(py, &[glue.as_os_str()]);
+    assert!(out.contains("win glue test ok"), "{out}");
 }
 
 fn same_notes(py: &[String], rs: &[String]) {
@@ -128,6 +158,44 @@ fn python_and_rust_converters_agree() {
         segments += crosscheck(py, &raw, dir.path(), &format!("varied{seed}"));
     }
     assert!(segments >= 8, "only {segments} segments exercised");
+
+    // Recordings without benchmark mode: every frame has its own length.
+    // Both converters write no tick rate and the same sample times (the f64
+    // sum of the f32 frame lengths).
+    let lengths = common::jittery_lengths(3, 150, 60.0);
+    let (variable, _) = common::scripted_recording_variable(&lengths, 500);
+    assert_eq!(crosscheck(py, &variable, dir.path(), "variable"), 1);
+    let rust = convert(&variable, &ConvertOptions::default()).unwrap();
+    assert_eq!(rust[0].trace.meta.tick_rate, None);
+    let mut variable_segments = 0;
+    for seed in [11_u64, 12, 13] {
+        let mut raw = common::varied_recording(seed, 300, seed % 2 == 1);
+        common::with_frame_lengths(&mut raw, seed);
+        let segs = convert(&raw, &ConvertOptions::default()).unwrap();
+        // (A two-sample run has one frame length, which is a fixed rate.)
+        assert!(
+            segs.iter()
+                .all(|s| s.trace.samples.len() < 3 || s.trace.meta.tick_rate.is_none())
+        );
+        variable_segments += crosscheck(py, &raw, dir.path(), &format!("variable{seed}"));
+    }
+    assert!(variable_segments >= 6, "only {variable_segments} segments");
+
+    // A level loaded again between two consecutive frames (the world's clock
+    // goes back, nothing else changes): both converters end the run there.
+    let (mut reloaded, _) = common::scripted_recording(80, 10);
+    let before = convert(&reloaded, &ConvertOptions::default())
+        .unwrap()
+        .len();
+    for r in &mut reloaded.records[40..] {
+        let w = r.world.as_mut().unwrap();
+        w.time_seconds -= 0.5;
+        w.real_time_seconds -= 0.5;
+    }
+    assert_eq!(
+        crosscheck(py, &reloaded, dir.path(), "reloaded"),
+        before + 1
+    );
 
     // A hostile binding table (wide alias fan-out, self references, empty
     // parts): both converters stop at the same expansion budget.

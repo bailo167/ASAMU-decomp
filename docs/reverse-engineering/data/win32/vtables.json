@@ -1,0 +1,568 @@
+{
+ "schema": "asamu-decomp/win32/vtables/v1",
+ "build": "Win32 (Steam build 1822049)",
+ "game_build": "steam-1822049-win32",
+ "image_base": "0x00400000",
+ "address_rule": "runtime address = module base + rva",
+ "notes": [
+  "MSVC layout: the object's first word points at the vtable's first slot (no offset-to-top / typeinfo words to skip).",
+  "A script-only class is constructed by its nearest native ancestor and carries that ancestor's vtable.",
+  "RTTI complete-object locators do not exist for UObject classes on this build (compiled without RTTI); the vtables come from the constructors."
+ ],
+ "classes": [
+  {
+   "class": "UObject",
+   "package": "Core",
+   "size": 60,
+   "super": null,
+   "vtable_rva": 31829304,
+   "vtable_rva_hex": "0x01E5AD38",
+   "secondary_vtables": [],
+   "shared_with": [
+    "UObjectSerializer"
+   ],
+   "private_static_class_rva": 40834988,
+   "internal_constructor_rva": 2023664
+  },
+  {
+   "class": "UClass",
+   "package": "Core",
+   "size": 456,
+   "super": "UState",
+   "vtable_rva": 31769920,
+   "vtable_rva_hex": "0x01E4C540",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40264816,
+   "internal_constructor_rva": 1750304
+  },
+  {
+   "class": "UPackage",
+   "package": "Core",
+   "size": 240,
+   "super": "UObject",
+   "vtable_rva": 31770600,
+   "vtable_rva_hex": "0x01E4C7E8",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40264848,
+   "internal_constructor_rva": 1753152
+  },
+  {
+   "class": "UWorld",
+   "package": "Engine",
+   "size": 736,
+   "super": "UObject",
+   "vtable_rva": 33133032,
+   "vtable_rva_hex": "0x01F991E8",
+   "secondary_vtables": [
+    {
+     "object_offset": 60,
+     "vtable_rva": 33132988
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40944780,
+   "internal_constructor_rva": 9063552
+  },
+  {
+   "class": "ULevel",
+   "package": "Engine",
+   "size": 960,
+   "super": "ULevelBase",
+   "vtable_rva": 32781960,
+   "vtable_rva_hex": "0x01F43688",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40937816,
+   "internal_constructor_rva": 6380320
+  },
+  {
+   "class": "AActor",
+   "package": "Engine",
+   "size": 460,
+   "super": "UObject",
+   "vtable_rva": 31883968,
+   "vtable_rva_hex": "0x01E682C0",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883648,
+   "internal_constructor_rva": 4388832
+  },
+  {
+   "class": "AWorldInfo",
+   "package": "Engine",
+   "size": 2136,
+   "super": "AZoneInfo",
+   "vtable_rva": 32409008,
+   "vtable_rva_hex": "0x01EE85B0",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883716,
+   "internal_constructor_rva": 4502848
+  },
+  {
+   "class": "UEngine",
+   "package": "Engine",
+   "size": 1592,
+   "super": "USubsystem",
+   "vtable_rva": 32672456,
+   "vtable_rva_hex": "0x01F28AC8",
+   "secondary_vtables": [
+    {
+     "object_offset": 60,
+     "vtable_rva": 32672448
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40929696,
+   "internal_constructor_rva": 5615616
+  },
+  {
+   "class": "UGameEngine",
+   "package": "Engine",
+   "size": 1948,
+   "super": "UEngine",
+   "vtable_rva": 32713296,
+   "vtable_rva_hex": "0x01F32A50",
+   "secondary_vtables": [
+    {
+     "object_offset": 60,
+     "vtable_rva": 32713292
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40929700,
+   "internal_constructor_rva": 5451696
+  },
+  {
+   "class": "UPlayer",
+   "package": "Engine",
+   "size": 96,
+   "super": "UObject",
+   "vtable_rva": 31939928,
+   "vtable_rva_hex": "0x01E75D58",
+   "secondary_vtables": [
+    {
+     "object_offset": 60,
+     "vtable_rva": 31939920
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40941408,
+   "internal_constructor_rva": 7460080
+  },
+  {
+   "class": "ULocalPlayer",
+   "package": "Engine",
+   "size": 932,
+   "super": "UPlayer",
+   "vtable_rva": 32905496,
+   "vtable_rva_hex": "0x01F61918",
+   "secondary_vtables": [
+    {
+     "object_offset": 60,
+     "vtable_rva": 32905492
+    },
+    {
+     "object_offset": 96,
+     "vtable_rva": 32905476
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40941412,
+   "internal_constructor_rva": 7530016
+  },
+  {
+   "class": "UGameViewportClient",
+   "package": "Engine",
+   "size": 296,
+   "super": "UScriptViewportClient",
+   "vtable_rva": 32905120,
+   "vtable_rva_hex": "0x01F617A0",
+   "secondary_vtables": [
+    {
+     "object_offset": 60,
+     "vtable_rva": 32905000
+    },
+    {
+     "object_offset": 64,
+     "vtable_rva": 32904992
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40941444,
+   "internal_constructor_rva": 7526224
+  },
+  {
+   "class": "UWindowsClient",
+   "package": "WinDrv",
+   "size": 476,
+   "super": "UClient",
+   "vtable_rva": 35634928,
+   "vtable_rva_hex": "0x021FBEF0",
+   "secondary_vtables": [
+    {
+     "object_offset": 60,
+     "vtable_rva": 35634924
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 41200100,
+   "internal_constructor_rva": 21314208
+  },
+  {
+   "class": "AController",
+   "package": "Engine",
+   "size": 848,
+   "super": "AActor",
+   "vtable_rva": 32361704,
+   "vtable_rva_hex": "0x01EDCCE8",
+   "secondary_vtables": [
+    {
+     "object_offset": 460,
+     "vtable_rva": 32361660
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40883868,
+   "internal_constructor_rva": 4392640
+  },
+  {
+   "class": "APlayerController",
+   "package": "Engine",
+   "size": 1416,
+   "super": "AController",
+   "vtable_rva": 32404056,
+   "vtable_rva_hex": "0x01EE7258",
+   "secondary_vtables": [
+    {
+     "object_offset": 460,
+     "vtable_rva": 32404012
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40883876,
+   "internal_constructor_rva": 4489392
+  },
+  {
+   "class": "AGamePlayerController",
+   "package": "GameFramework",
+   "size": 1432,
+   "super": "APlayerController",
+   "vtable_rva": 33599816,
+   "vtable_rva_hex": "0x0200B148",
+   "secondary_vtables": [
+    {
+     "object_offset": 460,
+     "vtable_rva": 33599772
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 41060496,
+   "internal_constructor_rva": 12299616
+  },
+  {
+   "class": "AUDKPlayerController",
+   "package": "UDKBase",
+   "size": 2160,
+   "super": "AGamePlayerController",
+   "vtable_rva": 35776912,
+   "vtable_rva_hex": "0x0221E990",
+   "secondary_vtables": [
+    {
+     "object_offset": 460,
+     "vtable_rva": 35776868
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 41227472,
+   "internal_constructor_rva": 21916048
+  },
+  {
+   "class": "APawn",
+   "package": "Engine",
+   "size": 1108,
+   "super": "AActor",
+   "vtable_rva": 32362888,
+   "vtable_rva_hex": "0x01EDD188",
+   "secondary_vtables": [
+    {
+     "object_offset": 460,
+     "vtable_rva": 32362876
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 40940988,
+   "internal_constructor_rva": 7400608
+  },
+  {
+   "class": "AGamePawn",
+   "package": "GameFramework",
+   "size": 1112,
+   "super": "APawn",
+   "vtable_rva": 33591608,
+   "vtable_rva_hex": "0x02009138",
+   "secondary_vtables": [
+    {
+     "object_offset": 460,
+     "vtable_rva": 33591596
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 41060688,
+   "internal_constructor_rva": 12252608
+  },
+  {
+   "class": "AUDKPawn",
+   "package": "UDKBase",
+   "size": 1576,
+   "super": "AGamePawn",
+   "vtable_rva": 35757984,
+   "vtable_rva_hex": "0x02219FA0",
+   "secondary_vtables": [
+    {
+     "object_offset": 460,
+     "vtable_rva": 35757972
+    }
+   ],
+   "shared_with": [],
+   "private_static_class_rva": 41227468,
+   "internal_constructor_rva": 21845408
+  },
+  {
+   "class": "AInventory",
+   "package": "Engine",
+   "size": 536,
+   "super": "AActor",
+   "vtable_rva": 32352072,
+   "vtable_rva_hex": "0x01EDA748",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883820,
+   "internal_constructor_rva": 4391824
+  },
+  {
+   "class": "AWeapon",
+   "package": "Engine",
+   "size": 700,
+   "super": "AInventory",
+   "vtable_rva": 32353048,
+   "vtable_rva_hex": "0x01EDAB18",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883708,
+   "internal_constructor_rva": 4391872
+  },
+  {
+   "class": "AUDKWeapon",
+   "package": "UDKBase",
+   "size": 732,
+   "super": "AWeapon",
+   "vtable_rva": 35744640,
+   "vtable_rva_hex": "0x02216B80",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 41227640,
+   "internal_constructor_rva": 21834672
+  },
+  {
+   "class": "UInteraction",
+   "package": "Engine",
+   "size": 120,
+   "super": "UUIRoot",
+   "vtable_rva": 32904320,
+   "vtable_rva_hex": "0x01F61480",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40946740,
+   "internal_constructor_rva": 9766336
+  },
+  {
+   "class": "UInput",
+   "package": "Engine",
+   "size": 280,
+   "super": "UInteraction",
+   "vtable_rva": 33215240,
+   "vtable_rva_hex": "0x01FAD308",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40946088,
+   "internal_constructor_rva": 9586576
+  },
+  {
+   "class": "UPlayerInput",
+   "package": "Engine",
+   "size": 608,
+   "super": "UInput",
+   "vtable_rva": 33215600,
+   "vtable_rva_hex": "0x01FAD470",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40946092,
+   "internal_constructor_rva": 9623056
+  },
+  {
+   "class": "ACamera",
+   "package": "Engine",
+   "size": 1192,
+   "super": "AActor",
+   "vtable_rva": 32517064,
+   "vtable_rva_hex": "0x01F02BC8",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40910600,
+   "internal_constructor_rva": 5091600
+  },
+  {
+   "class": "AVolume",
+   "package": "Engine",
+   "size": 504,
+   "super": "ABrush",
+   "vtable_rva": 32008232,
+   "vtable_rva_hex": "0x01E86828",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883908,
+   "internal_constructor_rva": 4388976
+  },
+  {
+   "class": "APhysicsVolume",
+   "package": "Engine",
+   "size": 568,
+   "super": "AVolume",
+   "vtable_rva": 32341168,
+   "vtable_rva_hex": "0x01ED7CB0",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883912,
+   "internal_constructor_rva": 4389216
+  },
+  {
+   "class": "ADefaultPhysicsVolume",
+   "package": "Engine",
+   "size": 568,
+   "super": "APhysicsVolume",
+   "vtable_rva": 32342168,
+   "vtable_rva_hex": "0x01ED8098",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883920,
+   "internal_constructor_rva": 4389264
+  },
+  {
+   "class": "AInfo",
+   "package": "Engine",
+   "size": 460,
+   "super": "AActor",
+   "vtable_rva": 33146160,
+   "vtable_rva_hex": "0x01F9C530",
+   "secondary_vtables": [],
+   "shared_with": [
+    "ACrowdPopulationManagerBase",
+    "AGameCrowdSpawnRelativeActor",
+    "ARigidBodyBase"
+   ],
+   "private_static_class_rva": 40883848,
+   "internal_constructor_rva": 9484848
+  },
+  {
+   "class": "AZoneInfo",
+   "package": "Engine",
+   "size": 476,
+   "super": "AInfo",
+   "vtable_rva": 32351096,
+   "vtable_rva_hex": "0x01EDA378",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883724,
+   "internal_constructor_rva": 4391776
+  },
+  {
+   "class": "AGameInfo",
+   "package": "Engine",
+   "size": 888,
+   "super": "AInfo",
+   "vtable_rva": 32403016,
+   "vtable_rva_hex": "0x01EE6E48",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883720,
+   "internal_constructor_rva": 4488832
+  },
+  {
+   "class": "AFrameworkGame",
+   "package": "GameFramework",
+   "size": 900,
+   "super": "AGameInfo",
+   "vtable_rva": 33596720,
+   "vtable_rva_hex": "0x0200A530",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 41060596,
+   "internal_constructor_rva": 12298848
+  },
+  {
+   "class": "AHUD",
+   "package": "Engine",
+   "size": 1108,
+   "super": "AActor",
+   "vtable_rva": 32388936,
+   "vtable_rva_hex": "0x01EE3748",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 40883840,
+   "internal_constructor_rva": 4429536
+  },
+  {
+   "class": "UASAMUSystemSettingsManager",
+   "package": "asamu",
+   "size": 64,
+   "super": "UObject",
+   "vtable_rva": 35793696,
+   "vtable_rva_hex": "0x02222B20",
+   "secondary_vtables": [],
+   "shared_with": [],
+   "private_static_class_rva": 41229024,
+   "internal_constructor_rva": 21965136
+  }
+ ],
+ "script_classes": [
+  {
+   "script_class": "asamu.ASAMUPawn",
+   "native_ancestor": "AUDKPawn",
+   "vtable_rva": 35757984,
+   "unique_vtable": true
+  },
+  {
+   "script_class": "asamu.ASAMUPlayerController",
+   "native_ancestor": "AUDKPlayerController",
+   "vtable_rva": 35776912,
+   "unique_vtable": true
+  },
+  {
+   "script_class": "asamu.GrappleGun",
+   "native_ancestor": "AUDKWeapon",
+   "vtable_rva": 35744640,
+   "unique_vtable": true
+  },
+  {
+   "script_class": "asamu.ASAMUCamera",
+   "native_ancestor": "ACamera",
+   "vtable_rva": 32517064,
+   "unique_vtable": true
+  },
+  {
+   "script_class": "asamu.ASAMUPlayerInput",
+   "native_ancestor": "UPlayerInput",
+   "vtable_rva": 33215600,
+   "unique_vtable": true
+  },
+  {
+   "script_class": "asamu.ASAMUGameInfo",
+   "native_ancestor": "AFrameworkGame",
+   "vtable_rva": 33596720,
+   "unique_vtable": true
+  }
+ ]
+}

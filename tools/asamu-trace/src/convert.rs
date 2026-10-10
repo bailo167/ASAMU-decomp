@@ -27,12 +27,34 @@
 //! a `check:` note. `rope_length` is always `null` (the original grapple has
 //! no rope). FOV = the camera's POV FOV, else the controller's `FOVAngle`.
 //!
+//! # Frame lengths
+//!
+//! The tick of sample `k` has the length `WorldInfo.DeltaSeconds` of `R_k`
+//! (the dilated length of the frame that produced `R_k`'s state), an `f32`.
+//! `time` is the `f64` sum of those lengths, so the lengths can be read back
+//! from the sample times, bit for bit for any realistic recording
+//! ([`crate::timestep`]). When every frame of a run has the same length
+//! (benchmark mode) the trace gets that fixed `tick_rate`; when the lengths
+//! differ (the original without benchmark mode, as on Windows) `tick_rate`
+//! is `null` and [`crate::replay`] steps with each sample's own length. No
+//! frame length is rejected except one that is not finite. The recorder also
+//! stores the tick's own `DeltaSeconds` argument (`dt_arg`, undilated and
+//! before the engine's 0.0005..0.4 s clamp); [`raw_timing`] cross-checks it
+//! against the next record's `DeltaSeconds`.
+//!
 //! # Segments
 //!
 //! A run ends at a frame gap (missed or paused frames), at a frame without a
-//! player, and when the map, the pawn object or the controller/pawn class
-//! changes. Runs shorter than two records are dropped. Each run is one trace;
-//! replays stop at the end of a trace, never inside a gap.
+//! player, when the map, the pawn object or the controller/pawn class
+//! changes, and when the world's clock (`WorldInfo.TimeSeconds`) goes back.
+//! A world's clock never does; a smaller value is another world: the level
+//! was loaded again (a restart from the menu), and the reloaded level can
+//! leave its `WorldInfo` and pawn at the addresses the old ones had, so
+//! neither the map name nor the pawn number shows it. (A recorder stopped at
+//! one breakpoint per frame sees consecutive frame numbers across such a
+//! load; the polling recorder drops the load frame anyway.) Runs shorter
+//! than two records are dropped. Each run is one trace; replays stop at the
+//! end of a trace, never inside a gap.
 //!
 //! `tools/trace-recorder/asamu_recorder_core.py` (`convert_raw`) implements
 //! the same conversion for the recorder; `tests/python_crosscheck.rs` checks
@@ -47,6 +69,7 @@ use serde::Serialize;
 
 use crate::bindings::{Actions, KeyMap};
 use crate::raw::{RawFile, RawPlayer, RawRecord};
+use crate::timestep::StepStats;
 
 /// `Physics` value of walking (NATIVE_PHYSICS.md 1.3, CONFIRMED).
 pub const PHYS_WALKING: u8 = 1;
@@ -175,6 +198,8 @@ fn continues(prev: &RawRecord, r: &RawRecord) -> bool {
         && pp.pawn_id == p.pawn_id
         && pp.controller_class == p.controller_class
         && pp.pawn_class == p.pawn_class
+        // Not `<`: a clock that is not a number continues nothing.
+        && w.time_seconds >= pw.time_seconds
 }
 
 #[derive(Default)]
@@ -298,6 +323,102 @@ pub fn tick_rate_of(dts: &[f32]) -> Option<f32> {
     } else {
         rate as f32
     })
+}
+
+/// Shortest frame the original simulates, seconds: `UWorld::Tick` raises a
+/// shorter (dilated) frame length to this before any actor ticks.
+/// CONFIRMED in both builds of Steam build 1822049 (the `f32` constant the
+/// clamp reads: Mac 0x101718EB4, read at 0x100910BEC; Windows VA 0x226E034,
+/// read at VA 0xA358AC — see [`raw_timing`]).
+pub const ORIGINAL_MIN_FRAME: f32 = 0.0005;
+/// Longest frame the original simulates, seconds: `UWorld::Tick` lowers a
+/// longer (dilated) frame length to this. CONFIRMED in both builds (Mac
+/// 0x1016E9200, read at 0x100910BE4; Windows VA 0x22340C4, read at VA
+/// 0xA358B9).
+pub const ORIGINAL_MAX_FRAME: f32 = 0.4;
+
+/// The frame length `UWorld::Tick` gives the actors for a tick argument
+/// `dt_arg` under `time_dilation`: the product, clamped to
+/// [`ORIGINAL_MIN_FRAME`]..[`ORIGINAL_MAX_FRAME`] (during demo playback, which
+/// the recorder never sees, the engine also multiplies by a second
+/// dilation).
+#[must_use]
+pub fn original_frame_length(dt_arg: f32, time_dilation: f32) -> f32 {
+    let x = dt_arg * time_dilation;
+    if x < ORIGINAL_MIN_FRAME {
+        ORIGINAL_MIN_FRAME
+    } else {
+        x.min(ORIGINAL_MAX_FRAME)
+    }
+}
+
+/// Frame timing of a raw recording ([`raw_timing`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RawTiming {
+    /// The frame lengths conversion uses (`WorldInfo.DeltaSeconds` of every
+    /// record after the first of its run), seconds.
+    pub lengths: StepStats,
+    /// Frames with a recorded tick argument: record `R_(k−1)` has `dt_arg`
+    /// and `R_k` follows it in the same run.
+    pub arg_checked: usize,
+    /// Of those, the frames where `DeltaSeconds(R_k)` is exactly
+    /// [`original_frame_length`] of `dt_arg(R_(k−1))` and
+    /// `TimeDilation(R_(k−1))`.
+    pub arg_equal: usize,
+    /// Of the equal ones, the frames the clamp changed (shorter than
+    /// [`ORIGINAL_MIN_FRAME`] or longer than [`ORIGINAL_MAX_FRAME`]).
+    pub arg_clamped: usize,
+}
+
+/// Frame lengths of the convertible runs of `raw`, and the cross-check of
+/// each frame's tick argument against the `DeltaSeconds` the world shows
+/// afterwards.
+///
+/// The argument (`dt_arg`) is what `UWorld::Tick` was called with; the
+/// world's `DeltaSeconds` is what the actors were ticked with. `UWorld::Tick`
+/// multiplies the argument by `WorldInfo.TimeDilation`, clamps the result to
+/// 0.0005..0.4 s, stores it as `WorldInfo.DeltaSeconds` and adds it to
+/// `TimeSeconds` unless paused. CONFIRMED by disassembly in both builds:
+///
+/// | | Mac (x86_64) | Windows (Win32) |
+/// |---|---|---|
+/// | the sequence | 0x100910BA7..0x100910C29 in `UWorld::Tick(ELevelTick, float)` | VA 0xA3586B..0xA358F6, in the function that starts at VA 0xA35450 (RVA 0x635450; the start is CONFIRMED: it is the target of the direct call at VA 0x9898BE in `UGameEngine::Tick`, made with `GWorld` in `ecx` right after `UObject::StaticTick`; the only code that reads both constants) |
+/// | `TimeDilation` / `TimeSeconds` / `RealTimeSeconds` / `DeltaSeconds` | +0x530 / +0x538 / +0x53C / +0x544 | +0x41C / +0x424 / +0x428 / +0x430 |
+///
+/// Reproduce (Mac): `objdump -d
+/// --disassemble-symbols=__ZN6UWorld4TickE10ELevelTickf <executable>`;
+/// (Windows) search `.text` for the one place that reads both `f32`
+/// constants within a few instructions and disassemble around it.
+/// A recording where argument and `DeltaSeconds` do not agree shows that the
+/// step changed in some other way; conversion uses `DeltaSeconds` in any
+/// case.
+#[must_use]
+pub fn raw_timing(raw: &RawFile) -> RawTiming {
+    let mut lengths = Vec::new();
+    let mut t = RawTiming::default();
+    for run in split_runs(&raw.records) {
+        for w in run.windows(2) {
+            let [cur, next] = w else { continue };
+            let (Some(cw), Some(nw)) = (&cur.world, &next.world) else {
+                continue;
+            };
+            lengths.push(f64::from(nw.delta_seconds));
+            if let Some(arg) = cur.dt_arg {
+                t.arg_checked += 1;
+                let product = arg * cw.time_dilation;
+                if original_frame_length(arg, cw.time_dilation).to_bits()
+                    == nw.delta_seconds.to_bits()
+                {
+                    t.arg_equal += 1;
+                    if product.to_bits() != nw.delta_seconds.to_bits() {
+                        t.arg_clamped += 1;
+                    }
+                }
+            }
+        }
+    }
+    t.lengths = StepStats::of_lengths(lengths);
+    t
 }
 
 /// Converts a raw recording into one trace per usable run.
@@ -598,6 +719,38 @@ mod tests {
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].trace.meta.level.as_deref(), Some("Override"));
         assert!(convert(&raw(vec![]), &opts).unwrap().is_empty());
+    }
+
+    /// The level is loaded again between two consecutive frames and
+    /// everything lands at the old addresses: same map, same pawn number,
+    /// consecutive frame numbers. Only the world's clock shows it.
+    #[test]
+    fn a_world_clock_that_goes_back_ends_the_run() {
+        let lens = |r: Vec<RawRecord>| -> Vec<(u64, usize)> {
+            convert(&raw(r), &ConvertOptions::default())
+                .unwrap()
+                .iter()
+                .map(|s| (s.first_frame, s.trace.samples.len()))
+                .collect()
+        };
+        let mut r = scripted();
+        for (i, rec) in r.iter_mut().enumerate() {
+            let w = rec.world.as_mut().unwrap();
+            w.time_seconds = if i < 3 { 50.0 } else { 0.25 } + i as f32 / 60.0;
+        }
+        assert_eq!(lens(r.clone()), [(100, 3), (103, 2)]);
+        // Frame lengths are not taken across the reload either.
+        let t = raw_timing(&raw(r.clone()));
+        assert_eq!((t.lengths.steps, t.arg_checked), (3, 3));
+        // A clock that stands still (a pause that is not the Pauser's, zero
+        // dilation) or runs on continues the run.
+        for rec in &mut r {
+            rec.world.as_mut().unwrap().time_seconds = 50.0;
+        }
+        assert_eq!(lens(r.clone()), [(100, 5)]);
+        // By the smallest step back it ends.
+        r[4].world.as_mut().unwrap().time_seconds = f32::from_bits(50.0_f32.to_bits() - 1);
+        assert_eq!(lens(r), [(100, 4)]);
     }
 
     #[test]

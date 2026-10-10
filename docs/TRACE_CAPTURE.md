@@ -411,37 +411,286 @@ Each scenario starts standing still with 30 neutral frames (the replay starts fr
 view and walking/falling, plus the `init:` grapple and boots state; other script state starts fresh) and ends 30
 frames after landing.
 
-## 6. Route B: Windows build (plan)
+## 6. Route B: Windows build (read-only polling, no debugger)
 
-The Windows build needs its own layout file and front end; the raw format, `asamu-trace convert` and everything
-after it stay the same.
+The owner plays the Windows build natively; everything else is automated from the analysis Mac over SSH. The
+recorder on the game machine is one Python script that only **reads** the game's memory: no debugger, nothing
+installed, nothing written to the process. The raw format, `asamu-trace validate`/`convert` and everything
+after them are the ones of section 3.
 
-1. **Get the build** with your own licence (Steam on Windows, or SteamCMD with
-   `+@sSteamCmdForcePlatformType windows`). It is 32-bit (E14), compiled with MSVC, probably without symbols
-   (TENTATIVE).
-2. **Field layout.** Recompute the layout with the DEFAULTS.md method in a Win32 mode: pointers 4/4, dynamic
-   arrays and strings 12/4 (`{data, count, max}` at 0/4/8), names 8/4, delegates 12/4, interfaces 8/4, and MSVC's
-   rule that a derived class starts after its parent's **padded** size (no Itanium tail-padding reuse). Check the
-   class sizes against the sizes the registration code passes to the `UClass` constructor, as for the Mac build.
-   `TCHAR` is 2-byte UTF-16 on Windows, so `FString` and wide `FNameEntry` characters are 2 bytes; recheck the
-   `FNameEntry` header in the code that reads it.
-3. **Addresses.** Find `FName::Names` by its fixed first entries (`None`, `ByteProperty`, `IntProperty`, ...),
-   `GEngine` from the code that reads `GamePlayers`, `GFrameCounter` from the main loop, and `UWorld::Tick` from
-   `UGameEngine::Tick`'s single call after the client tick (the E15 shape). Store them as offsets from the module
-   base (ASLR moves the base only).
-4. **Layout file.** Write `tools/trace-recorder/layout_win32_<build>.json` in the same schema (`pointer_size` 4,
-   Win32 struct members, module offsets instead of symbol names), with sentinels unchanged (they are values, not
-   offsets). `check-recorder` needs two changes for this file: its schema group accepts only `pointer_size` 8
-   today, and its binary group reads Mach-O only (a PE reader would be added). The sampler takes pointer reads and
-   string character sizes from the layout; its per-object block reads assume 8-byte pointer fields, which only
-   over-reads by 4 bytes on Win32 (recheck when the Win32 layout exists).
-5. **Front end.** A small Python debugger loop with `ctypes` (no dependency): `DebugActiveProcess`, a hardware
-   execute breakpoint in `Dr0` on `UWorld::Tick`, `ReadProcessMemory` on each hit through the same
-   `asamu_recorder_core.Sampler` (it reads through any `read(addr, size)` and takes the pointer size from the
-   layout), `ContinueDebugEvent`. Hardware breakpoints leave the code untouched. Same launch options if E5 holds
-   on Windows (verify).
-6. **Rejected:** DLL injection, code hooks, patched files, external polling readers for frame-exact traces (a
-   poller cannot see frame boundaries; acceptable only for coarse position checks with `tick_rate: null`).
+**Status (2026-10-10).** Built, tested, reviewed a second time (6.8) and deployed; **not yet run against the
+game**, which was not running on the game machine at any check (the last one after the review). Verified without
+it: the logic on a fake 32-bit image with exact interleavings (6.6), the real Windows API path against a stand-in
+process on the game machine (300 of 300 frames at 62 frames per second, none torn), and the whole remote flow
+from the Mac. The feasibility gate W-F1..W-F6 (6.5) is what the first session with the game has to show.
+
+### 6.1 Components
+
+| Path | What it is |
+|---|---|
+| `tools/trace-recorder/asamu_win.py` | Windows front end: `check`, `start`, `status`, `stop`. Stock CPython 3.8+ with `ctypes` (3.13 on the game machine); imports on macOS/Linux for the tests. Opens the game once, with `PROCESS_VM_READ \| PROCESS_QUERY_INFORMATION` only, and reads with `ReadProcessMemory`; that handle is the only one to the game (W1). |
+| `tools/trace-recorder/asamu_recorder_core.py` | The same core as the Mac recorder: layout lookups, object walk, sentinels, raw format, converter. Pointer size, array, string and name-entry shapes come from the layout file. |
+| `tools/trace-recorder/layout_win_x86.json` | The Win32 layout: 4-byte pointers, RVAs of the globals, 64 field offsets, sentinels ([DEFAULTS.md](reverse-engineering/DEFAULTS.md) §9, [WINDOWS_BINARY.md](reverse-engineering/WINDOWS_BINARY.md)). |
+| `tools/trace-recorder/win_remote.sh` | Mac-side helper: `deploy`, `selftest`, `game`, `check`, `start`, `status`, `stop`, `fetch` (finished recordings only), each one SSH call with `powershell -EncodedCommand`. |
+| `tools/trace-recorder/test_win_glue.py` | Tests on a fake 32-bit image (any OS) and, with `--live-fake` on Windows, against a stand-in process through the real API. |
+
+### 6.2 Evidence (Windows build, Steam build 1822049, read only)
+
+| # | Fact | Confidence |
+|---|---|---|
+| W1 | PE32 image with `DYNAMICBASE`: every address is module base + RVA, the base is read per process, **through the recorder's own read-only handle**: `NtQueryInformationProcess(ProcessWow64Information)` gives the 32-bit environment block of the process, whose `ImageBaseAddress` (block + 8) is the executable's base; the fallback is `EnumProcessModulesEx(LIST_MODULES_32BIT)`, which reads the module list through the same handle. A candidate counts only if an executable header is readable there. No Toolhelp module snapshot is taken: the system would make it with a second handle of its own, whose access rights the recorder neither chooses nor sees. After `OpenProcess` the recorder asks the system which access the handle got (`NtQueryObject`) and closes it unused if that is more than read + query; `check` prints the mask (0x1410 = the two rights asked for plus the limited-query right Windows adds). Then it compares the header's time stamp (1494838235) and image size (44654592) at the base with the layout and refuses another build. | CONFIRMED for the file facts; CONFIRMED on the game machine for the search (a 32-bit system process: both routes give the same base, the mask is 0x1410; 6.6); that the block's field is at +8 is the stock 32-bit layout (STRONG), checked on every use by the header test |
+| W2 | RVAs of `GEngine`, `GWorld`, `GFrameCounter`, `GDeltaTime`, `GFixedDeltaTime`, `GIsBenchmarking`, `GUseFixedTimeStep`, `FName::Names`; `GCurrentTime` (RVA 0x0264F9B8, from `data/win32/globals.json`, used only in fixed-step mode). | CONFIRMED statically (WINDOWS_BINARY.md §4; `GCurrentTime` STRONG); the live check is W-F2 |
+| W3 | **Frame order**, the same as E15: `appUpdateTimeAndHandleMaxTickRate` → `UGameEngine::Tick` { `Client->Tick`, `UObject::StaticTick`, one `UWorld::Tick` } → `GFrameCounter += 1` → end-of-frame work → message pump. `UWorld::Tick` stores `WorldInfo.RealTimeSeconds` before any actor ticks. | CONFIRMED (WINDOWS_BINARY.md §6) |
+| W4 | **Key and button messages are only queued by the window procedure.** The viewport's message handler (RVA 0x0144FFB0) sends `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` (0x100, 0x101, 0x104, 0x105), `WM_CHAR`/`WM_SYSCHAR`, the mouse button messages 0x201–0x209 and 0x20B–0x20D, and focus/close to the function at RVA 0x0144A4A0 and returns; that function reads five key states with `GetKeyState` (virtual keys 0xA2, 0xA3, 0xA0, 0xA1, 0x12) and appends a 36-byte element to the array at client+0x1D0. `UWindowsClient::Tick` (RVA 0x014536D0) begins by calling RVA 0x01451E80, which hands each queued element to RVA 0x014508D0 and empties the array; then it ticks the viewports and calls RVA 0x0144B9E0. | CONFIRMED (disassembly: the queue, its five `GetKeyState` calls, the replay loop, the call order); the names `DeferMessage` / `ProcessDeferredMessages` / `ProcessInput` are stock UE3's (STRONG); that RVA 0x0144B9E0 reads mouse movement and pads was not traced (STRONG) |
+| W5 | Hence **all input reaches the game inside `Client->Tick`**: nothing between the `GFrameCounter` increment and the next `Client->Tick` changes `PressedKeys` or runs a key command, and `PressedKeys` then stays as it is through the whole `UWorld::Tick`. | STRONG (W3 + W4; a script that resets the input during a tick would change it, not examined) |
+| W6 | The time update (RVA 0x014A6820): with a variable step `GDeltaTime` is stored after the frame-limit wait, as the last thing (RVA 0x014A6B17); with a fixed step `GDeltaTime = GFixedDeltaTime` (RVA 0x014A68A8) and `GCurrentTime` advances (RVA 0x014A68C2) without any wait. | CONFIRMED (disassembly) |
+| W7 | Field offsets: the Win32 layout rules reproduce 1,652 of 1,652 native class sizes and 76 of 76 offsets shown by instructions; 29 of the recorder's 64 fields are shown by an instruction, the script-only classes are rule-derived. | CONFIRMED rules, STRONG script-class offsets (DEFAULTS.md §9); W-F3 upgrades them |
+| W8 | **The `RealTimeSeconds` store is not the first thing `UWorld::Tick` does.** Between the function's entry (RVA 0x00635450) and the store (RVA 0x00635841) it makes 22 calls, among them an indirect call (RVA 0x00635574) in its loop over `GEngine`'s local players (+0x4B4) and one `UWorld::IsPaused` call; the Mac function has the same shape (21 calls before its store at 0x100910B71: a virtual call on each local player's controller, `FParticleDataManager::Clear`, the demo and net-client hooks, `UActorComponent::BeginDeferredReattach`). `TickActors` comes after the store in both. So "no actor has ticked" holds from the counter increment to the store, but "nothing has run" holds only up to the next frame's time update: it is the late marker (6.3), not the `RealTimeSeconds` rule, that keeps a sample clear of the input dispatch and of this code. | CONFIRMED (call lists of both functions up to the store; what the Windows calls are was not resolved beyond `GetWorldInfo` and `IsPaused`); that none of them changes a field the recorder reads is UNKNOWN |
+
+Reproduce W4, W6 and W8 (`$EXE` = a local copy of `Binaries/Win32/ASAMU-Win32-Shipping.exe`; image base
+0x00400000; output is instructions to look at, nothing to commit):
+
+```sh
+D="objdump -d --no-show-raw-insn --x86-asm-syntax=intel"
+$D --start-address=0x18536D0 --stop-address=0x1853790 "$EXE"   # UWindowsClient::Tick: first call, viewport loop, third call
+$D --start-address=0x1851E80 --stop-address=0x1851FB0 "$EXE"   # the replay loop over the array at +0x1D0 (36-byte elements)
+$D --start-address=0x184A4A0 --stop-address=0x184A538 "$EXE"   # the queueing function: five GetKeyState calls, append at +0x1D0
+$D --start-address=0x1850022 --stop-address=0x1850470 "$EXE" | grep -E 'cmp|jmp|call.*0x184a4a0'   # message switch
+# (0x100/0x101 by compare to 0x1850292; the other messages through the byte-indexed jump tables at 0x1850794,
+#  0x185085C and 0x1850888, whose targets 0x1850292, 0x1850451 and 0x1850056 each call 0x184A4A0)
+$D --start-address=0x18A6820 --stop-address=0x18A6B50 "$EXE" | grep -E '0x29a7e70|0x2a4f9b8'       # GDeltaTime, GCurrentTime
+$D --start-address=0xA35450 --stop-address=0xA35900 "$EXE" | grep -E 'call|\+ 0x4(1c|24|28|30)\]'  # W8: calls before the store to +0x428
+```
+
+In the variable-step path `GCurrentTime` is stored first thing (VA 0x018A68F4, before the frame-limit wait, and
+again while waiting), `GDeltaTime` last (W6). That is why the late marker is `GDeltaTime` there: `GCurrentTime`
+would call every sample late that was read after the message pump.
+
+### 6.3 Sampling point and frame alignment
+
+```text
+FEngineLoop::Tick
+  appUpdateTimeAndHandleMaxTickRate   waits for the frame limit, stores GDeltaTime           (W6)
+  UGameEngine::Tick
+    Client->Tick                      applies the queued key/button messages                 (W4)
+    UWorld::Tick                      stores WorldInfo.RealTimeSeconds, then ticks all actors (W3)
+  GFrameCounter += 1                  ── the window opens: the frame's state is final ──
+  end-of-frame work, message pump     (key messages are only queued)
+```
+
+Every actor tick lies between the `RealTimeSeconds` store and the counter increment (W3). From the increment to
+the next store, **the window**, the world holds the finished frame's state. Per frame the recorder
+
+1. spins on `GFrameCounter` and `RealTimeSeconds` (two small reads per turn). When the counter changes, it reads
+   every object span in **one burst**: the spans the previous frame's sample used, merged per object (16 or 17
+   reads, about 50 µs on the game machine, in the stand-in test). Then it reads the counter, `RealTimeSeconds`
+   and the late marker again and parses the record from the burst.
+2. keeps the sample only if the counter advanced by exactly one, `RealTimeSeconds` (in the burst and after it)
+   still has the value the recorder saw while the finished frame was ticking, **and** the late marker has not
+   moved. Then neither the next tick nor the next frame's time update (after which the input dispatch and the
+   first part of `UWorld::Tick` run, W8) had started when the last byte was read, so the sample is the finished
+   frame's state and nothing else.
+3. keeps polling `RealTimeSeconds`. When it moves forward, once, the next `UWorld::Tick` has started and that
+   frame's input is in place (W5): the recorder reads `PressedKeys`, `bPressedJump` and `GDeltaTime` (the tick's
+   `DeltaSeconds` argument, as `dt_arg`), checks that the counter has not moved, and writes the record. A key
+   array that cannot be read or cannot be a key list (a negative count, more than 64 entries, a name that does
+   not resolve) is read again while the tick lasts; it is never taken as "no keys".
+
+What is dropped, and counted in `status.json` and `<recording>.stats.json`:
+
+| Counter | Meaning | Effect |
+|---|---|---|
+| `torn` | `RealTimeSeconds` changed before the burst was complete: a tick started while reading | the record is not written; a one-frame gap splits the run |
+| `unconfirmed` | the finished frame's tick was not seen (start-up, after a missed frame, new `WorldInfo`) | not written |
+| `late` | `GDeltaTime` changed (fixed step: `GCurrentTime`): the next frame's time update had run, so its input dispatch may have too | not written; `--keep-late` keeps it |
+| `missed` | the counter advanced by more than one between two polls | the frames in between were never seen |
+| `no_input` | a record written without its frame's keys: its tick was not seen, its keys never read, or the recording ended first. The sample after it is never confirmed, so it is always the last record of its run | the keys of a run's last record are never used |
+| `resyncs` | frames in which `RealTimeSeconds` went back, or changed a second time: the world was reset or replaced at the same address (a level loaded again), or a tick start had been misjudged | that frame's sample is not confirmed (it counts under `unconfirmed` too) and a record waiting for its keys ends its run; the next frame starts clean |
+| `input_retries` | failed reads of a frame's keys at its tick start | read again while the tick lasts; a record that never gets its keys counts under `no_input` |
+
+A failed read inside the window is retried once; a sentinel mismatch counts only on a sample read in a window.
+
+**What a level change does.** A new `WorldInfo` at a new address makes the next sample unconfirmed. A level
+loaded again can leave the new `WorldInfo` and pawn at the old addresses, with the same map name (not observed
+on this game; the engine's allocator reuses freed blocks of a size, so it has to be expected): then
+`RealTimeSeconds` starts again below its old value, which is a `resyncs` frame or a value that does not fit
+(`torn`), and the load frame is not recorded. Either way a gap ends the run, so no trace joins two worlds; `convert` also ends
+a run where `WorldInfo.TimeSeconds` goes back (section 3.3 does not say so yet), which is what protects a
+breakpoint recording, where a load inside one frame leaves no gap. While the old world is being torn down the
+recorder may still read its freed objects: such reads fail or give values that the rules above reject, and what
+they could reach is the keys of the run's last record, which are never used. When the game exits, the recording
+ends with what it has (`the game exited`).
+
+**Names and key bindings.** The name table is a growing array that the engine moves when it grows, while an
+entry stays where it is (stock UE3; STRONG for this build, where `FName::Names` is a `{data, count, max}`
+array whose data pointer and count the code reads, as the layout file's `native_evidence` shows). Names are
+cached by index and every cache miss reads the table's address again, so a name first needed after a level load
+is not read through freed memory. The key bindings written to a recording's header
+are read once more in the window of the first accepted sample and kept only if the window was still open
+afterwards (`bindings_confirmed` in the stats file). If no window in the first 60 accepted samples is long
+enough (four reads per binding; the Mac session found 64 bindings), the table the first look found is kept and
+the header says so; if a later window then shows a different table, the recording is marked failed.
+
+**Alignment.** Record `R` holds the state at the end of frame `R.frame − 1`, `WorldInfo.DeltaSeconds` = the
+(dilated) length of that frame, and the keys and `dt_arg` of frame `R.frame`: the same as a Mac record (3.1), so
+`convert` is unchanged and `validate` cross-checks `DeltaSeconds = clamp(dt_arg × TimeDilation, 0.0005, 0.4)`.
+Frame lengths vary on Windows (no benchmark mode needed), so traces get `tick_rate: null` and replay with each
+sample's own length.
+
+| | Mac (breakpoint) | Windows (polling) |
+|---|---|---|
+| State read | at `UWorld::Tick` entry, the process stopped | in the window after the previous frame's increment, the process running |
+| What a key command changed at once (during the dispatch) | already in the record with the key | in the next record (the state is read before the dispatch) |
+| `pressed_jump` | exact | read early in the tick: a press the controller has already consumed is missed; jump presses come from the key edge anyway |
+| `dt_arg` | `xmm0` | `(float)GDeltaTime`, read during the tick |
+| Header | `recorder: asamu_lldb`, layout `mac-x86_64-…` | `recorder: asamu_win 0.1.0`, layout `win-x86-steam-1822049`, `game_build: steam-1822049-win32`, note `platform: win-x86` (raw v1 has no platform field) |
+
+Which commands change state at once was not examined (TENTATIVE that the grapple's start is one); the difference
+is at most one record at a key press and never mixes two frames.
+
+**What it needs from the game.** The window has to be longer than a burst (in the stand-in runs of 6.6: 49 to
+64 µs mean, 0.09 to 0.13 ms at the 99th percentile, 0.18 ms at worst). The engine's frame-limit wait lies inside the window
+(W6: it comes before `Client->Tick`), so a limited game waits there for most of the frame (14.2 ms of 16.1 in the
+stand-in). Running uncapped at several hundred frames per second leaves no window: the stand-in at 524 frames
+per second gave one record per run (four runs of 4,441 to 13,617 frames; nearly all others torn), none wrong. Whether this game's settings limit
+the frame rate, and where its game thread waits with V-Sync, is UNKNOWN until W-F4. `-BENCHMARK` removes the
+frame-limit wait (W6): do not use it with this recorder unless a probe shows a usable window. `check` prints the
+frame rate and the counters of a 120-frame probe before anything is recorded.
+
+**What the late marker cannot see.** With a variable step the marker is `GDeltaTime`, which the time update
+stores after the frame-limit wait. Should two consecutive frames have the same `GDeltaTime` to the last bit, a
+sample read after that store and before the tick's `RealTimeSeconds` store would not be called late. The burst
+follows the counter change within microseconds and the wait lasts milliseconds, so this needs the recorder to
+lose the processor for the whole wait and then land in the short stretch before the tick, in a frame whose
+length repeats exactly. Not observed. Repeats themselves are not rare: `check` counts the probed frames whose
+`dt_arg` equals the previous frame's (37 of 120 in the stand-in, which paces its frames by spinning to an exact
+time; compared as the `float` the tick gets, so an upper bound for the `double` the marker is). How often this
+game repeats a frame length is UNKNOWN until W-F2. With a fixed step and no `GCurrentTime` address there is no
+marker at all, and the recording's header says so.
+
+**Cost.** The recorder spins on one core while a player exists (96 to 100% of one of the game machine's 24
+logical cores in the stand-in test) and sleeps in menus. It raises its own process to above-normal priority
+(`--priority normal` to leave it); it never touches the game's priority. `--cpu-saver` sleeps through most of
+the wait between frames (36% of a core, 311 records without a gap in the stand-in test) at the risk of a missed
+frame when a sleep overruns.
+
+### 6.4 Procedure
+
+The owner does two things: starts the game through Steam, and plays. Everything else runs from the repository
+root on the Mac. `ASAMU_WIN_HOST` is the SSH host of the game machine (Windows OpenSSH server, key
+authentication, Python 3 with the `py` launcher; nothing else is needed there).
+
+```sh
+export ASAMU_WIN_HOST=<ssh host of the game machine>
+R=tools/trace-recorder/win_remote.sh
+$R deploy              # copies 4 files (+ globals.json) to %USERPROFILE%\asamu-trace, compares SHA-256
+$R selftest --live     # the tests there, then the real API path against a stand-in process (no game needed)
+```
+
+`fetch --validate` builds and runs `asamu-trace` with `cargo run`: set `CARGO_TARGET_DIR` first if the build is
+to go anywhere but `target/`.
+
+1. **Owner:** start *A Story About My Uncle* in Steam (no launch options needed; keep the frame limit or
+   V-Sync on), load the scenario's level, stand still.
+2. `$R game` says whether the game runs; `$R check` must end with `result: ok` and show the module base, the
+   build match, `handle: access 0x1410 granted`, `FName::Names[0]='None'`, the map, `ASAMUPlayerController` /
+   `ASAMUPawn`, `layout sentinels: ok`, a rising `GFrameCounter` with the frame rate, and a probe with (almost)
+   no `torn`, `late`, `missed` or `resyncs` (its last line also says on how many frames `dt_arg` was read and
+   how many repeat the frame before, 6.3). In the main menu it says `player: not sampled (no-player)`.
+3. `$R start <scenario> <frames>`, for example `$R start A1 400`. The recorder runs detached on the game machine
+   and waits for a player. **Owner:** wait about a second without input, perform the scenario (section 5), stand
+   still for a second.
+4. The recording ends after `<frames>` records, or `--seconds S` after the first record, or with `$R stop`, or
+   when the game exits; `$R status` shows the counters at any time. If the game was not running, `start` fails
+   at once (`--wait-game S` makes the recorder wait for it instead).
+5. `$R fetch --validate` copies finished recordings to `research/local/traces/win/` (a raw file without its
+   `.stats.json` is still being written and is left for the next fetch) and runs `asamu-trace validate` and
+   `convert` on them. Then replay and compare as in 4.6. A trace with `tick_rate: null` is stepped with each
+   sample's own length; the replay's notes state what that mode simulates on a converted level (the player and
+   the level objects only, no Kismet: `--kismet` is refused in that mode).
+
+Further arguments of `$R start` go to `asamu_win.py start`: `--seconds S`, `--wait-game S` (start the recorder
+first, the game later), `--timeout S` (give up after this long, default 1800), `--note TEXT`,
+`"--launch-options=-WINDOWED"` (recorded only; write it with `=`), `--keep-late`, `--cpu-saver`, `--convert`,
+`--ignore-sentinels` (never for real data), `--out DIR`, `--ctl DIR`. Files on the game machine:
+`%USERPROFILE%\asamu-trace\traces\<UTC time>-<scenario>.raw.jsonl` and `.stats.json`, and in `traces\ctl`
+`status.json`, `recorder.log` and the `STOP` file. The recorder can also be run by hand there:
+`py -3 asamu_win.py check`.
+
+Safety on the game machine (section 9 applies): the game's files and process are never written. The one handle
+to the game has read + query access (W1); no debugger is attached, no thread is suspended, no privilege is
+enabled, and none of the calls that could change another process appears in the script (a test scans its source
+for them). The recorder refuses an output or control folder inside the running game's install
+(`<install>\Binaries\Win32\…` → `<install>`) and inside any copy of the game it finds on disk above that folder
+(a folder holding `Binaries\Win32\ASAMU-Win32-Shipping.exe`, whatever it is called), also when the game is not
+running yet; with the game running and its location unknown it writes nothing. No software is installed and no
+system setting is changed; the only process it starts is itself, and the only priority it changes is its own.
+
+### 6.5 Feasibility gate for Windows (first session with the game; record the outcome in docs/STATUS.md)
+
+| # | Check | How | Expected | Status 2026-10-10 |
+|---|---|---|---|---|
+| W-F1 | Read-only access from the SSH session to the game in the desktop session; module base; build match | `$R check`, first lines | pid, base, time stamp and image size match; `handle: access 0x1410 granted` | Not run on the game. Stand-ins pass: the base of a 32-bit `SysWOW64` process by both routes of W1, access mask 0x1410, a read-only handle across sessions, `ReadProcessMemory` on the stand-in |
+| W-F2 | Globals (W2) | `$R check` | `FName::Names[0]='None'`, `GFrameCounter` rising at the frame rate, `GIsBenchmarking=False`, plausible `GDeltaTime` | Not run |
+| W-F3 | Live object walk and layout (W7, E19, E20) | in a level: `$R check` | map, `ASAMUPlayerController` / `ASAMUPawn`, plausible location, bindings read, `layout sentinels: ok` | Not run |
+| W-F4 | Sampling quality and frame lengths | `$R start idle --seconds 5` standing still; `$R fetch --validate` | records ≈ 5 × frame rate, `torn + late + missed + resyncs` ≈ 0, `bindings_confirmed: true` in the stats file, `DeltaSeconds = clamp(tick argument × TimeDilation)` on every frame | Not run. Stand-in at 62 frames per second: 312 of 313 frames recorded in 5 s (the first is the start-up `unconfirmed`), 0 torn, 0 late, 0 missed, 0 resyncs, bindings confirmed, burst 49 µs mean, 92 µs at the 99th percentile, 95 µs max; `DeltaSeconds` cross-check 311 of 311 |
+| W-F5 | Input timing (W5) | record: stand 1 s, press and hold W | the first sample with `move_forward = 1` is the first whose velocity changes; note any `check:` line of the converted trace | Not run. On the fake image: exact |
+| W-F6 | Grapple state | record one grapple attach and release | `grapple_state` attached exactly while `Physics` is 4, or one sample apart at the press (6.3) | Not run |
+
+If W-F1 fails with access denied, run `py -3 asamu_win.py check` in a terminal of the desktop session and
+compare. If W-F3 fails on the sentinels, see 2.2 (recompute with `--target win32`). If W-F4 shows more than a
+few torn or late samples, turn V-Sync on; if that is not enough, use the debugger route (6.7).
+
+### 6.6 What is verified without the game (2026-10-10)
+
+| Check | Command | Result |
+|---|---|---|
+| Front end on a fake 32-bit image at a relocated base (4-byte pointers, UTF-16 names and strings, globals at base + RVA), the engine's frame order played one event per memory read: variable frame lengths, every start time of a tick against a burst (256 cases), late samples with and without a marker, missed frames, menu, new pawn, pause, new map, a level loaded again at the old addresses at every point of the frame (20 cases), keys that cannot be read for a moment or for a whole tick, key bindings confirmed in a window, failing reads, sentinels, limits, STOP, output guards (also by the files of a game copy on disk), commands, and a source scan for any call that changes a process or takes a second handle | `python3 -I tools/trace-recorder/test_win_glue.py`; also run by `cargo test -p asamu-trace --test python_crosscheck` | ok, 15 tests, 76,464 checks; Python 3.9, 3.13 and 3.14 on the Mac, 3.13 on the game machine (76,463 there). No written record ever mixes two frames or two worlds |
+| Core sampler and converter with the Windows layout (also: a name table that moved, a world clock that goes back) | `python3 -I tools/trace-recorder/asamu_recorder_core.py selftest --layout tools/trace-recorder/layout_win_x86.json` | ok (25 reads per frame before merging) |
+| Mac front end unchanged | `python3 -I tools/trace-recorder/test_lldb_glue.py` | ok |
+| A Windows raw file through the Rust tools | `asamu-trace validate`, `convert` on a recording of the fake image | accepted unchanged; `DeltaSeconds` cross-check 59 of 59; the Python converter writes the same trace |
+| Real API path on the game machine: the executable's base in a 32-bit process by both routes of W1 and in a 64-bit one, the granted access mask, `check`, detached `start`, `status`, `stop`, a 300-frame recording of a stand-in process at 62 frames per second compared record by record with the stand-in's own log, and the same stand-in uncapped | `$R selftest --live` (run four times after the review) | ok: 300 of 300 records, 0 gaps, 0 torn, 0 late, 0 missed, 0 resyncs, burst 50 µs mean (p99 0.10 ms, max 0.13 to 0.18 ms); mask 0x1410; uncapped at 524 frames per second 1 record per run (of 4,441 to 13,617 frames), exact; the 120-frame probe counted 37 frames whose `dt_arg` repeats the previous frame's |
+| Remote flow from the Mac against the stand-in: `deploy`, `check`, `start` (survives the SSH session), a `fetch` while recording (left alone), `status`, `fetch --validate`, then `asamu-trace replay` with per-sample frame lengths on the graybox and on converted AG-Workshop | `win_remote.sh`, `asamu-trace` | ok: 312 records in 5 s, 1 segment, `DeltaSeconds` cross-check 311 of 311, inputs and frame lengths of the replay agree on 311 of 311 ticks (the stand-in's motion is not the game's, so positions differ by design) |
+| With the game not running: `check`, `start`, `status`, `stop` | `win_remote.sh` | `… is not running` (exit 2), a failed start that creates no recording, a one-line status |
+| Read-only handle from the SSH session (session 0) to a process of the desktop session | one `OpenProcess` with the recorder's access mask, no memory read | granted |
+| Per-sample replay = fixed-tick replay when all frames have the same length | `cargo test -p asamu-trace` (`equal_frame_lengths_replay_exactly_like_fixed_ticks_at_any_rate`, `equal_lengths_replay_like_the_fixed_tick`); with `ASAMU_CONVERTED_DIR` also `--test real_data` | identical samples at 24, 30, 50, 60, 62, 75, 120, 144 and 240 Hz on the graybox, from level start and from a tick in the middle, and for a converted fixed-step recording; identical at 30, 60 and 144 Hz on converted AG-Workshop, AG-Darkcave, AG-ParadiseCave, AG-IceCave, AG-StarHaven, AG-BeautifulCity and AG-Epilogue (150 ticks each, no run dies; `TheCore` does not load: no player start) |
+
+Not verified (needs the running game): everything in 6.5.
+
+### 6.7 Fallback and rejected routes
+
+- **Debugger with one hardware breakpoint** (`DebugActiveProcess`, `Dr0` on `UWorld::Tick` at base + 0x00635450,
+  `ecx` = world, `[esp+8]` = `DeltaSeconds`, WOW64 thread contexts): the exact Mac sample point, and the route to
+  take if the window is too short on some machine. Not built; the game imports `IsDebuggerPresent` and its
+  behaviour under a debugger is UNKNOWN (WINDOWS_BINARY.md §9).
+- **Rejected:** DLL injection, code hooks, patched files, suspending the game's threads.
+
+### 6.8 Review of 2026-10-10 (before the first session with the game)
+
+A second pass over the recorder, its tests and the replay path, with the game still not running. Found and
+fixed:
+
+| Finding | Was | Now |
+|---|---|---|
+| A level loaded again with its `WorldInfo` at the old address made the poller take the reset of `RealTimeSeconds` for a tick start. | Depending on when in the frame it happened: either every later frame counted as torn and nothing more was recorded (reproduced: 65 torn frames in a row), or one run continued across the load with the old world's last record next to the new world's first. | `resyncs` (6.3): the load frame is dropped, the run ends, recording goes on; 20 placements of the reload tested, each against the engine's own log. |
+| The executable's base came from a Toolhelp module snapshot. | The system takes that snapshot with a handle of its own, so "one read-only handle" described the recorder's handle only. | W1: the base is read through the recorder's handle; the granted access mask is checked and printed. |
+| A failed read of a frame's keys at its tick start. | The record was written with the keys the window sample had (the previous frame's) and its run went on. | Read again while the tick lasts; otherwise the record ends its run (`no_input`). |
+| The name table's address was read once per session. | After the table grew and moved, a name not seen before was read through freed memory. | Read again on every cache miss (both recorders). |
+| The header's key bindings came from the first look at the game, at an arbitrary moment. | A table caught while a level was being set up would have been used for the whole recording. | Confirmed in a window (6.3). |
+| Output folders were checked against the running game's path, and by folder name when it was not running. | A detached start that waits for the game could create its control folder inside a copy of the game under another name. | Also checked against the files on disk (6.4). |
+| `fetch` copied every raw file it did not have. | A file fetched while it was being written was kept as if complete. | Only recordings with their `.stats.json` are fetched. |
+| `convert` joined consecutive frames of one map and pawn number. | A breakpoint recording across a reload at the old addresses would have been one run. | A run ends where `WorldInfo.TimeSeconds` goes back (Rust and Python, cross-checked). |
+
+Confirmed as reported: the frame order and the input queue (W3, W4, W6: re-read from the disassembly), the
+alignment of a record with a Mac record, the access mask of the recorder's handle, the stand-in numbers, and
+variable-rate replay (per-sample steps equal fixed ticks when the frames are equally long, 6.6).
+
+Residual risks, none of which can be closed without the game: everything in 6.5; the equal-bits case of the late
+marker (6.3); whether the code before the `RealTimeSeconds` store touches a recorded field (W8, covered by the
+late marker); `pressed_jump` (6.3 table); a level left running for days: `RealTimeSeconds` is a 32-bit float,
+and once a frame's length is below half its spacing (after about 36 hours at 144 frames per second, later at
+lower rates) the store no longer changes it and no tick start is seen (nothing is recorded; nothing wrong is
+written).
 
 ## 7. Other routes (coarse cross-checks only)
 

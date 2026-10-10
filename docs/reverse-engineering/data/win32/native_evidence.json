@@ -1,0 +1,158 @@
+{
+ "schema": "asamu-decomp/win32/native-evidence/v1",
+ "build": "Win32 (Steam build 1822049)",
+ "game_build": "steam-1822049-win32",
+ "image_base": "0x00400000",
+ "address_rule": "runtime address = module base + rva",
+ "notes": [
+  "Each entry is one or more single-instruction encodings (2-8 bytes) found in the named function; they restate the offsets in 'shows'. rva is where the first one is.",
+  "sizeof(UObject) = 60 and Outer at +0x28 leave Name at +0x2C (8 bytes), Class at +0x34 and ObjectArchetype at +0x38 when the Mac member order is kept (STRONG)."
+ ],
+ "struct_sizes": {
+  "UObject": 60,
+  "UClass": 456,
+  "TArray": 12,
+  "FName": 8,
+  "pointer": 4
+ },
+ "evidence": [
+  {
+   "what": "UObject.Outer at +0x28 (the loop of the exported GetOutermost)",
+   "function": "UObject::GetOutermost",
+   "rva": 2041699,
+   "bytes": "8b4728",
+   "shows": {
+    "Core.Object.Outer": 40
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "Engine.Client at +0x4B0 (loaded for Client->Tick before UWorld::Tick)",
+   "function": "UGameEngine::Tick",
+   "rva": 5806030,
+   "bytes": "8b8eb0040000",
+   "shows": {
+    "Engine.Engine.Client": 1200
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "Engine.GamePlayers count at +0x4B8 (TArray count at +4)",
+   "function": "UGameEngine::Tick",
+   "rva": 5806277,
+   "bytes": "39aeb8040000",
+   "shows": {
+    "Engine.Engine.GamePlayers": 1204,
+    "TArray.count": 4
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "Engine.GamePlayers data pointer at +0x4B4 (TArray data at +0)",
+   "function": "UGameEngine::Tick",
+   "rva": 5806339,
+   "bytes": "8b86b4040000",
+   "shows": {
+    "Engine.Engine.GamePlayers": 1204,
+    "TArray.data": 0
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "Player.Actor at +0x40 (first-frame loop over GEngine->GamePlayers)",
+   "function": "FEngineLoop::Tick",
+   "rva": 21663653,
+   "bytes": "8b7140",
+   "shows": {
+    "Engine.Player.Actor": 64
+   },
+   "confidence": "STRONG"
+  },
+  {
+   "what": "WorldInfo.RealTimeSeconds at +0x428 (time update at the top of UWorld::Tick, in source order)",
+   "function": "UWorld::Tick",
+   "rva": 6510657,
+   "bytes": "f30f118328040000",
+   "shows": {
+    "Engine.WorldInfo.RealTimeSeconds": 1064
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "WorldInfo.AudioTimeSeconds at +0x42C (time update at the top of UWorld::Tick, in source order)",
+   "function": "UWorld::Tick",
+   "rva": 6510691,
+   "bytes": "f30f11832c040000",
+   "shows": {
+    "Engine.WorldInfo.AudioTimeSeconds": 1068
+   },
+   "confidence": "STRONG"
+  },
+  {
+   "what": "WorldInfo.TimeDilation at +0x41C (time update at the top of UWorld::Tick, in source order)",
+   "function": "UWorld::Tick",
+   "rva": 6510699,
+   "bytes": "f30f10831c040000",
+   "shows": {
+    "Engine.WorldInfo.TimeDilation": 1052
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "WorldInfo.DeltaSeconds at +0x430 (time update at the top of UWorld::Tick, in source order)",
+   "function": "UWorld::Tick",
+   "rva": 6510804,
+   "bytes": "f30f118330040000",
+   "shows": {
+    "Engine.WorldInfo.DeltaSeconds": 1072
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "WorldInfo.TimeSeconds at +0x424 (time update at the top of UWorld::Tick, in source order)",
+   "function": "UWorld::Tick",
+   "rva": 6510838,
+   "bytes": "f30f118324040000",
+   "shows": {
+    "Engine.WorldInfo.TimeSeconds": 1060
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "FName.Index is the first word; FName::Names is {data +0, count +4}; entries are 4-byte pointers (index < count, then data[index*4] != 0)",
+   "function": "FName validity test (small accessor)",
+   "rva": 3253216,
+   "bytes": "8b01 / 3b05 <Names+4> / 8b0d <Names> / 833c8100",
+   "shows": {
+    "FName.index": 0,
+    "TArray.data": 0,
+    "TArray.count": 4
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "FNameEntry: bit 0 of the word at +8 selects wide characters; characters start at +0x10 for both forms; the wide form is compared with _wcsicmp, the ANSI form is widened first",
+   "function": "FName lookup (hash chain compare)",
+   "rva": 1918839,
+   "bytes": "f6460801 / 8d4610 / 83c610",
+   "shows": {
+    "FNameEntry.index": 8,
+    "FNameEntry.chars": 16,
+    "FNameEntry.wide_flag_mask": 1,
+    "FNameEntry.wide_char_size": 2
+   },
+   "confidence": "CONFIRMED"
+  },
+  {
+   "what": "FNameEntry.Flags is a 64-bit word at +0: a log function tests bit 0x1000 of its high half (+4) on Names[760] (the hard-coded name index of Log)",
+   "function": "FOutputDevice log helper",
+   "rva": 1920043,
+   "bytes": "8b4804 / 81e100100000",
+   "shows": {
+    "FNameEntry.flags": 0,
+    "hardcoded_name_index_Log": 760
+   },
+   "confidence": "STRONG"
+  }
+ ]
+}
