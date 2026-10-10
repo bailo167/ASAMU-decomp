@@ -1214,9 +1214,10 @@ fn falling_refinement_uses_the_f32_reciprocal_of_the_substep() {
     //   displacement × (1/dt), and since V0.Z < 0 and the average is below
     //   it the result is 2·average − V0.
     // V0.Z is chosen so that V1.Z is the speed of the recorded pair:
-    //   g·dt = −520 × 0.01631380245089531 = −8.48317718505859375 exactly
-    //   (f32 0xC107BB18), V0.Z = −862.6168 (f32 −862.6168212890625,
-    //   0xC457A77A), and their f32 sum is −871.0999755859375.
+    //   g·dt = −520 × 0.01631380245089531 = −8.4831772744…, in f32
+    //   −8.483177185058594 (0xC107BB18); V0.Z = −862.6168 (f32
+    //   −862.6168212890625, 0xC457A77A); their sum −871.0999984741… is in
+    //   f32 −871.0999755859375, the f32 nearest to −871.1.
     // The displacement is therefore −14.2109375 and the average
     // −871.0989990234375, so
     //   V.Z = 2 × (−871.0989990234375) − (−862.6168212890625)
