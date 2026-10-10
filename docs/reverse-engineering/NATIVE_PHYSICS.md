@@ -262,10 +262,10 @@ The two forms give different floats for many inputs (one unit in the last place)
 | Site | Time | Mac x86_64: reciprocal at | Win32: reciprocal at | Recordings (Windows build) |
 |---|---|---|---|---|
 | Walking, final velocity (3.1) | the call's `dt` | 0x100ADB927 | 0xB27006 | 27,443 of 27,443 consecutive walking records equal the reciprocal form; the division form equals 23,839 (`docs/PARITY_FINDINGS.md` V17) |
-| Falling, average after wall contact (4.5 step 4) | the sub-step | 0x100AE0464 | 0xB2854B | not separable from the refinement |
-| Falling, refinement (4.6) | the sub-step | 0x100AE04D1 | 0xB285E9 | as part of `2·avg − V_old`: 7,798 of 7,885 falling pairs with the reciprocal form, 4,301 with the division (sampling analysis; not re-measured) |
-| Falling, landing velocity (4.4) | `step·Hit.Time` | 0x100AE0747 | 0xB2899B | not measured |
-| Flying, final velocity (`GRAPPLE.md` G-PH-3 step 6) | the call's `dt` | 0x100AE1CE8 | 0xB1AAE3 | not measurable: the script adds the pull to the velocity after the move |
+| Falling, average after wall contact (4.5 step 4) | the sub-step | 0x100AE0464 | 0xB2854B | of the 87 falling pairs that do not follow the plain refinement, 66 follow it with the old horizontal velocity replaced by the average (the horizontal result is then the average itself) in the reciprocal form, 35 in the division form; where the two give different floats (40 pairs): reciprocal 31, division 0 |
+| Falling, refinement (4.6) | the sub-step | 0x100AE04D1 | 0xB285E9 | as part of `2·avg − V_old`: 7,798 of 7,885 falling pairs with the reciprocal form, 4,301 with the division; where the two give different floats (3,534 pairs): reciprocal 3,497, division 0 (the 87 others: 66 wall contacts, see the row above; 15 frames where the script scaled the vertical velocity by 0.7 before the physics, which the same form then reproduces to the bit; 5 respawn teleports; 1 contact frame. The smallest miss is 2.1 uu/s, none is a last place) |
+| Falling, landing velocity (4.4) | `step·Hit.Time` | 0x100AE0747 | 0xB2899B | not observable: the rest of the landing frame is walked and the walking velocity replaces it (native code only) |
+| Flying, final velocity (`GRAPPLE.md` G-PH-3 step 6) | the call's `dt` | 0x100AE1CE8 | 0xB1AAE3 | the recorded velocity is this one plus the pull the gun adds after the move, so it is compared through an f32 model of that pull (below): 9,467 of 9,481 attached pairs with the reciprocal form, 5,422 with the division; where the two give different floats (4,052 pairs): reciprocal 4,045, division 0 |
 
 The constant 1.0 is read from 0x101633D88 (Mac) and 0x2211478 (Win32; addresses of the Win32 executable
 are virtual addresses with image base 0x400000). One recorded pair, used as the regression value: with
@@ -276,6 +276,16 @@ True divisions that are **not** this pattern, and stay divisions in a reimplemen
 air help `(10 − s2) / dt` (4.2; 0x100ADFD02), the slope-slide distance `g·dt / (2·max(F, 0.5))` (3.5;
 0x100ADA8CA) and the walked fraction `moved / |Delta|` when a walking pawn starts to fall (1.4;
 0x100ADBC3B).
+
+The counts in the table are over all pairs of consecutive records of the three Windows recordings with
+the same physics mode in both (per level, walking: AG-BeautifulCity 20,795, AG-Workshop 3,000,
+AG-ParadiseCave 2,509, AG-Darkcave 1,139, every pair in the reciprocal form; falling: 5,415 of 5,468,
+1,629 of 1,663 and 754 of 754 in BeautifulCity, ParadiseCave and Darkcave; flying: 5,500 of 5,509,
+3,550 of 3,555 and 417 of 417). The model of the pull used for flying is `GRAPPLE.md` G-PH-2 in f32, in
+this order: the unit vector from the pawn to the anchor (the Windows normalisation below), times the
+frame time, times 10000, times the f32 reciprocal of (recorded distance ÷ 1000); the sum with the
+physics velocity is the recorded velocity. The 14 pairs it does not reproduce miss by 1.7 to 1,624 uu/s
+(contacts and other events), not by a last place.
 
 Normalisation is a different helper, and here the two builds differ [CONFIRMED]. The Mac executable
 computes `1.0 / sqrt(len²)` with a real square root and a real division, then multiplies. The Win32
@@ -288,7 +298,13 @@ estimate of the recording machine's processor (2 × 1,024 distinct values over t
 that machine): of 2,832 flat walking frames at the speed cap, the two forms give a different velocity on
 1,205 and a different position on 16; the Windows form reproduces the recorded position on 16 of those
 16, the Mac form on none. This is the "one unit in the last place at the speed cap" of the first
-recordings (13 Workshop frames, 3 elsewhere). The port in `asamu-player` uses the Mac form.
+recordings (13 Workshop frames, 3 elsewhere). Two more places show the same thing in the recordings:
+the 2000 uu/s cap of flying (7,742 capped frames; the position differs between the forms on 15, the
+Windows form matches 15 of 15, the Mac form none) and the unit vector of the gun's pull, which is
+script-side (`Normal`): of the 9,481 attached pairs the two forms give a different recorded velocity
+on 776, the Windows form matches 773, the Mac form none (the code of the script-side helper was not
+read: STRONG that it is the same routine). The port in `asamu-player` uses the Mac form, so against a
+Windows recording about 8% of the attached frames differ in the last place of the velocity.
 
 Reproduce (local executables, read-only; `$WIN_EXE` is `Binaries/Win32/ASAMU-Win32-Shipping.exe` of a
 Windows install):
@@ -1169,7 +1185,10 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   5/6/13 TENTATIVE; every constants-table row now cites `Function @ address`.
 - 2026-10-10: section 2.4 (float form of every velocity derived from a displacement; the normalisation
   helper of the two builds), from the disassembly of both executables and the first recordings; the
-  statements in 3.1, 4.4, 4.5, 4.6, 9.3 and verification row 14 now point to it.
+  statements in 3.1, 4.4, 4.5, 4.6, 9.3 and verification row 14 now point to it. Verification pass of
+  2.4 the same day: the five sites re-read in both executables, the walking and falling counts
+  recounted, and the wall-contact average and the flying velocity, first listed as not measurable,
+  measured on the recordings (the flying one through a model of the gun's pull).
 - 2026-10-10: section 10.1 (the box checks of triangles, convex elements, spheres, sphyls, box
   elements and BSP: shape, axis order, contact normal, rules for a start in contact), from the
   disassembly and from running the triangle and convex routines in a local interpreter; 3 and 9.2

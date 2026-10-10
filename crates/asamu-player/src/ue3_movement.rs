@@ -92,8 +92,10 @@
 //! Float form (NATIVE_PHYSICS.md section 2.4): a velocity derived from a
 //! displacement is the displacement times the `f32` reciprocal of the time
 //! ([`velocity_from_displacement`]), as in the original (CONFIRMED: every
-//! such site of walking, falling and flying in both executables; walking
-//! also on 27,443 of 27,443 recorded pairs). Vector normalisation
+//! such site of walking, falling and flying in both executables; on the
+//! recordings 27,443 of 27,443 walking, 7,798 of 7,885 falling and, through
+//! a model of the gun's pull, 9,467 of 9,481 flying pairs, the misses being
+//! contacts and script events). Vector normalisation
 //! ([`safe_normal`]) is `v · (1 / sqrt(|v|²))` with a correctly rounded
 //! square root and division, which is what the macOS executable does; the
 //! Windows executable uses the processor's approximate reciprocal square
@@ -417,7 +419,10 @@ pub fn nearly_zero(v: Vec3) -> bool {
 /// 0x100AE1CE8. The Win32 executable has the same form at each of the five
 /// sites. Measured on the Windows build for walking: 27,443 of 27,443
 /// recorded pairs equal this form, 23,839 the division
-/// (`docs/PARITY_FINDINGS.md` V17).
+/// (`docs/PARITY_FINDINGS.md` V17). Falling and flying are measured too
+/// (spec 2.4): where the two forms give different floats the recordings
+/// have this one on 3,497 falling and 4,045 flying pairs and the division
+/// on none. Only the landing velocity rests on the native code alone.
 ///
 /// `time` is positive at every call site (a sub-step, a tick or a contact
 /// time above [`LANDING_MIN_CONTACT_TIME`]).
