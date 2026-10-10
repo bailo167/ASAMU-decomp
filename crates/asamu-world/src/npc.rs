@@ -1268,7 +1268,7 @@ fn collect_npcs(out: &mut NpcScene, scene: &NpcSceneFile, level: u8, offset: Vec
                 optional: param_bool(p, "bIsOptional", false),
                 parent: param_bool(p, "bParentInteractable", false),
                 linked_parent: param_str(p, "linkedParentActor")
-                    .and_then(&lookup)
+                    .and_then(lookup)
                     .map(|x| x.0),
                 linked_children: object_list(p, "linkedInteractables")
                     .iter()

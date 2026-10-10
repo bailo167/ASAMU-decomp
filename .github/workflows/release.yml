@@ -41,7 +41,7 @@ jobs:
         with:
           # A manual run with a tag builds that tag, not the branch it was started from.
           ref: ${{ inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - name: Repository hygiene (no game payloads / RE dumps / private paths)
         run: cargo run --locked -p repo-hygiene
 
@@ -76,7 +76,7 @@ jobs:
         with:
           # A manual run with a tag builds that tag, not the branch it was started from.
           ref: ${{ inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: ${{ matrix.target }}
       - name: Linux system dependencies (Bevy)
