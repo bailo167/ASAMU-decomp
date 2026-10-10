@@ -586,14 +586,10 @@ rm "$S/link-dir"
 mkdir "$S/realdir" && echo x > "$S/realdir/x.txt" && git -C "$S" add realdir
 mv "$S/realdir" "$T/realdir-moved" && ln -s "$T/realdir-moved" "$S/realdir"
 refuse 'files reached through a linked folder' 'symbolic link'
-rm "$S/realdir"
-# The same when git is told to ignore the link itself: only the files below it are listed.
+rm "$S/realdir" && git -C "$S" rm -q --cached realdir/x.txt
+# The same when git is told to ignore the link itself: only the file below it is listed.
 echo "/ignored-link" >> "$S/.git/info/exclude"
-ln -s "$T/realdir-moved" "$S/ignored-link"
-mkdir "$S/realdir" && echo x > "$S/realdir/x.txt"
-git -C "$S" rm -q --cached realdir/x.txt && rm -r "$S/realdir"
-mkdir "$S/ignored-link-real" && echo x > "$S/ignored-link-real/x.txt"
-rm "$S/ignored-link" && mv "$S/ignored-link-real" "$S/ignored-link" && git -C "$S" add -f ignored-link/x.txt
+mkdir "$S/ignored-link" && echo x > "$S/ignored-link/x.txt" && git -C "$S" add -f ignored-link/x.txt
 rm -r "$S/ignored-link" && ln -s "$T/realdir-moved" "$S/ignored-link"
 refuse 'tracked files below an ignored link' 'reached through the symbolic link'
 rm "$S/ignored-link" && git -C "$S" rm -q --cached ignored-link/x.txt

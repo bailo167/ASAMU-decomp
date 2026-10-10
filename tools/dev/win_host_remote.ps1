@@ -316,12 +316,15 @@ function WhGate([string]$name, [string[]]$only) {
     )
     $report = New-Object System.Collections.ArrayList
     $failed = New-Object System.Collections.ArrayList
+    $summary = Join-Path $logs 'gate.txt'
     $stamp = Join-Path $logs 'sync.txt'
-    if (Test-Path -LiteralPath $stamp) {
-        $line = 'gate ' + $name + ': ' + $work + ', ' + [string](Get-Content -LiteralPath $stamp -TotalCount 1)
-        WhSay $line
-        [void]$report.Add($line)
-    }
+    $line = 'gate ' + $name + ': ' + $work
+    if (Test-Path -LiteralPath $stamp) { $line += ', ' + [string](Get-Content -LiteralPath $stamp -TotalCount 1) }
+    WhSay $line
+    [void]$report.Add($line)
+    # gate.txt is rewritten after every step, so it can be fetched while the
+    # gate runs or after the connection was lost; "still running" is its last line until the end.
+    Set-Content -LiteralPath $summary -Encoding ASCII -Value ($report.ToArray() + 'still running')
     $ran = 0
     $whole = [Diagnostics.Stopwatch]::StartNew()
     foreach ($step in $steps) {
@@ -339,6 +342,7 @@ function WhGate([string]$name, [string[]]$only) {
         if ($code -ne 0) { $line += '  (exit ' + $code + ')' }
         WhSay $line
         [void]$report.Add($line)
+        Set-Content -LiteralPath $summary -Encoding ASCII -Value ($report.ToArray() + 'still running')
         if ($code -ne 0) {
             [Console]::Error.WriteLine('--- ' + $id + ' failed; the last lines of ' + $log + ':')
             foreach ($text in @(Get-Content -LiteralPath $log -Tail 30 -Encoding UTF8)) { [Console]::Error.WriteLine($text) }
@@ -350,7 +354,7 @@ function WhGate([string]$name, [string[]]$only) {
     else { $line = 'gate ' + $name + ': FAILED (' + ($failed.ToArray() -join ', ') + '), ' + $failed.Count + ' of ' + $ran + ' steps, in ' + $seconds + ' s' }
     WhSay $line
     [void]$report.Add($line)
-    Set-Content -LiteralPath (Join-Path $logs 'gate.txt') -Encoding ASCII -Value $report.ToArray()
+    Set-Content -LiteralPath $summary -Encoding ASCII -Value $report.ToArray()
     if ($failed.Count -gt 0) { exit 1 }
     exit 0
 }
