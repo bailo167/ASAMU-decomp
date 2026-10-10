@@ -7,10 +7,26 @@ deterministic export and behavioural parity are separate numbers and are never a
 |---|---|---|---|
 | Package reading | Every shipped package parses; offsets/sizes cross-check against file size and each other | The original files | verified (see `docs/reverse-engineering/PACKAGE_ANALYSIS.md`) |
 | Gameplay constants | Value recovered from script defaults / native code / config, cited | The original files | movement, camera, pawn-script, grapple-gun and rocket-boots values recovered and wired with provenance (drift-tested against `docs/reverse-engineering/data/defaults/*.json`) |
-| Player movement | Tick-by-tick position/velocity error vs original trace | Original game on Windows (traces) | native physics (walking, falling, flying) + ASAMU pawn script, power jump and rocket boots ported from the specs; **not measured** (no original traces yet) |
-| Grapple | Attach point, pull path, release velocity vs original trace | Original game on Windows (traces) | original `GrappleGun` ported from `GRAPPLE.md` (targeting, acceptance, attach, flying pull, every release path, budget, Kismet events); reproduces the spec's re-simulated numbers (G-PH-5); **not measured** against original traces |
-| Levels | Geometry/transforms match original placement | Original maps (converted locally) | not started |
-| Story flow | Kismet-driven event order matches original | Kismet graphs + playthrough | not started |
+| Player movement | Tick-by-tick position/velocity error vs original trace | Recordings of the original game (`docs/TRACE_CAPTURE.md`) | native physics (walking, falling, flying) + ASAMU pawn script, power jump and rocket boots ported from the specs; **not measured yet**: the first recordings of the original exist (2026-10-10, Windows build) and the first replay diverges, see "First comparison" below |
+| Grapple | Attach point, pull path, release velocity vs original trace | Recordings of the original game | original `GrappleGun` ported from `GRAPPLE.md` (targeting, acceptance, attach, flying pull, every release path, budget, Kismet events); reproduces the spec's re-simulated numbers (G-PH-5); **not measured** against the recordings yet |
+| Levels | Geometry/transforms match original placement | Original maps (converted locally) | structure verified by the importer (30,284 actor transforms and all static meshes agree with an independent decoder, `LEVEL_FORMAT.md`, `MESHES.md`); collision and visual agreement with the running original **not measured** |
+| Story flow | Kismet-driven event order matches original | Kismet graphs + playthrough | the interpreter runs every sequence-object class the maps use and each level's scripted exit leads to the next in the smoke run (`INTEGRATION.md` §8); event order and timing against a playthrough of the original **not measured** |
+
+### First comparison (2026-10-10)
+
+One recording of the original has been replayed so far: 50 s in AG-Workshop (story mode), Windows build, gamepad,
+variable frame lengths (`asamu-trace replay --compare` with each sample's own frame length). Verdict: diverged.
+This is a first look, not a parity number.
+
+| Observation | Status |
+|---|---|
+| The recorded walk gains 33.5 uu/s per 16.4 ms frame up to its cap: acceleration 2048 uu/s², one step per frame | agrees with `NATIVE_PHYSICS.md` (walking acceleration); CONFIRMED by the recording |
+| The original's `GroundSpeed` during the Workshop's story mode read 132 (66 about a second after level start); AG-BeautifulCity's story mode read 264 | our story-mode speed in the Workshop has to be checked against this; cause not yet traced (the level's Kismet is the first suspect) |
+| With a gamepad the recorder sees no stick deflection at its sample point, so the converted trace has no movement input and the replay does not move | a converter limitation, not a simulation difference; the recorded pawn acceleration carries the direction |
+| Position differs by 1 uu from the first tick | not yet classified |
+| FOV differs by 40° from the first zoom | consistent with the story-mode zoom not being reproduced in the replay; not yet classified |
+
+No tolerance was changed and no item was upgraded on the strength of this run.
 
 ## Parameters
 

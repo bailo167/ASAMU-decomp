@@ -3,47 +3,62 @@
 ASAMU-decomp is an **engine recreation** (universal-modder Pattern 4). The original game is used only as
 read-only evidence and as a behavioural oracle; our runtime is new code.
 
-```
-legitimate original install (read-only)
-        │
-        ├── static RE of the unstripped Mac Mach-O (symbols, Ghidra)      → docs/reverse-engineering
-        ├── UE3 package parsing (crates/asamu-ue3, tools/asamu-inspect)    → structure + sanitized metadata
-        └── behavioural observation (later: traces from the Windows game)  → parity tests
-        │
-        ▼
-importer / converter (runs on the user's machine; tools/asamu-import, planned)
-        │
-        ▼
-user-local converted data (never committed, never distributed)
-        │
-        ▼
-native Rust / Bevy runtime (apps/asamu + crates)
+```mermaid
+flowchart TB
+    install["Legitimate original install (read-only)"]
+    subgraph evidence["Evidence (docs/reverse-engineering)"]
+        static["Static RE of the unstripped macOS executable<br/>(symbols, Ghidra)"]
+        packages["UE3 package parsing<br/>(asamu-ue3, asamu-inspect)"]
+        traces["Behavioural recordings of the running original<br/>(tools/trace-recorder)"]
+    end
+    importer["asamu-import<br/>runs on the user's machine"]
+    data["User-local converted data<br/>(never committed, never distributed)"]
+    runtime["Rust / Bevy runtime<br/>(apps/asamu + crates)"]
+    parity["asamu-trace<br/>replay and compare"]
+    install --> static
+    install --> packages
+    install --> traces
+    install --> importer --> data --> runtime
+    static -. "specifications" .-> runtime
+    packages -. "formats, recovered values" .-> importer
+    traces --> parity
+    runtime --> parity
 ```
 
 ## Crates
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `asamu-core` | Shared math (glam), units, coordinate conventions, config types | — |
-| `asamu-player` | Deterministic, render-free movement / grapple / camera simulation | core |
-| `asamu-world` | Levels, triggers, checkpoints, moving platforms (runtime form) | core |
-| `asamu-assets` | Runtime asset representation (converted meshes/textures/levels) | core |
-| `asamu-ue3` | Defensive UE3 v868 package reader: summary, names, imports, exports, compression | — |
-| `asamu-game` | High-level game state (chapters, progression) | core, player, world |
-| `apps/asamu` | Bevy executable: windowing, input, rendering, glue systems | core, game, player, bevy |
+| `asamu-core` | Shared math (glam), units, coordinate conventions, deterministic trig, config types | — |
+| `asamu-player` | Deterministic, render-free simulation of the player: the port of the engine's pawn physics, the pawn script layer, grapple gun, power jump, rocket boots, parameters with provenance, trace format | core |
+| `asamu-world` | Level scenes in runtime form: triangle collision, volumes, checkpoints, kill zones, movers, world objects (recharge crystals, attractor pads, falling rocks), the built-in graybox level | core |
+| `asamu-kismet` | Interpreter for the levels' Kismet graphs and Matinee tracks; talks to the game through a host interface | core |
+| `asamu-game` | The game frame: tick order, level script host, NPCs and the worm, saves and progression, time trial, the smoke harness | core, player, world, kismet |
+| `asamu-assets` | Runtime view of converted data: level render plans, material descriptions, sound cue evaluation, particle simulation, lightmap and localization tables | core |
+| `asamu-ue3` | Defensive reader for the game's UE3 package generation (v868): summary, tables, LZO, objects and properties, bytecode, meshes, textures, materials, Kismet, Matinee, audio, particles | — |
+| `apps/asamu` | The Bevy executable: windowing, input, rendering, audio output, UI, and the glue that presents the simulation | core, player, game, assets, bevy |
 
-Tools: `asamu-locate` (Steam discovery), `asamu-inventory` (sanitized install inventory), `asamu-inspect`
-(package/map inspection), `asamu-symbols` (symbol statistics), `progress-gen`, `repo-hygiene`.
+Tools: `asamu-import` (the converter; the only user of `asamu-ue3` besides the inspection tools), `asamu-locate`
+(Steam discovery), `asamu-inventory` (sanitized install inventory), `asamu-inspect` (package/map inspection),
+`asamu-symbols` (symbol statistics), `asamu-trace` and `tools/trace-recorder` (record the original read-only,
+replay through the simulation, compare), `progress-gen`, `repo-hygiene`.
+
+How the pieces run together inside one frame is described in [INTEGRATION.md](INTEGRATION.md).
 
 ## Boundaries
 
 1. **Importer ↔ runtime.** Only the importer knows about UE3 serialization or Steam paths. The runtime reads
-   converted, open/runtime-friendly formats (e.g. glTF/PNG/our own RON or binary level format). The renderer is
-   not taught UE3 formats.
+   converted, open formats (glTF meshes, DDS textures, Ogg audio, versioned JSON for scenes, materials, Kismet
+   graphs, Matinee tracks, particles and text). The runtime does not link `asamu-ue3` at all
+   (`cargo tree -p asamu` shows no path to it), and the renderer is not taught UE3 formats.
 2. **Simulation ↔ rendering.** `asamu-player` and `asamu-world` expose pure step functions on plain data at a
    fixed timestep. Bevy systems call into them. This makes trajectory traces reproducible and testable in CI.
 3. **Evidence ↔ implementation.** Every gameplay constant in the runtime cites its source (script default
    property, native code, config, or a measured trace). Placeholders are explicitly marked as such.
+4. **Classic ↔ experiments.** The faithful game ("Classic": original parameters, original tick order, the parity
+   tooling) is the authoritative target. Anything experimental has to live beside it, not inside it: it may read
+   and wrap the simulation, but the Classic path must behave bit-identically whether or not the experiment is
+   compiled in.
 
 ## Coordinate conventions
 
@@ -72,8 +87,10 @@ Implemented in `crates/asamu-core` (`units`, `coords`, `rotator`, `clock`); test
   data and recorded traces. FOV parameters are treated as horizontal (UE3 convention, **TENTATIVE** for
   ASAMU) and converted to Bevy's vertical FOV using the window aspect.
 - **Time:** the simulation uses a fixed step (`clock::FixedClock`, default 60 Hz). This is a **runtime
-  choice**: the original's tick model is **UNKNOWN** (UE3 advances actors with a variable `DeltaTime`), to be
-  revisited against traces. `sim::step` clamps a single `dt` to `sim::MAX_STEP_DT` (a numerical safety
+  choice**. The original advances actors with a variable `DeltaTime` (CONFIRMED on the Windows build: the
+  recorded `DeltaSeconds` equals the frame's tick argument on every recorded frame, clamped to 0.0005–0.4 s),
+  so traces of the original are replayed with each frame's own length (`asamu-trace replay`, variable-step
+  mode). `sim::step` clamps a single `dt` to `sim::MAX_STEP_DT` (a numerical safety
   bound, not a gameplay value) and treats a non-finite or non-positive `dt` as a no-op.
 - **Determinism:** the simulation uses only IEEE-754 basic arithmetic, `sqrt`, exact operations and
   `det_math::sin_cos` (pure Rust; never the platform `sin`/`cos`, whose last bit can differ between
@@ -87,21 +104,27 @@ Implemented in `crates/asamu-core` (`units`, `coords`, `rotator`, `clock`); test
 
 Implemented in `crates/asamu-player/src/trace.rs`; the format (JSON Lines: one `TraceMeta` line, then one
 `TraceSample` per tick with input, position, velocity, yaw/pitch, FOV, grapple state/anchor/rope length,
-grounded) and the comparison metrics are specified in [PARITY.md](PARITY.md#trace-format). Original-game
-traces (recorded later on Windows) and runtime traces share the schema.
+grounded) and the comparison metrics are specified in [PARITY.md](PARITY.md#trace-format). Recordings of the
+original game and runtime traces share the schema.
 
-- `trace::record_run` replays a sequence of inputs through the deterministic `sim::step` from an initial
-  state and records a runtime trace; `asamu_game::Game` can record live sessions (the graybox app toggles
-  this with F9 and writes JSONL to `$ASAMU_TRACE_DIR` or the temp dir).
-- `trace::compare` aligns two traces by tick and reports per-field max/mean/RMS error and the first
-  divergence above a tolerance. Tests prove runtime traces are bit-reproducible and round-trip losslessly.
+- **Recording the original** ([TRACE_CAPTURE.md](TRACE_CAPTURE.md)): read-only recorders sample the running game
+  once per frame, an LLDB script for the macOS build and a memory-reading poller for the Windows build. They never
+  write to the game's process or files. `asamu-trace convert` turns a raw recording into canonical traces.
+- **Replaying:** `asamu-trace replay` feeds a trace's inputs through the deterministic simulation on the graybox
+  or on a converted level, with fixed ticks or with each recorded frame's own length, and
+  `asamu-trace compare` aligns two traces by tick and reports per-field max/mean/RMS error and the first
+  divergence above a tolerance.
+- `trace::record_run` records a runtime trace from a sequence of inputs; `asamu_game::Game` can record live
+  sessions (F9 in the app writes JSONL to `$ASAMU_TRACE_DIR` or the temp dir). Tests prove runtime traces are
+  bit-reproducible and round-trip losslessly.
 - **Simulation boundary for parity.** `sim::step` is pure (no globals, RNG, wall clock, hash ordering or
   hidden state; a test interleaves two simulations and compares bytes with isolated runs). Hostile input is
   contained: inputs are sanitized, and a step that would produce a non-finite state leaves the state
   unchanged and reports `StepEvents::non_finite_rejected`.
-  Locomotion sits behind `movement::MovementModel`; today's `PlaceholderMovement` is our own documented
-  placeholder model. The original's player movement is expected to be stock UE3 native Pawn physics
-  (`physWalking` / `physFalling` / `CalcVelocity`) driven by ASAMU script parameters, with the grapple in
-  UnrealScript — **TENTATIVE** (see `docs/reverse-engineering/`). A faithful reimplementation will be a new
-  `MovementModel` (and, once the script is understood, a new grapple module), validated by replaying
-  original traces' inputs and comparing with `trace::compare`.
+- **Movement model.** Locomotion sits behind `movement::MovementModel`. The default, `Ue3PawnMovement`, is a
+  port of the engine's native pawn physics as specified in
+  [NATIVE_PHYSICS.md](reverse-engineering/NATIVE_PHYSICS.md), driven by the recovered ASAMU parameters; the
+  grapple, power jump and rocket boots follow [GRAPPLE.md](reverse-engineering/GRAPPLE.md) and
+  [ABILITIES.md](reverse-engineering/ABILITIES.md). The older `PlaceholderMovement` remains only as a debugging
+  model. How far the port agrees with the original is what the trace comparison measures; see
+  [PARITY.md](PARITY.md) for the current numbers and the known deviations.

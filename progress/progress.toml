@@ -44,13 +44,13 @@ status = "verified"
 id = "M5"
 name = "Kismet/script structural recovery"
 status = "implemented"
-note = "Bytecode disassembly still pending."
+note = "Class, function and property lists, bytecode decoder and per-level Kismet graphs done; milestone stays implemented (not every item is verified)."
 
 [[milestone]]
 id = "M6"
 name = "Original-data importer"
 status = "implemented"
-note = "Textures, meshes, materials, levels, audio, matinee, skeletal/anim convert; single end-to-end command pending."
+note = "Twelve conversion stages behind one command (asamu-import all); verified on the macOS build only."
 
 [[milestone]]
 id = "M7"
@@ -1116,7 +1116,7 @@ id = "import-cli"
 name = "asamu-import end-to-end CLI"
 status = "implemented"
 evidence = "tools/asamu-import/src/all.rs; docs/PLAYING.md"
-note = "All original stages; particles/decals/localization are separate subcommands not yet chained into `all`."
+note = "Twelve stages behind `asamu-import all`, including particles, decals and localization (all/tests.rs); full run checked on the macOS build."
 
 # --------------------------------------------------------------------------
 # Platforms
@@ -1227,13 +1227,13 @@ note = "Replay + per-field max/mean/RMS diff with first divergence. No original 
 
 [[category.item]]
 id = "trace-capture"
-name = "Original-game trace capture tooling (Windows oracle)"
+name = "Original-game trace capture tooling (macOS lldb + Windows poller)"
 status = "implemented"
 evidence = "tools/trace-recorder; tools/asamu-trace; docs/TRACE_CAPTURE.md"
-note = "Read-only lldb recorder + convert/replay/compare; 309 static checks pass; not yet run against the live game."
+note = "Read-only recorders + convert/replay/compare. Windows poller: first live recordings 2026-10-10 (build, layout and frame-length checks pass on the running game; input-timing and grapple-state checks W-F5/W-F6 not yet evaluated). macOS lldb recorder: attach and layout checks F1-F3 pass, no trace recorded yet."
 
 [[category.item]]
 id = "parity-suite"
 name = "Trace-replay parity suite against original traces"
-status = "blocked"
-blocker = "Needs behavioural traces recorded from the original game (Windows copy, or the Mac build under Rosetta), which requires a human-run session; see docs/TRACE_CAPTURE.md."
+status = "partial"
+note = "First recordings of the original exist locally (2026-10-10, Windows build: story-mode walk, free play with sprint, jumps and grapples). The record -> convert -> replay -> compare pipeline runs end to end; the first comparison diverges (docs/PARITY.md, First comparison). No regression suite yet."

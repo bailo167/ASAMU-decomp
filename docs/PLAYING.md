@@ -52,13 +52,20 @@ The importer:
 | `audio` | Ogg sounds, sound cues, subtitles, ambient sounds | 774 files, 59 MB |
 | `matinee` | scripted movement / cutscene tracks | 10 files, 0.9 MB |
 | `skeletal` | glTF characters with skins and animations | 55 files, 86 MB |
-| `kismet` | the level scripts of every map, for the runtime's Kismet interpreter | 13 files, 2.9 MB |
-| `lightmaps` | the baked lighting of every map (approximate HDR atlases) | 2,751 files, 624 MB |
+| `kismet` | the level scripts of every map, for the runtime's Kismet interpreter | 13 files, 3.0 MB |
+| `lightmaps` | the baked lighting of every map (approximate HDR atlases) | 2,649 files, 618 MB |
+| `particles` | particle systems and where the maps place them | 13 files, 5.6 MB |
+| `decals` | level decals as projected meshes, with their masks | 50 files, 77 MB |
+| `localization` | menu text, subtitles and credits in every language of your install | 16 files, 1.4 MB |
 
-Together that is 13,108 files and 2.2 GB. A full import takes about half a minute on a recent Apple-silicon Mac
-(32 s, including 2.5 s to hash the 1.1 GB of game files), and up to about two minutes while other heavy programs
-run (111 s measured on a heavily loaded machine). It prints one line per stage and a summary at the end. A
-converter that is not part of your build is listed as `unavailable`.
+Together that is 13,091 files and 2.3 GB. A full import takes well under a minute on a recent Apple-silicon Mac
+(44 s measured for all twelve stages with other programs running, including 1.5 s to hash the 1.1 GB of game
+files). It prints one line per stage and a summary at the end. A converter that is not part of your build is
+listed as `unavailable`.
+
+The `localization` stage also reads two small Steam files next to the install when they exist (the game's app
+manifest for your default language, and Steam's cached list of achievement names). Nothing else outside the
+install is read.
 
 ### Where the data goes
 
@@ -109,30 +116,37 @@ are kept in the user data folder). Without either option the runtime starts its 
 The story order of the maps is: `AG-Workshop`, `AG-ParadiseCave`, `AG-BeautifulCity`, `AG-Darkcave`,
 `AG-StarHaven`, `AG-IceCave` (with `TheCore`), `AG-Epilogue`.
 
-**Controls** follow the original keyboard bindings: WASD move, mouse look, Space jump (in the air it fires the
-rocket boots when you have them), left Shift sprint, left mouse button grapple (release the button to let go),
-hold the right mouse button to power jump, E or Enter use, F7 respawn at the last checkpoint. Click into the
-window to capture the mouse; Esc pauses and releases it. Debug keys (not in the original): R respawn, F2 story
-mode, F3 grapple count, F4 rocket boots, F6 attractor pad, F9 start/stop recording a movement trace, F10 show the
-level objects' volumes.
+**Controls** follow the original bindings. Keyboard and mouse: WASD move, mouse look, Space jump (in the air it
+fires the rocket boots when you have them), left Shift sprint, left mouse button grapple (release the button to
+let go), hold the right mouse button to power jump, E or Enter use, F7 respawn at the last checkpoint. Gamepad:
+left stick move, right stick look, A jump, right trigger grapple, right shoulder power jump, left shoulder sprint,
+Back restart from the checkpoint, Start pause. Click into the window to capture the mouse; Esc pauses and
+releases it.
+
+Developer keys (not in the original): F1 shows a read-out of the simulation's state and the key list, R respawn,
+F2 story mode, F3 grapple count, F4 rocket boots, F6 attractor pad, F9 start/stop recording a movement trace,
+F10 show the level objects' volumes.
 
 Other options: `--fly` (free camera, no collision), `--all-sublevels`, `--light-scale F`, `--no-shadows`,
-`--no-fog`, `--normal-maps`, `--help` for the full list.
+`--no-fog`, `--normal-maps`, `--debug-info` (start with the F1 read-out shown), `--help` for the full list.
 
 ## What works today
 
-This describes the state when this guide was written; the progress table in the project README is the live
-status. "Original values" means numbers recovered from the game's own data, each with its source.
+This describes the state when this guide was last updated; the progress table in the project README is the live
+status. "Original values" means numbers recovered from the game's own data, each with its source. Nothing in
+this table has been measured against recordings of the original game yet: that work has started, and until it
+is done, expect the feel to differ in places.
 
 | Area | Status |
 |---|---|
-| Movement | Walking, jumping (with the original's jump-release damping), sprinting, falling and landing on a port of the original engine's pawn physics, with the original values. Not yet measured against recordings of the original game. |
-| Grapple, power jump, rocket boots | Ported from the original's script behaviour with the original values. Same caveat. |
-| Levels | The maps render from your converted data (static meshes, textures, approximate materials, lights) and play with triangle collision, checkpoints, kill zones and the grapple-reactive objects (recharge crystals, attractor pads, falling rocks; some still simplified; `docs/PARITY.md` in the repository lists every known difference). Moving platforms do not follow their original paths yet. |
-| Lighting | Approximate: dynamic lights and a constant ambient term. The baked lightmaps are converted; showing them in the runtime is in progress. |
-| Story scripting (Kismet), cutscenes, level transitions | The scripts are converted; the runtime interpreter is in progress. Until it lands, each level starts with a fixed set of abilities and story events do not fire. |
-| Sound, music, narration, subtitles | Converted by the importer; playback in the runtime is in progress. |
-| Characters and animation, menus, saving | In progress. |
+| Movement | Walking, jumping (with the original's jump-release damping), sprinting, falling and landing on a port of the original engine's pawn physics, with the original values. |
+| Grapple, power jump, rocket boots | Ported from the original's script behaviour with the original values, including the limited grapple charges, recharge crystals and every release rule. |
+| Levels | All seven story maps load from your converted data and play with triangle collision, checkpoints, kill zones, moving platforms on their original paths, and the grapple-reactive objects (recharge crystals, attractor pads, falling rocks). `docs/PARITY.md` in the repository lists every known difference. |
+| Story scripting (Kismet), cutscenes, level transitions | The levels' own scripts run: triggers, abilities granted by the story, scripted movers, cutscene cameras, level streaming and the exit of each level into the next. The whole chain from the Workshop to the Epilogue has been followed by an automated run that jumps to each exit; nobody has played it through by hand yet, so you may find a route that is blocked. |
+| Lighting and effects | The original's baked lightmaps, approximate materials, particles, decals, water, height fog, colour grading and bloom. An approximation: colour and brightness can differ visibly from the original, and a few materials still show as flat placeholders. |
+| Characters | Maddie, the villagers and the Dark Cave worm with their animations; collectibles and story items; the first-person hand. |
+| Sound, music, narration, subtitles | Sound cues, ambient sound, narration with subtitles and the adaptive music play. |
+| Menus, saving, languages | Main menu, chapter select, pause and settings; saves and progression in the recreation's own format; time trial with medals; the game's text in the 14 languages of your install (a functional replacement of the original's menus, not a visual copy; some characters outside basic Latin may not display yet). |
 
 ## Troubleshooting
 

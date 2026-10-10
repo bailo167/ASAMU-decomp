@@ -2,6 +2,60 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-10 — Session 2: first recordings of the original, showcase pass, Phase 8 merged
+
+**Done**
+- **Phase 8 merged**: particle systems, gameplay VFX and decals, localized text, camera animations and anim
+  notifies, NPC collision, time trial, gamepad, water and foliage (tracker: 143 items).
+- **`asamu-import all` runs all twelve stages** (particles, decals and localization are chained in): 13,091
+  files, 2.3 GB, 44 s on this machine.
+- **The original Mac build runs on Apple silicon** under Rosetta with `-ONETHREAD` (it crashes without it: the
+  rendering thread has no GL context). The LLDB recorder attached and passed its feasibility checks F1–F3
+  (symbols, fixed step, live layout). It has **not** recorded a trace yet: the first attempt stalled the game
+  because the driver drained debugger events too slowly; the driver loop was rewritten and still needs a live
+  test. Details in `docs/TRACE_CAPTURE.md` §4.0.
+- **Windows route built and used.** Static RE of the Win32 executable (globals, frame order, 1,982 native class
+  sizes), a Win32 field layout, a read-only memory-polling recorder driven over SSH, and replay with each frame's
+  own length. Against the running game on 2026-10-10:
+  - the build, module and layout checks pass; **15,081 of 15,081 live property offsets** equal the derived
+    layout, 3,226 of 3,226 bool masks, and the class default values of the six player classes sit where the
+    layout says (CONFIRMED, live);
+  - `DeltaSeconds` equals the clamped tick argument on every recorded frame (17,307 frames);
+  - two checker expectations failed and are **not yet explained**: `UStruct.PropertiesSize` equals the
+    registered native size for 1,803 of 1,954 classes only, and 630 layout fields had no live property object;
+  - **first recordings of the original**: a story-mode walk in AG-Workshop (3,001 frames), four minutes of
+    free play through AG-ParadiseCave into AG-BeautifulCity with sprinting, jumps, power jumps and about 3,800
+    frames of grappling (14,311 frames), and a longer free-play recording. No torn, late or missed samples in
+    the first; one torn and one late frame in the second, at a level change.
+- **First replay and comparison** (AG-Workshop walk, variable step): the pipeline runs end to end and the
+  verdict is *diverged*. What it shows so far:
+  - the recorded walk reaches its speed cap with acceleration 2048 uu/s² per frame, as the physics spec says;
+  - the original's `GroundSpeed` in the Workshop's story mode read **132** (and 66 about a second after level
+    start); AG-BeautifulCity's story mode read 264. Our Workshop speed has to be checked against this;
+  - with a gamepad the stick's deflection is not visible to the recorder at its sample point (the engine has
+    already cleared the axes), so the converter produces no movement input and the replay stands still. The
+    recorded pawn acceleration carries the direction; deriving the input from it is the next converter change;
+  - positions differ by 1 uu from the first tick (not yet classified).
+- **App**: skinned meshes (the first-person hand, villagers, Maddie, the worm) now use their converted
+  materials and the hand is lit by the level's lights; the developer read-out is hidden on converted levels
+  (F1 shows it); on-screen text uses only glyphs the built-in font has.
+- **Showcase pass**: new README, `docs/SHOWCASE.md`, curated screenshots in `docs/images/` with a written policy
+  (`docs/LEGAL.md`) and a hygiene rule that allows images only there.
+
+**True now**
+- Tracker: 143 items; the parity suite is no longer blocked on recordings (it is `partial`: recordings exist
+  locally, no regression suite yet). Nothing gameplay-related was upgraded to verified.
+- Running the original Mac build wrote its own configs, a log and saves into its app bundle; no original file
+  changed (`asamu-inventory`'s check compares all 1,636).
+
+**Next**
+1. Converter: movement input from the recorded acceleration (gamepad); then replay the free-play recordings
+   segment by segment (walk, sprint, jump, grapple attach/release), classify each first divergence and fix what
+   the evidence supports, with regression tests. No tolerance is to be loosened to make a comparison pass.
+2. Explain the two failed live checks (above) and the 66 / 132 story-mode speeds from the level's Kismet.
+3. Sandbox mode (design done in this session; implementation next), kept apart from the faithful game.
+4. Needs the owner: decide on a first tagged pre-release; a hand-played run through the recreation.
+
 ## 2026-10-10 — Morning summary (Session 1, overnight run)
 
 **Where things stand**

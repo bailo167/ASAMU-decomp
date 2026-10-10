@@ -25,19 +25,31 @@ Milestone status lives in `progress/progress.toml`; this file explains each mile
 
 Proven in a deterministic simulation first (no rendering), then wired into Bevy.
 
-## Execution plan to 100% (living; update as phases land)
+## Phases so far
 
-Each phase runs as parallel workstreams with an adversarial verification pass; results are merged in small
-commits with tracker updates.
+Each phase ran as parallel workstreams with an independent verification pass; results were merged in small
+commits with tracker updates. `docs/STATUS.md` has the session-by-session record.
 
-| Phase | Workstreams | Unlocks |
+| Phase | Workstreams | Unlocked |
 |---|---|---|
 | 1 ✅ | UE3 reader + LZO, symbol map, locator/inventory, native physics spec, deterministic player slice | M1, M2, M3 |
-| 2 (running) | Object payload decoder (tagged properties, UClass/UFunction/UProperty), grapple + abilities behaviour specs, native physics port, class defaults, Kismet graphs | M4, M5, real constants |
-| 2b (running) | Binary RE completion (load commands, RTTI, strings), save/progression format | Binary RE, Save |
-| 3 | Gameplay port: real defaults wired into `Ue3PawnMovement`; grapple (`GrappleGun` + `Grappling` state); power jump; rocket boots; sprint/story speed; camera/FOV/eye height; falling damage; kill zones, death, checkpoints; input layer per `DefaultInput.ini` | M7, M8 (pending traces) |
-| 4 | Asset importer: Texture2D + TFC (DXT → PNG/KTX2), static meshes (+LODs, sections, materials), collision (BSP `Model`, static-mesh collision, volumes), level actor placement (StaticMeshActor, InterpActor, lights, PlayerStart, triggers) → user-local converted format; Bevy loaders | M6, M9 |
-| 5 | Kismet runtime subset (events/actions/conditions/variables used by ASAMU), Matinee/interp movers, level streaming, story sequencing, narration + subtitles, audio (SoundNodeWave/SoundCue), music manager | M10 |
-| 6 | Skeletal meshes/animations (hands, Maddie, worm, villagers), NPC behaviour, UI (Bevy replacements for Scaleform menus/HUD), save/progression, time trial, collectibles/achievements | M11 |
-| 7 | Behavioural parity: trace capture on the original (Windows) + replay suite; regression traces per level | M12 |
-| 8 | Release packaging for Windows/Linux/macOS (arm64 + x86_64), importer UX | M13 |
+| 2 ✅ | Object payload decoder (tagged properties, classes, functions), class defaults, Kismet graphs, grapple and abilities behaviour specs, native physics port, binary RE completion, save format | M4, M5, real constants |
+| 3 ✅ | Gameplay port: recovered defaults wired into the physics port; grapple, power jump, rocket boots, sprint/story speed, camera/FOV/eye height, landing, kill zones, death, checkpoints; original input bindings | M7 |
+| 4 ✅ | Asset importer: textures, static meshes with collision, level actors, BSP, volumes; Bevy loaders | M6, M9 |
+| 5 ✅ | Runtime world (triangle collision, scene loading, streaming), level rendering, materials, audio decoding, Matinee curves, skeletal meshes and animations | M9 |
+| 6 ✅ | Kismet runtime and Matinee movers, runtime audio with narration and adaptive music, menus and saves, lightmaps, NPCs and the worm, skinned rendering, one-command importer, release workflow | M10 |
+| 7 ✅ | Integration into one connected game: frame order, level transitions, story chain in the smoke harness | M11 (partial) |
+| 8 ✅ | Particles, decals, gameplay VFX, localized text, camera animations and anim notifies, NPC collision, time trial, gamepad, water and foliage | M11 (partial) |
+
+## What is next
+
+In priority order. Nothing below is claimed as done.
+
+| Work | State | Unlocks |
+|---|---|---|
+| **Behavioural parity.** Record the original (read-only), replay the same inputs through the simulation, find and fix divergences, keep the recordings as regression traces. | In progress: the Windows recorder made the first recordings of the original on 2026-10-10 and the first comparison shows real differences to work through; the macOS recorder passed its attach and layout checks but has not recorded a trace yet | M8, M12 |
+| **A hand-played playthrough**, fixing whatever blocks a route | Not started (the automated chain only proves the scripted exits) | M11 |
+| **Rendering fidelity:** material placeholders, actors hidden at level start, moving lights, post effects not yet drawn, the look of the original's HUD | Partly done; known gaps listed in `docs/INTEGRATION.md` and `docs/PARITY.md` | — |
+| **Sandbox mode:** an opt-in playground for the movement and game systems (tuning, inspection, time control), kept strictly apart from the faithful game | Design in progress | later tooling and modding work |
+| **Packaged releases** for Windows, Linux and macOS | Workflow written, never run; needs a maintainer decision to tag | M13 |
+| **Other builds of the game:** verify the importer on the Windows data (`CookedPC`) | Not started | — |
