@@ -457,8 +457,16 @@ mod tests {
             None => std::path::PathBuf::from(std::env::var_os("HOME")?)
                 .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle"),
         };
-        let dir = root.join("A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac");
-        dir.is_dir().then_some(dir)
+        // The Mac build keeps the cook in its app bundle, the Windows build
+        // at the install root; the packages are the same files.
+        let mac = root
+            .join("A Story About My Uncle.app")
+            .join("Contents")
+            .join("Resources")
+            .join("ASAMU")
+            .join("CookedMac");
+        let windows = root.join("ASAMU").join("CookedPC");
+        [mac, windows].into_iter().find(|dir| dir.is_dir())
     }
 
     /// Real data (skipped when absent): the JSON of a map is byte-identical

@@ -2590,10 +2590,16 @@ mod tests {
                     "Library/Application Support/Steam/steamapps/common/A Story About My Uncle",
                 ),
             };
-            let dir = root
+            // The Mac build keeps the cook in its app bundle, the Windows
+            // build at the install root; the packages are the same files.
+            let mac = root
                 .join("A Story About My Uncle.app")
-                .join("Contents/Resources/ASAMU/CookedMac");
-            dir.is_dir().then_some(dir)
+                .join("Contents")
+                .join("Resources")
+                .join("ASAMU")
+                .join("CookedMac");
+            let windows = root.join("ASAMU").join("CookedPC");
+            [mac, windows].into_iter().find(|dir| dir.is_dir())
         }
 
         fn package_files(dir: &Path) -> Vec<PathBuf> {
@@ -3017,7 +3023,7 @@ mod tests {
         fn decompress_every_block_of_every_original_package() {
             let Some(dir) = cooked_dir() else {
                 println!(
-                    "SKIP: original CookedMac directory not found (set ASAMU_ORIGINAL_DIR); real-data LZO check not run"
+                    "SKIP: original cooked directory not found (set ASAMU_ORIGINAL_DIR); real-data LZO check not run"
                 );
                 return;
             };
