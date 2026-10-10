@@ -1190,13 +1190,13 @@ class ClientSide(RootCase):
         run_lines = [line for line in text.split("\r\n") if "desk_runner.py" in line and not line.startswith("rem")]
         self.assertEqual(len(run_lines), 2)
         for line in run_lines:
-            self.assertTrue(line.endswith(' -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."'), line)
+            self.assertTrue(line.endswith(' -B -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."'), line)
         for word in ("cmd /c", "powershell", "schtasks", "reg ", "start ", "setx", "runas", "http"):
             self.assertNotIn(word, text.lower())
         for odd in (None, 'C:\\a"b\\python.exe', "C:\\a%PATH%\\python.exe", "C:\\a&b\\python.exe", "python.exe", "\\\\srv\\s\\python.exe"):
             fallback = dr.start_cmd_text(odd)
             self.assertEqual(fallback.count("desk_runner.py\" run"), 1, odd)
-            self.assertIn('"%ASAMU_DESK_PY%" -3 -I', fallback)
+            self.assertIn('"%ASAMU_DESK_PY%" -3 -B -I', fallback)
             for line in fallback.split("\r\n"):
                 # A bare `py` or `where` is looked for in the current folder first (the root, on a double-click).
                 self.assertFalse(line.lower().startswith(("py ", "where ")), line)

@@ -150,7 +150,7 @@ case "$cmd" in
   desk | desk-install | desk-status | desk-stop | desk-cancel)
     # PowerShell that runs the installed runner script there with the arguments $1.
     desk_ps() {
-      printf '%s' "\$desk = Join-Path (Join-Path \$root 'runner') 'desk_runner.py'; if (-not (Test-Path \$desk)) { [Console]::Error.WriteLine('desk: the desk runner is not installed on that machine: run \"tools/dev/win_host.sh desk-install\" first'); exit 125 }; \$py = Get-Command py -ErrorAction SilentlyContinue; \$pre = @('-3'); if (-not \$py) { \$py = Get-Command python -ErrorAction SilentlyContinue; \$pre = @() }; if (-not \$py) { [Console]::Error.WriteLine('desk: Python 3 was not found on that machine'); exit 125 }; & \$py.Source @pre -I -X utf8 \$desk $1; exit \$LASTEXITCODE"
+      printf '%s' "\$desk = Join-Path (Join-Path \$root 'runner') 'desk_runner.py'; if (-not (Test-Path \$desk)) { [Console]::Error.WriteLine('desk: the desk runner is not installed on that machine: run \"tools/dev/win_host.sh desk-install\" first'); exit 125 }; \$py = Get-Command py -ErrorAction SilentlyContinue; \$pre = @('-3'); if (-not \$py) { \$py = Get-Command python -ErrorAction SilentlyContinue; \$pre = @() }; if (-not \$py) { [Console]::Error.WriteLine('desk: Python 3 was not found on that machine'); exit 125 }; & \$py.Source @pre -B -I -X utf8 \$desk $1; exit \$LASTEXITCODE"
     }
     case "$cmd" in
       desk-install)

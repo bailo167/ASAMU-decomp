@@ -1948,12 +1948,19 @@ def command_run(root: str, max_jobs: int) -> int:
         return 2
     done = threading.Event()
     keep = _prepare_console(runner, done)
+    code = 1
     try:
-        return runner.run()
+        code = runner.run()
+        return code
     finally:
-        console.close(2.0)
+        shown = console.close(2.0)
         done.set()
         del keep
+        if not shown:
+            # The window still takes no output. Everything is over by now
+            # (jobs ended, lock released); leaving the usual way would wait
+            # for the window at the last flush of the output.
+            os._exit(code)
 
 
 # --------------------------------------------------------------------------
@@ -2317,7 +2324,10 @@ OWNER_INSTRUCTIONS = (
 
 def start_cmd_text(python_exe: str | None) -> str:
     """The small batch file the owner double-clicks. It only starts the runner
-    with the folder it lies in as the root, and keeps the window open at the end."""
+    with the folder it lies in as the root, and keeps the window open at the end.
+    `-B`: Python writes no byte code files (into its own installation, for a
+    library module used for the first time); `-I`: it loads nothing from the
+    runner's folder or the current one but the script itself."""
     lines = [
         "@echo off",
         "rem Starts the ASAMU-decomp desk runner (tools/dev/desk_runner.py) for this folder.",
@@ -2331,7 +2341,7 @@ def start_cmd_text(python_exe: str | None) -> str:
     if safe:
         lines += [
             f'if not exist "{python_exe}" goto launcher',
-            f'"{python_exe}" -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."',
+            f'"{python_exe}" -B -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."',
             "goto done",
             ":launcher",
         ]
@@ -2341,7 +2351,7 @@ def start_cmd_text(python_exe: str | None) -> str:
     lines += [
         'for %%P in (py.exe) do if not "%%~$PATH:P"=="" set "ASAMU_DESK_PY=%%~$PATH:P"',
         "if not defined ASAMU_DESK_PY goto nopython",
-        '"%ASAMU_DESK_PY%" -3 -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."',
+        '"%ASAMU_DESK_PY%" -3 -B -I -X utf8 "%~dp0runner\\desk_runner.py" run --root "%~dp0."',
         "goto done",
         ":nopython",
         "echo Python 3 was not found on this computer, so the desk runner cannot start.",
