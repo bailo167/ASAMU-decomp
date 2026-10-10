@@ -212,11 +212,11 @@ stderr_filter() {
 # and exit code 1.
 #
 # The script arrives as: a line with the number of base64 characters, the
-# base64 text in lines, and a line with a single dot. The dot matters: the
-# Windows SSH server often does not pass on the end of standard input after
-# more than a few kilobytes (measured: 4 of 8 runs waited forever for it), so
-# nothing here waits for the end of input. The count makes sure a script that
-# arrived cut short is never run.
+# base64 text in lines, and a line with a single dot. The dot matters:
+# PowerShell behind the Windows SSH server often never sees the end of its
+# standard input (measured: ReadToEnd on 40 KB waited forever in 9 of 18 runs;
+# a native program always saw the end), so nothing here waits for the end of
+# input. The count makes sure a script that arrived cut short is never run.
 BOOTSTRAP='$ProgressPreference = "SilentlyContinue"; $ErrorActionPreference = "Stop"; try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }; $n = [Console]::In.ReadLine(); $b = New-Object System.Text.StringBuilder; while ($true) { $l = [Console]::In.ReadLine(); if ($null -eq $l -or $l -eq ".") { break }; [void]$b.Append($l) }; if ($l -ne "." -or [string]$b.Length -ne $n) { [Console]::Error.WriteLine("win_host: the script arrived incomplete on the other machine (" + $b.Length + " of " + $n + " characters): nothing was run"); exit 4 }; $function:WinHost = [scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b.ToString()))); try { WinHost } catch { [Console]::Error.WriteLine("win_host: error on the other machine: " + $_.Exception.Message); if ($_.InvocationInfo) { [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage) }; exit 1 }; exit 0'
 
 # Run PowerShell text ($1) on the other machine after the shared functions of
@@ -233,9 +233,10 @@ ps_run() {
     printf '\n%s\n' "$1"
   } | base64 | tr -d '\r\n')"
   # Measured on Windows 11's SSH server: input for PowerShell stops arriving
-  # somewhere after the first 270 KB (never before, in 100+ runs), while a
-  # native program such as tar reads 16 MB without trouble. What this script
-  # sends itself is about 40 KB; only a `ps` script can be larger.
+  # somewhere after the first 270 KB (10 of 10 runs with 4 MB or more; never
+  # before 270 KB), while a native program such as tar reads 40 MB without
+  # trouble. What this script sends itself is about 30 KB; only a `ps` script
+  # can be larger.
   [ "${#text}" -le 150000 ] || die "$EX_USAGE" "the PowerShell script is too large to send reliably ($((${#text} * 3 / 4)) bytes with the shared functions; the limit is about 90 KB): put it in the checkout and run it there"
   payload="${#text}$NL$(printf '%s\n' "$text" | fold -w 76)$NL."
   set +e

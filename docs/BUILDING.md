@@ -53,8 +53,8 @@ tools/dev/win_host.sh --help                # all commands, the environment vari
 
 Exit codes: the program's own for `cargo`, `exec` and `ps`; 1 a gate step failed; 2 bad usage, name or root;
 3 the checkout cannot be mirrored as it is (nothing was changed on the other machine); 4 the other machine refused
-or failed (no such work tree, unfinished sync, folder in use); 255 the machine could not be reached, with ssh's
-reason in one line, or the connection was lost. A program that was running when the connection was lost keeps
+or failed (no such work tree, unfinished sync, folder in use); 127 `exec` did not find the program; 255 the
+machine could not be reached, with ssh's reason in one line, or the connection was lost. A program that was running when the connection was lost keeps
 running there.
 
 What the script refuses, by design:
@@ -97,7 +97,7 @@ showed them are not kept.
 | Observation | Consequence in the script |
 |---|---|
 | Windows' `tar` (bsdtar 3.8.8) cannot create a file whose name has characters outside the machine's legacy code page: from a pax archive with UTF-8 names it wrote `über-äö café.txt` but skipped `日本語/日本語.txt` and an emoji name ("empty or unreadable filename"), with or without `chcp 65001`, `LC_ALL`, `LANG` or `--options hdrcharset=UTF-8`. | `sync` sends the files numbered (`.win_host_incomplete\000001`, ...) with the list of names as a file; PowerShell moves each to its name. That folder is also the mark of an unfinished sync. |
-| Standard input for PowerShell stops arriving after 0.27 to 2.3 MB (10 of 10 runs with 4 MB or more, with three different ways of reading; 350 KB and 1.4 MB arrived), and `ReadToEnd` on 40 KB waited forever in 9 of 18 runs. Native programs had no such trouble: Python read 16 MB in under a second (8 of 8 runs), and `tar` unpacked a 42 MB checkout 30 times in a row. | The PowerShell text of a command (about 40 KB) ends with a line holding a dot and is checked against its announced length; nothing waits for the end of input. Scripts over about 90 KB are refused. File contents never pass through PowerShell's standard input. |
+| Standard input for PowerShell stops arriving after 0.27 to 2.3 MB (10 of 10 runs with 4 MB or more, with three different ways of reading; 350 KB and 1.4 MB arrived), and `ReadToEnd` on 40 KB waited forever in 9 of 18 runs. Native programs had no such trouble: Python read 16 MB in under a second (8 of 8 runs), and `tar` unpacked a 42 MB checkout 30 times in a row. | The PowerShell text of a command (about 30 KB as sent) ends with a line holding a dot and is checked against its announced length; nothing waits for the end of input. Scripts over about 90 KB are refused. File contents never pass through PowerShell's standard input. |
 | A nested `cmd /c` in an SSH command keeps the closing quote (`ssh host 'cmd /c echo hi'` prints `hi"`). | No nested `cmd`: PowerShell text travels as `-EncodedCommand`, and the only other command line (`tar -xf - -C <root>\work\NAME`) needs no quoting because of the NAME and root rules. |
 | PowerShell 5.1 drops empty arguments and splits arguments that contain quotes when it starts a program. | `cargo` and `exec` build the command line themselves (Microsoft C runtime rules); 23 awkward arguments, among them `a b\`, `sp q"uo te`, an empty one, `$env:PATH`, a line break and non-ASCII text, arrived unchanged. |
 | PowerShell reports its own errors as CLIXML on standard error when started this way. | Errors are caught and printed as one plain line; warnings are converted back to text. |
@@ -116,10 +116,11 @@ work tree as in use (exit code 4) and finished on the next call. Timings: `sync`
 
 The gate on this workspace, from an empty target folder while four other builds were running on the machine
 (24 cores): fmt 2.2 s, clippy 254.0 s, test 941.2 s, build 100.9 s, 1298.3 s in all. The test step failed, which
-the gate reported with exit code 1 and the end of the log: two tests do not yet expect a Windows install of the
-game on the machine (`asamu-inventory --test real_install` compares it with the Mac inventory, and
-`asamu-locate`'s `windows_backslash_paths_in_vdf_are_unescaped` finds the real install where it expects none).
-With `--no-fail-fast` the same tree ran 115 test binaries: 1863 passed, those 2 failed, 5 ignored.
+the gate reported with exit code 1 and the end of the log: `asamu-inventory --test real_install` compares the
+install it finds with the Mac inventory, and that machine has the Windows install of the game. With
+`--no-fail-fast` the same tree ran 115 test binaries: 1863 tests passed, 5 were ignored and 2 failed, that one
+and `asamu-locate`'s `windows_backslash_paths_in_vdf_are_unescaped`, which finds the real install where it
+expects none. Both are tests that do not yet expect a Windows machine with the game on it.
 
 ### Testing the script without a Windows machine
 
@@ -132,8 +133,10 @@ puts a fake `ssh` and `scp` first in `PATH` that record their arguments and stan
 (names, bytes, times), for normal use and for hostile input (work tree names such as `..`, `a;b` or `$(id)`,
 roots such as `D:\`, hosts that look like options, file names with spaces, quotes, leading dashes and non-ASCII
 characters, symbolic links, an empty checkout, an unreachable machine, a connection lost half way). It needs
-bash, git and python3 and runs on Linux and macOS. It does not run the PowerShell half; that was exercised on
-the real machine as listed above.
+bash, git and python3 and is written for Linux and macOS; so far it has run on macOS only (bash 3.2, Python 3.9
+and 3.14, also in the C locale: 462 checks, and each of 48 faults put into the script on purpose made it fail).
+Two of its cases need a case-sensitive file system that accepts any bytes in names and are skipped elsewhere.
+It does not run the PowerShell half; that was exercised on the real machine as listed above.
 
 ## Using your original install
 
