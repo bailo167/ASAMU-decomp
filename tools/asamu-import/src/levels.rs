@@ -26,6 +26,13 @@
 //! (`WorldInfo.DefaultPostProcessSettings`, `PostProcessVolume.Settings`).
 //! See `docs/reverse-engineering/POST_FOG_SKY.md`.
 //!
+//! After it comes the additive `foliage` block ([`Foliage`]): every
+//! `InstancedStaticMeshComponent` with its decoded instances (world
+//! matrices and light-map UV biases), every `InstancedFoliageActor`'s mesh
+//! map (decoded from its native data, [`decode_foliage_actor_native`]), the
+//! fluid surfaces (effective component values and material parameters) and
+//! the SpeedTree placements. See `docs/reverse-engineering/WATER_FOLIAGE.md`.
+//!
 //! All of this is derived from copyrighted game data: keep it local and do
 //! not redistribute it.
 
@@ -430,7 +437,8 @@ const MAX_FOG_COMPONENTS: usize = 256;
 const MAX_ATMOSPHERE_WARNINGS: usize = 64;
 
 /// `<map>.scene.json`: the scene's own fields, then the additive
-/// [`Atmosphere`] block (existing keys keep their order and values).
+/// [`Atmosphere`] block, then the additive [`Foliage`] block (existing keys
+/// keep their order and values).
 #[derive(Debug, Serialize)]
 pub struct SceneFile<'a> {
     /// The scene.
@@ -438,6 +446,8 @@ pub struct SceneFile<'a> {
     pub scene: &'a Scene,
     /// Fog components and the default post-process chain.
     pub atmosphere: &'a Atmosphere,
+    /// Instanced meshes (foliage), fluid surfaces and SpeedTree placements.
+    pub foliage: &'a Foliage,
 }
 
 /// Fog and post-process data the actor list does not carry.
@@ -840,6 +850,575 @@ pub fn atmosphere(
     out
 }
 
+// ------------------------------------------------------------ foliage, water, SpeedTree
+
+/// `version` of the scene's additive `foliage` block.
+pub const FOLIAGE_VERSION: u32 = 1;
+/// Warnings kept in the foliage block.
+const MAX_FOLIAGE_WARNINGS: usize = 64;
+/// Instances exported per component or foliage mesh (the shipped maps hold
+/// far fewer; a bound against damaged counts).
+const MAX_INSTANCES_PER_SET: usize = 65_536;
+/// Instances exported per map over all components (bound on the JSON size).
+const MAX_INSTANCES_PER_MAP: usize = 262_144;
+/// Meshes read from one foliage actor's mesh map.
+const MAX_FOLIAGE_MESHES: usize = 4_096;
+/// Fluid surfaces / SpeedTree placements exported per map.
+const MAX_PLACEMENTS: usize = 1_024;
+/// Oldest package version whose foliage layout [`decode_foliage_actor_native`]
+/// reads (every field of `FFoliageInstance` present: `ZOffset` arrived at
+/// 850). The shipped packages are version 868.
+pub const FOLIAGE_MIN_VERSION: u16 = 850;
+/// Serialized size of one `FFoliageInstance` at [`FOLIAGE_MIN_VERSION`]+.
+const FOLIAGE_INSTANCE_SIZE: usize = 64;
+/// Smallest serialized `FFoliageInstanceCluster` (bounds, component, empty
+/// index array).
+const FOLIAGE_CLUSTER_MIN_SIZE: usize = 36;
+/// Smallest serialized foliage mesh entry (key, two empty arrays, settings).
+const FOLIAGE_MESH_MIN_SIZE: usize = 16;
+
+/// Instanced meshes, fluid surfaces and SpeedTree placements the actor list
+/// does not describe (their data lives in native serialization or on
+/// component subobjects). See `docs/reverse-engineering/WATER_FOLIAGE.md`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Foliage {
+    /// [`FOLIAGE_VERSION`].
+    pub version: u32,
+    /// `InstancedStaticMeshComponent`s with their decoded instances.
+    pub instanced_meshes: Vec<InstancedMeshExport>,
+    /// `InstancedFoliageActor` mesh maps (painted foliage bookkeeping).
+    pub foliage_actors: Vec<FoliageActorExport>,
+    /// `FluidSurfaceActor` components (water).
+    pub fluid_surfaces: Vec<FluidSurfaceExport>,
+    /// `SpeedTreeComponent` placements.
+    pub speedtrees: Vec<SpeedTreeExport>,
+    /// Non-fatal problems.
+    pub warnings: Vec<String>,
+}
+
+/// One `InstancedStaticMeshComponent`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InstancedMeshExport {
+    /// Owning actor's slot in `ULevel::Actors`.
+    pub slot: usize,
+    /// Owning actor name.
+    pub actor: String,
+    /// Owning actor class path.
+    pub actor_class: String,
+    /// Component object name (as in the actor's `components`).
+    pub component: String,
+    /// Component class path.
+    pub class: String,
+    /// `StaticMesh`.
+    pub static_mesh: Option<String>,
+    /// `Materials` overrides (as in the scene's components).
+    pub materials: Vec<Option<String>>,
+    /// The component's world matrix (UE3 row-vector convention).
+    pub local_to_world: level::Mat4,
+    /// Actor `bHidden` or component `HiddenGame`.
+    pub hidden: bool,
+    /// `PerInstanceSMData`, in serialized order.
+    pub instances: Vec<InstanceExport>,
+}
+
+/// One instance of an instanced static mesh component.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct InstanceExport {
+    /// World matrix: the serialized instance matrix followed by the
+    /// component's world matrix (`instance · component`, row-vector
+    /// convention; STRONG, see WATER_FOLIAGE.md).
+    pub local_to_world: level::Mat4,
+    /// `LightmapUVBias`.
+    pub lightmap_uv_bias: [f32; 2],
+    /// `ShadowmapUVBias`.
+    pub shadowmap_uv_bias: [f32; 2],
+}
+
+/// One `InstancedFoliageActor`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FoliageActorExport {
+    /// Actor slot.
+    pub slot: usize,
+    /// Actor name.
+    pub actor: String,
+    /// `FoliageMeshes`, in serialized order.
+    pub meshes: Vec<FoliageMeshExport>,
+}
+
+/// One entry of `AInstancedFoliageActor::FoliageMeshes`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FoliageMeshExport {
+    /// The painted static mesh (the map key).
+    pub static_mesh: Option<String>,
+    /// `Settings` (`InstancedFoliageSettings`).
+    pub settings: Option<String>,
+    /// `InstanceClusters`.
+    pub clusters: Vec<FoliageClusterExport>,
+    /// `Instances`.
+    pub instances: Vec<FoliageInstanceExport>,
+}
+
+/// `FFoliageInstanceCluster`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FoliageClusterExport {
+    /// `ClusterComponent` (an `InstancedStaticMeshComponent`).
+    pub component: Option<String>,
+    /// `Bounds.Origin`.
+    pub bounds_origin: [f32; 3],
+    /// `Bounds.BoxExtent`.
+    pub bounds_extent: [f32; 3],
+    /// `Bounds.SphereRadius`.
+    pub sphere_radius: f32,
+    /// `InstanceIndices` (into the mesh's `instances`).
+    pub instance_indices: Vec<i32>,
+}
+
+/// `FFoliageInstance`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FoliageInstanceExport {
+    /// `Base` (the component the instance was painted on).
+    pub base: Option<String>,
+    /// `Location`.
+    pub location: [f32; 3],
+    /// `Rotation` (pitch, yaw, roll).
+    pub rotation: [i32; 3],
+    /// `DrawScale3D`.
+    pub draw_scale3d: [f32; 3],
+    /// `ClusterIndex`.
+    pub cluster_index: i32,
+    /// `PreAlignRotation`.
+    pub pre_align_rotation: [i32; 3],
+    /// `Flags`.
+    pub flags: u32,
+    /// `ZOffset`.
+    pub z_offset: f32,
+}
+
+/// One `FluidSurfaceComponent` (water surface).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FluidSurfaceExport {
+    /// Owning actor slot.
+    pub slot: usize,
+    /// Owning actor name.
+    pub actor: String,
+    /// Owning actor class path.
+    pub actor_class: String,
+    /// Owning actor `Location`.
+    pub location: [f32; 3],
+    /// Component object name.
+    pub component: String,
+    /// Component class path.
+    pub class: String,
+    /// The component's world matrix (UE3 row-vector convention).
+    pub local_to_world: level::Mat4,
+    /// Actor `bHidden` or component `HiddenGame`.
+    pub hidden: bool,
+    /// Effective component values (own over archetype / class defaults):
+    /// `FluidWidth`, `FluidHeight`, `GridSpacing`, `FluidMaterial`, ...
+    pub params: BTreeMap<String, ParamValue>,
+    /// `FluidMaterial` parameters (when it is set and found).
+    pub material: Option<MaterialParamsExport>,
+}
+
+/// One `SpeedTreeComponent` placement.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SpeedTreeExport {
+    /// Owning actor slot.
+    pub slot: usize,
+    /// Owning actor name.
+    pub actor: String,
+    /// Owning actor class path.
+    pub actor_class: String,
+    /// Component object name.
+    pub component: String,
+    /// The component's world matrix (UE3 row-vector convention).
+    pub local_to_world: level::Mat4,
+    /// Actor `bHidden` or component `HiddenGame`.
+    pub hidden: bool,
+    /// The `SpeedTree` asset (`None`: the component names no tree).
+    pub speedtree: Option<String>,
+    /// Effective component values.
+    pub params: BTreeMap<String, ParamValue>,
+}
+
+fn warn_foliage(f: &mut Foliage, msg: String) {
+    if f.warnings.len() < MAX_FOLIAGE_WARNINGS {
+        f.warnings.push(msg);
+    }
+}
+
+/// Component role for the foliage block, from a lower-case class chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoliageKind {
+    Instanced,
+    Fluid,
+    SpeedTree,
+}
+
+fn foliage_kind(chain: &[String]) -> Option<FoliageKind> {
+    let has = |n: &str| chain.iter().any(|c| c == n);
+    if has("instancedstaticmeshcomponent") {
+        Some(FoliageKind::Instanced)
+    } else if has("fluidsurfacecomponent") {
+        Some(FoliageKind::Fluid)
+    } else if has("speedtreecomponent") {
+        Some(FoliageKind::SpeedTree)
+    } else {
+        None
+    }
+}
+
+/// Row-major `[f32; 16]` → [`level::Mat4`].
+fn mat_of(m: &[f32; 16]) -> level::Mat4 {
+    let mut out = [[0.0f32; 4]; 4];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = m[i * 4 + j];
+        }
+    }
+    out
+}
+
+/// The export payload and the end of its tagged properties.
+fn native_of<'a>(
+    set: &PackageSet,
+    lp: &'a LoadedPackage,
+    index: usize,
+) -> Result<(&'a [u8], usize)> {
+    let obj = set
+        .decode(lp, index)
+        .with_context(|| format!("{}: export {index} does not decode", lp.name))?;
+    let data = lp.package.export_data(index)?;
+    Ok((data, obj.properties_end))
+}
+
+fn read_vec3(r: &mut asamu_ue3::reader::Reader<'_>) -> asamu_ue3::Result<[f32; 3]> {
+    Ok([r.read_f32()?, r.read_f32()?, r.read_f32()?])
+}
+
+fn read_rotator(r: &mut asamu_ue3::reader::Reader<'_>) -> asamu_ue3::Result<[i32; 3]> {
+    Ok([r.read_i32()?, r.read_i32()?, r.read_i32()?])
+}
+
+/// `FFoliageInstanceCluster` with its component reference unresolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawFoliageCluster {
+    /// `Bounds.Origin`.
+    pub bounds_origin: [f32; 3],
+    /// `Bounds.BoxExtent`.
+    pub bounds_extent: [f32; 3],
+    /// `Bounds.SphereRadius`.
+    pub sphere_radius: f32,
+    /// `ClusterComponent`.
+    pub component: asamu_ue3::PackageIndex,
+    /// `InstanceIndices`.
+    pub instance_indices: Vec<i32>,
+}
+
+/// `FFoliageInstance` with its base reference unresolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawFoliageInstance {
+    /// `Base`.
+    pub base: asamu_ue3::PackageIndex,
+    /// `Location`.
+    pub location: [f32; 3],
+    /// `Rotation`.
+    pub rotation: [i32; 3],
+    /// `DrawScale3D`.
+    pub draw_scale3d: [f32; 3],
+    /// `ClusterIndex`.
+    pub cluster_index: i32,
+    /// `PreAlignRotation`.
+    pub pre_align_rotation: [i32; 3],
+    /// `Flags`.
+    pub flags: u32,
+    /// `ZOffset`.
+    pub z_offset: f32,
+}
+
+/// One `FoliageMeshes` entry with unresolved references.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawFoliageMesh {
+    /// The map key (`UStaticMesh*`).
+    pub static_mesh: asamu_ue3::PackageIndex,
+    /// `InstanceClusters`.
+    pub clusters: Vec<RawFoliageCluster>,
+    /// `Instances`.
+    pub instances: Vec<RawFoliageInstance>,
+    /// `Settings`.
+    pub settings: asamu_ue3::PackageIndex,
+}
+
+/// Decodes the native data of an `InstancedFoliageActor` (after its tagged
+/// properties), for package versions ≥ [`FOLIAGE_MIN_VERSION`]. Layout read
+/// from the Mac executable's serializers (`AInstancedFoliageActor::Serialize`
+/// and the `FFoliageMeshInfo` / `FFoliageInstanceCluster` /
+/// `FFoliageInstance` stream operators; WATER_FOLIAGE.md):
+///
+/// ```text
+/// i32 count, then per entry:
+///   obj StaticMesh                              (map key)
+///   TArray<cluster>  i32 n, per cluster: FVector Origin, FVector BoxExtent,
+///                    f32 SphereRadius, obj ClusterComponent, TArray<i32> InstanceIndices
+///   TArray<instance> i32 n, per instance (64 bytes): obj Base, FVector Location,
+///                    FRotator Rotation, FVector DrawScale3D, i32 ClusterIndex,
+///                    FRotator PreAlignRotation, u32 Flags, f32 ZOffset
+///   obj Settings
+/// ```
+///
+/// Every count is checked against the remaining bytes and the data must be
+/// consumed exactly.
+///
+/// # Errors
+/// Truncated or malformed data, trailing bytes, or too many entries.
+pub fn decode_foliage_actor_native(data: &[u8], start: usize) -> Result<Vec<RawFoliageMesh>> {
+    let mut r = asamu_ue3::reader::Reader::at(data, start)?;
+    let n = r.read_count("FoliageMeshes", FOLIAGE_MESH_MIN_SIZE)?;
+    if n > MAX_FOLIAGE_MESHES {
+        bail!("{n} foliage meshes (more than {MAX_FOLIAGE_MESHES})");
+    }
+    let mut meshes = Vec::with_capacity(n);
+    for _ in 0..n {
+        let static_mesh = r.read_package_index()?;
+        let clusters = r.read_tarray(
+            "FFoliageMeshInfo.InstanceClusters",
+            FOLIAGE_CLUSTER_MIN_SIZE,
+            |r| {
+                let bounds_origin = read_vec3(r)?;
+                let bounds_extent = read_vec3(r)?;
+                let sphere_radius = r.read_f32()?;
+                let component = r.read_package_index()?;
+                let instance_indices =
+                    r.read_tarray("FFoliageInstanceCluster.InstanceIndices", 4, |r| {
+                        r.read_i32()
+                    })?;
+                Ok(RawFoliageCluster {
+                    bounds_origin,
+                    bounds_extent,
+                    sphere_radius,
+                    component,
+                    instance_indices,
+                })
+            },
+        )?;
+        let count = r.read_count("FFoliageMeshInfo.Instances", FOLIAGE_INSTANCE_SIZE)?;
+        if count > MAX_INSTANCES_PER_SET {
+            bail!("{count} foliage instances in one mesh (more than {MAX_INSTANCES_PER_SET})");
+        }
+        let mut instances = Vec::with_capacity(count);
+        for _ in 0..count {
+            instances.push(RawFoliageInstance {
+                base: r.read_package_index()?,
+                location: read_vec3(&mut r)?,
+                rotation: read_rotator(&mut r)?,
+                draw_scale3d: read_vec3(&mut r)?,
+                cluster_index: r.read_i32()?,
+                pre_align_rotation: read_rotator(&mut r)?,
+                flags: r.read_u32()?,
+                z_offset: r.read_f32()?,
+            });
+        }
+        let settings = r.read_package_index()?;
+        meshes.push(RawFoliageMesh {
+            static_mesh,
+            clusters,
+            instances,
+            settings,
+        });
+    }
+    if r.remaining() != 0 {
+        bail!(
+            "{} bytes left after the foliage mesh map at {}",
+            r.remaining(),
+            r.position()
+        );
+    }
+    Ok(meshes)
+}
+
+/// Resolves a reference of `lp` to a path (`None` for null or unresolvable).
+fn ref_of(lp: &LoadedPackage, idx: asamu_ue3::PackageIndex) -> Option<String> {
+    lp.ref_path(idx).ok().flatten()
+}
+
+fn foliage_actor_export(
+    set: &PackageSet,
+    lp: &LoadedPackage,
+    actor: &level::SceneActor,
+) -> Result<FoliageActorExport> {
+    let version = lp.package.summary.file_version;
+    if version < FOLIAGE_MIN_VERSION {
+        bail!("package version {version} predates the foliage layout this reader knows");
+    }
+    let (data, start) = native_of(set, lp, actor.export_index)?;
+    let meshes = decode_foliage_actor_native(data, start)?
+        .into_iter()
+        .map(|m| FoliageMeshExport {
+            static_mesh: ref_of(lp, m.static_mesh),
+            settings: ref_of(lp, m.settings),
+            clusters: m
+                .clusters
+                .into_iter()
+                .map(|c| FoliageClusterExport {
+                    component: ref_of(lp, c.component),
+                    bounds_origin: c.bounds_origin,
+                    bounds_extent: c.bounds_extent,
+                    sphere_radius: c.sphere_radius,
+                    instance_indices: c.instance_indices,
+                })
+                .collect(),
+            instances: m
+                .instances
+                .into_iter()
+                .map(|i| FoliageInstanceExport {
+                    base: ref_of(lp, i.base),
+                    location: i.location,
+                    rotation: i.rotation,
+                    draw_scale3d: i.draw_scale3d,
+                    cluster_index: i.cluster_index,
+                    pre_align_rotation: i.pre_align_rotation,
+                    flags: i.flags,
+                    z_offset: i.z_offset,
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(FoliageActorExport {
+        slot: actor.slot,
+        actor: actor.name.clone(),
+        meshes,
+    })
+}
+
+/// The additive foliage block of one map: every instanced static mesh
+/// component with its instances, every `InstancedFoliageActor`'s mesh map,
+/// every fluid surface component (effective values and material
+/// parameters) and every SpeedTree component placement.
+pub fn foliage(set: &PackageSet, lp: &Arc<LoadedPackage>, scene: &Scene) -> Foliage {
+    let mut out = Foliage {
+        version: FOLIAGE_VERSION,
+        ..Foliage::default()
+    };
+    let mut total_instances = 0usize;
+    for actor in &scene.actors {
+        let actor_chain = set.class_chain(&actor.class);
+        if actor_chain.iter().any(|c| c == "instancedfoliageactor") {
+            match foliage_actor_export(set, lp, actor) {
+                Ok(f) => out.foliage_actors.push(f),
+                Err(e) => warn_foliage(&mut out, format!("{}: {e:#}", actor.name)),
+            }
+        }
+        for comp in &actor.components {
+            let chain = set.class_chain(&comp.class);
+            let Some(kind) = foliage_kind(&chain) else {
+                continue;
+            };
+            let hidden = actor.hidden || comp.hidden_game;
+            let label = format!("{}.{}", actor.name, comp.name);
+            match kind {
+                FoliageKind::Instanced => {
+                    let native = native_of(set, lp, comp.export_index).and_then(|(data, start)| {
+                        Ok(asamu_ue3::lightmap::decode_static_mesh_component_native(
+                            data, start, true,
+                        )?)
+                    });
+                    let list = match native {
+                        Ok(n) => n.instances.unwrap_or_default(),
+                        Err(e) => {
+                            warn_foliage(&mut out, format!("{label}: {e:#}"));
+                            continue;
+                        }
+                    };
+                    if list.len() > MAX_INSTANCES_PER_SET
+                        || total_instances.saturating_add(list.len()) > MAX_INSTANCES_PER_MAP
+                    {
+                        warn_foliage(
+                            &mut out,
+                            format!("{label}: {} instances over the export bound", list.len()),
+                        );
+                        continue;
+                    }
+                    total_instances += list.len();
+                    let instances = list
+                        .iter()
+                        .map(|i| InstanceExport {
+                            local_to_world: level::mat_mul(
+                                &mat_of(&i.transform),
+                                &comp.local_to_world,
+                            ),
+                            lightmap_uv_bias: i.lightmap_uv_bias,
+                            shadowmap_uv_bias: i.shadowmap_uv_bias,
+                        })
+                        .collect();
+                    out.instanced_meshes.push(InstancedMeshExport {
+                        slot: actor.slot,
+                        actor: actor.name.clone(),
+                        actor_class: actor.class.clone(),
+                        component: comp.name.clone(),
+                        class: comp.class.clone(),
+                        static_mesh: comp.static_mesh.clone(),
+                        materials: comp.materials.clone(),
+                        local_to_world: comp.local_to_world,
+                        hidden,
+                        instances,
+                    });
+                }
+                FoliageKind::Fluid | FoliageKind::SpeedTree => {
+                    if out.fluid_surfaces.len() + out.speedtrees.len() >= MAX_PLACEMENTS {
+                        warn_foliage(
+                            &mut out,
+                            format!("more than {MAX_PLACEMENTS} placements; the rest are left out"),
+                        );
+                        continue;
+                    }
+                    let props = match effective_props(set, lp, comp.export_index, 0) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn_foliage(&mut out, format!("{label}: {e:#}"));
+                            continue;
+                        }
+                    };
+                    if kind == FoliageKind::Fluid {
+                        let material = level::prop(&props, "FluidMaterial")
+                            .and_then(object_path)
+                            .and_then(|p| match material_params(set, &p) {
+                                Ok(m) => Some(m),
+                                Err(e) => {
+                                    warn_foliage(&mut out, format!("{p}: {e:#}"));
+                                    None
+                                }
+                            });
+                        out.fluid_surfaces.push(FluidSurfaceExport {
+                            slot: actor.slot,
+                            actor: actor.name.clone(),
+                            actor_class: actor.class.clone(),
+                            location: actor.location,
+                            component: comp.name.clone(),
+                            class: comp.class.clone(),
+                            local_to_world: comp.local_to_world,
+                            hidden,
+                            params: level::param_map(&props),
+                            material,
+                        });
+                    } else {
+                        out.speedtrees.push(SpeedTreeExport {
+                            slot: actor.slot,
+                            actor: actor.name.clone(),
+                            actor_class: actor.class.clone(),
+                            component: comp.name.clone(),
+                            local_to_world: comp.local_to_world,
+                            hidden,
+                            speedtree: level::prop(&props, "SpeedTree").and_then(object_path),
+                            params: level::param_map(&props),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------ manifest
 
 /// One map in `manifest.json` (counts only).
@@ -917,11 +1496,13 @@ fn convert_map(
         .with_context(|| format!("extracting the scene of {}", lp.name))?;
     let map = lp.name.clone();
     let atmosphere = atmosphere(&set, &lp, &scene, configs);
+    let foliage = foliage(&set, &lp, &scene);
     let mut files = Vec::new();
     let name = format!("{map}.scene.json");
     let scene_file = SceneFile {
         scene: &scene,
         atmosphere: &atmosphere,
+        foliage: &foliage,
     };
     write_file(
         out_dir,
@@ -1308,22 +1889,32 @@ mod tests {
         cooked: &Path,
         configs: &[PathBuf],
         file: &Path,
-    ) -> (Scene, Atmosphere) {
+    ) -> (Scene, Atmosphere, Foliage) {
         let set = PackageSet::new(&[cooked.to_path_buf(), cooked.join("Maps")]);
         let lp = set.open_file(file).unwrap();
         let lvl = level::level_exports(&lp.package)[0];
         let scene = level::extract_scene(&set, &lp, lvl, &SceneOptions::default()).unwrap();
         let atmosphere = atmosphere(&set, &lp, &scene, configs);
-        (scene, atmosphere)
+        let foliage = foliage(&set, &lp, &scene);
+        (scene, atmosphere, foliage)
     }
 
     /// The scene file is byte for byte the JSON the importer wrote before
-    /// the block existed (`to_json(&scene)`), with only `"atmosphere": ...`
-    /// appended as the last key, compact and pretty.
-    fn assert_scene_bytes_kept(scene: &Scene, atmosphere: &Atmosphere) {
+    /// the blocks existed (`to_json(&scene)`), with only `"atmosphere": ...`
+    /// and then `"foliage": ...` appended as the last keys, compact and
+    /// pretty.
+    fn assert_scene_bytes_kept(scene: &Scene, atmosphere: &Atmosphere, foliage: &Foliage) {
         for pretty in [false, true] {
             let old = to_json(scene, pretty).unwrap();
-            let new = to_json(&SceneFile { scene, atmosphere }, pretty).unwrap();
+            let new = to_json(
+                &SceneFile {
+                    scene,
+                    atmosphere,
+                    foliage,
+                },
+                pretty,
+            )
+            .unwrap();
             let close: &[u8] = if pretty { b"\n}" } else { b"}" };
             let head = old.strip_suffix(close).expect("a JSON object");
             assert!(
@@ -1342,13 +1933,29 @@ mod tests {
                 "{}: block not appended",
                 scene.package
             );
-            let block = rest[sep.len()..].strip_suffix(close).unwrap();
-            // The appended value is the block itself (compared as parsed
-            // text: f32 values print in their shortest form).
-            let parsed: serde_json::Value = serde_json::from_slice(block).unwrap();
-            let alone = to_json(atmosphere, false).unwrap();
-            let expected: serde_json::Value = serde_json::from_slice(&alone).unwrap();
-            assert_eq!(parsed, expected);
+            // The appended values are the blocks themselves, in this order
+            // (compared as parsed values: f32 values print in their
+            // shortest form).
+            let fsep = if pretty {
+                "\n  \"foliage\": "
+            } else {
+                "\"foliage\":"
+            };
+            let tail = std::str::from_utf8(&rest[sep.len()..]).unwrap();
+            let tail = tail
+                .strip_suffix(std::str::from_utf8(close).unwrap())
+                .unwrap();
+            let at = tail.rfind(fsep).expect("foliage block appended");
+            let a_text = tail[..at].trim_end().strip_suffix(',').unwrap();
+            let f_text = &tail[at + fsep.len()..];
+            let parsed_a: serde_json::Value = serde_json::from_str(a_text).unwrap();
+            let parsed_f: serde_json::Value = serde_json::from_str(f_text).unwrap();
+            let expected_a: serde_json::Value =
+                serde_json::from_slice(&to_json(atmosphere, false).unwrap()).unwrap();
+            let expected_f: serde_json::Value =
+                serde_json::from_slice(&to_json(foliage, false).unwrap()).unwrap();
+            assert_eq!(parsed_a, expected_a);
+            assert_eq!(parsed_f, expected_f);
         }
     }
 
@@ -1364,8 +1971,8 @@ mod tests {
         };
         let load = |map: &str| {
             let file = cooked.join("Maps").join(format!("{map}.asamu"));
-            let (scene, atmosphere) = scene_and_atmosphere(&cooked, &configs, &file);
-            assert_scene_bytes_kept(&scene, &atmosphere);
+            let (scene, atmosphere, foliage) = scene_and_atmosphere(&cooked, &configs, &file);
+            assert_scene_bytes_kept(&scene, &atmosphere, &foliage);
             atmosphere
         };
         let star = load("AG-StarHaven");
@@ -1432,8 +2039,14 @@ mod tests {
         let maps = select_maps(&cooked.join("Maps"), &[]).unwrap();
         assert!(!maps.is_empty());
         for file in &maps {
-            let (scene, atmosphere) = scene_and_atmosphere(&cooked, &configs, file);
-            assert_scene_bytes_kept(&scene, &atmosphere);
+            let (scene, atmosphere, foliage) = scene_and_atmosphere(&cooked, &configs, file);
+            assert_scene_bytes_kept(&scene, &atmosphere, &foliage);
+            assert!(
+                foliage.warnings.is_empty(),
+                "{}: {:?}",
+                scene.package,
+                foliage.warnings
+            );
             assert!(
                 atmosphere.warnings.is_empty(),
                 "{}: {:?}",
@@ -1448,6 +2061,338 @@ mod tests {
                 atmosphere.fog_volumes.len()
             );
         }
+    }
+
+    /// Writes one foliage mesh entry the way the executable serializes it
+    /// (hand-built bytes; no game data).
+    fn push_foliage_mesh(b: &mut Vec<u8>, key: i32, clusters: &[(i32, &[i32])], n: usize) {
+        let i32_ = |b: &mut Vec<u8>, v: i32| b.extend_from_slice(&v.to_le_bytes());
+        let f32_ = |b: &mut Vec<u8>, v: f32| b.extend_from_slice(&v.to_le_bytes());
+        i32_(b, key);
+        i32_(b, i32::try_from(clusters.len()).unwrap());
+        for (component, indices) in clusters {
+            for v in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] {
+                f32_(b, v);
+            }
+            i32_(b, *component);
+            i32_(b, i32::try_from(indices.len()).unwrap());
+            for i in *indices {
+                i32_(b, *i);
+            }
+        }
+        i32_(b, i32::try_from(n).unwrap());
+        for k in 0..n {
+            let k = i32::try_from(k).unwrap();
+            i32_(b, if k == 0 { 0 } else { -1 }); // Base
+            for v in [10.0, 20.0, 30.0 + k as f32] {
+                f32_(b, v);
+            }
+            for v in [0, 16384, k] {
+                i32_(b, v);
+            }
+            for v in [1.0, 1.5, 2.0] {
+                f32_(b, v);
+            }
+            i32_(b, if k == 0 { -1 } else { 0 }); // ClusterIndex
+            for v in [1, 2, 3] {
+                i32_(b, v);
+            }
+            i32_(b, 1); // Flags
+            f32_(b, -4.0); // ZOffset
+        }
+        i32_(b, 5); // Settings
+    }
+
+    #[test]
+    fn foliage_actor_native_data_decodes_exactly() {
+        let mut b = vec![0xAA; 3]; // stands in for the tagged properties
+        b.extend_from_slice(&2i32.to_le_bytes());
+        push_foliage_mesh(&mut b, 7, &[(-2, &[1, 2])], 3);
+        push_foliage_mesh(&mut b, 8, &[], 0);
+        let meshes = decode_foliage_actor_native(&b, 3).unwrap();
+        assert_eq!(meshes.len(), 2);
+        let m = &meshes[0];
+        assert_eq!(m.static_mesh.export_index(), Some(6));
+        assert_eq!(m.settings.export_index(), Some(4));
+        assert_eq!(m.clusters.len(), 1);
+        let c = &m.clusters[0];
+        assert_eq!(c.bounds_origin, [1.0, 2.0, 3.0]);
+        assert_eq!(c.bounds_extent, [4.0, 5.0, 6.0]);
+        assert_eq!(c.sphere_radius, 7.0);
+        assert_eq!(c.component.import_index(), Some(1));
+        assert_eq!(c.instance_indices, vec![1, 2]);
+        assert_eq!(m.instances.len(), 3);
+        let i = &m.instances[2];
+        assert_eq!(i.location, [10.0, 20.0, 32.0]);
+        assert_eq!(i.rotation, [0, 16384, 2]);
+        assert_eq!(i.draw_scale3d, [1.0, 1.5, 2.0]);
+        assert_eq!(i.cluster_index, 0);
+        assert_eq!(i.pre_align_rotation, [1, 2, 3]);
+        assert_eq!(i.flags, 1);
+        assert_eq!(i.z_offset, -4.0);
+        assert!(m.instances[0].base.is_null());
+        assert_eq!(m.instances[0].cluster_index, -1);
+        assert!(meshes[1].clusters.is_empty() && meshes[1].instances.is_empty());
+        // Trailing bytes and every truncation are errors, never panics.
+        let mut long = b.clone();
+        long.push(0);
+        assert!(decode_foliage_actor_native(&long, 3).is_err());
+        for cut in 3..b.len() {
+            assert!(
+                decode_foliage_actor_native(&b[..cut], 3).is_err(),
+                "cut {cut}"
+            );
+        }
+        assert!(decode_foliage_actor_native(&b, b.len() + 1).is_err());
+        // Damaged counts are refused before anything is allocated.
+        // Offsets: the mesh count, the first cluster count, its index count.
+        for at in [3usize, 11, 47] {
+            let mut bad = b.clone();
+            bad[at..at + 4].copy_from_slice(&i32::MAX.to_le_bytes());
+            assert!(decode_foliage_actor_native(&bad, 3).is_err());
+            bad[at..at + 4].copy_from_slice(&(-1i32).to_le_bytes());
+            assert!(decode_foliage_actor_native(&bad, 3).is_err());
+        }
+        // An empty map.
+        assert!(
+            decode_foliage_actor_native(&0i32.to_le_bytes(), 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Fuzz-style: every single-byte change of a valid foliage map either
+    /// decodes or is refused, never panics, and never yields more entries
+    /// than the bytes could hold (counts are checked against the remaining
+    /// data before anything is allocated).
+    #[test]
+    fn damaged_foliage_data_never_panics_or_over_allocates() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&2i32.to_le_bytes());
+        push_foliage_mesh(&mut b, 7, &[(-2, &[1, 2]), (-3, &[0])], 4);
+        push_foliage_mesh(&mut b, 8, &[(4, &[])], 1);
+        assert_eq!(decode_foliage_actor_native(&b, 0).unwrap().len(), 2);
+        let mut decoded = 0usize;
+        for at in 0..b.len() {
+            for v in [0x00, 0x01, 0x7f, 0x80, 0xff] {
+                let mut bad = b.clone();
+                if bad[at] == v {
+                    continue;
+                }
+                bad[at] = v;
+                let Ok(meshes) = decode_foliage_actor_native(&bad, 0) else {
+                    continue;
+                };
+                decoded += 1;
+                let instances: usize = meshes.iter().map(|m| m.instances.len()).sum();
+                let clusters: usize = meshes.iter().map(|m| m.clusters.len()).sum();
+                let indices: usize = meshes
+                    .iter()
+                    .flat_map(|m| &m.clusters)
+                    .map(|c| c.instance_indices.len())
+                    .sum();
+                assert!(
+                    meshes.len() * FOLIAGE_MESH_MIN_SIZE
+                        + instances * FOLIAGE_INSTANCE_SIZE
+                        + clusters * FOLIAGE_CLUSTER_MIN_SIZE
+                        + indices * 4
+                        <= bad.len(),
+                    "byte {at} = {v:#x}"
+                );
+            }
+        }
+        // Changes inside values (not counts) still decode.
+        assert!(decoded > 100, "{decoded}");
+        // Any start offset is safe, inside or outside the data.
+        for start in 0..b.len() + 8 {
+            let _ = decode_foliage_actor_native(&b, start);
+        }
+        assert!(decode_foliage_actor_native(&b, usize::MAX).is_err());
+        assert!(decode_foliage_actor_native(&[], 0).is_err());
+    }
+
+    #[test]
+    fn foliage_block_serializes_its_lists() {
+        let f = Foliage {
+            version: FOLIAGE_VERSION,
+            speedtrees: vec![SpeedTreeExport {
+                slot: 4,
+                actor: "SpeedTreeActor_0".to_owned(),
+                actor_class: "Engine.SpeedTreeActor".to_owned(),
+                component: "SpeedTreeComponent_0".to_owned(),
+                local_to_world: level::IDENTITY,
+                hidden: false,
+                speedtree: None,
+                params: BTreeMap::new(),
+            }],
+            ..Foliage::default()
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["version"], 1);
+        assert!(v["instanced_meshes"].as_array().unwrap().is_empty());
+        assert!(v["speedtrees"][0]["speedtree"].is_null());
+        assert_eq!(v["speedtrees"][0]["local_to_world"][3][3], 1.0);
+        assert_eq!(
+            foliage_kind(&["instancedstaticmeshcomponent".to_owned()]),
+            Some(FoliageKind::Instanced)
+        );
+        assert_eq!(foliage_kind(&["staticmeshcomponent".to_owned()]), None);
+        assert_eq!(
+            mat_of(&[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                16.0
+            ])[3],
+            [13.0, 14.0, 15.0, 16.0]
+        );
+    }
+
+    /// The foliage block of the user's install: AG-BeautifulCity and TheCore
+    /// hold the only instanced components (1 with 12 instances; 101 with
+    /// 4,531), and every one of them is a foliage cluster whose instance
+    /// list and positions agree with the foliage actor's own instance array
+    /// (two independent serializations of the same data); the other foliage
+    /// actors hold only unclustered instances, i.e. nothing is drawn;
+    /// AG-ParadiseCave has the two water surfaces and AG-Darkcave the four
+    /// SpeedTree placements without a tree. The scene part of each file is
+    /// unchanged. Skips when the install is absent.
+    #[test]
+    fn foliage_matches_the_original_data() {
+        let Some((cooked, configs)) = real_install() else {
+            return;
+        };
+        let load = |map: &str| {
+            let file = cooked.join("Maps").join(format!("{map}.asamu"));
+            let (scene, atmosphere, foliage) = scene_and_atmosphere(&cooked, &configs, &file);
+            assert_scene_bytes_kept(&scene, &atmosphere, &foliage);
+            assert!(foliage.warnings.is_empty(), "{map}: {:?}", foliage.warnings);
+            foliage
+        };
+        // (map, components, instances, foliage meshes, foliage instances,
+        // unclustered instances); the numbers of WATER_FOLIAGE.md §1 / §2.2,
+        // re-derived by the verification pass with an independent decoder.
+        for (map, components, instances, meshes, all, unclustered) in [
+            ("AG-BeautifulCity", 1, 12, 1, 13, 1),
+            ("TheCore", 101, 4531, 13, 8765, 4234),
+        ] {
+            let f = load(map);
+            assert_eq!(f.instanced_meshes.len(), components, "{map}");
+            let total: usize = f.instanced_meshes.iter().map(|m| m.instances.len()).sum();
+            assert_eq!(total, instances, "{map}");
+            assert_eq!(f.foliage_actors.len(), 1);
+            let fa = &f.foliage_actors[0];
+            assert_eq!(fa.meshes.len(), meshes, "{map}");
+            let count = |pred: fn(&FoliageInstanceExport) -> bool| -> usize {
+                fa.meshes
+                    .iter()
+                    .map(|m| m.instances.iter().filter(|i| pred(i)).count())
+                    .sum()
+            };
+            assert_eq!(count(|_| true), all, "{map}");
+            assert_eq!(count(|i| i.cluster_index < 0), unclustered, "{map}");
+            // Every cluster component sits at the origin (identity matrix),
+            // is shown, and belongs to exactly one cluster.
+            for m in &f.instanced_meshes {
+                assert_eq!(m.local_to_world, level::IDENTITY, "{map} {}", m.component);
+                assert!(!m.hidden, "{map} {}", m.component);
+            }
+            let mut components_seen = std::collections::BTreeSet::new();
+            let mut checked = 0usize;
+            for mesh in &fa.meshes {
+                let mut indices_seen = std::collections::BTreeSet::new();
+                for (ci, c) in mesh.clusters.iter().enumerate() {
+                    let name = c.component.as_deref().unwrap().rsplit('.').next().unwrap();
+                    assert!(components_seen.insert(name.to_owned()), "{map} {name}");
+                    let ism = f
+                        .instanced_meshes
+                        .iter()
+                        .find(|m| m.component == name)
+                        .unwrap();
+                    assert_eq!(ism.static_mesh, mesh.static_mesh);
+                    assert_eq!(ism.instances.len(), c.instance_indices.len());
+                    for (inst, &idx) in ism.instances.iter().zip(&c.instance_indices) {
+                        let fi = &mesh.instances[usize::try_from(idx).unwrap()];
+                        assert!(indices_seen.insert(idx), "{map}: instance in two clusters");
+                        assert_eq!(usize::try_from(fi.cluster_index).ok(), Some(ci));
+                        let m = &inst.local_to_world;
+                        assert_eq!(m[3][..3], fi.location);
+                        assert_eq!([m[0][3], m[1][3], m[2][3], m[3][3]], [0.0, 0.0, 0.0, 1.0]);
+                        // The matrix rows are the instance's axes scaled by
+                        // `DrawScale3D` (to float precision).
+                        for (row, scale) in m.iter().zip(fi.draw_scale3d) {
+                            let len = row[..3].iter().map(|x| x * x).sum::<f32>().sqrt();
+                            assert!(
+                                (len - scale).abs() <= 1e-5 * scale.abs().max(1.0),
+                                "{map} {name}: row length {len} vs scale {scale}"
+                            );
+                        }
+                        checked += 1;
+                    }
+                }
+                // Every clustered instance is in exactly one cluster;
+                // unclustered instances are the free slots: no base.
+                let clustered = mesh
+                    .instances
+                    .iter()
+                    .filter(|i| i.cluster_index >= 0)
+                    .count();
+                assert_eq!(clustered, indices_seen.len(), "{map}");
+                for i in &mesh.instances {
+                    assert_eq!(i.cluster_index < 0, i.base.is_none());
+                }
+            }
+            assert_eq!(checked, instances);
+            assert_eq!(components_seen.len(), components, "{map}");
+        }
+        for (map, instances) in [
+            ("AG-StarHaven", 100),
+            ("AG-Workshop", 1),
+            ("AG-Epilogue", 1),
+        ] {
+            let f = load(map);
+            assert!(f.instanced_meshes.is_empty(), "{map}");
+            assert_eq!(f.foliage_actors.len(), 1, "{map}");
+            assert_eq!(f.foliage_actors[0].meshes.len(), 1, "{map}");
+            for m in &f.foliage_actors[0].meshes {
+                assert!(m.clusters.is_empty());
+                assert_eq!(m.instances.len(), instances, "{map}");
+                assert!(m.instances.iter().all(|i| i.cluster_index == -1));
+            }
+        }
+        let paradise = load("AG-ParadiseCave");
+        assert_eq!(paradise.fluid_surfaces.len(), 2);
+        assert!(paradise.instanced_meshes.is_empty() && paradise.foliage_actors.is_empty());
+        let float = |w: &FluidSurfaceExport, name: &str| match w.params.get(name) {
+            Some(ParamValue::Float(x)) => *x,
+            other => panic!("{name}: {other:?}"),
+        };
+        for w in &paradise.fluid_surfaces {
+            // About 49,999 UU square, flat, unrotated, at the same height.
+            for side in ["FluidWidth", "FluidHeight"] {
+                let x = float(w, side);
+                assert!((49_990.0..50_000.0).contains(&x), "{side} {x}");
+            }
+            assert_eq!(float(w, "GridSpacing"), 10.0);
+            assert!(w.material.is_some());
+            assert!(!w.hidden);
+            assert_eq!(w.local_to_world[..3], level::IDENTITY[..3]);
+            assert_eq!(w.local_to_world[3][..3], w.location);
+        }
+        assert_eq!(
+            paradise.fluid_surfaces[0].location[2],
+            paradise.fluid_surfaces[1].location[2]
+        );
+        let dark = load("AG-Darkcave");
+        assert_eq!(dark.speedtrees.len(), 4);
+        assert!(dark.speedtrees.iter().all(|t| t.speedtree.is_none()));
+        // The maps without any of it carry an empty block.
+        let ice = load("AG-IceCave");
+        assert_eq!(
+            ice,
+            Foliage {
+                version: FOLIAGE_VERSION,
+                ..Foliage::default()
+            }
+        );
     }
 
     #[test]

@@ -19,7 +19,12 @@
 //!   component values, fog materials, the default post-process chain). The
 //!   values stay in UE3 names and units; their meaning and the rendering
 //!   approximations are documented in
-//!   `docs/reverse-engineering/POST_FOG_SKY.md`.
+//!   `docs/reverse-engineering/POST_FOG_SKY.md`;
+//! - the additive **foliage** block of newer scenes ([`FoliageInfo`],
+//!   `docs/reverse-engineering/WATER_FOLIAGE.md`): every instanced static
+//!   mesh component (painted foliage) becomes one [`MeshInstance`] per
+//!   instance, and the water surfaces and SpeedTree placements are kept for
+//!   the renderer.
 //!
 //! Positions stay in UE3 world space (UU, left-handed, X forward, Y right, Z
 //! up); conversion to render space happens in [`crate::transform`].
@@ -63,6 +68,10 @@ struct RawScene {
     /// level from loading.
     #[serde(default)]
     atmosphere: Option<serde_json::Value>,
+    /// The additive foliage block (instanced meshes, water, SpeedTree),
+    /// decoded separately for the same reason.
+    #[serde(default)]
+    foliage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,6 +319,10 @@ impl<'de> Deserialize<'de> for ActorParams {
 struct RawComponent {
     #[serde(default)]
     name: String,
+    /// Component class path (instanced static mesh components are drawn
+    /// once per instance from the foliage block).
+    #[serde(default)]
+    class: String,
     #[serde(default)]
     kind: String,
     #[serde(deserialize_with = "lenient::m4")]
@@ -424,6 +437,72 @@ struct RawEffect {
     class: String,
     #[serde(default)]
     params: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The importer's additive `foliage` block (`tools/asamu-import`
+/// `levels.rs`, version 1; `docs/reverse-engineering/WATER_FOLIAGE.md`).
+/// Only what rendering needs is read; the foliage actors' bookkeeping
+/// (`foliage_actors`) is skipped.
+#[derive(Debug, Default, Deserialize)]
+struct RawFoliage {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    instanced_meshes: Vec<RawInstancedMesh>,
+    #[serde(default)]
+    fluid_surfaces: Vec<RawFluidSurface>,
+    #[serde(default)]
+    speedtrees: Vec<RawSpeedTree>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawInstancedMesh {
+    #[serde(default)]
+    slot: usize,
+    #[serde(default)]
+    component: String,
+    #[serde(default)]
+    instances: Vec<RawInstance>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawInstance {
+    #[serde(deserialize_with = "lenient::m4")]
+    local_to_world: UeRowMatrix,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawFluidSurface {
+    #[serde(default)]
+    slot: usize,
+    #[serde(default)]
+    actor: String,
+    #[serde(default)]
+    component: String,
+    #[serde(deserialize_with = "lenient::m4")]
+    local_to_world: UeRowMatrix,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    params: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    material: Option<RawMaterialParams>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSpeedTree {
+    #[serde(default)]
+    slot: usize,
+    #[serde(default)]
+    actor: String,
+    #[serde(default)]
+    component: String,
+    #[serde(deserialize_with = "lenient::m4")]
+    local_to_world: UeRowMatrix,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    speedtree: Option<String>,
 }
 
 // ------------------------------------------------------------ atmosphere model
@@ -827,6 +906,246 @@ pub struct MeshInstance {
     /// The component blocks actors (a collision hint; gameplay collision is
     /// the world crate's business).
     pub blocks: bool,
+    /// For an instanced static mesh component (foliage): the index of this
+    /// instance in the component's `PerInstanceSMData`. Such draws carry the
+    /// component name with `#<index>` appended in [`Self::component_name`],
+    /// so that per-component lookups keyed by the plain name (light maps:
+    /// an instanced component's light map needs each instance's own UV
+    /// bias, which those lookups do not apply) do not match them.
+    pub instance: Option<u32>,
+}
+
+/// A water surface: one `FluidSurfaceComponent` (`FluidSurfaceActor`) from
+/// the scene's foliage block. The surface is the rectangle of
+/// [`Self::width`] along the component's local X axis and [`Self::height`]
+/// along its local Y axis, centred on the component origin
+/// (`UFluidSurfaceComponent::UpdateBounds`, CONFIRMED from the Mac
+/// executable; WATER_FOLIAGE.md).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaterSurfaceInfo {
+    /// Level of the actor (see [`MeshInstance::level`]).
+    pub level: usize,
+    /// Actor slot.
+    pub actor_slot: usize,
+    /// Actor name.
+    pub actor_name: String,
+    /// Component name.
+    pub component_name: String,
+    /// Component world matrix (UE3 space, column-vector convention).
+    pub ue_local_to_world: Mat4,
+    /// `FluidWidth` (UU, along local X).
+    pub width: f32,
+    /// `FluidHeight` (UU, along local Y).
+    pub height: f32,
+    /// `GridSpacing` (UU between simulation grid vertices).
+    pub grid_spacing: Option<f32>,
+    /// `FluidMaterial` path.
+    pub material: Option<String>,
+    /// The material's own vector parameters.
+    pub material_vectors: BTreeMap<String, [f32; 4]>,
+    /// The material's own scalar parameters.
+    pub material_scalars: BTreeMap<String, f32>,
+    /// Effective component values (UE3 names).
+    pub params: UeProps,
+    /// Actor `bHidden` or component `HiddenGame`.
+    pub hidden: bool,
+}
+
+/// A SpeedTree placement (`SpeedTreeComponent`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeedTreeInfo {
+    /// Level of the actor.
+    pub level: usize,
+    /// Actor slot.
+    pub actor_slot: usize,
+    /// Actor name.
+    pub actor_name: String,
+    /// Component name.
+    pub component_name: String,
+    /// Component world matrix (UE3 space, column-vector convention).
+    pub ue_local_to_world: Mat4,
+    /// The tree asset (`None`: the component names none; true of all four
+    /// shipped placements, all in AG-Darkcave).
+    pub speedtree: Option<String>,
+    /// Actor `bHidden` or component `HiddenGame`.
+    pub hidden: bool,
+}
+
+/// Water and SpeedTree data of a level (the scene's foliage block; the
+/// block's instanced meshes become [`LevelScene::meshes`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FoliageInfo {
+    /// Version of the scene's foliage block (`None`: the scene predates it
+    /// or the block did not decode).
+    pub block_version: Option<u32>,
+    /// Why the block was ignored (present with an unexpected shape).
+    pub block_error: Option<String>,
+    /// Water surfaces in actor order.
+    pub water: Vec<WaterSurfaceInfo>,
+    /// SpeedTree placements in actor order.
+    pub speedtrees: Vec<SpeedTreeInfo>,
+    /// Entries of the block left out because it holds more than the reader
+    /// takes ([`MAX_INSTANCED_DRAWS`], [`MAX_FOLIAGE_PLACEMENTS`]); 0 for
+    /// every scene the importer writes.
+    pub over_limit: usize,
+}
+
+/// Instances taken from one scene's foliage block, over all of its
+/// instanced components: the importer's own bound per map
+/// (`MAX_INSTANCES_PER_MAP` in `tools/asamu-import` `levels.rs`; the shipped
+/// maps hold at most 4,531). A damaged or hand-edited scene cannot make the
+/// reader build more draws than this.
+pub const MAX_INSTANCED_DRAWS: usize = 262_144;
+
+/// Water surfaces, and SpeedTree placements, taken from one scene's foliage
+/// block (the importer's bound on both together, `MAX_PLACEMENTS`; the
+/// shipped maps hold at most two and four).
+pub const MAX_FOLIAGE_PLACEMENTS: usize = 1_024;
+
+/// True for `Engine.InstancedStaticMeshComponent` (and classes named like
+/// it).
+fn is_instanced_class(class: &str) -> bool {
+    class
+        .rsplit('.')
+        .next()
+        .is_some_and(|c| c.eq_ignore_ascii_case("InstancedStaticMeshComponent"))
+}
+
+/// A material path with its own vector and scalar parameters.
+type MaterialMaps = (
+    Option<String>,
+    BTreeMap<String, [f32; 4]>,
+    BTreeMap<String, f32>,
+);
+
+#[allow(clippy::cast_possible_truncation)]
+fn material_maps(m: Option<RawMaterialParams>) -> MaterialMaps {
+    match m {
+        Some(mp) => (
+            Some(mp.path).filter(|p| !p.is_empty()),
+            mp.vectors
+                .into_iter()
+                .filter_map(|(k, c)| Some((k, narrow4(c)?)))
+                .collect(),
+            mp.scalars
+                .into_iter()
+                .map(|(k, x)| (k, x as f32))
+                .filter(|(_, x)| x.is_finite())
+                .collect(),
+        ),
+        None => (None, BTreeMap::new(), BTreeMap::new()),
+    }
+}
+
+/// The decoded foliage block: instance matrices per (actor slot, component
+/// name), water and SpeedTree placements.
+#[derive(Debug, Default)]
+struct FoliageBlock {
+    info: FoliageInfo,
+    instances: BTreeMap<(usize, String), Vec<Mat4>>,
+}
+
+impl FoliageBlock {
+    fn decode(value: Option<serde_json::Value>) -> Self {
+        Self::decode_bounded(value, MAX_INSTANCED_DRAWS, MAX_FOLIAGE_PLACEMENTS)
+    }
+
+    /// [`Self::decode`] taking at most `max_draws` instances over all
+    /// components and `max_placements` water surfaces and as many SpeedTree
+    /// placements; what is left out is counted in
+    /// [`FoliageInfo::over_limit`].
+    fn decode_bounded(
+        value: Option<serde_json::Value>,
+        max_draws: usize,
+        max_placements: usize,
+    ) -> Self {
+        let mut out = Self::default();
+        let raw = match value
+            .filter(|v| !v.is_null())
+            .map(serde_json::from_value::<RawFoliage>)
+        {
+            Some(Ok(raw)) => raw,
+            Some(Err(e)) => {
+                out.info.block_error = Some(e.to_string());
+                return out;
+            }
+            None => return out,
+        };
+        out.info.block_version = Some(raw.version);
+        let mut budget = max_draws;
+        for im in raw.instanced_meshes {
+            // A component listed twice keeps its first entry.
+            let key = (im.slot, im.component);
+            if out.instances.contains_key(&key) {
+                out.info.over_limit = out.info.over_limit.saturating_add(im.instances.len());
+                continue;
+            }
+            let take = im.instances.len().min(budget);
+            budget -= take;
+            out.info.over_limit = out
+                .info
+                .over_limit
+                .saturating_add(im.instances.len() - take);
+            let list = im
+                .instances
+                .iter()
+                .take(take)
+                .map(|i| ue_row_matrix_to_mat4(&i.local_to_world))
+                .collect();
+            out.instances.insert(key, list);
+        }
+        for f in raw.fluid_surfaces {
+            let m = ue_row_matrix_to_mat4(&f.local_to_world);
+            let params = UeProps::from_map(&f.params);
+            let (Some(width), Some(height)) = (params.f32("FluidWidth"), params.f32("FluidHeight"))
+            else {
+                continue;
+            };
+            if !m.is_finite() || width <= 0.0 || height <= 0.0 {
+                continue;
+            }
+            if out.info.water.len() >= max_placements {
+                out.info.over_limit = out.info.over_limit.saturating_add(1);
+                continue;
+            }
+            let (material, material_vectors, material_scalars) = material_maps(f.material);
+            out.info.water.push(WaterSurfaceInfo {
+                level: 0,
+                actor_slot: f.slot,
+                actor_name: f.actor,
+                component_name: f.component,
+                ue_local_to_world: m,
+                width,
+                height,
+                grid_spacing: params.f32("GridSpacing").filter(|g| *g > 0.0),
+                material: material.or_else(|| params.text("FluidMaterial").map(str::to_owned)),
+                material_vectors,
+                material_scalars,
+                params,
+                hidden: f.hidden,
+            });
+        }
+        for t in raw.speedtrees {
+            let m = ue_row_matrix_to_mat4(&t.local_to_world);
+            if !m.is_finite() {
+                continue;
+            }
+            if out.info.speedtrees.len() >= max_placements {
+                out.info.over_limit = out.info.over_limit.saturating_add(1);
+                continue;
+            }
+            out.info.speedtrees.push(SpeedTreeInfo {
+                level: 0,
+                actor_slot: t.slot,
+                actor_name: t.actor,
+                component_name: t.component,
+                ue_local_to_world: m,
+                speedtree: t.speedtree.filter(|p| !p.is_empty()),
+                hidden: t.hidden,
+            });
+        }
+        out
+    }
 }
 
 /// Kind of a UE3 light component (from its class name).
@@ -935,6 +1254,13 @@ pub struct LevelSceneStats {
     /// Actors per class name (only the ones the renderer approximates:
     /// fog, sky and post-process related classes).
     pub atmosphere_actors: BTreeMap<String, usize>,
+    /// Instanced static mesh components seen (drawn once per instance).
+    pub instanced_components: usize,
+    /// Instances drawn from them (included in [`Self::drawn`]).
+    pub instances: usize,
+    /// Instanced components skipped because the scene has no instance data
+    /// for them (a scene converted before the foliage block existed).
+    pub instanced_without_data: usize,
 }
 
 /// The rendering view of one level.
@@ -960,6 +1286,8 @@ pub struct LevelScene {
     pub player_starts: Vec<PlayerStartInfo>,
     /// Fog, sky and post-process data.
     pub atmosphere: AtmosphereInfo,
+    /// Water surfaces and SpeedTree placements.
+    pub foliage: FoliageInfo,
     /// Counts.
     pub stats: LevelSceneStats,
 }
@@ -1010,7 +1338,11 @@ impl LevelScene {
         Ok(Self::from_raw(raw))
     }
 
-    fn from_raw(raw: RawScene) -> Self {
+    fn from_raw(mut raw: RawScene) -> Self {
+        let FoliageBlock {
+            info: foliage,
+            instances: mut instanced,
+        } = FoliageBlock::decode(raw.foliage.take());
         let mut stats = LevelSceneStats {
             actors: raw.actors.len(),
             ..LevelSceneStats::default()
@@ -1124,6 +1456,43 @@ impl LevelScene {
                     stats.no_mesh += 1;
                     continue;
                 };
+                // Each instance list is drawn by one component only: a
+                // scene that repeats a component cannot multiply the draws.
+                let list = instanced.remove(&(actor.slot, comp.name.clone()));
+                if is_instanced_class(&comp.class) || list.is_some() {
+                    stats.instanced_components += 1;
+                    let Some(list) = list else {
+                        stats.instanced_without_data += 1;
+                        continue;
+                    };
+                    for (i, m) in list.iter().enumerate() {
+                        let Ok(index) = u32::try_from(i) else {
+                            break;
+                        };
+                        if !m.is_finite() {
+                            stats.bad_transform += 1;
+                            continue;
+                        }
+                        stats.drawn += 1;
+                        stats.instances += 1;
+                        meshes.push(MeshInstance {
+                            level: 0,
+                            actor_slot: actor.slot,
+                            actor_name: actor.name.clone(),
+                            actor_class: actor.class.clone(),
+                            actor_kind: actor.kind.clone(),
+                            component_name: format!("{}#{index}", comp.name),
+                            mesh: mesh.clone(),
+                            material_overrides: comp.materials.clone(),
+                            ue_local_to_world: *m,
+                            is_static: actor.is_static,
+                            matinee_driven,
+                            blocks: actor.block_actors && comp.block_actors,
+                            instance: Some(index),
+                        });
+                    }
+                    continue;
+                }
                 let m = ue_row_matrix_to_mat4(&comp.local_to_world);
                 if !m.is_finite() {
                     stats.bad_transform += 1;
@@ -1143,6 +1512,7 @@ impl LevelScene {
                     is_static: actor.is_static,
                     matinee_driven,
                     blocks: actor.block_actors && comp.block_actors,
+                    instance: None,
                 });
             }
         }
@@ -1182,6 +1552,7 @@ impl LevelScene {
             lights,
             player_starts,
             atmosphere,
+            foliage,
             stats,
         }
     }
@@ -1228,6 +1599,23 @@ impl LevelScene {
             f.ue_mesh_to_world = f.ue_mesh_to_world.map(|m| shift * m);
             self.atmosphere.fog_volumes.push(f);
         }
+        for mut w in sub.foliage.water {
+            w.level = level;
+            w.ue_local_to_world = shift * w.ue_local_to_world;
+            self.foliage.water.push(w);
+        }
+        for mut t in sub.foliage.speedtrees {
+            t.level = level;
+            t.ue_local_to_world = shift * t.ue_local_to_world;
+            self.foliage.speedtrees.push(t);
+        }
+        self.foliage.over_limit = self
+            .foliage
+            .over_limit
+            .saturating_add(sub.foliage.over_limit);
+        self.stats.instanced_components += sub.stats.instanced_components;
+        self.stats.instances += sub.stats.instances;
+        self.stats.instanced_without_data += sub.stats.instanced_without_data;
         self.stats.actors += sub.stats.actors;
         self.stats.mesh_components += sub.stats.mesh_components;
         self.stats.drawn += sub.stats.drawn;
@@ -1781,5 +2169,243 @@ pub(crate) mod tests {
             }
         }
         assert!(LevelScene::from_json(Path::new("x"), b"").is_err());
+    }
+
+    /// A synthetic scene with a foliage actor (one instanced component of
+    /// two instances), a water surface and a SpeedTree placement, in the
+    /// importer's foliage-block format (hand-written; no game data).
+    fn foliage_scene_json(block: &str) -> String {
+        let ident = "[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]";
+        format!(
+            r#"{{
+  "format": "asamu-scene", "version": 1, "package": "FoliageMap",
+  "actors": [
+    {{"slot": 1, "name": "InstancedFoliageActor_0", "class": "Engine.InstancedFoliageActor", "kind": "other",
+      "is_static": true,
+      "components": [{{"name": "ISMC_0", "class": "Engine.InstancedStaticMeshComponent", "kind": "static_mesh",
+                       "local_to_world": {ident}, "static_mesh": "Pkg.Meshes.Rock", "materials": [null]}},
+                     {{"name": "ISMC_1", "class": "Engine.InstancedStaticMeshComponent", "kind": "static_mesh",
+                       "local_to_world": {ident}, "static_mesh": "Pkg.Meshes.Pebble"}}]}},
+    {{"slot": 2, "name": "FluidSurfaceActor_0", "class": "Engine.FluidSurfaceActor", "kind": "other",
+      "components": [{{"name": "Fluid", "class": "Engine.FluidSurfaceComponent", "kind": "other_primitive",
+                       "local_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[10,20,30,1]]}}]}}
+  ]{block}
+}}"#
+        )
+    }
+
+    const FOLIAGE_BLOCK: &str = r#",
+  "atmosphere": null,
+  "foliage": {"version": 1,
+    "instanced_meshes": [{"slot": 1, "actor": "InstancedFoliageActor_0", "component": "ISMC_0",
+      "instances": [{"local_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[100,0,0,1]], "lightmap_uv_bias": [0,0], "shadowmap_uv_bias": [0,0]},
+                    {"local_to_world": [[0,2,0,0],[-2,0,0,0],[0,0,2,0],[0,50,0,1]], "lightmap_uv_bias": [0.5,0], "shadowmap_uv_bias": [0,0]},
+                    {"local_to_world": [[1e39,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}]}],
+    "foliage_actors": [{"slot": 1, "actor": "InstancedFoliageActor_0", "meshes": []}],
+    "fluid_surfaces": [{"slot": 2, "actor": "FluidSurfaceActor_0", "component": "Fluid",
+      "local_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[10,20,30,1]], "hidden": false,
+      "params": {"FluidWidth": 2000.0, "FluidHeight": 1000.0, "GridSpacing": 10.0, "FluidMaterial": "Pkg.M_Water"},
+      "material": {"path": "Pkg.M_Water", "vectors": {"Tint": [0.1, 0.2, 0.3, 1.0]}, "scalars": {"Opacity": 0.5}}},
+                       {"slot": 3, "actor": "Broken", "component": "F", "local_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+      "params": {"FluidWidth": -5.0, "FluidHeight": 1.0}}],
+    "speedtrees": [{"slot": 4, "actor": "SpeedTreeActor_0", "component": "ST",
+      "local_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[7,8,9,1]], "hidden": false, "speedtree": null}],
+    "warnings": []}"#;
+
+    #[test]
+    fn instanced_components_draw_once_per_instance() {
+        let json = foliage_scene_json(FOLIAGE_BLOCK);
+        let s = LevelScene::from_json(Path::new("x"), json.as_bytes()).unwrap();
+        assert_eq!(s.foliage.block_version, Some(1));
+        assert_eq!(s.foliage.block_error, None);
+        // ISMC_0: two finite instances drawn (the third is not finite);
+        // ISMC_1 has no instance data and is not drawn at its component
+        // transform.
+        assert_eq!(s.stats.instanced_components, 2);
+        assert_eq!(s.stats.instances, 2);
+        assert_eq!(s.stats.instanced_without_data, 1);
+        assert_eq!(s.stats.bad_transform, 1);
+        assert_eq!(s.meshes.len(), 2);
+        assert_eq!(s.stats.drawn, 2);
+        let a = &s.meshes[0];
+        assert_eq!(a.component_name, "ISMC_0#0");
+        assert_eq!(a.instance, Some(0));
+        assert_eq!(a.mesh, "Pkg.Meshes.Rock");
+        assert_eq!(
+            a.ue_local_to_world.w_axis.truncate(),
+            Vec3::new(100.0, 0.0, 0.0)
+        );
+        let b = &s.meshes[1];
+        assert_eq!(b.component_name, "ISMC_0#1");
+        assert_eq!(b.instance, Some(1));
+        // Row-vector rows become columns: local X maps to +2 Y.
+        assert_eq!(
+            b.ue_local_to_world.transform_vector3(Vec3::X),
+            Vec3::new(0.0, 2.0, 0.0)
+        );
+        assert_eq!(
+            b.ue_local_to_world.w_axis.truncate(),
+            Vec3::new(0.0, 50.0, 0.0)
+        );
+        assert!(b.is_static);
+    }
+
+    #[test]
+    fn water_and_speedtree_placements_parse() {
+        let json = foliage_scene_json(FOLIAGE_BLOCK);
+        let s = LevelScene::from_json(Path::new("x"), json.as_bytes()).unwrap();
+        // The surface with a negative width is dropped.
+        assert_eq!(s.foliage.water.len(), 1);
+        let w = &s.foliage.water[0];
+        assert_eq!(w.actor_name, "FluidSurfaceActor_0");
+        assert_eq!((w.width, w.height), (2000.0, 1000.0));
+        assert_eq!(w.grid_spacing, Some(10.0));
+        assert_eq!(w.material.as_deref(), Some("Pkg.M_Water"));
+        assert_eq!(w.material_vectors["Tint"], [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(w.material_scalars["Opacity"], 0.5);
+        assert_eq!(
+            w.ue_local_to_world.w_axis.truncate(),
+            Vec3::new(10.0, 20.0, 30.0)
+        );
+        assert_eq!(s.foliage.speedtrees.len(), 1);
+        assert_eq!(s.foliage.speedtrees[0].speedtree, None);
+        // A sub-level's water and trees move with the streaming offset.
+        let mut host =
+            LevelScene::from_json(Path::new("x"), foliage_scene_json("").as_bytes()).unwrap();
+        assert!(host.foliage.water.is_empty());
+        let level = host.merge_sublevel(s, Vec3::new(0.0, 0.0, 1000.0));
+        assert_eq!(host.foliage.water[0].level, level);
+        assert_eq!(
+            host.foliage.water[0].ue_local_to_world.w_axis.truncate(),
+            Vec3::new(10.0, 20.0, 1030.0)
+        );
+        assert_eq!(host.foliage.speedtrees[0].level, level);
+        assert_eq!(host.stats.instances, 2);
+        assert_eq!(host.stats.instanced_components, 4);
+        assert_eq!(host.stats.instanced_without_data, 3);
+    }
+
+    #[test]
+    fn scenes_without_or_with_a_broken_foliage_block_still_load() {
+        let s = LevelScene::from_json(Path::new("x"), foliage_scene_json("").as_bytes()).unwrap();
+        assert_eq!(s.foliage.block_version, None);
+        assert_eq!(s.foliage.block_error, None);
+        assert!(s.meshes.is_empty(), "no instance data: nothing drawn");
+        assert_eq!(s.stats.instanced_without_data, 2);
+        let broken = foliage_scene_json(r#", "foliage": {"instanced_meshes": 7}"#);
+        let s = LevelScene::from_json(Path::new("x"), broken.as_bytes()).unwrap();
+        assert!(s.foliage.block_error.is_some());
+        assert!(s.foliage.water.is_empty());
+        let null = foliage_scene_json(r#", "foliage": null"#);
+        let s = LevelScene::from_json(Path::new("x"), null.as_bytes()).unwrap();
+        assert_eq!(s.foliage.block_error, None);
+        // Fuzz-style: truncations and byte flips never panic.
+        let json = foliage_scene_json(FOLIAGE_BLOCK);
+        let bytes = json.as_bytes();
+        for cut in (0..bytes.len()).step_by(11) {
+            let _ = LevelScene::from_json(Path::new("x"), &bytes[..cut]);
+        }
+        for i in (0..bytes.len()).step_by(5) {
+            for v in [b'"', b'9', b'{', b']', 0xff] {
+                let mut b = bytes.to_vec();
+                b[i] = v;
+                let _ = LevelScene::from_json(Path::new("x"), &b);
+            }
+        }
+    }
+
+    #[test]
+    fn foliage_block_bounds_hold_against_damaged_scenes() {
+        let ident = "[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]";
+        let instances = |n: usize| {
+            (0..n)
+                .map(|_| format!(r#"{{"local_to_world": {ident}}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let water = |slot: usize| {
+            format!(
+                r#"{{"slot": {slot}, "actor": "W", "component": "F", "local_to_world": {ident},
+                     "params": {{"FluidWidth": 10.0, "FluidHeight": 10.0}}}}"#
+            )
+        };
+        let tree = |slot: usize| {
+            format!(
+                r#"{{"slot": {slot}, "actor": "T", "component": "S", "local_to_world": {ident}}}"#
+            )
+        };
+        let block: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"version": 1,
+                 "instanced_meshes": [
+                   {{"slot": 1, "component": "A", "instances": [{}]}},
+                   {{"slot": 1, "component": "A", "instances": [{}]}},
+                   {{"slot": 1, "component": "B", "instances": [{}]}},
+                   {{"slot": 2, "component": "A", "instances": [{}]}}],
+                 "fluid_surfaces": [{}, {}, {}],
+                 "speedtrees": [{}, {}, {}]}}"#,
+            instances(3),
+            instances(50),
+            instances(4),
+            instances(2),
+            water(1),
+            water(2),
+            water(3),
+            tree(1),
+            tree(2),
+            tree(3),
+        ))
+        .unwrap();
+        // Five draws in all: A takes 3, the repeated A is ignored, B gets the
+        // remaining 2 of its 4, the last component none.
+        let b = FoliageBlock::decode_bounded(Some(block.clone()), 5, 2);
+        assert_eq!(b.instances[&(1, "A".to_owned())].len(), 3);
+        assert_eq!(b.instances[&(1, "B".to_owned())].len(), 2);
+        assert!(b.instances[&(2, "A".to_owned())].is_empty());
+        assert_eq!(b.info.water.len(), 2);
+        assert_eq!(b.info.speedtrees.len(), 2);
+        // 50 (repeat) + 2 (B) + 2 (last) + 1 water + 1 tree.
+        assert_eq!(b.info.over_limit, 56);
+        // The reader's own bounds take all of it.
+        let all = FoliageBlock::decode(Some(block));
+        assert_eq!(all.instances.values().map(Vec::len).sum::<usize>(), 9);
+        assert_eq!(all.info.over_limit, 50, "only the repeated component");
+        assert_eq!((all.info.water.len(), all.info.speedtrees.len()), (3, 3));
+        // The bounds hold every shipped map (4,531 instances; 2 and 4
+        // placements).
+        const { assert!(MAX_INSTANCED_DRAWS >= 4_531 && MAX_FOLIAGE_PLACEMENTS >= 4) };
+    }
+
+    #[test]
+    fn a_repeated_instanced_component_is_drawn_once() {
+        // Two actors claim slot 1 with the same component name: the instance
+        // list is used by the first only, the second counts as a component
+        // without data (never a second copy of every instance).
+        let ident = "[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]";
+        let actor = format!(
+            r#"{{"slot": 1, "name": "InstancedFoliageActor_0", "class": "Engine.InstancedFoliageActor",
+                 "kind": "other", "is_static": true,
+                 "components": [{{"name": "ISMC_0", "class": "Engine.InstancedStaticMeshComponent",
+                                  "kind": "static_mesh", "local_to_world": {ident},
+                                  "static_mesh": "Pkg.Meshes.Rock"}}]}}"#
+        );
+        let json = format!(
+            r#"{{"format": "asamu-scene", "version": 1, "package": "M",
+                 "actors": [{actor}, {actor}, {actor}],
+                 "foliage": {{"version": 1, "instanced_meshes": [{{"slot": 1, "component": "ISMC_0",
+                     "instances": [{{"local_to_world": {ident}}}, {{"local_to_world": {ident}}}]}}]}}}}"#
+        );
+        let s = LevelScene::from_json(Path::new("x"), json.as_bytes()).unwrap();
+        assert_eq!(s.meshes.len(), 2);
+        assert_eq!(s.stats.instances, 2);
+        assert_eq!(s.stats.instanced_components, 3);
+        assert_eq!(s.stats.instanced_without_data, 2);
+        assert_eq!(s.foliage.over_limit, 0);
+        // Instance draws keep the component's index and never match the
+        // plain component name (per-component lookups such as light maps).
+        assert!(s.meshes.iter().all(|m| m.component_name != "ISMC_0"));
+        assert_eq!(
+            s.meshes.iter().map(|m| m.instance).collect::<Vec<_>>(),
+            [Some(0), Some(1)]
+        );
     }
 }
