@@ -643,7 +643,12 @@ fn toc_section(out: &mut String, tocs: &[TocReport]) {
 
     for t in tocs.iter().filter(|t| is_primary_toc(&t.path)) {
         let _ = writeln!(out, "### `{}`\n", t.path);
-        let _ = writeln!(out, "Base folder: `{}`.\n", t.base);
+        if t.base.is_empty() {
+            // A Windows install: the TOC's `..\X` paths start at the install root.
+            let _ = writeln!(out, "Base folder: the install root.\n");
+        } else {
+            let _ = writeln!(out, "Base folder: `{}`.\n", t.base);
+        }
         dir_table(
             out,
             "Listed in the TOC but missing on disk:",
@@ -936,6 +941,92 @@ mod tests {
         );
         assert!(md.contains("- Depot: 2 (manifest 3)"));
         assert!(md.contains("Binaries/Win32"));
+        assert!(!md.contains(&tmp.path().to_string_lossy().into_owned()));
+    }
+
+    /// A synthetic Windows-style tree (`ASAMU/`, `Binaries/Win32/`, `Engine/` directly in
+    /// the install root), written byte by byte.
+    fn synthetic_windows_tree() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let r = tmp.path().join("Game");
+        // "MZ", then zeros: no PE signature where e_lfanew points, which the sniffer
+        // reports as type `pe` with detail `mz`.
+        let mut exe = b"MZ".to_vec();
+        exe.resize(99, 0);
+        write(&r, "Binaries/Win32/ASAMU-Win32-Shipping.exe", &exe);
+        write(
+            &r,
+            "Binaries/Win32/ASAMU-Win32-Shipping.exe.config",
+            b"<?xml version=\"1.0\"?>\r\n<configuration/>\r\n",
+        );
+        write(&r, "Binaries/build.properties", b"EngineVersion=1\r\n");
+        write(&r, "ASAMU/CookedPC/Core.u", &ue3(868, 0, 64));
+        write(&r, "ASAMU/CookedPC/Maps/Entry.asamu", &ue3(868, 0, 40));
+        write(
+            &r,
+            "ASAMU/PCTOC.txt",
+            b"64 0 ..\\ASAMU\\CookedPC\\Core.u 0\r\n\
+              99 0 ..\\Binaries\\Win32\\ASAMU-Win32-Shipping.exe 0\r\n\
+              16 0 ..\\Binaries\\build.properties 0\r\n",
+        );
+        write(&r, "Engine/Config/BaseEngine.ini", b"[URL]\r\n");
+        tmp
+    }
+
+    #[test]
+    fn scan_synthetic_windows_tree() {
+        let tmp = synthetic_windows_tree();
+        let inv = scan(&tmp.path().join("Game"), &ScanOptions::default()).unwrap();
+        let paths: Vec<&str> = inv.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "ASAMU/CookedPC/Core.u",
+                "ASAMU/CookedPC/Maps/Entry.asamu",
+                "ASAMU/PCTOC.txt",
+                "Binaries/Win32/ASAMU-Win32-Shipping.exe",
+                "Binaries/Win32/ASAMU-Win32-Shipping.exe.config",
+                "Binaries/build.properties",
+                "Engine/Config/BaseEngine.ini",
+            ],
+            "forward slashes, relative to the install root, sorted"
+        );
+        let get = |path: &str| inv.files.iter().find(|f| f.path == path).unwrap();
+        assert_eq!(
+            get("Binaries/Win32/ASAMU-Win32-Shipping.exe").category,
+            Category::Executable
+        );
+        assert_eq!(
+            get("Binaries/Win32/ASAMU-Win32-Shipping.exe.config").category,
+            Category::Config
+        );
+        assert_eq!(
+            get("Binaries/build.properties").category,
+            Category::Metadata
+        );
+        assert!(inv.files.iter().all(|f| f.category != Category::Unknown));
+
+        // The TOC's `..\X` paths resolve at the install root itself: nothing is remapped,
+        // and the one size that differs is reported.
+        assert_eq!(inv.tocs.len(), 1);
+        let toc = &inv.tocs[0];
+        assert_eq!(toc.base, "");
+        assert_eq!(
+            (
+                toc.entries,
+                toc.found_exact,
+                toc.found_remapped,
+                toc.missing
+            ),
+            (3, 3, 0, 0)
+        );
+        assert_eq!(toc.size_matches, 2);
+        assert_eq!(toc.size_mismatches.len(), 1);
+        assert_eq!(toc.size_mismatches[0].path, "Binaries/build.properties");
+
+        let md = to_markdown(&inv);
+        assert!(md.contains("Base folder: the install root."), "{md}");
+        assert!(md.contains("Paths relative to `ASAMU/CookedPC/`"), "{md}");
         assert!(!md.contains(&tmp.path().to_string_lossy().into_owned()));
     }
 
