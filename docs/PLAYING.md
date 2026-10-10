@@ -173,9 +173,42 @@ is done, expect the feel to differ in places.
 
 ## Other builds of the game
 
-The importer reads the game's cooked packages. It has been checked against the macOS build only. A Windows or
-Linux Steam install (cooked folder `CookedPC`) is located and converted, but there is no published inventory for
-it and its packages may differ, so expect problems and please report what you find. If you own the game, Valve's
+The importer reads the game's cooked packages. Two Steam depots of the game have been checked, both of Steam
+build 1822049:
+
+| Your install | Steam depot | Cooked folder | Checked |
+|---|---|---|---|
+| macOS | 278362 | `CookedMac` | located, inventoried, all twelve stages converted |
+| Windows | 278361 | `CookedPC` | located, inventoried, all twelve stages converted (2026-10-10) |
+| Linux | not examined | not examined | nothing |
+
+**Windows.** `asamu-import all` finds a Windows Steam install by itself, checks its 45 input files against the
+published inventory of the Windows depot (`all 45 input files match win-depot278361-build1822049`), and converts
+all twelve stages: 13,091 files, 2.3 GB, the same counts as on macOS. The two depots ship the same 45 data files
+(identical sizes and SHA-256), so the converted data is the same too: ten stages came out byte for byte identical
+to a macOS conversion, and `levels` and `lightmaps` differed only in the last digits of a few numbers, because the
+two systems' math libraries round differently. That is fixed (those two stages no longer use the system's math
+library), but the macOS conversion has not been repeated since, so "identical on both systems" is measured for
+ten stages and expected for the other two.
+
+What was measured on Windows 11 (details in `docs/reverse-engineering/INVENTORY.md`, "Converting on Windows"):
+
+- a full import took 60 to 67 s on a 24-core laptop that was busy with other work, and several minutes when it
+  was heavily loaded; how long an idle machine takes was not measured;
+- importing again with nothing to do takes less than 0.2 s, and two forced imports in a row wrote byte-identical
+  run manifests;
+- **close the game runtime (`asamu`) before importing again.** Windows does not let a folder be replaced while
+  any program has one of its files open. The stage then fails after a few seconds with a message that says so,
+  the converted data you had stays complete, and the next import (with the program closed) finishes the job.
+
+Not checked on Windows by this section: playing from the converted data (see the rest of this document). The
+conversions above were written to a folder given with `--out`; without it the importer chooses
+`%LOCALAPPDATA%\asamu-decomp\converted` (seen in a dry run with `--plan`, nothing was written there).
+
+**Linux, or any other build.** The importer accepts a Windows- or Linux-style install folder and converts what
+it finds. If it prints `no committed inventory describes ...` or lists input files that differ from the
+inventory, your files are not the checked ones: expect problems, and please report what you see together with
+`asamu-import-run.json` from the output folder (it holds no personal paths). If you own the game, Valve's
 SteamCMD tool can also download the macOS version of it with your own account
 (`+@sSteamCmdForcePlatformType macos +app_update 278360`); point `--original` at the downloaded folder.
 
