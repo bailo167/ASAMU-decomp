@@ -6,7 +6,9 @@ _Session journal. Newest entry first. Each entry: what was done, what is true no
 
 **Done**
 - **Phase 8 merged**: particle systems, gameplay VFX and decals, localized text, camera animations and anim
-  notifies, NPC collision, time trial, gamepad, water and foliage (tracker: 143 items).
+  notifies, NPC collision, time trial, the gamepad mapping (found later in this session not to be connected to
+  the simulation tick: only look, jump, pause and restart reach the game), water and foliage (tracker: 143
+  items).
 - **`asamu-import all` runs all twelve stages** (particles, decals and localization are chained in): 13,091
   files, 2.3 GB, 44 s on this machine.
 - **The original Mac build runs on Apple silicon** under Rosetta with `-ONETHREAD` (it crashes without it: the
@@ -19,7 +21,8 @@ _Session journal. Newest entry first. Each entry: what was done, what is true no
   own length. Against the running game on 2026-10-10:
   - the build, module and layout checks pass; **15,081 of 15,081 live property offsets** equal the derived
     layout, 3,226 of 3,226 bool masks, and the class default values of the six player classes sit where the
-    layout says (CONFIRMED, live);
+    layout says (CONFIRMED, live; the checkers' output is kept locally, and `docs/TRACE_CAPTURE.md` §6.5 still
+    has to be updated with these results);
   - `DeltaSeconds` equals the clamped tick argument on every recorded frame (17,307 frames);
   - two checker expectations failed and are **not yet explained**: `UStruct.PropertiesSize` equals the
     registered native size for 1,803 of 1,954 classes only, and 630 layout fields had no live property object;

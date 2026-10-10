@@ -27,8 +27,8 @@ Proven in a deterministic simulation first (no rendering), then wired into Bevy.
 
 ## Phases so far
 
-Each phase ran as parallel workstreams with an independent verification pass; results were merged in small
-commits with tracker updates. `docs/STATUS.md` has the session-by-session record.
+Each phase ran as parallel workstreams with an independent verification pass; results were merged as one commit
+per workstream, with tracker updates. `docs/STATUS.md` has the session-by-session record.
 
 | Phase | Workstreams | Unlocked |
 |---|---|---|
@@ -39,7 +39,7 @@ commits with tracker updates. `docs/STATUS.md` has the session-by-session record
 | 5 ✅ | Runtime world (triangle collision, scene loading, streaming), level rendering, materials, audio decoding, Matinee curves, skeletal meshes and animations | M9 |
 | 6 ✅ | Kismet runtime and Matinee movers, runtime audio with narration and adaptive music, menus and saves, lightmaps, NPCs and the worm, skinned rendering, one-command importer, release workflow | M10 |
 | 7 ✅ | Integration into one connected game: frame order, level transitions, story chain in the smoke harness | M11 (partial) |
-| 8 ✅ | Particles, decals, gameplay VFX, localized text, camera animations and anim notifies, NPC collision, time trial, gamepad, water and foliage | M11 (partial) |
+| 8 ✅ | Particles, decals, gameplay VFX, localized text, camera animations and anim notifies, NPC collision, time trial, gamepad mapping (not yet wired into the simulation tick), water and foliage | M11 (partial) |
 
 ## What is next
 
@@ -47,9 +47,9 @@ In priority order. Nothing below is claimed as done.
 
 | Work | State | Unlocks |
 |---|---|---|
-| **Behavioural parity.** Record the original (read-only), replay the same inputs through the simulation, find and fix divergences, keep the recordings as regression traces. | In progress: the Windows recorder made the first recordings of the original on 2026-10-10 and the first comparison shows real differences to work through; the macOS recorder passed its attach and layout checks but has not recorded a trace yet | M8, M12 |
+| **Behavioural parity.** Record the original (read-only), replay the same inputs through the simulation, find and fix divergences, keep the recordings as regression traces. | In progress: the Windows recorder made the first recordings of the original on 2026-10-10. The first replay diverges; the causes found so far are tooling limits (no movement input from a gamepad recording, no Kismet in the variable-step replay) and open questions (a Workshop story-mode speed of 132, a 1 uu offset), not yet classified simulation differences. The macOS recorder passed its attach and layout checks but has not recorded a trace yet | M8, M12 |
 | **A hand-played playthrough**, fixing whatever blocks a route | Not started (the automated chain only proves the scripted exits) | M11 |
-| **Rendering fidelity:** material placeholders, actors hidden at level start, moving lights, post effects not yet drawn, the look of the original's HUD | Partly done; known gaps listed in `docs/INTEGRATION.md` and `docs/PARITY.md` | — |
-| **Sandbox mode:** an opt-in playground for the movement and game systems (tuning, inspection, time control), kept strictly apart from the faithful game | Design in progress | later tooling and modding work |
+| **Rendering fidelity:** material placeholders, actors hidden at level start, cutscene camera FOV, post effects not yet drawn, the look of the original's HUD | Partly done; known gaps listed in `docs/INTEGRATION.md` (parts of that list are stale and need a refresh) and `docs/PARITY.md` | — |
+| **Sandbox mode:** an opt-in playground for the movement and game systems (tuning, inspection, time control), kept strictly apart from the faithful game | Design done; implementation in progress | later tooling and modding work |
 | **Packaged releases** for Windows, Linux and macOS | Workflow written, never run; needs a maintainer decision to tag | M13 |
 | **Other builds of the game:** verify the importer on the Windows data (`CookedPC`) | Not started | — |

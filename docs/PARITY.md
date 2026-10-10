@@ -252,9 +252,9 @@ boots, world objects):
 
 ## Trace format
 
-Implemented in `crates/asamu-player/src/trace.rs` (schema version **1**). Original-game traces (to be
-recorded later on Windows) and runtime traces share this schema so a harness can compare them tick by tick.
-Producing original traces is not possible yet; the format is the contract a future recorder must meet.
+Implemented in `crates/asamu-player/src/trace.rs` (schema version **1**). Recordings of the original (Windows
+build, first made 2026-10-10; `docs/TRACE_CAPTURE.md`) and runtime traces share this schema so they can be
+compared tick by tick.
 
 ### Layout: JSON Lines
 
@@ -355,7 +355,7 @@ whenever the parameters have a pawn group (the original set); see "Pawn script l
 | Model | What it is | Status |
 |---|---|---|
 | `PlaceholderMovement` | Our own graybox model (see above) | placeholder, not parity-relevant |
-| `Ue3PawnMovement` (`crates/asamu-player/src/ue3_movement.rs`) | Port of the original's native UE3/UDK pawn walking/falling physics, written independently from `docs/reverse-engineering/NATIVE_PHYSICS.md` (the spec; no decompiled code was used) | implemented and tested against closed-form consequences of the spec; **parity with the original not measured** (no original traces yet) |
+| `Ue3PawnMovement` (`crates/asamu-player/src/ue3_movement.rs`) | Port of the original's native UE3/UDK pawn walking/falling physics, written independently from `docs/reverse-engineering/NATIVE_PHYSICS.md` (the spec; no decompiled code was used) | implemented and tested against closed-form consequences of the spec; **parity with the original not measured** (the first recordings of the original exist; this model has not been compared against them within a tolerance yet) |
 
 ### What `Ue3PawnMovement` reproduces (spec section → behaviour)
 

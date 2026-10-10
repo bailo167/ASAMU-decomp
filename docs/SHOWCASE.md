@@ -23,10 +23,10 @@ own copy of the game.
 ## Short (about 100 words)
 
 ASAMU-decomp is an open-source, from-scratch recreation of the engine behind *A Story About My Uncle*, written in
-Rust on Bevy. It ships no game data: an importer converts your own Steam copy locally, and the new runtime plays
-the result on Windows, Linux and macOS. All seven story levels load with their original scripting, collision,
-lighting, characters, audio and menus, and the grapple, power jump and rocket boots are ported from values
-recovered from the game's own files. It is pre-alpha: nobody has played it start to finish yet, and how closely
+Rust on Bevy. It ships no game data: an importer converts your own Steam copy locally, and the new runtime builds
+for Windows, Linux and macOS (played so far only on macOS). All seven story levels load with their original
+scripting, collision, baked lighting, characters and audio, behind stand-in menus, and the grapple, power jump
+and rocket boots are ported from values recovered from the game's own files. It is pre-alpha: nobody has played it start to finish yet, and how closely
 it matches the original's feel is still being measured against recordings of the real game.
 
 ## Technical (about 250 words)
@@ -35,11 +35,11 @@ ASAMU-decomp reimplements a 2014 Unreal Engine 3 game as a clean Rust codebase, 
 read-only evidence.
 
 The importer contains a UE3 package reader written from scratch for the game's package version (868), including
-LZO chunk decompression, the object and property system, a decoder for all 12,801 compiled UnrealScript functions,
+LZO chunk decompression, the object and property system, a decoder for all 12,801 compiled UnrealScript scripts,
 and converters for static and skeletal meshes, animations, textures, materials, lightmaps, sound cue graphs,
 particle systems, Kismet graphs and Matinee tracks. All 42 shipped packages parse; where it can be proven, decoding
-is exact (every static mesh re-encodes byte for byte). Output is open formats (glTF, DDS, Ogg, JSON) written to
-the user's own disk.
+is exact (every static mesh re-encodes byte for byte). Output is glTF, DDS, Ogg and JSON, plus a few raw buffers
+of our own, written to the user's own disk.
 
 The runtime never sees UE3 data. Its simulation core is deterministic and runs without a renderer: a port of the
 engine's pawn physics specified from the unstripped macOS executable, the game's grapple and abilities, and an
@@ -47,12 +47,13 @@ interpreter for Kismet, the visual scripting that drives every level (all 97 kin
 use). Bevy provides rendering, audio, UI and input on top.
 
 Every gameplay constant carries its source (class default, config file or native code), and tests fail if a value
-drifts. Parity with the original is treated as something to measure, not assume: read-only recorders for the
-macOS and Windows builds capture per-frame player state from the real game, and a replay tool runs the same
-inputs through the recreation and reports the first divergence.
+drifts. Parity with the original is treated as something to measure, not assume: a read-only recorder captures
+per-frame player state from the real game (the Windows recorder made the first recordings; the macOS one has
+not recorded yet), and a replay tool runs the same inputs through the recreation and reports the first
+divergence.
 
-CI builds and tests on Windows, Linux and macOS on every push, and a hygiene check keeps game data out of the
-repository.
+CI builds on Windows, Linux and macOS on every push and runs the library and tool tests there, and a hygiene
+check keeps game data out of the repository.
 
 ## Feature list
 
@@ -66,10 +67,12 @@ repository.
   grading and bloom
 - Maddie, the villagers, the Dark Cave worm, collectibles and story items; first-person hand with its animations
 - Sound cues, ambient sound, narration with subtitles, adaptive music
-- Main menu, chapter select, pause, settings, saves and progression, time trial with medals
-- Text in the game's 14 languages; keyboard/mouse and gamepad with the original bindings
+- Main menu, chapter select, pause, settings, saves and progression, time trial with medals (unlocked by finishing
+  the game)
+- Text in the game's 14 languages; keyboard and mouse with the original bindings (gamepad support is partial:
+  look and jump work, movement and grapple are not connected yet)
 - One-command importer (`asamu-import all`): about a minute, 2.3 GB, resumable, verifies your install first
-- Builds and tests on Windows, Linux and macOS (Apple silicon) in CI
+- Builds on Windows, Linux and macOS (Apple silicon) in CI, with the library and tool tests run on each
 
 ## Current limitations
 
@@ -80,25 +83,27 @@ repository.
 - Rendering is an approximation of the original's materials and lighting.
 - The original's Scaleform menus and HUD are replaced by functional stand-ins.
 - Verified against one build of the game only (macOS Steam build 1822049).
+- Props and platforms that start hidden and are shown later by a level's script are not drawn yet.
 - Saves from the original cannot be imported.
 
 ## Facts and figures
 
 Use these only as stated; each comes from the evidence documents in
-[`docs/reverse-engineering/`](reverse-engineering).
+[`docs/reverse-engineering/`](reverse-engineering), from [`BUILDING.md`](BUILDING.md) (importer output) or from
+the CI workflow (platforms).
 
 | Fact | Value |
 |---|---|
 | Original engine | Unreal Engine 3 (UDK), package file version 868 |
-| Packages parsed and decompressed | 42 of 42 |
+| Packages parsed | 42 of 42 (38 are compressed; all 38 decompress) |
 | Game script classes recovered (package `asamu`, found inside `Startup.upk`) | 172 |
-| Compiled script functions decoded | 12,801 |
+| Compiled scripts decoded (12,511 functions, 211 states, 79 classes with class-level code) | 12,801 |
 | Kismet sequence-object classes used by the maps, all interpreted | 97 (3,207 placed objects in 12 maps) |
 | Static meshes decoded and re-encoded byte for byte | 1,512 |
 | Placed actors in the 12 maps | 30,284 |
 | Symbols in the unstripped macOS executable | about 135,000 |
 | Importer output for the verified build | 13,091 files, 2.3 GB (2.1 GiB) |
-| Platforms built and tested in CI | Windows x86_64, Linux x86_64, macOS arm64 (+ macOS x86_64 compile check) |
+| Platforms built in CI (library and tool tests run on each) | Windows x86_64, Linux x86_64, macOS arm64 (+ macOS x86_64 compile check) |
 | Licence | MIT or Apache-2.0 (code only; the game belongs to its owners) |
 
 ## Images

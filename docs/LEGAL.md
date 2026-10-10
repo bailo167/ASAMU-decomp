@@ -11,7 +11,8 @@ its assets are the property of their respective owners.
 - Sanitized metadata: file hashes, sizes, counts, and names (classes, functions, symbols, packages) where needed to
   explain structure.
 - Synthetic test fixtures created by us.
-- A small number of curated screenshots and short clips of **our runtime** in `docs/images/` (see below).
+- A small number of curated screenshots (and, under the same rules, short clips) of **our runtime** in
+  `docs/images/` (see below).
 
 ## What this repository never contains
 
@@ -24,8 +25,8 @@ its assets are the property of their respective owners.
 
 ## Screenshots and clips
 
-`docs/images/` holds a few screenshots and short clips that show the recreation running, so that a visitor can see
-what the project does. They are pictures of our own runtime rendering data that the maintainer converted locally
+`docs/images/` holds a few screenshots that show the recreation running, so that a visitor can see what the
+project does (short clips may be added under the same rules). They are pictures of our own runtime rendering data that the maintainer converted locally
 from a legitimately owned copy. The game's art that is visible in them belongs to its owners; the images are
 included only to illustrate this project, and they are not a substitute for the game.
 

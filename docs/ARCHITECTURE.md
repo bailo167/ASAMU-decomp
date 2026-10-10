@@ -47,10 +47,12 @@ How the pieces run together inside one frame is described in [INTEGRATION.md](IN
 
 ## Boundaries
 
-1. **Importer ↔ runtime.** Only the importer knows about UE3 serialization or Steam paths. The runtime reads
-   converted, open formats (glTF meshes, DDS textures, Ogg audio, versioned JSON for scenes, materials, Kismet
-   graphs, Matinee tracks, particles and text). The runtime does not link `asamu-ue3` at all
-   (`cargo tree -p asamu` shows no path to it), and the renderer is not taught UE3 formats.
+1. **Importer ↔ runtime.** Only the importer (and the inspection tools) read UE3 packages or locate the Steam
+   install. The runtime reads converted formats: glTF meshes, DDS textures, Ogg audio, versioned JSON for scenes,
+   materials, Kismet graphs, Matinee tracks, particles and text, plus a few raw buffers of our own for BSP
+   geometry and lightmap data. The runtime does not link `asamu-ue3` at all (`cargo tree -p asamu` shows no
+   path to it), never locates or reads the install (its only knowledge of Steam is a guard that refuses to write
+   screenshots into a `steamapps` tree or an `.app` bundle), and the renderer is not taught UE3 formats.
 2. **Simulation ↔ rendering.** `asamu-player` and `asamu-world` expose pure step functions on plain data at a
    fixed timestep. Bevy systems call into them. This makes trajectory traces reproducible and testable in CI.
 3. **Evidence ↔ implementation.** Every gameplay constant in the runtime cites its source (script default
@@ -107,9 +109,11 @@ Implemented in `crates/asamu-player/src/trace.rs`; the format (JSON Lines: one `
 grounded) and the comparison metrics are specified in [PARITY.md](PARITY.md#trace-format). Recordings of the
 original game and runtime traces share the schema.
 
-- **Recording the original** ([TRACE_CAPTURE.md](TRACE_CAPTURE.md)): read-only recorders sample the running game
-  once per frame, an LLDB script for the macOS build and a memory-reading poller for the Windows build. They never
-  write to the game's process or files. `asamu-trace convert` turns a raw recording into canonical traces.
+- **Recording the original** ([TRACE_CAPTURE.md](TRACE_CAPTURE.md)): recorders sample the running game once per
+  frame. The memory-reading poller for the Windows build made the first recordings; the LLDB script for the
+  macOS build passes its attach and layout checks but has not recorded a trace yet. Neither writes to the game's
+  files; the Windows poller only reads process memory, and the LLDB route's only change to the process is the
+  breakpoint LLDB places. `asamu-trace convert` turns a raw recording into canonical traces.
 - **Replaying:** `asamu-trace replay` feeds a trace's inputs through the deterministic simulation on the graybox
   or on a converted level, with fixed ticks or with each recorded frame's own length, and
   `asamu-trace compare` aligns two traces by tick and reports per-field max/mean/RMS error and the first

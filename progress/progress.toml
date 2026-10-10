@@ -85,8 +85,8 @@ note = "Story chain connects Workshop to Epilogue in the smoke harness (some exi
 [[milestone]]
 id = "M12"
 name = "Behavioural/regression parity pass"
-status = "blocked"
-note = "Tooling ready; needs traces recorded from the original game."
+status = "partial"
+note = "First recordings of the original exist (Windows build, 2026-10-10); no comparison within a measured tolerance and no regression suite yet."
 
 [[milestone]]
 id = "M13"
@@ -655,7 +655,7 @@ id = "sim-harness"
 name = "Deterministic fixed-step simulation harness"
 status = "implemented"
 evidence = "crates/asamu-player (sim.rs, tests/slice.rs, tests/robustness.rs, tests/property.rs)"
-note = "Pure fixed-step step(); byte-identical determinism tests; NaN/dt guards. Movement model itself is a placeholder."
+note = "Pure fixed-step step(); byte-identical determinism tests; NaN/dt guards. The default movement model is the native-physics port; the placeholder model remains for debugging."
 
 [[category.item]]
 id = "ground-move"
@@ -721,9 +721,9 @@ note = "DefaultInput.ini actions; mouse-look scaling formula not ported (documen
 [[category.item]]
 id = "gamepad"
 name = "Gamepad input per DefaultInput.ini"
-status = "implemented"
+status = "partial"
 evidence = "apps/asamu/src/gamepad.rs"
-note = "Bindings from DefaultInput.ini; untested on real hardware in our runtime."
+note = "Bindings from DefaultInput.ini are mapped and unit-tested. Look, the jump press, pause and checkpoint restart reach the game; the move axes and the held buttons (grapple, sprint, power jump, jump hold) are not merged into the simulation tick yet. Menus have no gamepad navigation. Not tested with a real controller in our runtime."
 [[category]]
 id = "grapple"
 name = "Grapple"
@@ -851,7 +851,7 @@ id = "npcs"
 name = "NPCs (Maddie, villagers, backpack Maddie)"
 status = "implemented"
 evidence = "docs/INTEGRATION.md; crates/asamu-game/src/npc.rs; apps/asamu/src/kismet.rs"
-note = "NPC system ticked in the game frame; villagers/Maddie render skinned; NPC pawns do not block the player (documented gap)."
+note = "NPC system ticked in the game frame; villagers/Maddie render skinned with converted materials; blocking is tracked by the npc-collision item."
 
 [[category.item]]
 id = "worm"
@@ -896,7 +896,7 @@ id = "bevy-shell"
 name = "Bevy application shell"
 status = "implemented"
 evidence = "apps/asamu/src/main.rs"
-note = "Graybox prototype: level boxes, first-person camera, input, fixed-step sim, rope gizmo, placeholder-physics banner. Builds and passes clippy on CI targets."
+note = "Windowing, input, fixed-step simulation, HUD and menus for the graybox test level and converted levels. Builds and passes clippy on CI targets; the app's own tests run on the development machine only."
 
 [[category.item]]
 id = "static-mesh-render"
@@ -1002,7 +1002,7 @@ id = "narration"
 name = "Narrator / voice + subtitles"
 status = "implemented"
 evidence = "apps/asamu/src/audio; docs/reverse-engineering/AUDIO.md"
-note = "Narrator queue with timed subtitles; Kismet NarratorLine via AudioCommand (app wiring pending)."
+note = "Narrator queue with timed subtitles; Kismet NarratorLine is routed to the audio engine (docs/INTEGRATION.md section 4)."
 
 [[category.item]]
 id = "music"
@@ -1223,7 +1223,7 @@ id = "trace-replay"
 name = "Trace replay harness"
 status = "implemented"
 evidence = "crates/asamu-player/src/trace.rs (record_run, compare); tests/slice.rs"
-note = "Replay + per-field max/mean/RMS diff with first divergence. No original traces exist yet."
+note = "Replay + per-field max/mean/RMS diff with first divergence, fixed or per-frame step. First recordings of the original exist locally; no comparison passes within a tolerance yet."
 
 [[category.item]]
 id = "trace-capture"

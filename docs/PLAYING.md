@@ -12,15 +12,18 @@ This is pre-alpha software. Read [What works today](#what-works-today) before yo
 | | |
 |---|---|
 | The game | Installed through Steam. The importer is verified against the **macOS build 1822049** (depot 278362). Windows and Linux installs of the game are detected but **not verified** (see [Other builds of the game](#other-builds-of-the-game)). |
-| Disk | About **2.2 GB** for the converted data. Re-converting needs room for one more copy of the largest stage for a moment (textures, 1.3 GB: the old copy is kept until the new one is complete). `--package-cache` adds about 1.5 GB. |
+| Disk | About **2.3 GB** for the converted data. Re-converting needs room for one more copy of the largest stage for a moment (textures, 1.3 GB: the old copy is kept until the new one is complete). `--package-cache` adds about 1.5 GB. |
 | Memory | About 3 GB free while importing (peak resident memory measured at 2.7 GB). |
 | GPU | Anything Bevy 0.20 supports: Metal (macOS), Vulkan or DirectX 12 (Windows), Vulkan (Linux). |
 | OS | Windows 10/11 x86_64, Linux x86_64 (glibc 2.35 or newer), macOS 11 or newer (Apple silicon or Intel). |
 
 ## 1. Get the programs
 
-Download the zip for your system from the project's GitHub releases page (`asamu-decomp-<version>-<target>.zip`)
-and unzip it anywhere. It holds two programs, `asamu` (the game runtime) and `asamu-import` (the importer),
+**No release has been published yet.** Until one is, build both programs from source (`docs/BUILDING.md`) and run
+the commands below through `cargo run --release -p asamu-import -- ...` and `cargo run --release -p asamu -- ...`.
+
+Once releases exist: download the zip for your system from the project's GitHub releases page
+(`asamu-decomp-<version>-<target>.zip`) and unzip it anywhere. It holds two programs, `asamu` (the game runtime) and `asamu-import` (the importer),
 plus `LICENSE` and this file. `SHA256SUMS.txt` on the release page lists the zip hashes.
 
 You can also build both from source: see `docs/BUILDING.md` in the source repository
@@ -48,9 +51,9 @@ The importer:
 | `textures` | DDS textures + manifest | 7,702 files, 1.29 GB |
 | `meshes` | glTF static meshes with collision + manifest | 1,765 files, 66 MB |
 | `materials` | approximate material descriptions | 1 file, 2.5 MB |
-| `levels` | scene descriptions and BSP geometry of all 12 maps | 37 files, 73 MB |
+| `levels` | scene descriptions and BSP geometry of all 12 maps | 37 files, 76 MB |
 | `audio` | Ogg sounds, sound cues, subtitles, ambient sounds | 774 files, 59 MB |
-| `matinee` | scripted movement / cutscene tracks | 10 files, 0.9 MB |
+| `matinee` | scripted movement / cutscene tracks | 16 files, 1.1 MB |
 | `skeletal` | glTF characters with skins and animations | 55 files, 86 MB |
 | `kismet` | the level scripts of every map, for the runtime's Kismet interpreter | 13 files, 3.0 MB |
 | `lightmaps` | the baked lighting of every map (approximate HDR atlases) | 2,649 files, 618 MB |
@@ -58,9 +61,9 @@ The importer:
 | `decals` | level decals as projected meshes, with their masks | 50 files, 77 MB |
 | `localization` | menu text, subtitles and credits in every language of your install | 16 files, 1.4 MB |
 
-Together that is 13,091 files and 2.3 GB. A full import takes well under a minute on a recent Apple-silicon Mac
-(44 s measured for all twelve stages with other programs running, including 1.5 s to hash the 1.1 GB of game
-files). It prints one line per stage and a summary at the end. A converter that is not part of your build is
+Together that is 13,091 files and 2.3 GB. A full import takes under a minute on a recent Apple-silicon Mac
+(44 s measured for all twelve stages, including 1.5 s to hash the 1.1 GB of game files); a heavily loaded
+machine has taken about two minutes. It prints one line per stage and a summary at the end. A converter that is not part of your build is
 listed as `unavailable`.
 
 The `localization` stage also reads two small Steam files next to the install when they exist (the game's app
@@ -108,7 +111,8 @@ output when it is complete. Just run the command again.
 ./asamu --level AG-Workshop          # Windows: .\asamu.exe --level AG-Workshop
 ```
 
-`--level` loads a converted map from the default folder (or from `--converted DIR`, or `ASAMU_CONVERTED_DIR`).
+`--level` loads a converted map from the default folder (or from `--converted DIR`, or `ASAMU_CONVERTED_DIR`). Started this
+way, saves stay in memory; use the main menu for saves on disk.
 `./asamu --converted DIR` without `--level` starts at the main menu (New Game, Continue, chapter select; saves
 are kept in the user data folder). Without either option the runtime starts its built-in graybox test level
 (through the same menu), which needs no game data.
@@ -118,9 +122,11 @@ The story order of the maps is: `AG-Workshop`, `AG-ParadiseCave`, `AG-BeautifulC
 
 **Controls** follow the original bindings. Keyboard and mouse: WASD move, mouse look, Space jump (in the air it
 fires the rocket boots when you have them), left Shift sprint, left mouse button grapple (release the button to
-let go), hold the right mouse button to power jump, E or Enter use, F7 respawn at the last checkpoint. Gamepad:
-left stick move, right stick look, A jump, right trigger grapple, right shoulder power jump, left shoulder sprint,
-Back restart from the checkpoint, Start pause. Click into the window to capture the mouse; Esc pauses and
+let go), hold the right mouse button to power jump, E or Enter use, F7 respawn at the last checkpoint. Gamepad
+(partial, not yet enough to play): right stick look, A jump (always the short jump), Back restart from the
+checkpoint, Start pause. Left-stick movement, right-trigger grapple, right-shoulder power jump and left-shoulder
+sprint are mapped from the original bindings but not connected to the simulation yet; the menus need keyboard or
+mouse. Click into the window to capture the mouse; Esc pauses and
 releases it.
 
 Developer keys (not in the original): F1 shows a read-out of the simulation's state and the key list, R respawn,
@@ -141,12 +147,12 @@ is done, expect the feel to differ in places.
 |---|---|
 | Movement | Walking, jumping (with the original's jump-release damping), sprinting, falling and landing on a port of the original engine's pawn physics, with the original values. |
 | Grapple, power jump, rocket boots | Ported from the original's script behaviour with the original values, including the limited grapple charges, recharge crystals and every release rule. |
-| Levels | All seven story maps load from your converted data and play with triangle collision, checkpoints, kill zones, moving platforms on their original paths, and the grapple-reactive objects (recharge crystals, attractor pads, falling rocks). `docs/PARITY.md` in the repository lists every known difference. |
+| Levels | All seven story maps load from your converted data and play with triangle collision, checkpoints, kill zones, moving platforms on their original paths, and the grapple-reactive objects (recharge crystals, attractor pads, falling rocks). `docs/PARITY.md` in the repository lists the known gameplay differences. Props and platforms that start hidden and are shown later by a level's script are not drawn yet. |
 | Story scripting (Kismet), cutscenes, level transitions | The levels' own scripts run: triggers, abilities granted by the story, scripted movers, cutscene cameras, level streaming and the exit of each level into the next. The whole chain from the Workshop to the Epilogue has been followed by an automated run that jumps to each exit; nobody has played it through by hand yet, so you may find a route that is blocked. |
 | Lighting and effects | The original's baked lightmaps, approximate materials, particles, decals, water, height fog, colour grading and bloom. An approximation: colour and brightness can differ visibly from the original, and a few materials still show as flat placeholders. |
 | Characters | Maddie, the villagers and the Dark Cave worm with their animations; collectibles and story items; the first-person hand. |
 | Sound, music, narration, subtitles | Sound cues, ambient sound, narration with subtitles and the adaptive music play. |
-| Menus, saving, languages | Main menu, chapter select, pause and settings; saves and progression in the recreation's own format; time trial with medals; the game's text in the 14 languages of your install (a functional replacement of the original's menus, not a visual copy; some characters outside basic Latin may not display yet). |
+| Menus, saving, languages | Main menu, chapter select, pause and settings; saves and progression in the recreation's own format; time trial with medals (it unlocks when the game is finished, as in the original); the game's text in the 14 languages of your install (a functional replacement of the original's menus, not a visual copy; some characters outside basic Latin may not display yet). |
 
 ## Troubleshooting
 
@@ -158,7 +164,7 @@ is done, expect the feel to differ in places.
 | A stage shows `FAILED` | Run `asamu-import all` again; it retries only failed stages. `--only <stage>` reruns one stage. Report persistent failures with `asamu-import-run.json`. |
 | `refusing to write inside the game install` (or inside the source repository) | Choose an output folder elsewhere with `--out`. |
 | `... already holds other files` | The `--out` folder contains files the importer did not write. Choose a new or empty folder. |
-| The runtime shows the gray test level | It did not find converted data. Pass `--converted DIR --level AG-Workshop`, or run the import first. |
+| The runtime shows the gray test level | You started it without `--converted` or `--level`: converted data is only loaded when one of them is given. Pass `--level AG-Workshop` (or `--converted DIR`), after running the import. |
 | `no converted levels in ...` | The `levels` stage has not run in that folder: `asamu-import all` (or `--only levels`). |
 | macOS: "cannot be opened because the developer cannot be verified" | The binaries are not code-signed. Right-click > Open once, or run `xattr -d com.apple.quarantine asamu asamu-import` in the unzipped folder. |
 | Windows: "Windows protected your PC" | The binaries are not signed. Click "More info" > "Run anyway". |

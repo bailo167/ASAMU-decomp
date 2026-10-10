@@ -15,8 +15,8 @@
 //! Raster images and clips are accepted in one place only, `docs/images/`:
 //! curated screenshots and short clips of **our runtime** for the README
 //! (see `docs/LEGAL.md`). Anywhere else an image file is refused, so an
-//! extracted texture cannot slip in as a `.png`; texture container formats
-//! are refused everywhere.
+//! extracted texture cannot slip in as a `.png`; texture container, video
+//! and model formats are refused everywhere.
 
 use std::fs;
 use std::io::Read;
@@ -101,10 +101,12 @@ const SHOWCASE_FORMATS: &[(&str, &[u8])] = &[
 ];
 
 /// Image and texture formats that are refused outside [`SHOWCASE_DIR`]
-/// (the first five) or everywhere (texture containers and video).
+/// (the first five) or everywhere (texture containers, video and model
+/// formats).
 const IMAGE_EXT: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "tga", "dds", "ktx", "ktx2", "tif", "tiff", "psd",
-    "exr", "hdr", "avif", "mov", "webm", "mkv", "avi",
+    "exr", "hdr", "avif", "mov", "webm", "mkv", "avi", "gltf", "glb", "fbx", "obj", "psk", "pskx",
+    "psa", "dae", "blend",
 ];
 
 /// What the image rules say about `rel` (`len` bytes, starting with `head`):
@@ -119,7 +121,7 @@ fn image_finding(rel: &str, len: u64, head: &[u8]) -> Option<String> {
     }
     let Some((_, magic)) = SHOWCASE_FORMATS.iter().find(|(e, _)| *e == ext) else {
         return Some(format!(
-            "image/texture/video format .{ext} is never committed"
+            "image/texture/video/model format .{ext} is never committed"
         ));
     };
     // Directly inside the folder: no sub-folders to hide a texture tree in.
@@ -378,6 +380,10 @@ mod tests {
             "docs/images/clip.webm",
             "a/b.ktx2",
             "a/b.bmp",
+            "docs/images/hand.gltf",
+            "meshes/rock.glb",
+            "a/b.fbx",
+            "a/b.psk",
         ] {
             assert!(image_finding(rel, 10, PNG).is_some(), "{rel}");
         }
