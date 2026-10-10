@@ -1150,6 +1150,160 @@ fn walking_into_an_obtuse_corner_follows_the_second_wall() {
 }
 
 // ---------------------------------------------------------------------------
+// 2.4 Velocity derived from a displacement: the float form.
+//
+// One recorded pair of the original (docs/PARITY_FINDINGS.md P8 / V17): in a
+// tick of 0.01631380245089531 s a displacement of −14.2109375 uu gave the
+// velocity −871.0989990234375 uu/s, which is the displacement times the f32
+// reciprocal of the tick (61.297786712646484); dividing gives the next float,
+// −871.0990600585938. The three tests below put that displacement through
+// each movement mode. They work at a coordinate of 20000, where neighbouring
+// f32 positions are 1/512 uu apart, and at a speed of 871.1 uu/s (f32
+// 871.0999755859375): the move 871.0999755859375 × 0.01631380245089531 =
+// 14.21095… uu then lands on the position 19985.7890625, and
+// 19985.7890625 − 20000 = −14.2109375 exactly (0.2109375 = 108/512). The
+// speeds, the cap and the drag set here are test inputs, not game values.
+// ---------------------------------------------------------------------------
+
+/// The tick length of the recorded pair (f32 bits 0x3C85A486).
+fn recorded_dt() -> f32 {
+    let dt = 0.01631380245089531_f64 as f32;
+    assert_eq!(dt.to_bits(), 0x3C85_A486);
+    dt
+}
+
+/// 871.1 uu/s: the f32 nearest to it is 871.0999755859375.
+const RECORDED_PAIR_SPEED: f32 = 871.1;
+/// The displacement of the recorded pair, uu.
+const RECORDED_PAIR_MOVE: f32 = -14.2109375;
+/// The velocity of the recorded pair, uu/s (f32 bits 0xC459C656).
+const RECORDED_PAIR_VELOCITY: f64 = -871.0989990234375;
+/// What dividing the displacement by the tick gives instead (0xC459C657).
+const RECORDED_PAIR_DIVIDED: f64 = -871.0990600585938;
+
+#[test]
+fn walking_velocity_is_the_displacement_times_the_f32_reciprocal_of_dt() {
+    // 3.1 with 2.4. Walking at the speed cap with the input along the
+    // velocity: the turning-friction term is exactly zero, the acceleration
+    // pushes the speed over the cap and the cap brings it back to
+    // GroundSpeed (to within the rounding of the normalisation, far inside
+    // the 1/1024 uu that would change the position reached).
+    let dt = recorded_dt();
+    let mut params = PlayerParams::default();
+    params.movement.max_ground_speed.value = RECORDED_PAIR_SPEED;
+    assert_eq!(params.movement.movement_speed_modifier.value, 1.0);
+    let world = BoxWorld::new().with_ground(0.0, false);
+    let start = Vec3::new(20000.0, 0.0, hh(&params) + 2.15);
+    let mut s = walking_at(start, Vec3::Z, true, false);
+    s.velocity = Vec3::new(-RECORDED_PAIR_SPEED, 0.0, 0.0);
+    let (_, stats) = tick(&mut s, towards(Vec3::NEG_X), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Walking, dt)]);
+    assert!(s.grounded);
+    assert_eq!(s.position.x - start.x, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.x), RECORDED_PAIR_VELOCITY);
+    assert_ne!(f64::from(s.velocity.x), RECORDED_PAIR_DIVIDED);
+    assert_eq!(s.velocity.y, 0.0);
+    assert_eq!(s.velocity.z, 0.0);
+}
+
+#[test]
+fn falling_refinement_uses_the_f32_reciprocal_of_the_substep() {
+    // 4.3 and 4.6 with 2.4, the analogous case for falling. Free fall
+    // straight down with no input, one sub-step (dt ≤ 0.05):
+    //   V1 = V0 + g·dt, the move is V1·dt, the average velocity is the
+    //   displacement × (1/dt), and since V0.Z < 0 and the average is below
+    //   it the result is 2·average − V0.
+    // V0.Z is chosen so that V1.Z is the speed of the recorded pair:
+    //   g·dt = −520 × 0.01631380245089531 = −8.48317718505859375 exactly
+    //   (f32 0xC107BB18), V0.Z = −862.6168 (f32 −862.6168212890625,
+    //   0xC457A77A), and their f32 sum is −871.0999755859375.
+    // The displacement is therefore −14.2109375 and the average
+    // −871.0989990234375, so
+    //   V.Z = 2 × (−871.0989990234375) − (−862.6168212890625)
+    //       = −879.5811767578125                  (exact, f32 0xC45BE532).
+    // With the division form the average would be −871.09906005859375 and
+    // the result −879.581298828125 (0xC45BE534), two floats away.
+    let dt = recorded_dt();
+    let params = PlayerParams::default();
+    assert_eq!(gravity(&params), -520.0);
+    assert!(params.movement.terminal_velocity.value > 880.0);
+    let world = BoxWorld::new();
+    let v0 = Vec3::new(0.0, 0.0, -862.6168);
+    assert_eq!(v0.z.to_bits(), 0xC457_A77A);
+    let start = Vec3::new(0.0, 0.0, 20000.0);
+    let mut s = airborne(start, v0);
+    let (events, stats) = tick(&mut s, no_input(), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Falling, dt)]);
+    assert!(!s.grounded && events.landed.is_none());
+    assert_eq!(s.position.z - start.z, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.z), -879.5811767578125);
+    assert_eq!(s.velocity.z.to_bits(), 0xC45B_E532);
+    assert_ne!(f64::from(s.velocity.z), -879.581298828125);
+    assert_eq!(s.velocity.x, 0.0);
+    assert_eq!(s.velocity.y, 0.0);
+    assert_eq!(s.position.x, 0.0);
+    assert_eq!(s.position.y, 0.0);
+}
+
+#[test]
+fn falling_average_after_wall_contact_uses_the_f32_reciprocal_of_the_substep() {
+    // 4.5 step 4 with 2.4: after a wall contact the old horizontal velocity
+    // is replaced by the average actually travelled, displacement × (1/dt),
+    // before the refinement 2·average − old. Sideways (Y) nothing stops the
+    // pawn, so its Y average is the reciprocal form of the recorded pair and
+    // the refinement gives 2·a − a = a exactly: the Y velocity after the
+    // tick is that average itself. (Without the replacement the result would
+    // be 2·a − V0.Y, about −871.098; with the division form it would be
+    // −871.0990600585938.) The wall only has to be hit: it faces −X, far
+    // from the pawn's Y range, and the pawn moves into it at 100 uu/s.
+    let dt = recorded_dt();
+    let mut params = PlayerParams::default();
+    // No air steering and no gravity: the only acceleration is zero.
+    params.movement.custom_gravity_scaling.value = 0.0;
+    let wall_x = 100.0;
+    let world = BoxWorld::new().with_box(
+        Vec3::new(wall_x, 19000.0, 0.0),
+        Vec3::new(wall_x + 50.0, 21000.0, 2000.0),
+        false,
+    );
+    // Half a unit from the wall face (the sweep radius is 1.001 × the
+    // collision radius), so the 1.63 uu move into it is cut short.
+    let start = Vec3::new(wall_x - move_radius(&params) - 0.5, 20000.0, 1000.0);
+    let v0 = Vec3::new(100.0, -RECORDED_PAIR_SPEED, 0.0);
+    let mut s = airborne(start, v0);
+    let (_, stats) = tick(&mut s, no_input(), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Falling, dt)]);
+    assert!(s.position.x - start.x < 0.6, "stopped by the wall");
+    assert_eq!(s.position.y - start.y, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.y), RECORDED_PAIR_VELOCITY);
+    assert_eq!(s.velocity.z, 0.0);
+}
+
+#[test]
+fn flying_velocity_is_the_displacement_times_the_f32_reciprocal_of_dt() {
+    // G-PH-3 step 6 with 2.4. No drag (FluidFriction 0 makes both friction
+    // factors exactly 1), no acceleration and a cap above the speed: the
+    // velocity update leaves V unchanged, the move is V·dt and the velocity
+    // is re-derived from the displacement.
+    let dt = recorded_dt();
+    let mut params = PlayerParams::default();
+    params.movement.fluid_friction.value = 0.0;
+    params.movement.air_speed.value = 2000.0;
+    let world = BoxWorld::new();
+    let start = Vec3::new(20000.0, 0.0, 500.0);
+    let mut s = flying(start, Vec3::new(-RECORDED_PAIR_SPEED, 0.0, 0.0));
+    let (_, stats) = tick(&mut s, no_input(), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Flying, dt)]);
+    assert!(s.pawn.flying && !s.grounded);
+    assert_eq!(s.position.x - start.x, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.x), RECORDED_PAIR_VELOCITY);
+    assert_ne!(f64::from(s.velocity.x), RECORDED_PAIR_DIVIDED);
+    assert_eq!(s.velocity.y, 0.0);
+    assert_eq!(s.velocity.z, 0.0);
+    assert_eq!(s.position.z, start.z);
+}
+
+// ---------------------------------------------------------------------------
 // physFlying (GRAPPLE.md G-PH-3): the mode the grapple uses.
 // ---------------------------------------------------------------------------
 
