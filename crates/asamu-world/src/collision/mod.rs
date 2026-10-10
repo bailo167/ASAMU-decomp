@@ -73,11 +73,11 @@
 //! brush row is one computation for both columns: the brush component's
 //! check at 0x100759CB0 hands any trace to its convex elements and then
 //! pulls the hit back without looking at the extent, CONFIRMED. The same
-//! routine lets a trace carrying flag 0x20000, one of the two bits that
-//! force the per-triangle path of meshes (V3), through any brush whose
-//! flag bit 0 at component offset 0x2AC is clear; whether that makes the
-//! grapple's trace pass blocking volumes depends on that bit in the level
-//! data, which nothing here reads yet.)
+//! routine lets a bullet trace (native flag 0x20000, which the grapple's
+//! fire trace carries) through any brush whose component flag
+//! `bBlockComplexCollisionTrace` is clear: NATIVE_PHYSICS.md 10.1. Nothing
+//! here reads that flag yet; a scene builder that does can express it with
+//! [`InstanceInfo::blocks_traces`].)
 //!
 //! # Collision flags and the enabled switch
 //!

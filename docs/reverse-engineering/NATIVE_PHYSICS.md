@@ -1109,10 +1109,14 @@ shorter than 1 uu and by min(0.1 × length, 1.0) uu otherwise (0.1: f32 at 0x101
 0x101633D88), unless the trace carries flag 0x80000. There is one computation for both kinds of
 trace, so the cap of 1.0 holds for zero-extent traces of brushes too (this was TENTATIVE in
 `docs/PARITY_FINDINGS.md` section 7). Before anything else the routine returns "no hit" for a trace
-carrying flag 0x20000 when bit 0 of the component's byte at +0x2AC is clear. 0x20000 is one of the
-two bits that force the per-triangle path of static meshes (`docs/PARITY_FINDINGS.md` V3), so a
-bullet-style trace such as the grapple's would pass every brush with that bit clear [TENTATIVE: the
-bit's property name and its value on the level's volumes were not read].
+carrying flag 0x20000 when bit 0 of the component's byte at +0x2AC is clear. 0x20000 is what the
+script's bullet flag becomes (`AActor::execTrace @ 0x100B377A0` shifts bit 0 of the script's extra
+trace flags up by 17) and one of the two bits that force the per-triangle path of static meshes
+(`docs/PARITY_FINDINGS.md` V3). So the grapple's fire trace (GRAPPLE.md section 4, `TRACEFLAG_Bullet`)
+passes every brush whose bit is clear. The bit is `bBlockComplexCollisionTrace` [STRONG: it is the first bit after
+the cached physics data, as in the property order of `Engine.BrushComponent`]; its value on the
+user's volumes was not read [UNKNOWN], and a volume whose component does not block zero-extent
+traces at all is passed either way.
 
 **BSP** (`UModel::LineCheck @ 0x10092BD20` → `FBoxLineCheckInfo::BoxLineCheck @ 0x10092C440`,
 `FBoxLineCheckInfo::ClipTo @ 0x10092E920`): per convex leaf hull, the line is clipped against the
