@@ -10,8 +10,8 @@ frame boundary are, the size and vtable of every native class, and the struct of
 directly. Field layouts of whole classes are not derived here (the layout stage does that with the
 [DEFAULTS.md](DEFAULTS.md) rules in a Win32 mode and checks them against the class sizes below).
 
-Everything was read statically from the executable. **The game was not run for this analysis; live validation
-is pending** (section 8). The executable has no symbols, so every name below is assigned by us from a string
+Everything was read statically from the executable. **The game was not run for this analysis**; a live check
+against the running game followed on 2026-10-10 (section 8). The executable has no symbols, so every name below is assigned by us from a string
 literal, an export, or the position of a call or reference that matches the symbolised Mac build
 ([BINARY_ANALYSIS.md](BINARY_ANALYSIS.md)). Only addresses, sizes, names, counts and a few 2–10 byte
 instruction encodings are published; string contents appear only as the short anchors the tools search for.
@@ -400,45 +400,119 @@ and instruction bytes; the scanner asserts the bytes are there.
 TENTATIVE value taken from an older stock layout. On this engine version +0x04 is the `HashNext` link; the index
 is the `ObjectInternalInteger` member at +0x20 (row above).
 
-## 8. Live validation (pending)
+## 8. Live validation
 
-**Status: not done.** The game was not running on the Windows machine when this analysis finished, and this
-stage does not launch it.
+**Status (2026-10-10).** The two read-only checkers below were run against the running game during the first
+recording session. What that run showed is recorded in `docs/STATUS.md`; **its output was not kept**, so the
+numbers here are that entry's, and the per-class lists behind them do not exist. Both checkers now write every
+line to a log file, and `tools/trace-recorder/win_remote.sh layoutcheck` runs them and keeps the logs under
+`research/local/win/live-checks/` (git-ignored: they list class and property names).
+
+| Result of the live run (STATUS.md) | Confidence |
+|---|---|
+| The module is this build; the build, module and layout checks of the recorder pass | CONFIRMED (live) |
+| `UProperty.Offset` equals the derived layout for **15,081 of 15,081** properties of the loaded classes; `UBoolProperty.BitMask` equals `1 << bit` for 3,226 of 3,226; the recorded class defaults of the six player classes sit at their layout offsets | CONFIRMED (live). `UBoolProperty.BitMask` at +0x70 (TENTATIVE in section 7) is thereby CONFIRMED; `UStruct.PropertiesSize` at +0x50 is STRONG (it held the registered `sizeof` for 1,803 classes, 8.1) |
+| `UStruct.PropertiesSize` equals the registered `sizeof` for 1,803 of 1,954 native classes (reported as a failed check) | a wrong expectation of the checker, 8.1 |
+| 630 layout fields had no live property object (reported as a failed check) | a wrong expectation of the checker, 8.2 |
+
+### 8.1 `PropertiesSize` is the end of the last property, not `sizeof` (STRONG; the per-class list is pending)
+
+For a class linked from script the engine stores in `PropertiesSize` the end of the last property. The C++
+`sizeof` the registration passes is that end rounded up to the class's alignment (rule 6 of the layout rules,
+[DEFAULTS.md](DEFAULTS.md) §9.3). The two differ whenever the last member does not end on the alignment.
+
+Static reconciliation (`class_sizes.json` against the script layout of every class; no game needed):
+
+| Native classes | Count |
+|---|---:|
+| registered | 1,982 |
+| without a script class (no layout to compare) | 330 |
+| with a script layout | 1,652 |
+| … whose property end equals the registered `sizeof` | 1,484 |
+| … whose `sizeof` is the end rounded up to 4 (the last member is a byte or ends off a word: `ACoverLink` 813 → 816, `AStaticMeshActor` 469 → 472, `UActorComponent` 85 → 88) | 38 |
+| … whose `sizeof` is the end rounded up to 16 (a 16-aligned class: `AKActor` 712 → 720, `AUDKVehicle` 1940 → 1952) | 130 |
+| … any other relation | 0 |
+
+Of the 168 classes whose end is below their `sizeof`, 9 are in the editor packages, whose script the game does
+not load (8.2): their class objects keep the `sizeof` the constructor set. That predicts **159** classes with
+`PropertiesSize` ≠ `sizeof` (Engine 133, UDKBase 23, GameFramework 3); the live run found **151**
+(1,954 − 1,803). The mechanism is STRONG (no class has an end above its `sizeof` or a tail the alignment does
+not explain; and the same run matched every property offset, including first members of classes derived from
+these).
+
+**The 8 classes between 159 and 151 are not explained.** Two readings fit, and the data kept from the live run
+cannot tell them apart: (a) eight of the 159 were among the 28 native classes whose `PrivateStaticClass` was
+not set when the check ran (1,982 − 1,954; such a class is not visited); (b) eight linked classes hold their
+`sizeof` after all, for a reason not found (30 of the 159 declare no property of their own, so "a class without
+own properties" is not the answer by itself). UNKNOWN. The corrected checker decides it on its next run: it
+lists by name every class that is not set (with a note when its end is below its `sizeof`) and every class
+whose `PropertiesSize` is not the value expected for it, saying which of the two values it holds.
+
+What the checkers expect now:
+
+- `win32_props_check.py`: `PropertiesSize` = the layout's property end for a native class of a package whose
+  script is loaded (a package with at least one live property), = the registered `sizeof` otherwise; and,
+  statically, every such end rounds up to the `sizeof` by 4, 8 or 16. It prints how many classes hold each, how
+  many ends are below the `sizeof` per alignment, and for comparison how many equal the `sizeof` (the old
+  check's number).
+- `win32_live_check.py` has no script layout. It accepts the `sizeof` or a smaller value that rounds up to it
+  by 4, 8 or 16, counts both kinds, and lists every class that is neither.
+
+### 8.2 The 630 "missing" fields are native classes of packages the game does not load (CONFIRMED count; STRONG that the live 630 are these)
+
+The executable registers the native classes of every package it was built with, the editor's too, so their
+class objects exist and the checker visited them. Their script packages are never loaded by the game, so they
+have no property objects. The layout holds exactly 630 fields of native classes of the three editor packages
+(`UnrealEd` 623, `GFxUIEditor` 7, `UTEditor` 0), and the whole layout reconciles:
+
+| Layout fields | Count |
+|---|---:|
+| matched by a live property | 15,081 |
+| of native classes of the three editor packages (class object without properties) | 630 |
+| of classes with no class object at all (script-only classes of the editor packages 52, `UTGameContent` 93) | 145 |
+| all script classes | 15,856 |
+
+`win32_props_check.py` now treats a class without any live property, in a package without any live property,
+as "registered, script not loaded": its fields are counted per package and not called missing. A field
+without a property object in a class of a loaded package is still a failure. It prints the three sets above and
+checks that they add up to the layout.
+
+### 8.3 The checkers
 
 [`tools/ghidra-scripts/win32/win32_live_check.py`](../../tools/ghidra-scripts/win32/win32_live_check.py) is a
 read-only checker (ctypes; `OpenProcess` with query + read rights, `ReadProcessMemory`; no debugger, no
-writes). With the game running it checks:
+writes) of the scanner's address tables. With the game running it checks:
 
 - the module header at the discovered base has this build's time stamp;
 - `FName::Names[0] == "None"`, `Names[760] == "Log"`;
 - every set `PrivateStaticClass` points at a `UClass` (by vtable) whose name is the class name; the class's
-  size field equals `sizeof` from the table and its default object carries the listed vtable (the checker finds
-  the two `UClass` field offsets by agreement across classes and reports them);
+  size field is the `sizeof` from the table or a property end that rounds up to it (8.1) and its default object
+  carries the listed vtable (the checker finds the two `UClass` field offsets by agreement across classes and
+  reports them);
 - `GEngine` carries `UGameEngine`'s vtable, `GWorld` carries `UWorld`'s;
-- `GObjObjects` is plausible and `object.Index == slot`;
+- `GObjObjects` is plausible and `object.Index` (+0x20) equals the slot;
 - `GamePlayers[0].Actor` carries `AUDKPlayerController`'s vtable (in a level), and which controller fields
   point at an `AUDKPawn`-vtable object (a hint for the layout stage);
 - `GFrameCounter` and `WorldInfo.RealTimeSeconds` advance over an interval; `GDeltaTime == GFixedDeltaTime`
   when benchmarking.
 
-Its self-test (`--selftest`, a fake memory image built from the JSON; passes on macOS with Python 3.9 and 3.14
-and on the Windows machine with Python 3.13) checks the checker, not the game. A pass against the running game
-upgrades the "live check pending" entries above and the STRONG vtable results.
+[`tools/ghidra-scripts/win32/win32_props_check.py`](../../tools/ghidra-scripts/win32/win32_props_check.py)
+compares the engine's own reflection objects with the layout. Every script property is a `UProperty` object
+whose `Offset` (+0x60) is the offset the engine itself linked for that field, and every class object lists its
+properties (`Children` +0x4C, `Next` +0x3C), so *every* field offset of every loaded class can be compared, at
+the main menu, without a level. It also compares the class default objects of the player classes with the
+recorded script defaults (`GroundSpeed` 440, `JumpZ` 1000, `AirControl` 0.3, `MaxStepHeight` 26, ...), the
+64 fields of the recorder layout and, when `recorder_optional_win32.json` is next to it, the recorder's
+optional fields (section 13). Its input `expected_win32.json` (every script class laid out by an independent
+implementation of the rules: 2,521 classes, 15,856 fields) is local data and not in the repository
+(`research/local/verify-win-re-layout/`).
 
-**Known defect of that checker (found by the verification pass, not yet fixed in the script):** its check
-"object.Index (+4) equals its slot" reads the word at +0x04, which is the `HashNext` link (section 7). On the
-running game that one check will fail for every object although nothing is wrong. The index is at +0x20: the
-check must read `struct.unpack_from("<i", head, 0x20)` from a head of at least 0x24 bytes, and the self-test's
-fake objects must store the index there.
-
-**Property-offset check.** Every script property is a `UProperty` object whose `Offset` (+0x60) is the offset the
-engine itself linked for that field, and every class object lists its properties (`Children` +0x4C, `Next`
-+0x3C). A live reader can therefore compare *every* field offset of every loaded class with the layout, at the
-main menu, without a level. The verification pass wrote such a reader (read-only, ctypes, same access rights as
-above) and left it with its data on the Windows machine as `%USERPROFILE%\asamu-trace\win32_props_check.py`
-and `expected_win32.json`; it is not in the repository yet (section 12.5). It also compares the class default
-objects of the player classes with the recorded script defaults (`GroundSpeed` 440, `JumpZ` 1000, `AirControl`
-0.3, `MaxStepHeight` 26, ...).
+Both have a self-test (`--selftest`, a fake memory image built from the data files; any OS). They check the
+checker, not the game: the live checker's fake holds classes whose size field is a property end below the
+`sizeof` (both alignments) and one whose size is neither; the property checker's is built with a class whose
+end rounds up by 4 (`ACoverLink`), one by 16 (`AKActor`) and a registered editor class without properties, and
+it must catch a property moved by 4 bytes, a linked class that holds its `sizeof`, and a property without its
+object. Both pass on macOS with Python 3.9, 3.13 and 3.14.
 
 ## 9. Notes for the layout and recorder stages
 
@@ -684,8 +758,77 @@ For the 64 fields the recorder reads:
   This file states the current confidence; the JSON is regenerated by `win32_scan.py` and was not edited by hand.
 
 Not in the repository: the scratch tooling of this pass (literal and relocation cross-references, the Mac and
-Windows function pairing, the Python layout implementation) and the live property checker
-`win32_props_check.py` with its data file `expected_win32.json` (every script class laid out by the Python
-implementation: 2,521 classes, 15,856 fields, plus 355 recorded default values of six player classes). Both
-files are in `%USERPROFILE%\asamu-trace` on the Windows machine and the checker's self-test passes there
-(Python 3.13) and on macOS (3.9, 3.14). It was not run against the game: the game was not running.
+Windows function pairing, the Python layout implementation) and `expected_win32.json`, the data file of the live
+property checker (every script class laid out by the Python implementation: 2,521 classes, 15,856 fields, plus
+355 recorded default values of six player classes). The checker itself, `win32_props_check.py`, is in the
+repository since (section 8.3); it was run against the game on 2026-10-10 (section 8).
+
+## 13. Optional recorder fields (2026-10-10)
+
+The fields recorder 0.2.0 reads beyond the 64 of the layout ([TRACE_CAPTURE.md](../TRACE_CAPTURE.md) §6.10).
+Offsets are the layout rules' (`native_layout_win32.json` has the rows; the Python implementation of the
+verification pass gives the same offset and bit for all 23 that are plain properties). The instructions below
+are in `layout_win_x86.json` → `native_evidence` and in `native_layout_win32.json` (`native_offsets` now 77 of
+77, `independent_offsets` 66 of 66); `asamu-trace check-recorder` finds each at its RVA in the executable,
+inside the function its anchor names (1,635 checks, 0 failed). The file the recorder reads is
+`data/win32/recorder_optional_win32.json` (25 fields, two structures, three sentinels), generated with the
+layout by `gameplay_defaults --target win32`.
+
+Functions (found through the native function name table, then by direct calls, as in section 12):
+
+| Function | RVA | Found by | Mac counterpart |
+|---|---|---|---|
+| `UObject::execGetStateName` | `0x0018D100` | name table | same thunk; it reads the state frame at +0x20 and the state node at +0x48 of the frame |
+| `AActor::GetTimerCount` | `0x0075B670` | the only direct call of the thunk `AActor::execGetTimerCount` (`0x00516C00`) | `AActor::GetTimerCount(FName, UObject*)`, the only direct call of the Mac thunk; timers at +0xD8, count at +0xE0 |
+| `AActor::IsTimerActive` | `0x0075B540` | the only direct call of `AActor::execIsTimerActive` (`0x00516B50`) | same |
+| `AActor::PauseTimer` | `0x0075B410` | the only direct call of `AActor::execPauseTimer` (`0x00516A70`) | same |
+| `AActor::SetTimer` | `0x0075ACF0` | the only direct call of `AActor::execSetTimer` (`0x00516810`) | `AActor::SetTimer(float, unsigned int, FName, UObject*)`, the only direct call of the Mac thunk; it also masks its loop argument to bit 0, writes it into the timer's first word and clears bit 1 of that word |
+| `ACamera::SetViewTarget` | `0x004C8B10` | the only direct call of `ACamera::execSetViewTarget` (`0x00528ED0`) | same |
+| `ACamera::AssignViewTarget` | `0x004BD9B0` | called twice by `ACamera::SetViewTarget`, as on the Mac | it copies `DefaultAspectRatio` (+0x268) and `DefaultFOV` (+0x258) into the view target and loads `PCOwner` (+0x248), in that order on both builds |
+| `APawn::physFalling` | `0x00727590` | section 12.4 (vtable slot, members paired) | loads `CylinderComponent` (+0x478), then its radius and height |
+
+Fields:
+
+| Field | Win32 offset | Instruction (function, RVA) | Confidence |
+|---|---|---|---|
+| `Object.StateFrame` | 0x14 | `UObject::execGetStateName` loads it, `0x0018D125` | CONFIRMED |
+| state node in the native state frame (no script declaration) | +0x28 | same function, `0x0018D12D`; then it tests that object's index (+0x20) and returns its name (+0x2C) | CONFIRMED (the instruction is the only source: no layout rule covers a native-only structure) |
+| `Actor.Timers` | 0xA4 (count 0xA8) | `AActor::GetTimerCount` loads it, `0x0075B6D2` | CONFIRMED |
+| `TimerData`: 28-byte elements; `FuncName` +4, `Rate` +0xC, `Count` +0x10, `TimerObj` +0x18; `bPaused` bit 1 and `bLoop` bit 0 of the word at +0 | — | `GetTimerCount` `0x0075B6D8` (index × 7 × 4), `0x0075B6E5`, `0x0075B793`, `0x0075B734`; `IsTimerActive` `0x0075B651`; `PauseTimer` `0x0075B518` (mask 2); `SetTimer` `0x0075AF39` (the loop argument masked with 1 and written into the word; added by the verification of this section) | CONFIRMED, every member and both bits; equal to the layout rule for `Engine.Actor.TimerData` |
+| `Camera.DefaultFOV`, `Camera.DefaultAspectRatio` | 0x1D8, 0x1E8 | `ACamera::AssignViewTarget`, `0x004BD9DD`, `0x004BD9D2` | CONFIRMED |
+| `Camera.bLockedFOV`, `Camera.LockedFOV` | 0x1DC bit 0, 0x1E0 | none found: no `ACamera` function of the symbolised Mac build uses their Mac offsets (0x25C, 0x260), and the field-of-view accessors are script functions; other native classes were not searched. They lie between the two fields above, with `ConstrainedAspectRatio` 0x1E4 after them | STRONG (rule row of a native class whose `sizeof` the rules reproduce; bracketed on both sides; the live run of section 8 matched every loaded property) |
+| `Camera.CameraCache.POV.Location`, `.Rotation` | 0x384, 0x390 | none (struct members by the rule; the third member, `.FOV` at 0x39C, read 90.0 on 45,237 records) | STRONG |
+| `Camera.FreeCamDistance` (sentinel) | 0x438 | none | STRONG |
+| `Pawn.Floor`, `Pawn.BaseEyeHeight` | 0x2CC, 0x2C4 | already in the layout stage's table: `APawn::processLanded` stores the normal (`0x007190F9`), `AUDKPawn::UpdateEyeHeight` loads the height (`0x014B7A9C`) | CONFIRMED |
+| `Pawn.CylinderComponent` | 0x38C | `APawn::physFalling` loads it, `0x007279E4`; the next two instructions load `CollisionRadius` (+0x1DC) and `CollisionHeight` (+0x1D8) from it | CONFIRMED |
+| `Actor.CollisionComponent`, `PrimitiveComponent.Translation`, `CylinderComponent.CollisionHeight`, `.CollisionRadius` | 0x18C, 0x1A0, 0x1D8, 0x1DC | already in the layout stage's table (`APawn::processLanded`, `APawn::physFalling`) | CONFIRMED |
+| `UTPawn.WalkBob`, `Bob`, `LandBob`, `JumpBob`, `AppliedBob`, `BobTime`, `bJustLanded`, `bLandRecovery`, `DoubleJumpEyeHeight` (sentinel) | 0x6CC, 0x6B8, 0x6BC, 0x6C0, 0x6C4, 0x6C8, 0x628 bits 10 and 11, 0x6AC | none (script-only class) | STRONG (rules; live run of section 8) |
+
+Sentinel values are class defaults read from the defaults data (`DefaultAspectRatio` 1.33333 and
+`FreeCamDistance` 256 of `ASAMUCamera`, `DoubleJumpEyeHeight` 43 of `ASAMUPawn`). **None of these fields has
+been read from the running game by the recorder yet.** The property checker compares the 23 plain ones with the
+live property objects when the optional file is next to it (8.3).
+
+Two things the recorder was asked for and the build does not have:
+
+- **A stored distance to the floor or the base.** No property of `Actor`, `Pawn`, `GamePawn`, `UDKPawn`,
+  `UTPawn` or `ASAMUPawn` holds one. (CONFIRMED: the property lists of those classes.)
+- **`bPowerJumped` and `bHasReleasedJump` ever being true.** The offsets are right (bits 1 and 2 of the word at
+  0x874, between `bHasJumped` bit 0 and `bSprinting` bit 4, which the recordings show working), and nothing
+  sets them: in the cooked data the two properties are referenced by two functions only (`ASAMUPawn.Landed`
+  and its `StoryState` override), and both assign false. Scanned: all 984 function and state exports of the
+  `asamu` package (identifier names of the bytecode only); the two names occur in the name table of 1 of the
+  42 cooked packages and in neither executable. (CONFIRMED.) `bHasJumped` is assigned true by one function
+  (`ASAMUPawn.DoJump`) and never cleared.
+
+```sh
+EXE=research/local/win/ASAMU-Win32-Shipping.exe
+D="objdump -d --no-show-raw-insn --x86-asm-syntax=intel"
+$D --start-address=0x58D100 --stop-address=0x58D192 "$EXE"   # UObject::execGetStateName: [this+0x14], [frame+0x28], name at +0x2C
+$D --start-address=0xB5B670 --stop-address=0xB5B7AA "$EXE"   # AActor::GetTimerCount: [this+0xA4], 28-byte elements, +4, +0x18, +0x10
+$D --start-address=0xB5AF2C --stop-address=0xB5AF3F "$EXE"   # AActor::SetTimer: the flags word, the loop argument, mask 1, written back
+$D --start-address=0x8BD9B0 --stop-address=0x8BD9F0 "$EXE"   # ACamera::AssignViewTarget: +0x1E8, +0x1D8, +0x1CC
+$D --start-address=0xB279E4 --stop-address=0xB27A04 "$EXE"   # APawn::physFalling: +0x38C, then +0x1DC and +0x1D8
+cargo run -p asamu-trace -- check-recorder --verbose | grep -E 'StateFrame|Timer|AssignViewTarget|CylinderComponent'
+cargo run -p asamu-inspect --example gameplay_defaults -- --target win32 --check     # 3 files compared, 0 differ
+```

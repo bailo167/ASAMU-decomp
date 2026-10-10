@@ -14,21 +14,100 @@
 //!   jump (held or pressed), no grapple button and no power-jump button (the
 //!   sprint button may be held: flag, speed and button level are all
 //!   recorded);
-//! - a sample is a *clean start* when it is quiet and the sample before it
+//! - a sample is a *clean start* when it is quiet, the sample before it
 //!   (if the trace has one, without a tick gap) is quiet too, so that
-//!   anything a button release one tick earlier set off has shown.
+//!   anything a button release one tick earlier set off has shown, and the
+//!   pawn was not teleported in its tick.
 //!
 //! [`clean_runs`] lists the stretches of clean starts, [`events`] what the
 //! player did, both for picking segments (`asamu-trace starts`).
+//!
+//! # Events a replay cannot follow
+//!
+//! Two kinds of event in a recording come from outside the player's
+//! simulation, so a replay that only feeds inputs cannot reproduce them
+//! ([`EventKind::ends_validity`]; [`crate::replay`] ends a replay's validity
+//! at the first of them, or takes them from the recording under a labelled
+//! option):
+//!
+//! - **A teleport** ([`is_teleport`]): the pawn moved farther in one tick
+//!   than [`TELEPORT_SPEED`] × the tick's frame length. That speed is the
+//!   3-D clamp of the falling physics (`ASAMUPawn.fTerminalVelocity`, class
+//!   default 10,000 uu/s; NATIVE_PHYSICS.md 4), so no fall covers more. In
+//!   the recordings of 2026-10-10 the rule finds five ticks, each a respawn
+//!   after a death (10,035 to 34,860 uu in one tick; the largest
+//!   displacement per time anywhere else is 6,776 uu/s, in the fall before
+//!   one of them): CONFIRMED on those 45,237 records. The rule cannot find
+//!   a script move that is shorter than that limit (167 uu in a frame of
+//!   1/60 s, more in a longer one): a respawn that close to the place of
+//!   death would pass as a move. Whether those recordings hold such a case
+//!   cannot be told from the samples (the five respawns found moved the
+//!   pawn 10,035 uu or more); a recorder field for the death or the respawn
+//!   would close the gap.
+//! - **A level-script state change**, read from the `state:` note: the
+//!   recorded `GroundSpeed` changes in a way the pawn's own script does not
+//!   make (it writes the walking and the sprint speed, ABILITIES.md A-WK-3:
+//!   to or from the story speed is story mode entered or left, any other
+//!   value is a console `SetSpeed`), the grapple capacity `iMaxGrapples`
+//!   changes, or the rocket boots are switched. In the same recordings: 7
+//!   ticks (6 story-mode changes, 1 capacity change).
+//!
+//! # Attaches
+//!
+//! [`EventKind::GrappleAttached`] is the attached flag rising from one
+//! sample to the next. An attach that is released inside the same frame
+//! never shows in a sample; it does show in the gun's used-grapple counter
+//! (`iTimesGrappled` in the `state:` note), which every attach raises
+//! (GRAPPLE.md G-AT-1). [`recorded_events`] reports such a tick as
+//! [`EventKind::GrappleAttachedWithinFrame`], so that the attaches of a
+//! recording are counted from the counter: 134 in the recordings of
+//! 2026-10-10, 15 of them inside one frame.
 
 use std::fmt::Write as _;
 
 use anyhow::Result;
 use asamu_core::glam::Vec3;
 use asamu_player::trace::{TraceGrappleState, TraceSample};
-use asamu_player::{PlayerParams, Trace};
+use asamu_player::{PawnParams, PlayerParams, Trace};
 
-use crate::state::{StateTimeline, story_mode_shown};
+use crate::state::{StateTimeline, TickState, story_mode_shown};
+
+/// Speed no physics of the pawn exceeds, uu/s: a longer move in one tick is
+/// a teleport ([`is_teleport`]). Source: `ASAMUPawn.fTerminalVelocity`
+/// (class default; `PlayerParams::asamu_original().movement.terminal_velocity`,
+/// which a test compares it with), the 3-D speed clamp of the falling
+/// physics.
+pub const TELEPORT_SPEED: f64 = 10_000.0;
+
+/// Distance of two positions in `f64` (the Python converter computes it the
+/// same way).
+fn distance(a: Vec3, b: Vec3) -> f64 {
+    let (dx, dy, dz) = (
+        f64::from(a.x) - f64::from(b.x),
+        f64::from(a.y) - f64::from(b.y),
+        f64::from(a.z) - f64::from(b.z),
+    );
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// `true` if the pawn was teleported in the tick of `s`: `before` is the
+/// sample of the tick before it and the pawn moved more than
+/// [`TELEPORT_SPEED`] × the frame length (`s.time − before.time`; in a tick
+/// in which no time passes, any move).
+#[must_use]
+pub fn is_teleport(before: &TraceSample, s: &TraceSample) -> bool {
+    if before.tick.checked_add(1) != Some(s.tick) {
+        return false;
+    }
+    let limit = TELEPORT_SPEED * (s.time - before.time);
+    distance(s.position, before.position) > limit.max(0.0)
+}
+
+/// How far the pawn moved in the tick of `s`, UU.
+#[must_use]
+pub fn tick_displacement(before: &TraceSample, s: &TraceSample) -> f64 {
+    distance(s.position, before.position)
+}
 
 /// `true` if `s` stands still with nothing held (see the module docs).
 #[must_use]
@@ -74,7 +153,11 @@ pub fn is_clean_start(samples: &[TraceSample], index: usize) -> bool {
     }
     match index.checked_sub(1).and_then(|i| samples.get(i)) {
         None => true,
-        Some(before) => before.tick.checked_add(1) == Some(s.tick) && is_quiet(before),
+        Some(before) => {
+            before.tick.checked_add(1) == Some(s.tick)
+                && is_quiet(before)
+                && !is_teleport(before, s)
+        }
     }
 }
 
@@ -87,9 +170,12 @@ pub fn not_clean_reasons(samples: &[TraceSample], index: usize) -> Vec<&'static 
     let mut why = not_quiet_reasons(s);
     if why.is_empty()
         && let Some(before) = index.checked_sub(1).and_then(|i| samples.get(i))
-        && !(before.tick.checked_add(1) == Some(s.tick) && is_quiet(before))
     {
-        why.push("the tick before it is not standing still");
+        if !(before.tick.checked_add(1) == Some(s.tick) && is_quiet(before)) {
+            why.push("the tick before it is not standing still");
+        } else if is_teleport(before, s) {
+            why.push("the pawn was teleported in this tick");
+        }
     }
     why
 }
@@ -159,6 +245,26 @@ pub enum EventKind {
     LeftGround,
     /// Not walking → walking.
     Landed,
+    /// The pawn moved farther than any physics allows ([`is_teleport`]): a
+    /// respawn or another script move.
+    Teleport,
+    /// The recorded `GroundSpeed` became the story speed.
+    StoryModeOn,
+    /// The recorded `GroundSpeed` went from the story speed to the walking
+    /// or the sprint speed.
+    StoryModeOff,
+    /// The recorded `GroundSpeed` changed to or from a value the pawn's own
+    /// script never writes (a console `SetSpeed`).
+    GroundSpeedSet,
+    /// The gun's capacity `iMaxGrapples` changed.
+    MaxGrapplesChanged,
+    /// The rocket boots were enabled.
+    BootsEnabled,
+    /// The rocket boots were disabled.
+    BootsDisabled,
+    /// The used-grapple counter rose without the attached flag rising: an
+    /// attach that was released inside the same frame.
+    GrappleAttachedWithinFrame,
 }
 
 impl EventKind {
@@ -181,7 +287,47 @@ impl EventKind {
             Self::GrappleReleasedHeld => "grapple released with the button held",
             Self::LeftGround => "left the ground",
             Self::Landed => "landed",
+            Self::Teleport => "teleport",
+            Self::StoryModeOn => "story mode on",
+            Self::StoryModeOff => "story mode off",
+            Self::GroundSpeedSet => "GroundSpeed set (a console speed)",
+            Self::MaxGrapplesChanged => "grapple capacity changed",
+            Self::BootsEnabled => "rocket boots enabled",
+            Self::BootsDisabled => "rocket boots disabled",
+            Self::GrappleAttachedWithinFrame => "grapple attached and released within the frame",
         }
+    }
+
+    /// `true` for a change of the level script's making (story mode, a
+    /// console speed, the grapple capacity, the rocket boots).
+    #[must_use]
+    pub fn is_level_state(self) -> bool {
+        matches!(
+            self,
+            Self::StoryModeOn
+                | Self::StoryModeOff
+                | Self::GroundSpeedSet
+                | Self::MaxGrapplesChanged
+                | Self::BootsEnabled
+                | Self::BootsDisabled
+        )
+    }
+
+    /// `true` for an event that a replay of the inputs cannot reproduce: a
+    /// teleport or a level-script state change (see the module docs).
+    #[must_use]
+    pub fn ends_validity(self) -> bool {
+        self == Self::Teleport || self.is_level_state()
+    }
+
+    /// `true` for an attach of the grapple, seen in a sample or only in the
+    /// used-grapple counter.
+    #[must_use]
+    pub fn is_attach(self) -> bool {
+        matches!(
+            self,
+            Self::GrappleAttached | Self::GrappleAttachedWithinFrame
+        )
     }
 }
 
@@ -253,8 +399,213 @@ pub fn events(samples: &[TraceSample]) -> Vec<Event> {
             (false, true) => push(EventKind::Landed),
             _ => {}
         }
+        if is_teleport(a, b) {
+            push(EventKind::Teleport);
+        }
     }
     out
+}
+
+/// The three values the pawn's own script and story mode give `GroundSpeed`
+/// (ABILITIES.md A-WK-3), computed from `pawn` as the script does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroundSpeeds {
+    /// `fMoveSpeed`.
+    pub walk: f32,
+    /// Walking speed × the sprint multiplier.
+    pub sprint: f32,
+    /// Walking speed × the story multiplier.
+    pub story: f32,
+}
+
+impl GroundSpeeds {
+    /// The speeds of `pawn`.
+    #[must_use]
+    pub fn of(pawn: &PawnParams) -> Self {
+        let walk = pawn.move_speed.value;
+        Self {
+            walk,
+            sprint: walk * pawn.sprint_speed_multiplier.value,
+            story: walk * pawn.story_speed_multiplier.value,
+        }
+    }
+
+    /// The original's: 440, 880 and 264 uu/s (class defaults; the Python
+    /// converter has the same three numbers, and a test compares them).
+    #[must_use]
+    pub fn original() -> Self {
+        PlayerParams::asamu_original().pawn.as_ref().map_or(
+            Self {
+                walk: 0.0,
+                sprint: 0.0,
+                story: 0.0,
+            },
+            Self::of,
+        )
+    }
+
+    /// What a change of the recorded `GroundSpeed` from `old` to `new` is:
+    /// nothing between the walking and the sprint speed (the pawn's own
+    /// sprint), story mode on or off, or a console speed.
+    #[must_use]
+    pub fn change(&self, old: f32, new: f32) -> Option<EventKind> {
+        let own = |g: f32| g == self.walk || g == self.sprint;
+        if old == new || (own(old) && own(new)) {
+            None
+        } else if new == self.story {
+            Some(EventKind::StoryModeOn)
+        } else if old == self.story && own(new) {
+            Some(EventKind::StoryModeOff)
+        } else {
+            Some(EventKind::GroundSpeedSet)
+        }
+    }
+}
+
+/// The level-script state changes and the counter-only attach between two
+/// consecutive recorded states (`attached_rose`: the attached flag rose in
+/// this tick's sample).
+fn state_change_events(
+    speeds: &GroundSpeeds,
+    before: &TickState,
+    after: &TickState,
+    attached_rose: bool,
+) -> Vec<EventKind> {
+    let mut kinds = Vec::new();
+    if let (Some(old), Some(new)) = (before.ground_speed, after.ground_speed)
+        && let Some(kind) = speeds.change(old, new)
+    {
+        kinds.push(kind);
+    }
+    if let (Some(old), Some(new)) = (before.max_grapples, after.max_grapples)
+        && old != new
+    {
+        kinds.push(EventKind::MaxGrapplesChanged);
+    }
+    match (before.boots_enabled, after.boots_enabled) {
+        (Some(false), Some(true)) => kinds.push(EventKind::BootsEnabled),
+        (Some(true), Some(false)) => kinds.push(EventKind::BootsDisabled),
+        _ => {}
+    }
+    if let (Some(old), Some(new)) = (before.times_grappled, after.times_grappled)
+        && new > old
+        && !attached_rose
+    {
+        kinds.push(EventKind::GrappleAttachedWithinFrame);
+    }
+    kinds
+}
+
+/// [`events`] plus what only the recorded script state shows
+/// (`timeline`, the trace's `state:` note): level-script state changes and
+/// attaches that were released inside their frame (see the module docs).
+/// In tick order; at one tick the events of the samples come first.
+///
+/// # Errors
+/// An invalid `state:` note.
+pub fn recorded_events(
+    samples: &[TraceSample],
+    timeline: Option<&StateTimeline>,
+) -> Result<Vec<Event>> {
+    let from_samples = events(samples);
+    let Some(timeline) = timeline else {
+        return Ok(from_samples);
+    };
+    let speeds = GroundSpeeds::original();
+    let mut from_state: Vec<Event> = Vec::new();
+    timeline.for_each_change(|tick, before, after| {
+        let Ok(index) = samples.binary_search_by_key(&tick, |s| s.tick) else {
+            return;
+        };
+        let attached = |i: usize| {
+            samples
+                .get(i)
+                .is_some_and(|s| s.grapple_state == TraceGrappleState::Attached)
+        };
+        let attached_rose = attached(index) && index.checked_sub(1).is_some_and(|i| !attached(i));
+        for kind in state_change_events(&speeds, before, after, attached_rose) {
+            from_state.push(Event { index, tick, kind });
+        }
+    })?;
+    // A stable merge by sample index.
+    let mut out = Vec::with_capacity(from_samples.len() + from_state.len());
+    let mut state = from_state.into_iter().peekable();
+    for e in from_samples {
+        while let Some(s) = state.next_if(|s| s.index < e.index) {
+            out.push(s);
+        }
+        out.push(e);
+    }
+    out.extend(state);
+    Ok(out)
+}
+
+/// Most ticks an `event:` note lists.
+pub const MAX_LISTED: usize = 20;
+/// Prefix of the converter's notes about [`recorded_events`].
+pub const EVENT_NOTE_PREFIX: &str = "event: ";
+
+/// `items` joined with `, `, at most [`MAX_LISTED`] of them, then how many
+/// more there are.
+fn bounded_list(items: &[String]) -> String {
+    let shown = items.len().min(MAX_LISTED);
+    let mut text = items.get(..shown).unwrap_or(items).join(", ");
+    if items.len() > shown {
+        let _ = write!(text, " and {} more", items.len() - shown);
+    }
+    text
+}
+
+/// The converter's `event:` notes for the events of a run: teleports,
+/// level-script state changes and the attaches by the used-grapple counter
+/// (how many, and where; the Python converter writes the same lines).
+#[must_use]
+pub fn event_notes(all: &[Event]) -> Vec<String> {
+    let mut notes = Vec::new();
+    let ticks = |keep: &dyn Fn(EventKind) -> bool| -> Vec<String> {
+        all.iter()
+            .filter(|e| keep(e.kind))
+            .map(|e| e.tick.to_string())
+            .collect()
+    };
+    let teleports = ticks(&|k| k == EventKind::Teleport);
+    if !teleports.is_empty() {
+        notes.push(format!(
+            "{EVENT_NOTE_PREFIX}{} teleport(s) (the pawn moved more than {TELEPORT_SPEED} uu/s x \
+             the frame length in one tick: a respawn or another script move): tick(s) {}",
+            teleports.len(),
+            bounded_list(&teleports)
+        ));
+    }
+    let level: Vec<String> = all
+        .iter()
+        .filter(|e| e.kind.is_level_state())
+        .map(|e| format!("{} {}", e.tick, e.kind.name()))
+        .collect();
+    if !level.is_empty() {
+        notes.push(format!(
+            "{EVENT_NOTE_PREFIX}{} level-script state change(s) (story mode, a console speed, \
+             the grapple capacity or the rocket boots: changes the pawn's own rules do not \
+             make): {}",
+            level.len(),
+            bounded_list(&level)
+        ));
+    }
+    let attaches = all.iter().filter(|e| e.kind.is_attach()).count();
+    let within = ticks(&|k| k == EventKind::GrappleAttachedWithinFrame);
+    if !within.is_empty() {
+        notes.push(format!(
+            "{EVENT_NOTE_PREFIX}{attaches} grapple attach(es), {} of them inside one frame (the \
+             used-grapple counter iTimesGrappled rose, no sample is attached): tick(s) {}",
+            within.len(),
+            bounded_list(&within)
+        ));
+    } else if attaches > 0 {
+        notes.push(format!(
+            "{EVENT_NOTE_PREFIX}{attaches} grapple attach(es), each with an attached sample"
+        ));
+    }
+    notes
 }
 
 /// The events of `samples[from..until]`: with `every_event` one per line,
@@ -328,8 +679,8 @@ fn between(
 pub fn describe(trace: &Trace, every_event: bool) -> Result<String> {
     let samples = trace.samples.as_slice();
     let runs = clean_runs(samples);
-    let all = events(samples);
     let timeline = StateTimeline::from_notes(&trace.meta.notes)?;
+    let all = recorded_events(samples, timeline.as_ref())?;
     let params = PlayerParams::asamu_original();
     let mut out = String::new();
     let _ = writeln!(
@@ -540,7 +891,8 @@ mod tests {
             "    2..=10: move at 2, sprint ends x2 (first at 2), sprint at 3, jump at 4, left the ground \
              at 4, grapple button down at 5, grapple attached at 5, move ends at 6, grapple \
              button up at 7, grapple released by the button at 7, landed at 8, power-jump \
-             button down at 9, power-jump button up at 10, use at 10"
+             button down at 9, GroundSpeed set (a console speed) at 9, grapple attached and \
+             released within the frame at 9, power-jump button up at 10, use at 10"
         );
         assert_eq!(
             lines[4],
@@ -552,6 +904,188 @@ mod tests {
             every.contains("\n        7 grapple released by the button\n"),
             "{every}"
         );
-        assert_eq!(every.lines().count(), 3 + 1 + 15 + 2);
+        // The timeline's own events (a console speed and a counted attach at
+        // tick 9) are listed with the samples' events.
+        assert!(
+            every.contains("\n        9 grapple attached and released within the frame\n"),
+            "{every}"
+        );
+        assert_eq!(every.lines().count(), 3 + 1 + 17 + 2);
+    }
+
+    /// 1/64 s (exact in binary): [`TELEPORT_SPEED`] allows 156.25 uu.
+    const TICK: f64 = 0.015_625;
+
+    fn at(tick: u64, x: f32) -> TraceSample {
+        let mut s = standing(tick);
+        s.time = tick as f64 * TICK;
+        s.position = Vec3::new(x, 2.0, 3.0);
+        s
+    }
+
+    #[test]
+    fn teleports() {
+        assert_eq!(
+            TELEPORT_SPEED,
+            f64::from(
+                PlayerParams::asamu_original()
+                    .movement
+                    .terminal_velocity
+                    .value
+            ),
+            "the teleport rule's speed is the falling physics' clamp"
+        );
+        // 156 uu in a tick is a fast fall, 156.5 uu is not physics.
+        assert!(!is_teleport(&at(0, 0.0), &at(1, 156.0)));
+        assert!(is_teleport(&at(0, 0.0), &at(1, 156.5)));
+        assert!(is_teleport(&at(0, 0.0), &at(1, -20_000.0)));
+        assert_eq!(tick_displacement(&at(0, 1.0), &at(1, 4.0)), 3.0);
+        // Not across a tick gap (the frames in between are unknown).
+        assert!(!is_teleport(&at(0, 0.0), &at(2, 9000.0)));
+        // A tick in which no time passes, or time runs back: any move.
+        let mut frozen = at(1, 0.5);
+        frozen.time = 0.0;
+        assert!(is_teleport(&at(0, 0.0), &frozen));
+        frozen.time = -1.0;
+        assert!(is_teleport(&at(0, 0.0), &frozen));
+        frozen.position.x = 0.0;
+        assert!(!is_teleport(&at(0, 0.0), &frozen));
+        // Huge times and positions: no panic, a finite answer.
+        let mut far = at(1, f32::MAX);
+        far.time = 1e308;
+        let mut origin = at(0, -f32::MAX);
+        origin.time = -1e308;
+        assert!(!is_teleport(&origin, &far), "an infinite frame length");
+        far.time = origin.time;
+        assert!(is_teleport(&origin, &far));
+
+        // In a listing: an event, and the standing stretch does not span it.
+        let mut s: Vec<TraceSample> = (0..10).map(|t| at(t, 0.0)).collect();
+        for x in &mut s[5..] {
+            x.position.x = 5000.0;
+        }
+        let got: Vec<(u64, EventKind)> = events(&s).iter().map(|e| (e.tick, e.kind)).collect();
+        assert_eq!(got, [(5, EventKind::Teleport)]);
+        assert!(EventKind::Teleport.ends_validity());
+        assert!(!EventKind::Teleport.is_level_state());
+        assert_eq!(clean_runs(&s), [(0, 4), (6, 9)]);
+        assert_eq!(
+            not_clean_reasons(&s, 5),
+            ["the pawn was teleported in this tick"]
+        );
+        assert!(is_clean_start(&s, 6), "the tick after it is a start again");
+    }
+
+    fn timeline(json: &str) -> StateTimeline {
+        StateTimeline::from_notes(&[format!("state: {json}")])
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn level_state_changes_and_counted_attaches() {
+        let speeds = GroundSpeeds::original();
+        assert_eq!(
+            (speeds.walk, speeds.sprint, speeds.story),
+            (440.0, 880.0, 264.0),
+            "the Python converter has these three numbers"
+        );
+        use EventKind::*;
+        for (old, new, want) in [
+            (440.0, 880.0, None),
+            (880.0, 440.0, None),
+            (440.0, 440.0, None),
+            (132.0, 132.0, None),
+            (440.0, 264.0, Some(StoryModeOn)),
+            (880.0, 264.0, Some(StoryModeOn)),
+            (132.0, 264.0, Some(StoryModeOn)),
+            (264.0, 440.0, Some(StoryModeOff)),
+            (264.0, 880.0, Some(StoryModeOff)),
+            (264.0, 132.0, Some(GroundSpeedSet)),
+            (440.0, 132.0, Some(GroundSpeedSet)),
+            (132.0, 440.0, Some(GroundSpeedSet)),
+            (66.0, 132.0, Some(GroundSpeedSet)),
+        ] {
+            assert_eq!(speeds.change(old, new), want, "{old} -> {new}");
+        }
+        // Ten standing samples; the grapple is attached on ticks 4 and 5.
+        let mut s: Vec<TraceSample> = (0..10).map(|t| at(t, 0.0)).collect();
+        for x in &mut s[4..6] {
+            x.grapple_state = TraceGrappleState::Attached;
+            x.grapple_anchor = Some(Vec3::X);
+            x.grounded = false;
+        }
+        let t = timeline(
+            "{\"changes\":[[0,{\"ground_speed\":440.0,\"max_grapples\":2,\"times_grappled\":0,\
+             \"boots_enabled\":true}],[1,{\"ground_speed\":880.0}],[2,{\"ground_speed\":264.0}],\
+             [3,{\"times_grappled\":1}],[4,{\"ground_speed\":440.0,\"times_grappled\":2}],\
+             [5,{\"ground_speed\":132.0,\"times_grappled\":0}],[6,{\"max_grapples\":3}],\
+             [7,{\"boots_enabled\":false}],[8,{\"boots_enabled\":true}],\
+             [9,{\"max_grapples\":null}],[40,{\"ground_speed\":264.0}]],\"v\":1}",
+        );
+        let all = recorded_events(&s, Some(&t)).unwrap();
+        let got: Vec<(u64, EventKind)> = all.iter().map(|e| (e.tick, e.kind)).collect();
+        assert_eq!(
+            got,
+            [
+                (2, StoryModeOn),
+                (3, GrappleAttachedWithinFrame),
+                (4, GrappleAttached),
+                (4, LeftGround),
+                (4, StoryModeOff),
+                (5, GroundSpeedSet),
+                (6, GrappleReleasedByButton),
+                (6, Landed),
+                (6, MaxGrapplesChanged),
+                (7, BootsDisabled),
+                (8, BootsEnabled),
+            ],
+            "the sprint at tick 1, the refill at 5, a gun that goes away at 9 and a tick the \
+             trace does not have are no events"
+        );
+        assert!(all.iter().all(|e| s[e.index].tick == e.tick));
+        let ends: Vec<u64> = all
+            .iter()
+            .filter(|e| e.kind.ends_validity())
+            .map(|e| e.tick)
+            .collect();
+        assert_eq!(ends, [2, 4, 5, 6, 7, 8]);
+        assert_eq!(all.iter().filter(|e| e.kind.is_attach()).count(), 2);
+        assert_eq!(
+            event_notes(&all),
+            [
+                "event: 6 level-script state change(s) (story mode, a console speed, the grapple \
+                 capacity or the rocket boots: changes the pawn's own rules do not make): 2 story \
+                 mode on, 4 story mode off, 5 GroundSpeed set (a console speed), 6 grapple \
+                 capacity changed, 7 rocket boots disabled, 8 rocket boots enabled",
+                "event: 2 grapple attach(es), 1 of them inside one frame (the used-grapple \
+                 counter iTimesGrappled rose, no sample is attached): tick(s) 3",
+            ]
+        );
+        // Without a timeline: the samples' events only.
+        let plain = recorded_events(&s, None).unwrap();
+        assert_eq!(plain, events(&s));
+        assert_eq!(
+            event_notes(&plain),
+            ["event: 1 grapple attach(es), each with an attached sample"]
+        );
+        assert!(event_notes(&[]).is_empty());
+        // A long list is cut after MAX_LISTED ticks.
+        let mut jumpy: Vec<TraceSample> = (0..30).map(|t| at(t, 400.0 * t as f32)).collect();
+        jumpy[0].position.x = 0.0;
+        let notes = event_notes(&events(&jumpy));
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        assert!(
+            notes[0].starts_with(
+                "event: 29 teleport(s) (the pawn moved more than 10000 uu/s x the frame length \
+                 in one tick: a respawn or another script move): tick(s) 1, 2, "
+            ) && notes[0].ends_with("19, 20 and 9 more"),
+            "{notes:#?}"
+        );
+        // A broken timeline is an error.
+        let bad = timeline(
+            "{\"changes\":[[0,{\"ground_speed\":1.0}],[1,{\"ground_speed\":\"x\"}]],\"v\":1}",
+        );
+        assert!(recorded_events(&s, Some(&bad)).is_err());
     }
 }

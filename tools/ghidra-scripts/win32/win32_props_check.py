@@ -16,6 +16,20 @@ never writes to the process, injects nothing and attaches no debugger.
     python win32_props_check.py --expected FILE --data DIR --verbose
     python win32_props_check.py --selftest         (no game needed; any OS)
 
+Two expectations follow from how the engine links a class (WINDOWS_BINARY.md 8):
+
+* UStruct.PropertiesSize of a class whose script is loaded is the END of its last property, not the
+  C++ sizeof: the registered sizeof is that end rounded up to the class's alignment (4, 8 or 16). A
+  native class whose script package the game does not load keeps the sizeof its constructor set.
+* The executable registers the native classes of every package it was built with, the editor's
+  too. Their class objects exist, but without their script package they have no property objects:
+  the layout's fields of those classes are "not loaded", not "missing".
+
+Every line, and every list in full, also goes to a log file (--log FILE; default
+logs/win32_props_check-<UTC time>.log next to the script, or research/local/win/live-checks/ in a
+repository checkout; --no-log for none). The console shows the first rows of a long list unless
+--verbose is given.
+
 Stock CPython 3.9+ (ctypes only). Exit code: 0 every check passed, 1 a check failed, 2 the game is
 not running.
 """
@@ -32,6 +46,8 @@ EXE_NAME = "ASAMU-Win32-Shipping.exe"
 MAX_OBJECTS = 4000000
 MAX_FIELDS = 20000
 MAX_NAME_CHARS = 1024
+SHOWN_ROWS = 10  # rows of a long list on the console (the log has all of them)
+ALIGNMENTS = (4, 8, 16)  # class alignments of this build (DEFAULTS.md 9.3, rules 5 and 6)
 
 
 class ReadError(Exception):
@@ -67,33 +83,71 @@ class Memory:
 
 
 class Report:
-    def __init__(self, verbose=False):
+    """Prints the checks; ``log`` (a file object) gets every line, and every
+    row of a list whether or not the console shows it."""
+
+    def __init__(self, verbose=False, log=None, quiet=False):
         self.failed = 0
         self.passed = 0
         self.verbose = verbose
+        self.log = log
+        self.quiet = quiet
+
+    def _line(self, text, console=True):
+        if console and not self.quiet:
+            print(text)
+        if self.log is not None:
+            self.log.write(text + "\n")
 
     def check(self, ok, text):
         if ok:
             self.passed += 1
         else:
             self.failed += 1
-        print("[%s] %s" % ("ok" if ok else "FAIL", text))
+        self._line("[%s] %s" % ("ok" if ok else "FAIL", text))
         return ok
 
     def info(self, text):
-        print("[info] %s" % text)
+        self._line("[info] %s" % text)
 
     def detail(self, text):
-        if self.verbose:
-            print("       %s" % text)
+        self._line("       %s" % text, console=self.verbose)
+
+    def rows(self, title, rows):
+        """A list: its title and length, then the rows (all of them in the
+        log; the first SHOWN_ROWS on the console unless verbose)."""
+        if not rows:
+            return
+        self._line("       %s: %d" % (title, len(rows)))
+        for i, row in enumerate(rows):
+            self._line("         %s" % row, console=self.verbose or i < SHOWN_ROWS)
+        if not self.verbose and len(rows) > SHOWN_ROWS:
+            self._line("         ... %d more in the log" % (len(rows) - SHOWN_ROWS))
+
+
+def align_up(value, alignment):
+    return (value + alignment - 1) // alignment * alignment
+
+
+def rounds_up_to(end, size):
+    """The alignment (one of ALIGNMENTS) by which ``end`` rounds up to
+    ``size``; 1 when they are equal; None when no alignment gives it."""
+    if end == size:
+        return 1
+    for a in ALIGNMENTS:
+        if end < size and align_up(end, a) == size:
+            return a
+    return None
 
 
 class Game:
     """The engine structures the checks walk. Every offset comes from the data files."""
 
-    def __init__(self, mem, layout, globals_json, class_sizes, expected):
+    def __init__(self, mem, layout, globals_json, class_sizes, expected, optional=None):
         self.mem = mem
         self.expected = expected
+        # The recorder's optional fields (recorder_optional_win32.json), when the file is there.
+        self.optional = {(f["class"], f["name"]): f for f in (optional or {}).get("fields", [])}
         r = expected["reflection"]
         self.r = r
         self.o_outer = r["object_outer"]
@@ -253,46 +307,101 @@ def run_checks(game, report, seconds=1.0):
             paths["%s.%s" % (oname, name)] = obj
     report.info("%d class objects loaded, %d with a package outer" % (len(classes), len(paths)))
 
+    # ---- every property of every loaded class (walked first: which script packages are loaded
+    # decides what the class objects must hold)
+    own = {}
+    for path in sorted(paths):
+        cls = paths[path]
+        own[path] = [p for p in game.properties(cls) if p[4] == cls]
+    loaded_packages = sorted({path.split(".")[0] for path, props in own.items() if props})
+    report.info("script packages with live properties (loaded): %d (%s)" % (len(loaded_packages), ", ".join(loaded_packages)))
+
     # ---- native classes: PrivateStaticClass and PropertiesSize
-    psc_ok = psc_set = size_ok = 0
+    # A class whose script is loaded was linked by the engine: PropertiesSize is the end of its
+    # last property, and the registered sizeof is that end rounded up to the class's alignment. A
+    # class whose script package is not loaded keeps the sizeof its constructor set.
+    psc_ok = psc_set = 0
+    unset = []
+    linked = unlinked = old_equal = 0
+    rounded = {a: 0 for a in ALIGNMENTS}
+    unlinked_packages = {}
     size_bad = []
+    static_bad = []
     for c in game.native:
+        path = "%s.%s" % (c["package"], c["name"])
+        e = exp["classes"].get(path)
         ptr = mem.u32(mem.base + c["private_static_class_rva"])
         if not ptr:
+            unset.append("%s (%s)%s" % (c["cpp_name"], path, "" if e is None or e["end"] == c["size"]
+                                         else ": its property end %#x is below its sizeof %#x" % (e["end"], c["size"])))
             continue
         psc_set += 1
-        if game.name_of(ptr) == c["name"]:
-            psc_ok += 1
-            got = mem.u32(ptr + game.r["struct_properties_size"])
-            if got == c["size"]:
-                size_ok += 1
-            else:
-                size_bad.append((c["cpp_name"], got, c["size"]))
+        if game.name_of(ptr) != c["name"]:
+            continue
+        psc_ok += 1
+        got = mem.u32(ptr + game.r["struct_properties_size"])
+        old_equal += got == c["size"]
+        if e is not None and c["package"] in loaded_packages:
+            want, what = e["end"], "property end"
+            a = rounds_up_to(e["end"], c["size"])
+            if a is None:
+                static_bad.append("%s (%s): layout end %#x does not round up to the registered sizeof %#x" % (c["cpp_name"], path, e["end"], c["size"]))
+            elif a > 1 and got == want:
+                rounded[a] += 1
+            linked += got == want
+        else:
+            want, what = c["size"], "registered sizeof"
+            if got == want:
+                unlinked += 1
+                unlinked_packages[c["package"]] = unlinked_packages.get(c["package"], 0) + 1
+        if got != want:
+            also = "the registered sizeof" if got == c["size"] else ("the layout's property end" if e is not None and got == e["end"] else "neither end nor sizeof")
+            size_bad.append("%s (%s): live %#x, expected the %s %#x; layout end %s, sizeof %#x; live equals %s; package %s"
+                            % (c["cpp_name"], path, got, what, want, "%#x" % e["end"] if e is not None else "none", c["size"], also,
+                               "loaded" if c["package"] in loaded_packages else "not loaded"))
     report.check(psc_set > 0 and psc_ok == psc_set, "%d of %d set PrivateStaticClass pointers name their class" % (psc_ok, psc_set))
-    report.check(psc_ok > 0 and not size_bad, "UStruct.PropertiesSize (+%#x) equals the registered sizeof for %d of %d native classes" % (game.r["struct_properties_size"], size_ok, psc_ok))
-    for row in size_bad[:10]:
-        report.detail("size differs: %s live %#x table %#x" % row)
+    report.rows("native classes whose PrivateStaticClass is not set (not registered yet; not checked)", unset)
+    report.check(psc_ok > 0 and not size_bad,
+                 "UStruct.PropertiesSize (+%#x) is the property end (script loaded) or the registered sizeof (not loaded) for %d of %d native classes"
+                 % (game.r["struct_properties_size"], linked + unlinked, psc_ok))
+    report.info("  script loaded: %d classes hold their property end; for %d of them it is below the sizeof (rounded up to %s)"
+                % (linked, sum(rounded.values()), ", ".join("%d: %d" % (a, rounded[a]) for a in ALIGNMENTS)))
+    report.info("  script not loaded or no script class: %d classes hold their sizeof (%s)"
+                % (unlinked, ", ".join("%s %d" % kv for kv in sorted(unlinked_packages.items())) or "none"))
+    report.info("  for comparison, PropertiesSize equals the registered sizeof itself for %d of %d (the earlier, wrong expectation)" % (old_equal, psc_ok))
+    report.rows("PropertiesSize not as expected", size_bad)
+    report.check(not static_bad, "the layout's property end rounds up to the registered sizeof (alignment %s) for every native class with loaded script"
+                 % ", ".join(str(a) for a in ALIGNMENTS))
+    report.rows("layout end against sizeof", static_bad)
 
-    # ---- every property of every loaded class
+    # ---- the properties against the layout
     total = match = 0
     bad = []
     unknown = []
     bits_total = bits_ok = 0
+    bits_bad = []
     classes_checked = classes_unknown = 0
     missing = []
+    not_loaded = {}  # package -> [classes, layout fields] of registered classes without their script
     script_sizes = [0, 0]
+    script_bad = []
     for path in sorted(paths):
         cls = paths[path]
         e = exp["classes"].get(path)
         if e is None:
             classes_unknown += 1
             continue
+        package = path.split(".")[0]
+        if not own[path] and package not in loaded_packages:
+            # The executable registered the class natively; its script package was never loaded,
+            # so it has no property objects: nothing to compare, nothing missing.
+            entry = not_loaded.setdefault(package, [0, 0])
+            entry[0] += 1
+            entry[1] += len(e["fields"])
+            continue
         classes_checked += 1
-        props = game.properties(cls)
         seen = set()
-        for name, kind, offset, mask, outer, _dim in props:
-            if outer != cls:
-                continue
+        for name, kind, offset, mask, _outer, _dim in own[path]:
             total += 1
             seen.add(name)
             want = e["fields"].get(name)
@@ -305,22 +414,48 @@ def run_checks(game, report, seconds=1.0):
                 bad.append("%s.%s: live %#x, layout %#x" % (path, name, offset, want[0]))
             if kind == "BoolProperty" and want[1] is not None:
                 bits_total += 1
-                bits_ok += mask == (1 << want[1])
+                if mask == (1 << want[1]):
+                    bits_ok += 1
+                else:
+                    bits_bad.append("%s.%s: live mask %#x, layout bit %d" % (path, name, mask or 0, want[1]))
         for name in e["fields"]:
             if name not in seen:
                 missing.append("%s.%s" % (path, name))
         if path not in game.native_by_path and e.get("size") is not None:
             got = mem.u32(cls + game.r["struct_properties_size"])
             script_sizes[1] += 1
-            script_sizes[0] += got in (e["size"], e.get("end"))
+            if got in (e["size"], e.get("end")):
+                script_sizes[0] += 1
+            else:
+                script_bad.append("%s: live %#x, layout end %#x, size %#x" % (path, got, e.get("end") or 0, e["size"]))
     report.check(total > 0 and not bad, "UProperty.Offset equals the layout for %d of %d properties in %d classes" % (match, total, classes_checked))
-    for row in bad[:40]:
-        report.detail(row)
+    report.rows("property offsets that differ", bad)
     report.check(bits_total > 0 and bits_ok == bits_total, "UBoolProperty bit mask (+%#x) equals 1 << bit for %d of %d bool properties" % (game.r["bool_bitmask"], bits_ok, bits_total))
-    report.check(not unknown and not missing, "property lists agree: %d live properties not in the layout, %d layout fields not live" % (len(unknown), len(missing)))
-    for row in (unknown[:10] + missing[:10]):
-        report.detail(row)
+    report.rows("bool masks that differ", bits_bad)
+    report.check(not unknown and not missing,
+                 "property lists agree for the %d classes with loaded script: %d live properties not in the layout, %d layout fields not live"
+                 % (classes_checked, len(unknown), len(missing)))
+    report.rows("live properties not in the layout", unknown)
+    report.rows("layout fields without a live property", missing)
+    # Where every field of the layout went.
+    fields_total = sum(len(c["fields"]) for c in exp["classes"].values())
+    fields_not_loaded = sum(v[1] for v in not_loaded.values())
+    unvisited = {}
+    for path, c in exp["classes"].items():
+        if path not in paths:
+            entry = unvisited.setdefault(path.split(".")[0], [0, 0])
+            entry[0] += 1
+            entry[1] += len(c["fields"])
+    fields_unvisited = sum(v[1] for v in unvisited.values())
+    report.info("layout fields: %d = %d live and matched by name + %d not live + %d of %d registered classes whose script package is not loaded (%s) + %d of %d classes with no class object (%s)"
+                % (fields_total, total - len(unknown), len(missing), fields_not_loaded, sum(v[0] for v in not_loaded.values()),
+                   ", ".join("%s: %d classes, %d fields" % (k, v[0], v[1]) for k, v in sorted(not_loaded.items())) or "none",
+                   fields_unvisited, sum(v[0] for v in unvisited.values()),
+                   ", ".join("%s: %d classes, %d fields" % (k, v[0], v[1]) for k, v in sorted(unvisited.items())) or "none"))
+    report.check(fields_total == total - len(unknown) + len(missing) + fields_not_loaded + fields_unvisited,
+                 "every layout field is accounted for (live, not live, script not loaded, or no class object)")
     report.info("script-only classes whose PropertiesSize equals the computed size: %d of %d; classes loaded but not in the layout data: %d" % (script_sizes[0], script_sizes[1], classes_unknown))
+    report.rows("script-only classes whose PropertiesSize is neither the layout's end nor its size", script_bad)
 
     # ---- the fields the recorder reads
     rec_total = rec_ok = 0
@@ -336,8 +471,27 @@ def run_checks(game, report, seconds=1.0):
                 if not ok:
                     rec_bad.append("%s.%s: live %#x mask %s, recorder layout %s bit %s" % (cls_path, name, offset, mask, f["offset"], f.get("bit")))
     report.check(rec_total > 0 and not rec_bad, "recorder layout: %d of %d plain fields equal the live property offsets" % (rec_ok, rec_total))
-    for row in rec_bad:
-        report.detail(row)
+    report.rows("recorder fields that differ", rec_bad)
+    if game.optional:
+        opt_total = opt_ok = 0
+        opt_bad = []
+        opt_skipped = []
+        for (cls_path, name), f in sorted(game.optional.items()):
+            if "." in name or cls_path not in paths:
+                opt_skipped.append("%s.%s (%s)" % (cls_path, name, "a struct member" if "." in name else "class not loaded"))
+                continue
+            for pname, kind, offset, mask, outer, _dim in game.properties(paths[cls_path]):
+                if pname == name and outer == paths[cls_path]:
+                    opt_total += 1
+                    ok = offset == int(f["offset"], 16) and (f.get("bit") is None or mask == (1 << f["bit"]))
+                    opt_ok += ok
+                    if not ok:
+                        opt_bad.append("%s.%s: live %#x mask %s, optional layout %s bit %s" % (cls_path, name, offset, mask, f["offset"], f.get("bit")))
+        report.check(opt_total > 0 and not opt_bad, "recorder optional fields: %d of %d plain fields equal the live property offsets" % (opt_ok, opt_total))
+        report.rows("optional fields that differ", opt_bad)
+        report.rows("optional fields not checked here", opt_skipped)
+    else:
+        report.info("recorder optional fields: recorder_optional_win32.json not found, not checked")
 
     # ---- class default objects against the recorded script defaults
     for obj, head in heads.items():
@@ -382,8 +536,7 @@ def run_checks(game, report, seconds=1.0):
             if not ok:
                 wrong.append("%s at %#x: live %r, default %r" % (name, offset, got, value))
         report.check(not wrong, "%s: %d of %d recorded default values are at their layout offsets in %s" % (path, good, len(rows), short))
-        for row in wrong[:20]:
-            report.detail(row)
+        report.rows("%s: values that differ" % path, wrong)
 
     # ---- the live player (informational: values change during play)
     engine = mem.u32(mem.base + game.symbols["GEngine"])
@@ -448,6 +601,15 @@ def load_inputs(args):
     for key, path in files.items():
         with open(path, "r", encoding="utf-8") as fh:
             out[key] = json.load(fh)
+    # Optional: the recorder's optional fields are checked too when their file is found.
+    out["optional"] = None
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in ([args.data] if args.data else []) + [os.path.join(here, x) for x in data_dirs]:
+        path = os.path.join(d, "recorder_optional_win32.json")
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                out["optional"] = json.load(fh)
+            break
     return out
 
 
@@ -615,7 +777,40 @@ class Fake:
         self.write(self.base + self.glob["UObject::GObjObjects"], struct.pack("<Iii", arr, len(self.objects), len(self.objects)))
 
 
-def build_fake(inputs, break_field=None):
+EDITOR_PACKAGES = ("UnrealEd", "UTEditor", "GFxUIEditor")  # registered by the executable, never loaded by the game
+
+
+def selftest_cases(inputs):
+    """Three classes of the data files that exercise the two expectations:
+    a native class whose property end rounds up to its sizeof by 4, one that
+    rounds up by 16, and a native class of an editor package with layout
+    fields (registered by the executable, script never loaded)."""
+    exp = inputs["expected"]["classes"]
+    cols = inputs["class_sizes"]["columns"]
+    by4 = by16 = editor = None
+    for row in inputs["class_sizes"]["classes"]:
+        c = dict(zip(cols, row))
+        path = "%s.%s" % (c["package"], c["name"])
+        e = exp.get(path)
+        if e is None:
+            continue
+        if c["package"] in EDITOR_PACKAGES:
+            if editor is None and e["fields"]:
+                editor = path
+            continue
+        if e["end"] != c["size"]:
+            if by4 is None and align_up(e["end"], 4) == c["size"]:
+                by4 = path
+            elif by16 is None and align_up(e["end"], 4) != c["size"] and align_up(e["end"], 16) == c["size"]:
+                by16 = path
+    return by4, by16, editor
+
+
+def build_fake(inputs, break_field=None, sizeof_for=None, drop_field=None, extra=()):
+    """A fake image of the classes the checks walk. ``break_field``: one
+    property 4 bytes off; ``sizeof_for``: a loaded class that holds its
+    sizeof instead of its property end; ``drop_field``: one property without
+    its object; ``extra``: further class paths to build."""
     f = Fake(inputs)
     exp = inputs["expected"]
     layout = inputs["layout"]
@@ -640,6 +835,7 @@ def build_fake(inputs, break_field=None):
         return kinds[kind]
 
     wanted = sorted(exp.get("defaults", {})) + ["Engine.Actor", "Engine.Pawn", "Engine.Controller", "Engine.Player", "Engine.Engine"]
+    wanted += [p for p in extra if p]
     todo = []
     for path in wanted:
         p = path
@@ -660,11 +856,16 @@ def build_fake(inputs, break_field=None):
         n = native.get(path)
         if n:
             f.p32(f.base + n["private_static_class_rva"], cls)
-            f.p32(cls + r["struct_properties_size"], n["size"])
-        else:
-            f.p32(cls + r["struct_properties_size"], e["size"])
+        if pkg in EDITOR_PACKAGES:
+            # Registered natively, script never loaded: the constructor's sizeof, no properties.
+            f.p32(cls + r["struct_properties_size"], n["size"] if n else e["size"])
+            continue
+        # A linked class holds the end of its last property.
+        f.p32(cls + r["struct_properties_size"], n["size"] if n and path == sizeof_for else e["end"])
         prev = None
         for fname, (offset, bit) in e["fields"].items():
+            if (path, fname) == drop_field:
+                continue
             kind = "BoolProperty" if bit is not None else "IntProperty"
             prop = f.obj(fname, kind_class(kind), cls, 0x80)
             if (path, fname) == break_field:
@@ -683,7 +884,9 @@ def build_fake(inputs, break_field=None):
             fn = f.obj("SomeFunction", kind_class("Function"), cls, 0x80)
             f.p32(prev + r["field_next"], fn)
     f.p32(f.base + native["Core.Class"]["private_static_class_rva"], uclass)
-    f.p32(uclass + r["struct_properties_size"], native["Core.Class"]["size"])
+    if "Core.Class" not in class_objs:
+        e = exp["classes"].get("Core.Class")
+        f.p32(uclass + r["struct_properties_size"], e["end"] if e else native["Core.Class"]["size"])
     for path, rows in exp.get("defaults", {}).items():
         size = exp["classes"][path]["size"] + 0x40
         cdo = f.obj("Default__" + path.split(".")[-1], class_objs[path], packages[path.split(".")[0]], size)
@@ -704,23 +907,79 @@ def build_fake(inputs, break_field=None):
     return f
 
 
+class _Lines:
+    """Collects a report's log lines (self-test)."""
+
+    def __init__(self):
+        self.lines = []
+
+    def write(self, text):
+        self.lines.append(text)
+
+    def text(self):
+        return "".join(self.lines)
+
+
 def selftest(inputs):
-    fake = build_fake(inputs)
-    report = Report()
-    game = Game(Memory(fake.read, fake.base), inputs["layout"], inputs["globals"], inputs["class_sizes"], inputs["expected"])
-    run_checks(game, report, seconds=0)
-    good = report.failed == 0 and report.passed >= 8
-    print("self-test (consistent image): %s" % ("ok" if good else "FAILED"))
-    # A wrong offset must be caught.
+    by4, by16, editor = selftest_cases(inputs)
+    cases = [c for c in (by4, by16, editor) if c]
+    optional = sorted({f["class"] for f in (inputs.get("optional") or {}).get("fields", [])})
+    print("self-test classes: end rounds up by 4: %s; by 16: %s; registered without script: %s" % (by4, by16, editor))
+
+    def run(**kw):
+        fake = build_fake(inputs, extra=cases + optional, **kw)
+        log = _Lines()
+        report = Report(log=log, quiet=True)
+        game = Game(Memory(fake.read, fake.base), inputs["layout"], inputs["globals"], inputs["class_sizes"], inputs["expected"],
+                    inputs.get("optional"))
+        run_checks(game, report, seconds=0)
+        return report, log.text()
+
+    results = []
+    # 1. A consistent image, with a class whose property end is below its sizeof by each alignment
+    #    and a registered class of a package that is not loaded: every check passes.
+    report, text = run()
+    good = report.failed == 0 and report.passed >= 10 and len(cases) == 3
+    good = good and "rounded up to 4: " in text and "4: 0," not in text.split("rounded up to ")[1].split(")")[0]
+    good = good and "16: 0" not in text.split("rounded up to ")[1].split(")")[0]
+    good = good and ("%s: 1 classes" % editor.split(".")[0]) in text and "0 layout fields not live" in text
+    if optional:
+        good = good and "[ok] recorder optional fields: " in text and "class not loaded" not in text
+    if not good:
+        sys.stdout.write(text)
+    results.append(("consistent image (property ends below sizeof, an editor class without script)", good))
+    # 2. A wrong offset must be caught.
     path = sorted(inputs["expected"].get("defaults", {}))[0]
     field = next(iter(inputs["expected"]["classes"][path]["fields"]))
-    fake = build_fake(inputs, break_field=(path, field))
-    report2 = Report()
-    game = Game(Memory(fake.read, fake.base), inputs["layout"], inputs["globals"], inputs["class_sizes"], inputs["expected"])
-    run_checks(game, report2, seconds=0)
-    caught = report2.failed >= 1
-    print("self-test (one property moved by 4 bytes): %s" % ("caught" if caught else "NOT caught"))
-    return 0 if good and caught else 1
+    report, text = run(break_field=(path, field))
+    results.append(("one property moved by 4 bytes is caught", report.failed >= 1 and "%s.%s: live" % (path, field) in text))
+    # 3. A linked class that holds its sizeof instead of its property end must be caught (and the
+    #    old expectation would have called it right).
+    report, text = run(sizeof_for=by4)
+    results.append(("a loaded class holding its sizeof instead of its property end is caught",
+                    report.failed == 1 and "PropertiesSize not as expected: 1" in text and "live equals the registered sizeof" in text))
+    # 4. A property of a loaded class without its object is "not live"; the same for the class of
+    #    the unloaded package is not (it has no property objects at all).
+    report, text = run(drop_field=(path, field))
+    results.append(("a missing property of a loaded class is caught",
+                    report.failed == 1 and "1 layout fields not live" in text and "%s.%s" % (path, field) in text))
+    ok = True
+    for what, passed in results:
+        print("self-test (%s): %s" % (what, "ok" if passed else "FAILED"))
+        ok = ok and passed
+    return 0 if ok else 1
+
+
+def default_log_path():
+    """logs/ next to the script (the working folder on the game machine);
+    in a repository checkout the git-ignored research/local/win/live-checks."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(os.path.join(here, "..", "..", ".."))
+    if os.path.isfile(os.path.join(root, "Cargo.toml")) and os.path.isdir(os.path.join(root, "research")):
+        folder = os.path.join(root, "research", "local", "win", "live-checks")
+    else:
+        folder = os.path.join(here, "logs")
+    return os.path.join(folder, "win32_props_check-%s.log" % time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
 
 
 def main():
@@ -729,7 +988,9 @@ def main():
     ap.add_argument("--layout", help="layout_win_x86.json")
     ap.add_argument("--data", help="directory with globals.json and class_sizes.json")
     ap.add_argument("--seconds", type=float, default=1.0, help="interval of the frame-counter check")
-    ap.add_argument("--verbose", action="store_true", help="list every difference")
+    ap.add_argument("--verbose", action="store_true", help="list every difference on the console too")
+    ap.add_argument("--log", help="file for the full output (default: see the module text)")
+    ap.add_argument("--no-log", action="store_true", help="write no log file")
     ap.add_argument("--selftest", action="store_true", help="check the checker on a fake image; no game needed")
     args = ap.parse_args()
     inputs = load_inputs(args)
@@ -739,15 +1000,24 @@ def main():
     if mem is None:
         print("%s is not running" % EXE_NAME)
         return 2
-    report = Report(args.verbose)
+    log = None
+    log_path = None if args.no_log else (args.log or default_log_path())
+    if log_path:
+        os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+        log = open(log_path, "w", encoding="utf-8", newline="\n")
+        log.write("win32_props_check %s UTC; module base %#x\n" % (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()), mem.base))
+    report = Report(args.verbose, log=log)
     try:
-        game = Game(mem, inputs["layout"], inputs["globals"], inputs["class_sizes"], inputs["expected"])
+        game = Game(mem, inputs["layout"], inputs["globals"], inputs["class_sizes"], inputs["expected"], inputs.get("optional"))
         run_checks(game, report, args.seconds)
     except ReadError as error:
         report.check(False, "stopped: %s" % error)
     finally:
         close()
-    print("%d checks passed, %d failed" % (report.passed, report.failed))
+    report._line("%d checks passed, %d failed" % (report.passed, report.failed))
+    if log is not None:
+        log.close()
+        print("full output: %s" % log_path)
     return 1 if report.failed else 0
 
 

@@ -37,6 +37,16 @@
 //! a `check:` note. `rope_length` is always `null` (the original grapple has
 //! no rope). FOV = the camera's POV FOV, else the controller's `FOVAngle`.
 //!
+//! **The FOV column is the cached view FOV.** `Camera.CameraCache.POV.FOV`
+//! is written from the camera's default FOV on every view update, while the
+//! zoom locks the camera's FOV in other fields (`bLockedFOV`, `LockedFOV`)
+//! that the recorder does not read (PARITY_FINDINGS.md N1 and V19: the field
+//! is constant on all 45,237 records of 2026-10-10, through zoom-button
+//! holds). The converter says on how many samples the column is that field
+//! (a note that starts with [`FOV_CACHED_NOTE_PREFIX`]);
+//! [`crate::compare`] leaves the FOV out of the verdict of such a trace
+//! unless told otherwise.
+//!
 //! # Move axes
 //!
 //! `move_forward` / `move_right` come from the held keys through the game's
@@ -53,8 +63,22 @@
 //!
 //! The `state:` note ([`crate::state`]) holds what the recorder read beyond
 //! the sample fields (`GroundSpeed`, `AirControl`, the sprint flag, the
-//! grapple budget, ...) for every tick, so that [`crate::replay`] can start
-//! from any tick; the `init:` note is the older form for tick 0 only.
+//! grapple budget, the eye height, ...) for every tick, so that
+//! [`crate::replay`] can start from any tick; the `init:` note is the older
+//! form for tick 0 only.
+//!
+//! # Events
+//!
+//! `event:` notes ([`crate::segments::event_notes`]) mark what a replay of
+//! the inputs cannot follow and what the samples do not show: teleports (a
+//! respawn after a death keeps the map, the pawn object and the frame
+//! numbers, so it does not end a run), level-script state changes (story
+//! mode, a console speed, the grapple capacity, the rocket boots) and the
+//! attaches of the grapple counted from the gun's used-grapple counter (an
+//! attach that is released inside its frame has no attached sample). They
+//! are text for people; readers compute the same events from the samples
+//! and the `state:` note ([`crate::segments::recorded_events`]). The schema
+//! stays v1.
 //!
 //! # Frame lengths
 //!
@@ -99,7 +123,10 @@ use serde::Serialize;
 use crate::bindings::{Actions, KeyMap};
 use crate::move_input::{AXES_TABLE_STEP, MoveFrame, horizontal_magnitude, move_direction};
 use crate::raw::{RawFile, RawPlayer, RawRecord};
-use crate::state::state_note;
+use crate::segments::{event_notes, recorded_events};
+use crate::state::{
+    EYE_HEIGHT_MAX_CHANGES, StateTimeline, eye_height_changes, eye_height_kept, state_note,
+};
 use crate::timestep::StepStats;
 
 /// `Physics` value of walking (NATIVE_PHYSICS.md 1.3, CONFIRMED).
@@ -108,6 +135,9 @@ pub const PHYS_WALKING: u8 = 1;
 pub const PHYS_FLYING: u8 = 4;
 /// Prefix of the notes line carrying the initial script state as JSON.
 pub const INIT_NOTE_PREFIX: &str = "init: ";
+/// Start of the note that says the FOV column is the camera's cached view
+/// FOV, which cannot show the zoom (see the module docs).
+pub const FOV_CACHED_NOTE_PREFIX: &str = "fov: cached view FOV";
 
 /// One converted run.
 #[derive(Clone, Debug, PartialEq)]
@@ -769,8 +799,26 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
                 c.fov_controller
             ));
         }
+        let cached = run.len().saturating_sub(c.fov_controller);
+        if cached > 0 {
+            notes.push(format!(
+                "{FOV_CACHED_NOTE_PREFIX} (the camera's CameraCache.POV.FOV) on {cached} of {} \
+                 samples: a locked camera FOV (the zoom) does not show in it",
+                run.len()
+            ));
+        }
+        if !eye_height_kept(&players) {
+            notes.push(format!(
+                "check: EyeHeight left out of the state: note ({} changes; at most \
+                 {EYE_HEIGHT_MAX_CHANGES} fit a notes line)",
+                eye_height_changes(&players)
+            ));
+        }
+        let state = state_note(&players)?;
+        let timeline = StateTimeline::from_notes(std::slice::from_ref(&state))?;
+        notes.extend(event_notes(&recorded_events(&samples, timeline.as_ref())?));
         notes.extend(h.notes.iter().cloned());
-        notes.push(state_note(&players)?);
+        notes.push(state);
         let init = InitState::of(players[0]);
         notes.push(format!(
             "{INIT_NOTE_PREFIX}{}",
@@ -1524,6 +1572,146 @@ mod tests {
         f.records[1].player.as_mut().unwrap().view_rotation[1] += 7;
         let t = &convert(&f, &ConvertOptions::default()).unwrap()[0].trace;
         assert!(differs(t, 2), "{:#?}", t.meta.notes);
+    }
+
+    /// Ten records, one tick each 1/60 s: 10,000 uu/s allow 166.67 uu.
+    fn eventful() -> Vec<RawRecord> {
+        let rec = |i: u64, x: f32, speed: f32, used: i32, capacity: i32, boots: bool| {
+            let mut p = player(x, 0, &[]);
+            p.velocity = Vec3::ZERO;
+            p.ground_speed = speed;
+            let g = p.gun.as_mut().unwrap();
+            g.times_grappled = used;
+            g.max_grapples = capacity;
+            p.boots.as_mut().unwrap().enabled = boots;
+            record(300 + i, p)
+        };
+        let mut r = vec![
+            rec(0, 0.0, 440.0, 0, 2, true),
+            rec(1, 0.0, 880.0, 0, 2, true),   // the pawn's own sprint
+            rec(2, 166.0, 264.0, 0, 2, true), // story mode on; 166 uu: no teleport
+            rec(3, 333.0, 264.0, 1, 2, true), // 167 uu: a teleport; an attach inside the frame
+            rec(4, 333.0, 440.0, 2, 2, true), // story mode off; a visible attach
+            rec(5, 333.0, 132.0, 0, 2, true), // a console speed; the refill
+            rec(6, 333.0, 132.0, 0, 3, true),
+            rec(7, 333.0, 132.0, 0, 3, false),
+            rec(8, 333.0, 132.0, 0, 3, true),
+            rec(9, 20333.0, 132.0, 0, 3, true),
+        ];
+        let p4 = r[4].player.as_mut().unwrap();
+        p4.physics = PHYS_FLYING;
+        let g = p4.gun.as_mut().unwrap();
+        g.grappling = true;
+        g.grapple_location = Vec3::new(633.0, -3.5, 45.05);
+        g.distance = 300.0;
+        for (i, eye) in [(5, 30.5), (6, 30.5), (7, 30.5)] {
+            r[i].player.as_mut().unwrap().eye_height = Some(eye);
+        }
+        r
+    }
+
+    #[test]
+    fn events_fov_and_eye_height_notes() {
+        let t = &convert(&raw(eventful()), &ConvertOptions::default()).unwrap()[0].trace;
+        let notes = &t.meta.notes;
+        for want in [
+            "event: 2 teleport(s) (the pawn moved more than 10000 uu/s x the frame length in \
+             one tick: a respawn or another script move): tick(s) 3, 9",
+            "event: 6 level-script state change(s) (story mode, a console speed, the grapple \
+             capacity or the rocket boots: changes the pawn's own rules do not make): 2 story \
+             mode on, 4 story mode off, 5 GroundSpeed set (a console speed), 6 grapple capacity \
+             changed, 7 rocket boots disabled, 8 rocket boots enabled",
+            "event: 2 grapple attach(es), 1 of them inside one frame (the used-grapple counter \
+             iTimesGrappled rose, no sample is attached): tick(s) 3",
+            "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 10 of 10 samples: a \
+             locked camera FOV (the zoom) does not show in it",
+        ] {
+            assert!(notes.iter().any(|n| n == want), "{want}\n{notes:#?}");
+        }
+        assert!(notes.iter().any(|n| n.starts_with(FOV_CACHED_NOTE_PREFIX)));
+        // The notes are text; the events themselves come from the samples
+        // and the state note, which a reader of the trace has.
+        let timeline = crate::state::StateTimeline::from_notes(notes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event_notes(&recorded_events(&t.samples, Some(&timeline)).unwrap()).len(),
+            3
+        );
+        let eyes: Vec<Option<f32>> = (0..10)
+            .map(|k| timeline.at(k).unwrap().unwrap().eye_height)
+            .collect();
+        assert_eq!(eyes[4], Some(38.0));
+        assert_eq!(eyes[5..8], [Some(30.5); 3]);
+        assert_eq!(eyes[8], Some(38.0));
+        // The state and init notes are still the last two; the schema is v1.
+        assert!(notes[notes.len() - 2].starts_with(crate::state::STATE_NOTE_PREFIX));
+        assert!(notes[notes.len() - 1].starts_with(INIT_NOTE_PREFIX));
+        assert_eq!(t.meta.schema_version, 1);
+        t.validate().unwrap();
+
+        // A recording without the camera's FOV, without events and without
+        // an eye height: no such notes, and a null eye height.
+        let mut plain = scripted();
+        plain.truncate(3);
+        for rec in &mut plain {
+            let p = rec.player.as_mut().unwrap();
+            p.fov_camera = None;
+            p.eye_height = None;
+            p.location = Vec3::new(1.0, 2.0, 3.0);
+        }
+        let t = &convert(&raw(plain), &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(
+            !t.meta.notes.iter().any(|n| n.starts_with("event: ")
+                || n.starts_with(FOV_CACHED_NOTE_PREFIX)
+                || n.contains("EyeHeight")),
+            "{:#?}",
+            t.meta.notes
+        );
+        let timeline = crate::state::StateTimeline::from_notes(&t.meta.notes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(timeline.at(0).unwrap().unwrap().eye_height, None);
+        // The camera's FOV on some samples only: both FOV notes, with counts.
+        let mut mixed = scripted();
+        mixed[1].player.as_mut().unwrap().fov_camera = None;
+        let t = &convert(&raw(mixed), &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(
+            t.meta.notes.iter().any(|n| n.starts_with(
+                "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 4 of 5 samples"
+            )) && t
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with("fov: controller FOVAngle used on 1 samples")),
+            "{:#?}",
+            t.meta.notes
+        );
+        // An eye height that changes on too many ticks is left out, with a
+        // note that says so.
+        let template = scripted().remove(0);
+        let ticks = EYE_HEIGHT_MAX_CHANGES + 2;
+        let restless: Vec<RawRecord> = (0..ticks)
+            .map(|i| {
+                let mut rec = template.clone();
+                rec.frame = 100 + i as u64;
+                rec.player.as_mut().unwrap().eye_height = Some(30.0 + (i % 2) as f32);
+                rec
+            })
+            .collect();
+        let t = &convert(&raw(restless), &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(t.meta.notes.iter().any(|n| *n
+            == format!(
+                "check: EyeHeight left out of the state: note ({} changes; at most \
+                     {EYE_HEIGHT_MAX_CHANGES} fit a notes line)",
+                EYE_HEIGHT_MAX_CHANGES + 1
+            )),);
+        // The trace still fits the reader's line limit.
+        let text = t.to_jsonl_string().unwrap();
+        assert!(
+            text.lines()
+                .all(|l| l.len() < asamu_player::trace::MAX_LINE_BYTES)
+        );
     }
 
     #[test]

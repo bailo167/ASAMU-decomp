@@ -6,9 +6,10 @@
 //! state at the start tick (position, velocity, yaw, pitch, walking or
 //! falling from the sample; the recorded script state from the `state:`
 //! note, see "Start state" below) and then feeds every later sample's
-//! input, one tick each. It stops at the first tick gap. The result is a
-//! runtime trace aligned tick for tick with the input trace, ready for
-//! [`crate::compare`].
+//! input, one tick each. It stops at the first tick gap, and (for an
+//! original recording) before the first event that inputs cannot reproduce
+//! ("Validity" below). The result is a runtime trace aligned tick for tick
+//! with the input trace, ready for [`crate::compare`].
 //!
 //! # Start state
 //!
@@ -23,22 +24,138 @@
 //! | story mode | `GroundSpeed` when it is the story speed (on) or the walking or sprint speed (off): the pawn's own script writes no other value (ABILITIES.md A-WK-3). Any other value (a console `SetSpeed`, as in AG-Workshop) shows nothing: the replay then leaves it as it is and says so; [`ReplayOptions::story_mode`] states it |
 //! | grapple capacity, used count, fire latch | the gun's `iMaxGrapples`, `iTimesGrappled`, `bCanGrapple` |
 //! | rocket boots enabled | the boots' `bEnabled` |
+//! | eye height | the pawn's `EyeHeight` (when the `state:` note has it) |
+//! | the pawn has a base | a walking start whose recorded `Base` is not null: the first floor check then keeps the pawn where it stands if its floor is inside the native hover band, as the original's does for a based pawn (NATIVE_PHYSICS.md 3.3); without a base it re-seats the pawn in any case |
 //! | button levels of the tick before (for press and release edges) | the start sample's own input |
 //! | FOV | the start sample's FOV |
 //!
 //! Not recorded, so left as our simulation starts them: "sprint after
 //! landing", the pawn's and the power jump's state code (jump-release
 //! damping, a charging power jump, a running zoom), zoom availability, the
-//! gun's timers and attachment, the boots' boost, the eye height's
-//! smoothing (the raw record has `EyeHeight`; it changes on most frames and
-//! is not in the timeline), the floor the pawn is based on. All of these
-//! are at rest when the pawn stands still with no button held, so a replay
-//! of an original recording starts only at such a tick
-//! ([`crate::segments`], [`StartPolicy`]): a start in the air, while moving
-//! or while the grapple is attached is refused (the error names the
+//! gun's timers and attachment, the boots' boost, the walk bob, the floor
+//! normal. All of these are at rest when the pawn stands still with no
+//! button held, so a replay of an original recording starts only at such a
+//! tick ([`crate::segments`], [`StartPolicy`]): a start in the air, while
+//! moving or while the grapple is attached is refused (the error names the
 //! standing-still ticks before and after it), moved forward to the next
 //! standing-still tick, or forced. A trace converted before the `state:`
 //! note existed has an `init:` note for its first sample only.
+//!
+//! ## What the start notes say (PARITY_FINDINGS.md N2)
+//!
+//! The recorded position is the original's, on the original's collision.
+//! Ours differs (other shapes, other rest heights), and a replay used to
+//! say nothing when that already decides the first tick. Whenever the start
+//! state is written, the notes now carry:
+//!
+//! - `start: our floor is … uu below the pawn …`: the distance our own
+//!   floor check will measure, what it hits (the actor's name on a
+//!   converted level) and whether that is the recorded base actor (by name;
+//!   world geometry against the original's `WorldInfo`);
+//! - `warning: the start position overlaps our collision …`: with what, and
+//!   how far above the recorded height a pawn lowered onto that place comes
+//!   to rest. Our pawn usually cannot move from such a start;
+//! - `start: in the first tick …`: how far our pawn and the original moved
+//!   vertically in the first tick while walking, as a warning when the two
+//!   differ by more than the width of the native hover band
+//!   (`MAX_FLOOR_DIST − MIN_FLOOR_DIST`): the two stand on different floor
+//!   heights (our floor check re-seated the pawn on our floor, or left it
+//!   inside our geometry), and every vertical number carries that offset;
+//! - `warning: our pawn did not move …` when it never left an overlapping
+//!   start while the original travelled.
+//!
+//! # Validity ([`EventPolicy`], PARITY_FINDINGS.md N3 and N6)
+//!
+//! A recording contains events that no replay of the inputs reproduces
+//! ([`crate::segments`]): respawn teleports and level-script state changes
+//! (story mode, a console speed, the grapple capacity, the rocket boots).
+//! For an original recording the replay, by default, **stops before the
+//! first such tick** and says so (`validity:` note,
+//! [`ReplayResult::stopped_at_event`]): the trace it returns is the valid
+//! part. [`EventPolicy::Inject`] instead takes the recorded change at that
+//! tick and runs on, under an `injected:` note: a level-script change is
+//! written into our state before our tick (the record after the frame shows
+//! it, so the frame ran with it; whether the script acted before or after
+//! the pawn's physics of that frame is not recorded: TENTATIVE. One
+//! instance agrees with "before": the original leaves story mode in DC1
+//! seg3 at tick 5019 and walks 299.0 uu/s at the end of that frame, ours
+//! with the change written before the tick 299.1), a teleport replaces our
+//! position, velocity, view and physics mode after our tick.
+//! [`EventPolicy::Ignore`] runs through as replays did before, with a
+//! warning. Traces of our own runtime are not checked (our simulation
+//! reproduces its own respawns).
+//!
+//! # One-step replays ([`ReplayOptions::one_step`], N8)
+//!
+//! A free-running replay measures accumulated drift: one early difference
+//! (a pawn standing 1 uu lower) hides everything after it. A one-step
+//! replay restarts **every** tick from the input trace's previous sample,
+//! so sample `k` of our trace is one tick of our rules applied to the
+//! original's state `k − 1`.
+//!
+//! Resynchronised before each tick, from sample `k − 1` and the `state:`
+//! note at `k − 1`: position, velocity, yaw and pitch; the physics mode
+//! (walking, falling, or attached with the recorded anchor: an attachment
+//! we do not have is created on world geometry, one the original does not
+//! have is released); `GroundSpeed` with the story mode it shows,
+//! `AirControl`, `JumpZ`, `AirSpeed`, the sprint flag; the gun's used
+//! count, capacity, fire latch and released flag; rocket boots enabled; the
+//! eye height.
+//!
+//! **Not** resynchronised, because no record shows them (they continue from
+//! our own previous tick): the pawn's and the power jump's state code and
+//! timers (jump-release damping, a charging power jump, a running zoom),
+//! "sprint after landing", the move-input lock, the gun's weapon state and
+//! timers, the boots' boost, the walk bob, the FOV (the recorded one is the
+//! cached view FOV), the floor normal and the "has a base" flag while the
+//! physics mode agrees (set from the recorded base when the mode has to be
+//! changed), the level's objects and Kismet. Button levels are not touched
+//! either: both sides get the same inputs. A tick with a teleport or a
+//! level-script state change is left out (its sample is missing from our
+//! trace; the next tick starts from the recording after it) unless
+//! [`EventPolicy::Ignore`] is given.
+//!
+//! When nothing differs, the resynchronisation writes back what is already
+//! there: a one-step replay of a recording made by our own simulation is
+//! that recording, bit for bit (tested).
+//!
+//! **A tick that starts inside our collision measures something else.** The
+//! recording's positions are the original's, on the original's collision.
+//! Where ours has geometry the original does not have there (a prop that
+//! does not block the original's pawn, a hull of another shape, a volume
+//! that is switched off), the resynchronised pawn starts the tick stuck in
+//! or pushed out of it. That is a collision difference, not one tick of our
+//! movement rules, so every such tick is counted and listed (a `one-step:
+//! warning:` note with the count and the first ticks,
+//! [`ReplayResult::resync_overlaps`] with all of them): read the one-step
+//! numbers of the other ticks apart from these. The test is the same as for
+//! the start position (the pawn's shape at the recorded position against
+//! our collision as it was when the replay started: on the per-sample path,
+//! level objects that moved since are not followed). Measured on the
+//! recordings of 2026-10-10 (CONFIRMED, `tests/findings_comparisons.rs`):
+//! 185 of the 3,000 ticks of the Workshop walk start that way (from tick
+//! 1798; our pawn stands still in some of them and reports falling), and 5
+//! of 150 in the flight through a blocking volume that is switched off in
+//! the original (PARITY_FINDINGS.md P5), where the largest one-step
+//! horizontal error is 18.2 uu with them and 6.1 uu without.
+//!
+//! The overlap test does **not** separate every collision difference: a
+//! walking tick that starts above or below our floor (the original stands
+//! on its own floor) is moved onto ours by our floor check, up to the
+//! check's reach in one tick, and a move may meet a step of ours where the
+//! original has a ramp. The largest one-step errors of the Workshop walk
+//! (11.7 uu and 678 uu/s horizontally, 22.3 uu vertically, on the stairs)
+//! are of that kind and are not overlap ticks. Until the collision agrees,
+//! one-step numbers of walking ticks are numbers about the collision too.
+//!
+//! # What else the notes compare (N7, N10)
+//!
+//! - `attaches:` the grapple's attaches of both sides, counted the same way:
+//!   the attached flag rose or the used-grapple counter rose (an attach
+//!   released inside its frame shows in the counter only).
+//! - `state check:` our `GroundSpeed`, `AirControl`, sprint flag, used
+//!   grapples, capacity and eye height after every tick against the
+//!   recording's (canonical samples do not carry them).
 //!
 //! # Time step ([`Stepping`])
 //!
@@ -68,26 +185,37 @@
 //! replaying a runtime recording reproduces it exactly.
 //!
 //! Limits: a forced start while the grapple is attached does not recreate
-//! the attachment. With `--kismet` the map's Kismet always starts from level
-//! start, also for a segment replay (`start_tick`), and its level-start
-//! actions may override the start state; the notes say so.
+//! the attachment (a one-step replay does). With `--kismet` the map's Kismet
+//! always starts from level start, also for a segment replay
+//! (`start_tick`), and its level-start actions may override the start
+//! state; the notes say so.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use asamu_core::DEFAULT_TICK_RATE_HZ;
+use asamu_core::glam::Vec3;
 use asamu_core::rotator::wrap_radians;
-use asamu_game::{Game, LevelScript, load_level_with_kismet};
-use asamu_player::pawn::SprintState;
+use asamu_game::{Game, GameWorld, LevelScript, load_level_with_kismet};
+use asamu_player::grapple_gun::{Attachment, ReleaseReason};
+use asamu_player::pawn::{PawnStateName, SprintState};
 use asamu_player::trace::{TraceGrappleState, TraceSample, TraceSource};
+use asamu_player::ue3_movement::{MAX_FLOOR_DIST, MIN_FLOOR_DIST, STEP_FUDGE, TARGET_FLOOR_DIST};
+use asamu_player::world::{ActorClass, CollisionShape, CollisionWorld, Surface};
 use asamu_player::{
-    InputFrame, MAX_STEP_DT, MovementModelKind, PawnPhysicsState, PlayerParams, Trace, grapple_gun,
-    pawn, rocket_boots,
+    InputFrame, MAX_STEP_DT, MovementModelKind, PawnPhysicsState, PlayerParams, PlayerState, Trace,
+    grapple_gun, pawn, rocket_boots,
 };
+use serde::Deserialize;
 
+use crate::compare::ONE_STEP_NOTE_PREFIX;
 use crate::convert::InitState;
-use crate::segments::{is_clean_start, next_clean_start, not_clean_reasons, previous_clean_start};
-use crate::state::{StateTimeline, TickState, story_mode_shown};
+use crate::segments::{
+    EventKind, MAX_LISTED, is_clean_start, next_clean_start, not_clean_reasons,
+    previous_clean_start, recorded_events, tick_displacement,
+};
+use crate::state::{StateTimeline, TickState, TimelineCursor, story_mode_shown};
 use crate::stepper::VariableStepper;
 use crate::timestep::{FrameLength, StepStats, finite};
 
@@ -122,6 +250,23 @@ pub enum StartPolicy {
     Force,
 }
 
+/// What a replay of an original recording does at a tick with an event the
+/// inputs cannot reproduce: a teleport or a level-script state change
+/// ([`EventKind::ends_validity`]; see the module docs, "Validity").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EventPolicy {
+    /// The replay ends before the tick (a one-step replay leaves the tick
+    /// out and goes on).
+    #[default]
+    Stop,
+    /// The recorded change is taken over at the tick, under an `injected:`
+    /// note, and the replay goes on (a one-step replay leaves the tick out:
+    /// it takes everything from the recording anyway).
+    Inject,
+    /// The tick is simulated like any other; the notes carry a warning.
+    Ignore,
+}
+
 /// Replay options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplayOptions {
@@ -135,10 +280,13 @@ pub struct ReplayOptions {
     /// fixed tick rate ([`Stepping::PerSample`]). Excludes `tick_rate`.
     pub variable_dt: bool,
     /// Apply the recorded start state (the trace's `state:` or `init:`
-    /// note, the start sample's button levels and FOV).
+    /// note, the start sample's button levels and FOV). Off, a one-step
+    /// replay does not write the recorded script state on later ticks
+    /// either (position, velocity, view and physics mode only).
     pub use_init: bool,
     /// Story mode at the start, when the recording does not show it or is
-    /// to be overruled.
+    /// to be overruled. (A one-step replay takes the story mode from the
+    /// recorded `GroundSpeed` on every tick where that shows it.)
     pub story_mode: Option<bool>,
     /// What to do with a start tick that is not a clean start.
     pub start: StartPolicy,
@@ -151,6 +299,12 @@ pub struct ReplayOptions {
     pub start_tick: Option<u64>,
     /// Replay at most this many ticks.
     pub max_ticks: Option<u64>,
+    /// Restart every tick from the input trace's previous sample (see the
+    /// module docs, "One-step replays").
+    pub one_step: bool,
+    /// What to do at a teleport or a level-script state change of an
+    /// original recording.
+    pub events: EventPolicy,
 }
 
 impl Default for ReplayOptions {
@@ -166,6 +320,8 @@ impl Default for ReplayOptions {
             placeholder: false,
             start_tick: None,
             max_ticks: None,
+            one_step: false,
+            events: EventPolicy::Stop,
         }
     }
 }
@@ -221,6 +377,43 @@ pub struct VariableSteps {
     pub first_no_op: Option<u64>,
 }
 
+/// What a replay did at an event the inputs cannot reproduce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventAction {
+    /// The replay ended before the tick.
+    Stopped,
+    /// The recorded change was taken over.
+    Injected,
+    /// The tick was not simulated (one-step replays).
+    LeftOut,
+    /// The tick was simulated like any other.
+    Ignored,
+}
+
+/// An event of the input trace inside the replayed ticks that inputs cannot
+/// reproduce, and what the replay did there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossedEvent {
+    /// The tick.
+    pub tick: u64,
+    /// What happened in the recording.
+    pub kind: EventKind,
+    /// What the replay did.
+    pub action: EventAction,
+}
+
+/// The grapple's attaches inside the replayed ticks, counted the same way
+/// on both sides: the attached flag rose, or the gun's used-grapple counter
+/// rose (an attach that is released inside its frame).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Attaches {
+    /// Ticks of the input trace's attaches (the counter is read from its
+    /// `state:` note; without one, attached samples only).
+    pub original: Vec<u64>,
+    /// Ticks of our attaches.
+    pub ours: Vec<u64>,
+}
+
 /// Result of [`replay`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplayResult {
@@ -236,6 +429,23 @@ pub struct ReplayResult {
     pub stepping: Stepping,
     /// Frame lengths of a per-sample replay (`None` for a fixed one).
     pub variable: Option<VariableSteps>,
+    /// Every tick restarted from the input trace's previous sample.
+    pub one_step: bool,
+    /// The tick of the input trace before which the replay ended because
+    /// inputs cannot reproduce what happened in it ([`EventPolicy::Stop`]).
+    pub stopped_at_event: Option<u64>,
+    /// The events of that kind inside the replayed ticks.
+    pub events: Vec<CrossedEvent>,
+    /// The grapple's attaches of both sides (original recordings only).
+    pub attaches: Option<Attaches>,
+    /// The pawn's shape at the start position overlaps our collision.
+    pub start_overlaps: bool,
+    /// One-step replays: the ticks that started inside our collision (the
+    /// input trace's previous sample, which the tick was restarted from,
+    /// overlaps it; see the module docs). Their errors measure the
+    /// collision difference, not one tick of our movement rules. Empty for
+    /// a free-running replay.
+    pub resync_overlaps: Vec<u64>,
 }
 
 fn params(placeholder: bool) -> PlayerParams {
@@ -307,12 +517,635 @@ fn lengths_until_gap(samples: &[TraceSample]) -> Vec<f64> {
         .collect()
 }
 
+/// A yaw already in [−π, π) is taken as it is (wrapping it again can move it
+/// by one bit).
+fn in_range_yaw(yaw: f32) -> f32 {
+    if (-core::f32::consts::PI..core::f32::consts::PI).contains(&yaw) {
+        yaw
+    } else {
+        wrap_radians(yaw)
+    }
+}
+
+/// `items` joined with `, `, at most [`MAX_LISTED`] of them, then how many
+/// more there are.
+fn bounded(items: &[String]) -> String {
+    let shown = items.len().min(MAX_LISTED);
+    let mut text = items.get(..shown).unwrap_or(items).join(", ");
+    if items.len() > shown {
+        text.push_str(&format!(" and {} more", items.len() - shown));
+    }
+    text
+}
+
+/// Names of a converted level's actors by actor id (`level << 16 | slot`),
+/// read from the level's scene files when first asked for.
+struct ActorNames {
+    /// The converted data directory and the names of the loaded levels (by
+    /// level index); `None` on a hand-made level.
+    source: Option<(PathBuf, Vec<String>)>,
+    /// Slot → name per level index (`None`: the file could not be read).
+    levels: BTreeMap<usize, Option<BTreeMap<usize, String>>>,
+}
+
+/// The part of a scene file this module reads.
+#[derive(Deserialize)]
+struct SceneNames {
+    #[serde(default)]
+    actors: Vec<SceneActorName>,
+}
+
+#[derive(Deserialize)]
+struct SceneActorName {
+    slot: usize,
+    name: String,
+}
+
+impl ActorNames {
+    fn new(level: &ReplayLevel, game: &Game) -> Self {
+        let source = match (level, game.scene_map()) {
+            (ReplayLevel::Converted { dir, .. }, Some(map)) => Some((
+                dir.clone(),
+                map.levels.iter().map(|l| l.name.clone()).collect(),
+            )),
+            _ => None,
+        };
+        Self {
+            source,
+            levels: BTreeMap::new(),
+        }
+    }
+
+    fn read(dir: &Path, level: &str) -> Option<BTreeMap<usize, String>> {
+        const SUFFIX: &str = ".scene.json";
+        let folder = dir.join("levels");
+        let file = std::fs::read_dir(&folder)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|e| e.file_name().into_string().ok())
+            .find(|n| {
+                n.strip_suffix(SUFFIX)
+                    .is_some_and(|stem| stem.eq_ignore_ascii_case(level))
+            })?;
+        let text = std::fs::read_to_string(folder.join(file)).ok()?;
+        let scene: SceneNames = serde_json::from_str(&text).ok()?;
+        Some(scene.actors.into_iter().map(|a| (a.slot, a.name)).collect())
+    }
+
+    /// The object name of actor `id`, if the level's scene file has it.
+    fn name(&mut self, id: u32) -> Option<String> {
+        let (dir, names) = self.source.as_ref()?;
+        let level = usize::try_from(id >> 16).ok()?;
+        let slot = usize::try_from(id & 0xFFFF).ok()?;
+        let level_name = names.get(level)?;
+        self.levels
+            .entry(level)
+            .or_insert_with(|| Self::read(dir, level_name))
+            .as_ref()?
+            .get(&slot)
+            .cloned()
+    }
+}
+
+/// What a query hit, for a note: the actor's name when the level has one.
+struct SurfaceText {
+    /// E.g. `StaticMeshActor_12 (StaticMesh)`.
+    text: String,
+    /// The actor's object name.
+    name: Option<String>,
+    /// Level geometry without an actor (BSP).
+    world_geometry: bool,
+}
+
+fn surface_text(surface: &Surface, names: &mut ActorNames) -> SurfaceText {
+    let name = surface.actor.and_then(|id| names.name(id));
+    let world_geometry = surface.actor.is_none() && surface.class == ActorClass::WorldGeometry;
+    let text = match (&name, surface.actor) {
+        (Some(n), _) => format!("{n} ({:?})", surface.class),
+        (None, Some(id)) => format!("actor {id} ({:?})", surface.class),
+        (None, None) if world_geometry => "world geometry (no actor)".to_owned(),
+        (None, None) => format!("a surface without an actor ({:?})", surface.class),
+    };
+    SurfaceText {
+        text,
+        name,
+        world_geometry,
+    }
+}
+
+/// How our floor's actor compares with the recorded base actor.
+fn base_comparison(recorded: Option<&str>, ours: &SurfaceText) -> String {
+    match (recorded, &ours.name) {
+        (None, _) => "the recording names no base actor at this tick".to_owned(),
+        (Some(r), Some(n)) if r == n => format!(
+            "the recorded base actor has the same name ({r}; names are not unique across \
+             streamed levels)"
+        ),
+        (Some(r), Some(_)) => format!("the recorded base actor is {r}: another actor"),
+        (Some(r), None) if ours.world_geometry && r.starts_with("WorldInfo") => {
+            format!("the recorded base is {r}: world geometry on both sides")
+        }
+        (Some(r), None) if ours.world_geometry => {
+            format!("the recorded base actor is {r}: an actor, where ours is world geometry")
+        }
+        (Some(r), None) => {
+            format!("the recorded base actor is {r} (ours has no actor name here: not comparable)")
+        }
+    }
+}
+
+/// Heights a start that overlaps our collision is probed from, UU above the
+/// recorded position (a search ladder of the harness, not a game value).
+const OVERLAP_PROBE_LIFTS: [f32; 9] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
+
+/// The notes about the start position on our collision (see the module
+/// docs, "What the start notes say"). Returns whether the pawn's shape
+/// overlaps our collision there.
+fn start_position_notes(
+    world: &GameWorld,
+    params: &PlayerParams,
+    s0: &TraceSample,
+    recorded_base: Option<&str>,
+    names: &mut ActorNames,
+    notes: &mut Vec<String>,
+) -> bool {
+    let shape = CollisionShape {
+        radius: params.movement.capsule_radius.value,
+        half_height: params.movement.capsule_half_height.value,
+    };
+    let at = s0.position;
+    let overlaps = world.overlaps(at, shape);
+    if overlaps {
+        let free = OVERLAP_PROBE_LIFTS
+            .into_iter()
+            .find(|lift| !world.overlaps(at + Vec3::Z * *lift, shape));
+        let rest = match free {
+            None => format!(
+                "no free place for it up to {} uu above",
+                OVERLAP_PROBE_LIFTS[OVERLAP_PROBE_LIFTS.len() - 1]
+            ),
+            Some(lift) => match world.sweep_capsule(at + Vec3::Z * lift, at, shape) {
+                Some(hit) => format!(
+                    "lowered from {lift} uu above, it comes to rest {:.3} uu above the recorded \
+                     height, on {}",
+                    f64::from(hit.position.z) - f64::from(at.z),
+                    surface_text(&hit.surface, names).text
+                ),
+                None => format!(
+                    "lowered from {lift} uu above, it reaches the recorded height without a \
+                     contact (a grazing overlap)"
+                ),
+            },
+        };
+        notes.push(format!(
+            "warning: the start position overlaps our collision: the pawn's shape at the \
+             recorded position ({}, {}, {}) is inside our geometry; {rest}. Our pawn may not \
+             move from here; the original stood there on its own collision",
+            at.x, at.y, at.z
+        ));
+    }
+    if s0.grounded && !overlaps {
+        let probe = params.movement.step_height.value + STEP_FUDGE;
+        let base = recorded_base.map_or_else(
+            || "the recording names no base actor at this tick".to_owned(),
+            |r| format!("the recorded base actor is {r}"),
+        );
+        match world.sweep_capsule(at, at - Vec3::Z * probe, shape) {
+            Some(hit) => {
+                let ours = surface_text(&hit.surface, names);
+                notes.push(format!(
+                    "start: our floor is {:.3} uu below the pawn at the recorded position (our \
+                     floor check rests a pawn {TARGET_FLOOR_DIST} uu above its floor and leaves \
+                     a based one alone between {MIN_FLOOR_DIST} and {MAX_FLOOR_DIST}): {}; {}",
+                    hit.distance,
+                    ours.text,
+                    base_comparison(recorded_base, &ours)
+                ));
+            }
+            None => notes.push(format!(
+                "start: no floor of ours within {probe} uu below the recorded position ({base}): \
+                 our pawn starts to fall"
+            )),
+        }
+    }
+    overlaps
+}
+
+/// The trace's recorded script state, read tick by tick.
+struct Recorded<'a> {
+    cursor: Option<TimelineCursor<'a>>,
+}
+
+impl Recorded<'_> {
+    /// The recorded state at `tick` (ticks must not decrease).
+    fn at(&mut self, tick: u64) -> Result<Option<TickState>> {
+        match &mut self.cursor {
+            Some(c) => Ok(c.advance(tick)?.cloned()),
+            None => Ok(None),
+        }
+    }
+}
+
+/// The first tick at which one of our values differed from the recording's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FirstDifference {
+    tick: u64,
+    ours: f64,
+    recorded: f64,
+}
+
+/// One compared value of the `state check:` notes.
+#[derive(Clone, Copy, Debug, Default)]
+struct CheckedValue {
+    compared: usize,
+    differing: usize,
+    first: Option<FirstDifference>,
+    largest: f64,
+    largest_at: Option<FirstDifference>,
+}
+
+impl CheckedValue {
+    fn add(&mut self, tick: u64, ours: f64, recorded: f64) {
+        self.compared += 1;
+        let difference = (ours - recorded).abs();
+        if ours != recorded {
+            self.differing += 1;
+            let d = FirstDifference {
+                tick,
+                ours,
+                recorded,
+            };
+            self.first.get_or_insert(d);
+            if self.largest_at.is_none() || difference > self.largest {
+                self.largest = difference;
+                self.largest_at = Some(d);
+            }
+        }
+    }
+}
+
+/// Our script state against the recording's, tick by tick (see the module
+/// docs, "What else the notes compare").
+#[derive(Clone, Copy, Debug, Default)]
+struct StateCheck {
+    ground_speed: CheckedValue,
+    air_control: CheckedValue,
+    sprinting: CheckedValue,
+    times_grappled: CheckedValue,
+    max_grapples: CheckedValue,
+    eye_height: CheckedValue,
+}
+
+impl StateCheck {
+    fn add(&mut self, tick: u64, ours: &PlayerState, recorded: &TickState) {
+        if !ours.script.started {
+            return;
+        }
+        let s = &ours.script;
+        if let Some(v) = recorded.ground_speed {
+            self.ground_speed
+                .add(tick, f64::from(s.ground_speed), f64::from(v));
+        }
+        if let Some(v) = recorded.air_control {
+            self.air_control
+                .add(tick, f64::from(s.air_control), f64::from(v));
+        }
+        if let Some(v) = recorded.sprinting {
+            self.sprinting.add(
+                tick,
+                f64::from(u8::from(s.sprint.active)),
+                f64::from(u8::from(v)),
+            );
+        }
+        if let Some(v) = recorded.times_grappled {
+            self.times_grappled
+                .add(tick, f64::from(s.gun.times_grappled), f64::from(v));
+        }
+        if let Some(v) = recorded.max_grapples {
+            self.max_grapples
+                .add(tick, f64::from(s.gun.max_grapples), f64::from(v));
+        }
+        if let Some(v) = recorded.eye_height {
+            self.eye_height
+                .add(tick, f64::from(s.eye_height), f64::from(v));
+        }
+    }
+
+    fn notes(&self, notes: &mut Vec<String>) {
+        let exact = [
+            ("GroundSpeed", &self.ground_speed),
+            ("AirControl", &self.air_control),
+            ("the sprint flag", &self.sprinting),
+            ("the used-grapple count", &self.times_grappled),
+            ("the grapple capacity", &self.max_grapples),
+        ];
+        let agreeing: Vec<&str> = exact
+            .iter()
+            .filter(|(_, c)| c.compared > 0 && c.differing == 0)
+            .map(|(name, _)| *name)
+            .collect();
+        if let Some(ticks) = exact.iter().map(|(_, c)| c.compared).max()
+            && !agreeing.is_empty()
+        {
+            notes.push(format!(
+                "state check: after each of {ticks} tick(s) our {} equal(s) the recording's",
+                agreeing.join(", ")
+            ));
+        }
+        for (name, c) in exact {
+            if let Some(d) = c.first {
+                notes.push(format!(
+                    "state check: {name} differs from the recording's after {} of {} tick(s) \
+                     (first at tick {}: ours {}, recorded {})",
+                    c.differing, c.compared, d.tick, d.ours, d.recorded
+                ));
+            }
+        }
+        let e = &self.eye_height;
+        if e.compared > 0 {
+            match e.largest_at {
+                None => notes.push(format!(
+                    "state check: our eye height equals the recorded EyeHeight after each of {} \
+                     tick(s)",
+                    e.compared
+                )),
+                Some(d) => notes.push(format!(
+                    "state check: our eye height differs from the recorded EyeHeight after {} \
+                     of {} tick(s); largest difference {:.4} uu at tick {} (ours {}, recorded {})",
+                    e.differing, e.compared, e.largest, d.tick, d.ours, d.recorded
+                )),
+            }
+        }
+    }
+}
+
+/// What the resynchronisation of a one-step replay had to change beyond
+/// values (see [`resync`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct ResyncCounts {
+    ticks: usize,
+    mode: usize,
+    first_mode: Option<u64>,
+    attached: usize,
+    first_attached: Option<u64>,
+    released: usize,
+    first_released: Option<u64>,
+    anchor: usize,
+    first_anchor: Option<u64>,
+}
+
+/// Writes the recorded script state `st` into the player: only values, and
+/// only where they differ in kind (story mode entered or left, boots
+/// switched), so that a state that already agrees is left bit for bit.
+fn write_recorded_state(p: &mut PlayerState, params: &PlayerParams, st: &TickState) {
+    if p.script.started
+        && let Some(pawn_params) = params.pawn.as_ref()
+    {
+        if let Some(shown) = st
+            .ground_speed
+            .and_then(|g| story_mode_shown(g, pawn_params))
+        {
+            match (shown, p.script.is_story()) {
+                (true, false) => {
+                    pawn::enter_story_mode(p, params);
+                }
+                (false, true) => pawn::exit_story_mode(p, params),
+                _ => {}
+            }
+        }
+        let s = &mut p.script;
+        if let Some(v) = st.ground_speed {
+            s.ground_speed = v;
+        }
+        if let Some(v) = st.sprinting {
+            s.sprint.active = v;
+        }
+        if let Some(v) = st.air_control {
+            s.air_control = v;
+        }
+        if let Some(v) = st.jump_z {
+            s.jump_z = v;
+        }
+        if let Some(v) = st.air_speed {
+            s.air_speed = v;
+        }
+        if let Some(v) = st.eye_height {
+            s.eye_height = v;
+        }
+    }
+    if let Some(n) = st.max_grapples
+        && p.script.gun.max_grapples != n
+    {
+        grapple_gun::set_max_grapples(p, n);
+    }
+    if let Some(n) = st.times_grappled {
+        p.script.gun.times_grappled = n;
+    }
+    if let Some(on) = st.can_grapple {
+        grapple_gun::enable_grapple(p, on);
+    }
+    if let Some(on) = st.released {
+        p.script.gun.released = on;
+    }
+    if let Some(on) = st.boots_enabled
+        && p.script.boots.enabled != on
+    {
+        rocket_boots::enable_rocket_boots(p, on);
+    }
+}
+
+/// Puts the player into the state of the input trace's sample `o` (the
+/// state the original's next tick starts from) with the recorded script
+/// state `st` of that tick: the one-step resynchronisation (see the module
+/// docs for what it covers and what it cannot).
+fn resync(
+    p: &mut PlayerState,
+    params: &PlayerParams,
+    o: &TraceSample,
+    st: Option<&TickState>,
+    counts: &mut ResyncCounts,
+) {
+    counts.ticks += 1;
+    let yaw = in_range_yaw(o.yaw);
+    p.position = o.position;
+    p.velocity = o.velocity;
+    p.yaw = yaw;
+    p.pitch = o.pitch;
+    if p.script.started {
+        p.script.pov_yaw = yaw;
+        p.script.pov_pitch = o.pitch;
+    }
+    let ours_attached = p.script.gun.attached.is_some();
+    match (o.grapple_state, o.grapple_anchor) {
+        (TraceGrappleState::Attached, Some(anchor)) if p.script.gun.spawned => {
+            if !ours_attached {
+                // What an attach leaves (GRAPPLE.md §6), without its events,
+                // budget and timers: the target is unknown, so it is world
+                // geometry that carries no anchor.
+                let g = &mut p.script.gun;
+                g.grapple_location = anchor;
+                g.attached = Some(Attachment::default());
+                g.follow = None;
+                g.has_grappled = true;
+                p.pawn.flying = true;
+                p.grounded = false;
+                p.pawn.based = false;
+                p.script.release_gap = false;
+                p.script.code.goto(PawnStateName::Shooting);
+                counts.attached += 1;
+                counts.first_attached.get_or_insert(o.tick);
+            } else if p.script.gun.grapple_location != anchor {
+                p.script.gun.grapple_location = anchor;
+                p.script.gun.follow = None;
+                counts.anchor += 1;
+                counts.first_anchor.get_or_insert(o.tick);
+            }
+        }
+        _ => {
+            if ours_attached {
+                // The common release (physics Falling, pawn `Release`, the
+                // controller's release gap); its handler calls are dropped.
+                grapple_gun::release_from_outside(p, ReleaseReason::External);
+                counts.released += 1;
+                counts.first_released.get_or_insert(o.tick);
+            }
+            if p.grounded != o.grounded || p.pawn.flying {
+                p.grounded = o.grounded;
+                p.pawn = PawnPhysicsState {
+                    force_floor_check: o.grounded,
+                    based: o.grounded && st.is_some_and(|s| s.base.is_some()),
+                    ..PawnPhysicsState::default()
+                };
+                counts.mode += 1;
+                counts.first_mode.get_or_insert(o.tick);
+            }
+        }
+    }
+    if let Some(st) = st {
+        write_recorded_state(p, params, st);
+    }
+}
+
+/// The simulation of a replay: `Game::tick` (optionally with Kismet) at a
+/// fixed rate, or the per-sample stepper.
+struct Run {
+    game: Game,
+    script: Option<LevelScript>,
+    /// The per-sample stepper ([`Stepping::PerSample`]).
+    sim: Option<VariableStepper>,
+    /// Input ticks of the fixed path's recorded samples, in order.
+    ticks: Vec<u64>,
+    /// Fixed path: samples to overwrite after the recording stopped
+    /// (index into the recording, state to copy).
+    patches: Vec<(usize, TraceSample)>,
+    /// Per-sample path: our samples.
+    samples: Vec<TraceSample>,
+    variable: VariableSteps,
+    lengths: Vec<f64>,
+    /// Time of the start sample.
+    t0: f64,
+}
+
+impl Run {
+    fn player(&self) -> &PlayerState {
+        match &self.sim {
+            Some(s) => s.player(),
+            None => self.game.player(),
+        }
+    }
+
+    fn player_mut(&mut self) -> &mut PlayerState {
+        match &mut self.sim {
+            Some(s) => s.player_mut(),
+            None => self.game.player_mut(),
+        }
+    }
+
+    fn fov(&self) -> f32 {
+        match &self.sim {
+            Some(s) => s.fov(),
+            None => self.game.fov(),
+        }
+    }
+
+    fn respawn_count(&self) -> u32 {
+        match &self.sim {
+            Some(s) => s.respawn_count(),
+            None => self.game.respawn_count(),
+        }
+    }
+
+    /// One tick with the input of `s` (the sample after `prev`), recorded
+    /// as tick `s.tick`.
+    fn tick(&mut self, prev: &TraceSample, s: &TraceSample, notes: &mut Vec<String>) -> Result<()> {
+        match &mut self.sim {
+            None => {
+                let ticked = match self.script.as_mut() {
+                    Some(sc) => sc.tick(&mut self.game, &s.input).is_some(),
+                    None => self.game.tick(&s.input).is_some(),
+                };
+                if !ticked {
+                    bail!("the game did not tick at input tick {}", s.tick);
+                }
+                self.ticks.push(s.tick);
+            }
+            Some(sim) => {
+                let seconds = s.time - prev.time;
+                let length = FrameLength::of(seconds);
+                match length {
+                    FrameLength::Step(_) => {}
+                    FrameLength::Clamped => {
+                        self.variable.clamped += 1;
+                        self.variable.first_clamped.get_or_insert(s.tick);
+                    }
+                    FrameLength::NoOp => {
+                        self.variable.no_op += 1;
+                        self.variable.first_no_op.get_or_insert(s.tick);
+                    }
+                }
+                self.lengths.push(seconds);
+                let report = sim.tick(&s.input, length.dt(), finite(s.time - self.t0));
+                if report.respawned {
+                    notes.push(format!("respawn (kill_z) at tick {}", s.tick));
+                }
+                self.samples.push(TraceSample::capture(
+                    s.tick,
+                    s.time,
+                    &s.input,
+                    sim.player(),
+                    sim.fov(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Records the player's present state as the sample of the tick that
+    /// just ran (after an injection changed it).
+    fn recapture(&mut self, s: &TraceSample) {
+        let sample = TraceSample::capture(s.tick, s.time, &s.input, self.player(), self.fov());
+        match &self.sim {
+            // The game's recording gets it when it stops; index 0 is the
+            // start sample.
+            None => self
+                .patches
+                .push((self.ticks.len().saturating_sub(1), sample)),
+            Some(_) => {
+                if let Some(last) = self.samples.last_mut() {
+                    *last = sample;
+                }
+            }
+        }
+    }
+}
+
 /// Replays `original` (see the module docs).
 ///
 /// # Errors
 /// Empty trace, contradictory or invalid stepping options, a trace without a
 /// fixed rate whose sample times never advance, a per-sample replay with
-/// Kismet, level loading or game construction errors.
+/// Kismet, an invalid `state:` note, level loading or game construction
+/// errors.
 pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
     let mut start = match opts.start_tick {
         None => 0,
@@ -324,7 +1157,8 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
     };
     let mut start_notes = Vec::new();
     let all = original.samples.as_slice();
-    if original.meta.source == TraceSource::Original
+    let is_original = original.meta.source == TraceSource::Original;
+    if is_original
         && let Some(asked) = all.get(start)
         && !is_clean_start(all, start)
     {
@@ -378,7 +1212,7 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
         TraceSource::Original => "original",
         TraceSource::Runtime => "runtime",
     };
-    let (mut game, mut script, mut notes) = match stepping {
+    let (mut game, script, mut notes) = match stepping {
         Stepping::Fixed(rate) => {
             let (game, script, level_desc) = build(opts, rate)?;
             let note =
@@ -427,16 +1261,63 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
         ));
     }
 
+    // The recorded script state. Without the start state (`use_init` off) a
+    // broken note is not an error, as before it was read for anything else.
+    let timeline = match StateTimeline::from_notes(&original.meta.notes) {
+        Ok(t) => t,
+        Err(e) if !opts.use_init => {
+            notes.push(format!(
+                "warning: the trace's state: note is not readable ({e:#}); events and the \
+                 recorded state are not used"
+            ));
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    // What happens in the input trace inside the replayed ticks.
+    let recorded_events = if is_original {
+        recorded_events(all, timeline.as_ref())?
+    } else {
+        Vec::new()
+    };
+    let inside = |index: usize| index > start && index < end;
+    let mut ends: BTreeMap<u64, Vec<EventKind>> = BTreeMap::new();
+    for e in &recorded_events {
+        if inside(e.index) && e.kind.ends_validity() {
+            ends.entry(e.tick).or_default().push(e.kind);
+        }
+    }
+    let mut attaches = is_original.then(|| Attaches {
+        original: recorded_events
+            .iter()
+            .filter(|e| inside(e.index) && e.kind.is_attach())
+            .map(|e| e.tick)
+            .collect(),
+        ours: Vec::new(),
+    });
+    let mut recorded = Recorded {
+        cursor: timeline.as_ref().map(StateTimeline::cursor),
+    };
+    let first_tick = original.samples.first().map_or(s0.tick, |f| f.tick);
+    let state_at_start = match recorded.at(s0.tick)? {
+        Some(st) => Some(st),
+        None => InitState::from_notes(&original.meta.notes)
+            .filter(|_| timeline.is_none())
+            .map(|init| {
+                if opts.use_init && s0.tick != first_tick {
+                    notes.push(
+                        "note: the init: state belongs to the first sample, not the start tick"
+                            .to_owned(),
+                    );
+                }
+                TickState::from(&init)
+            }),
+    };
+
     // Initial state.
-    {
+    let wrote_state = {
         let p = game.player_mut();
-        // A yaw already in [−π, π) is taken as it is (wrapping it again can
-        // move it by one bit).
-        let yaw = if (-core::f32::consts::PI..core::f32::consts::PI).contains(&s0.yaw) {
-            s0.yaw
-        } else {
-            wrap_radians(s0.yaw)
-        };
+        let yaw = in_range_yaw(s0.yaw);
         let same = p.position == s0.position
             && p.velocity == s0.velocity
             && p.yaw == yaw
@@ -464,27 +1345,15 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
                 if s0.grounded { "walking" } else { "falling" }
             ));
         }
-        if s0.grapple_state == TraceGrappleState::Attached {
+        if s0.grapple_state == TraceGrappleState::Attached && !opts.one_step {
             notes.push(
                 "warning: the trace starts attached; the attachment is not recreated".to_owned(),
             );
         }
-    }
+        !same
+    };
     if opts.use_init {
-        let first_tick = original.samples.first().map_or(s0.tick, |f| f.tick);
-        let recorded = match StateTimeline::from_notes(&original.meta.notes)? {
-            Some(timeline) => timeline.at(s0.tick)?,
-            None => InitState::from_notes(&original.meta.notes).map(|init| {
-                if s0.tick != first_tick {
-                    notes.push(
-                        "note: the init: state belongs to the first sample, not the start tick"
-                            .to_owned(),
-                    );
-                }
-                TickState::from(&init)
-            }),
-        };
-        if original.meta.source == TraceSource::Original && s0.tick == first_tick {
+        if is_original && s0.tick == first_tick {
             notes.push(
                 "note: the buttons held before the first record are unknown (taken as released)"
                     .to_owned(),
@@ -492,9 +1361,10 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
         }
         apply_start_state(
             &mut game,
-            &recorded.unwrap_or_default(),
+            &state_at_start.clone().unwrap_or_default(),
             s0,
             opts.story_mode,
+            wrote_state,
             &mut notes,
         );
     }
@@ -502,51 +1372,235 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
         grapple_gun::set_max_grapples(game.player_mut(), n);
         notes.push(format!("max_grapples override {n}"));
     }
+    let run_params = game.params().clone();
+    let mut names = ActorNames::new(&opts.level, &game);
+    let start_overlaps = wrote_state
+        && start_position_notes(
+            game.world(),
+            &run_params,
+            s0,
+            state_at_start.as_ref().and_then(|s| s.base.as_deref()),
+            &mut names,
+            &mut notes,
+        );
 
     game.start();
     game.start_recording();
-    let (mut trace, stopped_at_gap, respawns, variable) = match stepping {
-        Stepping::Fixed(_) => {
-            let respawns_before = game.respawn_count();
-            let mut stopped_at_gap = None;
-            let mut prev_tick = s0.tick;
-            for s in samples.iter().skip(1) {
-                if prev_tick.checked_add(1) != Some(s.tick) {
-                    stopped_at_gap = Some(prev_tick);
+    let mut run = Run {
+        sim: None,
+        game,
+        script,
+        ticks: vec![s0.tick],
+        patches: Vec::new(),
+        samples: Vec::new(),
+        variable: VariableSteps {
+            lengths: StepStats::default(),
+            clamped: 0,
+            first_clamped: None,
+            no_op: 0,
+            first_no_op: None,
+        },
+        lengths: Vec::new(),
+        t0: s0.time,
+    };
+    if stepping == Stepping::PerSample {
+        let sim = VariableStepper::from_game(&run.game);
+        notes.push(
+            "stepping: per-sample frame lengths on asamu-trace's stepper (a rebuild of Game::tick \
+             from the public simulation API; asamu-game has no tick that takes a frame length)"
+                .to_owned(),
+        );
+        if sim.is_converted() {
+            notes.push(
+                "note: on a converted level this stepper simulates the player and the level \
+                 objects (recharge crystals, glow flowers, interactables, attractor pads) only; \
+                 touch volumes, checkpoints, kill zones, deaths and respawns, falling rocks, \
+                 level streaming, NPCs and Kismet are not simulated"
+                    .to_owned(),
+            );
+        }
+        run.samples.push(TraceSample::capture(
+            s0.tick,
+            s0.time,
+            &InputFrame::default(),
+            sim.player(),
+            sim.fov(),
+        ));
+        run.sim = Some(sim);
+    }
+    let respawns_before = run.respawn_count();
+
+    // The ticks.
+    let mut stopped_at_gap = None;
+    let mut stopped_at_event = None;
+    let mut crossed: Vec<CrossedEvent> = Vec::new();
+    let mut check = StateCheck::default();
+    let mut counts = ResyncCounts::default();
+    let mut resync_overlaps: Vec<u64> = Vec::new();
+    let pawn_shape = CollisionShape {
+        radius: run_params.movement.capsule_radius.value,
+        half_height: run_params.movement.capsule_half_height.value,
+    };
+    let mut state_prev = state_at_start;
+    let mut prev = s0;
+    let mut simulated = 0_usize;
+    let mut original_travel = 0.0_f64;
+    for s in samples.iter().skip(1) {
+        if prev.tick.checked_add(1) != Some(s.tick) {
+            stopped_at_gap = Some(prev.tick);
+            break;
+        }
+        let state_now = recorded.at(s.tick)?;
+        let kinds = ends.get(&s.tick).map_or(&[][..], Vec::as_slice);
+        let mut inject = false;
+        if !kinds.is_empty() {
+            let action = match (opts.events, opts.one_step) {
+                (EventPolicy::Ignore, _) => EventAction::Ignored,
+                (_, true) => EventAction::LeftOut,
+                (EventPolicy::Stop, false) => EventAction::Stopped,
+                (EventPolicy::Inject, false) => EventAction::Injected,
+            };
+            crossed.extend(kinds.iter().map(|kind| CrossedEvent {
+                tick: s.tick,
+                kind: *kind,
+                action,
+            }));
+            match action {
+                EventAction::Stopped => {
+                    stopped_at_event = Some(s.tick);
                     break;
                 }
-                let ticked = match script.as_mut() {
-                    Some(sc) => sc.tick(&mut game, &s.input).is_some(),
-                    None => game.tick(&s.input).is_some(),
-                };
-                if !ticked {
-                    bail!("the game did not tick at input tick {}", s.tick);
+                EventAction::LeftOut => {
+                    state_prev = state_now;
+                    prev = s;
+                    continue;
                 }
-                prev_tick = s.tick;
+                EventAction::Injected => inject = true,
+                EventAction::Ignored => {}
             }
-            let respawns = game.respawn_count().saturating_sub(respawns_before);
-            let mut trace = game.stop_recording().context("recording was not running")?;
-            // Our ticks count from 0; give them the input trace's numbers.
-            let base = s0.tick;
-            for s in &mut trace.samples {
-                s.tick = s.tick.checked_add(base).context("tick numbers overflow")?;
-            }
-            (trace, stopped_at_gap, respawns, None)
         }
-        Stepping::PerSample => {
+        if opts.one_step {
+            // The recording's position on our collision: a tick that starts
+            // inside it is not one tick of our movement rules.
+            if run.game.world().overlaps(prev.position, pawn_shape) {
+                resync_overlaps.push(s.tick);
+            }
+            // Without the recorded start state (`use_init` off) the recorded
+            // script state is not written on later ticks either.
+            resync(
+                run.player_mut(),
+                &run_params,
+                prev,
+                state_prev.as_ref().filter(|_| opts.use_init),
+                &mut counts,
+            );
+        }
+        if inject
+            && kinds.iter().any(|k| k.is_level_state())
+            && let Some(st) = &state_now
+        {
+            // The level script's part of the recorded state, before our tick.
+            let level_state = TickState {
+                ground_speed: st.ground_speed,
+                max_grapples: st.max_grapples,
+                boots_enabled: st.boots_enabled,
+                ..TickState::default()
+            };
+            write_recorded_state(run.player_mut(), &run_params, &level_state);
+        }
+        let before = {
+            let p = run.player();
+            (p.is_grapple_attached(), p.script.gun.times_grappled)
+        };
+        run.tick(prev, s, &mut notes)?;
+        simulated += 1;
+        original_travel += tick_displacement(prev, s);
+        // Counted before an injected teleport rewrites the state.
+        if let Some(a) = &mut attaches {
+            let p = run.player();
+            if (p.is_grapple_attached() && !before.0) || p.script.gun.times_grappled > before.1 {
+                a.ours.push(s.tick);
+            }
+        }
+        if inject && kinds.contains(&EventKind::Teleport) {
+            // Where the recording's pawn is after its teleport.
+            let mut unused = ResyncCounts::default();
+            resync(
+                run.player_mut(),
+                &run_params,
+                s,
+                state_now.as_ref(),
+                &mut unused,
+            );
+            let p = run.player_mut();
+            p.pawn = PawnPhysicsState {
+                force_floor_check: s.grounded,
+                based: s.grounded && state_now.as_ref().is_some_and(|st| st.base.is_some()),
+                flying: p.pawn.flying,
+                ..PawnPhysicsState::default()
+            };
+            run.recapture(s);
+        }
+        if simulated == 1 && wrote_state {
+            first_tick_note(s0, s, run.player(), &mut notes);
+        }
+        if is_original && let Some(st) = &state_now {
+            check.add(s.tick, run.player(), st);
+        }
+        state_prev = state_now;
+        prev = s;
+    }
+    let respawns = run.respawn_count().saturating_sub(respawns_before);
+
+    // Our trace.
+    let mut trace = run
+        .game
+        .stop_recording()
+        .context("recording was not running")?;
+    let variable = match &run.sim {
+        None => {
+            // Our ticks count from 0; give them the input trace's numbers.
+            for (s, tick) in trace.samples.iter_mut().zip(&run.ticks) {
+                s.tick = *tick;
+            }
+            for (index, patch) in &run.patches {
+                if let Some(s) = trace.samples.get_mut(*index) {
+                    *s = TraceSample {
+                        tick: s.tick,
+                        time: s.time,
+                        ..*patch
+                    };
+                }
+            }
+            None
+        }
+        Some(_) => {
             // The game's recording gives the meta line (level, model and
             // parameter notes); the samples come from the stepper.
-            let mut trace = game.stop_recording().context("recording was not running")?;
             trace.meta.tick_rate = None;
-            trace.samples.clear();
+            trace.samples = std::mem::take(&mut run.samples);
             for n in &mut trace.meta.notes {
                 if n == "recorded by asamu-game" {
                     *n = "recorded by asamu-trace (per-sample stepper)".to_owned();
                 }
             }
-            let (stopped_at_gap, respawns, variable) =
-                run_per_sample(&game, samples, &mut trace, &mut notes);
-            (trace, stopped_at_gap, respawns, Some(variable))
+            let mut variable = run.variable;
+            variable.lengths = StepStats::of_lengths(std::mem::take(&mut run.lengths));
+            if let Some(t) = variable.first_clamped {
+                notes.push(format!(
+                    "warning: {} tick(s) longer than {MAX_STEP_DT} s were simulated as \
+                     {MAX_STEP_DT} s (our step bound; first at tick {t})",
+                    variable.clamped
+                ));
+            }
+            if let Some(t) = variable.first_no_op {
+                notes.push(format!(
+                    "warning: {} tick(s) have a frame length that is not positive; no time \
+                     passed in them (first at tick {t})",
+                    variable.no_op
+                ));
+            }
+            Some(variable)
         }
     };
     // The start sample is the input trace's own: its input is the one that
@@ -561,8 +1615,87 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
     if respawns > 0 {
         notes.push(format!("{respawns} respawn(s) during the replay"));
     }
+    if opts.one_step {
+        let state = match (timeline.is_some(), opts.use_init) {
+            (_, false) => Some("the recorded state is switched off"),
+            (false, true) => Some("the trace has no state: note"),
+            (true, true) => None,
+        };
+        one_step_notes(&counts, state, &mut notes);
+        if let Some(first) = resync_overlaps.first() {
+            let ticks: Vec<String> = resync_overlaps.iter().map(u64::to_string).collect();
+            notes.push(format!(
+                "{ONE_STEP_NOTE_PREFIX} warning: {} of {} tick(s) start inside our collision (the \
+                 pawn's shape at the recording's previous sample overlaps our geometry; first \
+                 tick {first}): our pawn starts them stuck in or pushed out of geometry the \
+                 original does not have there, so their errors measure the collision difference, \
+                 not one tick of our movement rules. Tick(s) {}",
+                resync_overlaps.len(),
+                counts.ticks,
+                bounded(&ticks)
+            ));
+        }
+    }
+    event_notes(
+        &crossed,
+        stopped_at_event,
+        simulated,
+        samples.len().saturating_sub(1),
+        &mut notes,
+    );
+    if let Some(a) = &attaches
+        && (!a.original.is_empty() || !a.ours.is_empty())
+    {
+        let list = |ticks: &[u64]| {
+            if ticks.is_empty() {
+                String::new()
+            } else {
+                let ticks: Vec<String> = ticks.iter().map(u64::to_string).collect();
+                format!(" (tick(s) {})", bounded(&ticks))
+            }
+        };
+        // A tick the replay did not simulate has no attach of ours.
+        let simulated_ticks: Vec<u64> = trace.samples.iter().map(|s| s.tick).collect();
+        let comparable: Vec<u64> = a
+            .original
+            .iter()
+            .copied()
+            .filter(|t| simulated_ticks.binary_search(t).is_ok())
+            .collect();
+        notes.push(format!(
+            "attaches: the original attached the grapple {} time(s) in the replayed ticks{}, \
+             ours {} time(s){}; counted from the attached flag and the used-grapple counter; {}",
+            comparable.len(),
+            list(&comparable),
+            a.ours.len(),
+            list(&a.ours),
+            if comparable == a.ours {
+                "the same ticks"
+            } else {
+                "not the same ticks"
+            }
+        ));
+    }
+    if is_original {
+        check.notes(&mut notes);
+    }
+    if start_overlaps
+        && simulated > 0
+        && trace.samples.iter().all(|s| s.position == s0.position)
+        && original_travel > 0.0
+        && !opts.one_step
+    {
+        notes.push(format!(
+            "warning: our pawn did not move in {simulated} tick(s) while the original travelled \
+             {original_travel:.1} uu: the start position overlaps our collision"
+        ));
+    }
     trace.meta.notes.extend(notes);
     trace.validate()?;
+    if let Some(a) = &mut attaches {
+        let ticks: Vec<u64> = trace.samples.iter().map(|s| s.tick).collect();
+        a.original.retain(|t| ticks.binary_search(t).is_ok());
+    }
     Ok(ReplayResult {
         trace,
         start_tick: s0.tick,
@@ -570,7 +1703,163 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
         respawns,
         stepping,
         variable,
+        one_step: opts.one_step,
+        stopped_at_event,
+        events: crossed,
+        attaches,
+        start_overlaps,
+        resync_overlaps,
     })
+}
+
+/// The `start: in the first tick …` note (see the module docs): how far our pawn
+/// and the original moved vertically in the first tick while walking.
+fn first_tick_note(
+    s0: &TraceSample,
+    s1: &TraceSample,
+    ours: &PlayerState,
+    notes: &mut Vec<String>,
+) {
+    if !(s0.grounded && s1.grounded && ours.grounded) {
+        return;
+    }
+    let (start, theirs, mine) = (
+        f64::from(s0.position.z),
+        f64::from(s1.position.z),
+        f64::from(ours.position.z),
+    );
+    let (dz_ours, dz_original) = (mine - start, theirs - start);
+    let difference = dz_ours - dz_original;
+    let band = f64::from(MAX_FLOOR_DIST) - f64::from(MIN_FLOOR_DIST);
+    if difference.abs() > band {
+        notes.push(format!(
+            "warning: in the first tick our pawn moves {dz_ours:+.4} uu vertically and the \
+             original {dz_original:+.4} uu while both walk: {difference:+.4} uu apart, more than \
+             the width of the native hover band ({band:.1} uu), so the two stand on different \
+             floor heights from the start. Every vertical number of this replay carries that \
+             offset"
+        ));
+    } else {
+        notes.push(format!(
+            "start: in the first tick our pawn moves {dz_ours:+.4} uu vertically and the \
+             original {dz_original:+.4} uu while both walk"
+        ));
+    }
+}
+
+/// The notes of a one-step replay. `no_state`: why the recorded script
+/// state was not written, if it was not.
+fn one_step_notes(counts: &ResyncCounts, no_state: Option<&str>, notes: &mut Vec<String>) {
+    let state = match no_state {
+        None => "the recorded script state (GroundSpeed with the story mode it shows, \
+                 AirControl, JumpZ, AirSpeed, the sprint flag, the gun's used count, capacity, \
+                 fire latch and released flag, rocket boots enabled, the eye height when \
+                 recorded)"
+            .to_owned(),
+        Some(why) => format!("no script state ({why})"),
+    };
+    notes.push(format!(
+        "{ONE_STEP_NOTE_PREFIX} each of {} tick(s) starts from the input trace's previous sample \
+         (position, velocity, view, walking, falling or attached at the recorded anchor) and \
+         {state}; the errors are those of one tick, not accumulated drift",
+        counts.ticks
+    ));
+    notes.push(format!(
+        "{ONE_STEP_NOTE_PREFIX} not resynchronised (no record shows them; kept from our own \
+         previous tick): the pawn's and the power jump's state code and timers, sprint after \
+         landing, the move-input lock, the gun's weapon state and timers, the boots' boost, the \
+         walk bob, the FOV, the floor normal and the base flag while the physics mode agrees, \
+         level objects and Kismet"
+    ));
+    let mut changed = Vec::new();
+    for (n, first, what) in [
+        (
+            counts.mode,
+            counts.first_mode,
+            "the physics mode was set to the recording's (walking or falling)",
+        ),
+        (
+            counts.attached,
+            counts.first_attached,
+            "an attachment of the original that we did not have was created",
+        ),
+        (
+            counts.released,
+            counts.first_released,
+            "an attachment of ours that the original did not have was released",
+        ),
+        (
+            counts.anchor,
+            counts.first_anchor,
+            "our anchor was moved to the recorded one",
+        ),
+    ] {
+        if let Some(t) = first {
+            changed.push(format!("{what} before {n} tick(s) (first after tick {t})"));
+        }
+    }
+    if !changed.is_empty() {
+        notes.push(format!("{ONE_STEP_NOTE_PREFIX} {}", changed.join("; ")));
+    }
+}
+
+/// The notes about the events the inputs cannot reproduce.
+fn event_notes(
+    crossed: &[CrossedEvent],
+    stopped_at: Option<u64>,
+    simulated: usize,
+    asked: usize,
+    notes: &mut Vec<String>,
+) {
+    let list = |action: EventAction| -> Vec<String> {
+        crossed
+            .iter()
+            .filter(|e| e.action == action)
+            .map(|e| format!("{} {}", e.tick, e.kind.name()))
+            .collect()
+    };
+    if let Some(tick) = stopped_at {
+        notes.push(format!(
+            "validity: stopped before tick {tick} ({}): a replay of the inputs cannot reproduce \
+             it. {simulated} of {asked} tick(s) replayed; --level-events inject takes the \
+             recorded change and runs on, ignore runs through",
+            list(EventAction::Stopped)
+                .iter()
+                .map(|e| e.split_once(' ').map_or(e.as_str(), |(_, kind)| kind))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let left_out = list(EventAction::LeftOut);
+    if !left_out.is_empty() {
+        notes.push(format!(
+            "validity: {} event(s) the inputs cannot reproduce; their ticks are left out of this \
+             one-step replay (not simulated; the tick after starts from the recording): {}",
+            left_out.len(),
+            bounded(&left_out)
+        ));
+    }
+    let injected = list(EventAction::Injected);
+    if !injected.is_empty() {
+        notes.push(format!(
+            "injected: {} recorded change(s) the inputs cannot reproduce were taken from the \
+             recording (--level-events inject): a level-script state change is written before \
+             our tick, a teleport replaces our position, velocity, view and physics mode after \
+             it: {}",
+            injected.len(),
+            bounded(&injected)
+        ));
+    }
+    let ignored = list(EventAction::Ignored);
+    if let Some(first) = crossed.iter().find(|e| e.action == EventAction::Ignored) {
+        notes.push(format!(
+            "warning: the replay ran through {} event(s) the inputs cannot reproduce \
+             (--level-events ignore): {}. From tick {} on the comparison is not valid",
+            ignored.len(),
+            bounded(&ignored),
+            first.tick
+        ));
+    }
 }
 
 fn on_off(on: bool) -> &'static str {
@@ -580,11 +1869,13 @@ fn on_off(on: bool) -> &'static str {
 /// Puts the script state `recorded` (the original's at the start tick), the
 /// button levels of the start sample `s0` and its FOV into the game's player
 /// (see the module docs, "Start state"). Writes what it set to `notes`.
+/// `wrote_state`: the start sample replaced the spawn state.
 fn apply_start_state(
     game: &mut Game,
     recorded: &TickState,
     s0: &TraceSample,
     story_mode: Option<bool>,
+    wrote_state: bool,
     notes: &mut Vec<String>,
 ) {
     let params = game.params().clone();
@@ -687,6 +1978,21 @@ fn apply_start_state(
         rocket_boots::enable_rocket_boots(p, on);
         applied.push(format!("rocket_boots {on}"));
     }
+    if p.script.started
+        && let Some(v) = recorded.eye_height
+    {
+        p.script.eye_height = v;
+        applied.push(format!("eye_height {v}"));
+    }
+    if wrote_state
+        && s0.grounded
+        && let Some(base) = &recorded.base
+    {
+        // The original's pawn has a base: its floor check leaves it where it
+        // stands inside the hover band (NATIVE_PHYSICS.md 3.3).
+        p.pawn.based = true;
+        applied.push(format!("based (recorded base {base})"));
+    }
     if !applied.is_empty() {
         notes.push(format!(
             "start state applied (tick {}): {}",
@@ -694,104 +2000,6 @@ fn apply_start_state(
             applied.join(", ")
         ));
     }
-}
-
-/// The per-sample loop: steps a [`VariableStepper`] snapshot of `game` with
-/// every sample's input and frame length, writes our samples (with the input
-/// samples' ticks and times) to `trace` and the stepping notes to `notes`.
-/// Returns the gap that stopped it, the respawn count and the frame-length
-/// summary.
-fn run_per_sample(
-    game: &Game,
-    samples: &[TraceSample],
-    trace: &mut Trace,
-    notes: &mut Vec<String>,
-) -> (Option<u64>, u32, VariableSteps) {
-    let mut sim = VariableStepper::from_game(game);
-    notes.push(
-        "stepping: per-sample frame lengths on asamu-trace's stepper (a rebuild of Game::tick \
-         from the public simulation API; asamu-game has no tick that takes a frame length)"
-            .to_owned(),
-    );
-    if sim.is_converted() {
-        notes.push(
-            "note: on a converted level this stepper simulates the player and the level objects \
-             (recharge crystals, glow flowers, interactables, attractor pads) only; touch \
-             volumes, checkpoints, kill zones, deaths and respawns, falling rocks, level \
-             streaming, NPCs and Kismet are not simulated"
-                .to_owned(),
-        );
-    }
-    let respawns_before = sim.respawn_count();
-    let mut variable = VariableSteps {
-        lengths: StepStats::default(),
-        clamped: 0,
-        first_clamped: None,
-        no_op: 0,
-        first_no_op: None,
-    };
-    let mut lengths = Vec::new();
-    let mut stopped_at_gap = None;
-    let Some(s0) = samples.first() else {
-        return (None, 0, variable);
-    };
-    trace.samples.push(TraceSample::capture(
-        s0.tick,
-        s0.time,
-        &InputFrame::default(),
-        sim.player(),
-        sim.fov(),
-    ));
-    let mut prev = s0;
-    for s in samples.iter().skip(1) {
-        if prev.tick.checked_add(1) != Some(s.tick) {
-            stopped_at_gap = Some(prev.tick);
-            break;
-        }
-        let seconds = s.time - prev.time;
-        let length = FrameLength::of(seconds);
-        match length {
-            FrameLength::Step(_) => {}
-            FrameLength::Clamped => {
-                variable.clamped += 1;
-                variable.first_clamped.get_or_insert(s.tick);
-            }
-            FrameLength::NoOp => {
-                variable.no_op += 1;
-                variable.first_no_op.get_or_insert(s.tick);
-            }
-        }
-        lengths.push(seconds);
-        let report = sim.tick(&s.input, length.dt(), finite(s.time - s0.time));
-        if report.respawned {
-            notes.push(format!("respawn (kill_z) at tick {}", s.tick));
-        }
-        trace.samples.push(TraceSample::capture(
-            s.tick,
-            s.time,
-            &s.input,
-            sim.player(),
-            sim.fov(),
-        ));
-        prev = s;
-    }
-    variable.lengths = StepStats::of_lengths(lengths);
-    if let Some(t) = variable.first_clamped {
-        notes.push(format!(
-            "warning: {} tick(s) longer than {MAX_STEP_DT} s were simulated as {MAX_STEP_DT} s \
-             (our step bound; first at tick {t})",
-            variable.clamped
-        ));
-    }
-    if let Some(t) = variable.first_no_op {
-        notes.push(format!(
-            "warning: {} tick(s) have a frame length that is not positive; no time passed in \
-             them (first at tick {t})",
-            variable.no_op
-        ));
-    }
-    let respawns = sim.respawn_count().saturating_sub(respawns_before);
-    (stopped_at_gap, respawns, variable)
 }
 
 #[cfg(test)]
@@ -1588,6 +2796,183 @@ mod tests {
                 }
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn base_actor_comparison_and_event_notes() {
+        let named = |name: Option<&str>, world_geometry| SurfaceText {
+            text: String::new(),
+            name: name.map(str::to_owned),
+            world_geometry,
+        };
+        let cmp = |recorded, ours: &SurfaceText| base_comparison(recorded, ours);
+        assert!(cmp(None, &named(Some("A_1"), false)).contains("names no base actor"));
+        assert!(cmp(Some("A_1"), &named(Some("A_1"), false)).contains("the same name (A_1"));
+        assert!(cmp(Some("A_1"), &named(Some("A_2"), false)).ends_with("is A_1: another actor"));
+        assert!(
+            cmp(Some("WorldInfo_6"), &named(None, true)).ends_with("world geometry on both sides")
+        );
+        assert!(
+            cmp(Some("StaticMeshActor_3"), &named(None, true))
+                .ends_with("an actor, where ours is world geometry")
+        );
+        assert!(cmp(Some("A_1"), &named(None, false)).ends_with("not comparable)"));
+        // A hand-made level has no actor names.
+        let game = Game::graybox().unwrap();
+        let mut names = ActorNames::new(&ReplayLevel::Graybox, &game);
+        assert_eq!(names.name(7), None);
+        let world = surface_text(&Surface::default(), &mut names);
+        assert!(world.world_geometry && world.text == "world geometry (no actor)");
+        // A converted directory that does not exist: no names, no panic.
+        let mut missing = ActorNames {
+            source: Some((PathBuf::from("/nonexistent"), vec!["AG-Workshop".into()])),
+            levels: BTreeMap::new(),
+        };
+        assert_eq!(missing.name(3), None);
+        assert_eq!(
+            missing.name(u32::MAX),
+            None,
+            "a level the map does not have"
+        );
+
+        // The notes about events, by what the replay did.
+        let event = |tick, kind, action| CrossedEvent { tick, kind, action };
+        let mut notes = Vec::new();
+        event_notes(
+            &[
+                event(40, EventKind::StoryModeOn, EventAction::Stopped),
+                event(40, EventKind::Teleport, EventAction::Stopped),
+            ],
+            Some(40),
+            39,
+            120,
+            &mut notes,
+        );
+        assert_eq!(
+            notes,
+            [
+                "validity: stopped before tick 40 (story mode on, teleport): a replay of the \
+              inputs cannot reproduce it. 39 of 120 tick(s) replayed; --level-events inject \
+              takes the recorded change and runs on, ignore runs through"
+            ]
+        );
+        notes.clear();
+        let many: Vec<CrossedEvent> = (0..30)
+            .map(|i| event(100 + i, EventKind::Teleport, EventAction::LeftOut))
+            .collect();
+        event_notes(&many, None, 0, 0, &mut notes);
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].starts_with("validity: 30 event(s) the inputs cannot reproduce")
+                && notes[0].ends_with("119 teleport and 10 more"),
+            "{notes:#?}"
+        );
+        notes.clear();
+        event_notes(&[], None, 5, 5, &mut notes);
+        assert!(notes.is_empty());
+        assert_eq!(bounded(&[]), "");
+    }
+
+    /// A state: note that cannot be read is an error when the start state
+    /// is asked for, and a warning when it is not.
+    #[test]
+    fn unreadable_state_note() {
+        let broken = standing_original(&["state: {\"v\":7,\"changes\":[]}"], &walk_and_jump(5));
+        assert!(replay(&broken, &ReplayOptions::default()).is_err());
+        let r = replay(
+            &broken,
+            &ReplayOptions {
+                use_init: false,
+                ..ReplayOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.trace.samples.len(), 6);
+        assert!(
+            r.trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with("warning: the trace's state: note is not readable")),
+            "{:#?}",
+            r.trace.meta.notes
+        );
+        // A one-step replay of a trace without any state note says what it
+        // resynchronises.
+        let bare = standing_original(&[], &walk_and_jump(30));
+        let r = replay(
+            &bare,
+            &ReplayOptions {
+                one_step: true,
+                ..ReplayOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(r.one_step);
+        assert!(
+            r.trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.contains("and no script state (the trace has no state: note)")),
+            "{:#?}",
+            r.trace.meta.notes
+        );
+        // Without the recorded start state the script state is not written
+        // on later ticks either.
+        let stated = standing_original(&[&state_note(264.0, 0.3)], &walk_and_jump(30));
+        let off = replay(
+            &stated,
+            &ReplayOptions {
+                one_step: true,
+                use_init: false,
+                ..ReplayOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            off.trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.contains("no script state (the recorded state is switched off)")),
+            "{:#?}",
+            off.trace.meta.notes
+        );
+        assert!(
+            off.trace.meta.notes.iter().any(|n| n.starts_with(
+                "state check: GroundSpeed differs from the recording's after 30 of 30 tick(s) \
+                 (first at tick 1: ours 440, recorded 264)"
+            )),
+            "{:#?}",
+            off.trace.meta.notes
+        );
+        let on = replay(
+            &stated,
+            &ReplayOptions {
+                one_step: true,
+                ..ReplayOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            on.trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.contains("our GroundSpeed, AirControl")),
+            "{:#?}",
+            on.trace.meta.notes
+        );
+        // Every sample of this "original" stands at the spawn point while
+        // its inputs walk: each one-step tick starts there again.
+        let start = bare.samples[0].position;
+        assert!(
+            r.trace
+                .samples
+                .iter()
+                .all(|s| (s.position - start).length() < 10.0)
         );
     }
 

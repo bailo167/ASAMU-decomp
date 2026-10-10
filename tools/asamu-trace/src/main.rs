@@ -7,10 +7,12 @@
 //! asamu-trace replay TRACE --out OURS [--converted DIR [--map NAME] [--kismet]]
 //!                    [--tick-rate HZ | --variable-dt]
 //!                    [--from-tick T] [--ticks N] [--start refuse|snap|force] [--story-mode on|off]
+//!                    [--one-step] [--level-events stop|inject|ignore]
 //!                    [--no-init] [--max-grapples N] [--placeholder]
-//!                    [--compare [--json SUMMARY] [--tol-*]]
+//!                    [--compare [--json SUMMARY] [--fov-verdict auto|count|exclude] [--tol-*]]
 //! asamu-trace compare A B [--tol-position UU] [--tol-velocity UU/S] [--tol-angle RAD] [--tol-fov DEG]
-//!                    [--tol-anchor UU] [--json SUMMARY] [--fail-on-divergence]
+//!                    [--tol-anchor UU] [--fov-verdict auto|count|exclude] [--json SUMMARY]
+//!                    [--fail-on-divergence]
 //! asamu-trace report SUMMARY.json... [--title TEXT] [--out FILE]
 //! asamu-trace validate FILE...
 //! asamu-trace check-recorder [--binary PATH] [--repo DIR] [--verbose]
@@ -20,6 +22,12 @@
 //! fixed rate (`tick_rate: null`, the original without benchmark mode) with
 //! each sample's own frame length; `--tick-rate` forces fixed ticks,
 //! `--variable-dt` forces the frame lengths (see `asamu_trace::replay`).
+//! A replay of an original recording ends before the first teleport or
+//! level-script state change (`--level-events`); `--one-step` restarts every
+//! tick from the recording's previous sample, so that a comparison measures
+//! one tick of our rules instead of accumulated drift. `compare` leaves the
+//! FOV out of the verdict of a recording whose FOV column is the camera's
+//! cached view FOV (`--fov-verdict`).
 
 use std::fs::File;
 use std::io::BufReader;
@@ -29,11 +37,14 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use asamu_player::Trace;
 use asamu_player::trace::CompareTolerances;
-use asamu_trace::compare::{CompareSummary, Verdict, compare_traces, render_text};
+use asamu_trace::compare::{
+    CompareOptions, CompareSummary, FovPolicy, HARNESS_NOTE_PREFIXES, Verdict, compare_traces_with,
+    render_text,
+};
 use asamu_trace::convert::{ConvertOptions, MoveInput, convert, output_names, raw_timing};
 use asamu_trace::move_input::MoveFrame;
 use asamu_trace::raw::{RawFile, looks_raw};
-use asamu_trace::replay::{ReplayLevel, ReplayOptions, StartPolicy, Stepping, replay};
+use asamu_trace::replay::{EventPolicy, ReplayLevel, ReplayOptions, StartPolicy, Stepping, replay};
 use asamu_trace::timestep::StepStats;
 use asamu_trace::{layout, read_trace, report, segments, write_trace};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -63,6 +74,29 @@ fn tolerance(s: &str) -> Result<f64, String> {
     }
 }
 
+/// `--fov-verdict`.
+#[derive(Clone, Copy, ValueEnum)]
+enum FovArg {
+    /// Leave the FOV out when a trace's notes say its FOV column is the
+    /// camera's cached view FOV (which does not show the zoom), else count it.
+    Auto,
+    /// Count the FOV.
+    Count,
+    /// Leave the FOV out.
+    Exclude,
+}
+
+/// `--level-events`.
+#[derive(Clone, Copy, ValueEnum)]
+enum EventsArg {
+    /// End the replay before the tick (one-step: leave the tick out).
+    Stop,
+    /// Take the recorded change over and go on, with a note.
+    Inject,
+    /// Simulate the tick like any other, with a warning.
+    Ignore,
+}
+
 #[derive(Args, Clone, Copy)]
 struct TolArgs {
     /// Position tolerance, UU.
@@ -80,6 +114,10 @@ struct TolArgs {
     /// Grapple anchor tolerance, UU.
     #[arg(long, default_value_t = 0.0, value_parser = tolerance)]
     tol_anchor: f64,
+    /// Whether the FOV counts for the verdict (its numbers are always
+    /// reported; no tolerance changes).
+    #[arg(long, value_enum, default_value = "auto")]
+    fov_verdict: FovArg,
 }
 
 impl TolArgs {
@@ -90,6 +128,16 @@ impl TolArgs {
             angle: self.tol_angle,
             fov: self.tol_fov,
             anchor: self.tol_anchor,
+        }
+    }
+
+    fn options(self) -> CompareOptions {
+        CompareOptions {
+            fov: match self.fov_verdict {
+                FovArg::Auto => FovPolicy::Auto,
+                FovArg::Count => FovPolicy::Count,
+                FovArg::Exclude => FovPolicy::Exclude,
+            },
         }
     }
 }
@@ -197,7 +245,8 @@ enum Cmd {
         #[arg(long, conflicts_with = "tick_rate")]
         variable_dt: bool,
         /// Do not apply the recorded start state (the trace's state: or init: note,
-        /// the start sample's button levels and FOV).
+        /// the start sample's button levels and FOV); with --one-step, do not
+        /// write the recorded script state on later ticks either.
         #[arg(long)]
         no_init: bool,
         /// What to do when the start tick of an original recording is not a
@@ -219,6 +268,17 @@ enum Cmd {
         /// Replay at most this many ticks.
         #[arg(long)]
         ticks: Option<u64>,
+        /// Restart every tick from the input trace's previous sample
+        /// (position, velocity, view, physics mode, attachment and the
+        /// recorded script state): the errors are those of one tick of our
+        /// rules, not accumulated drift.
+        #[arg(long)]
+        one_step: bool,
+        /// What to do at a teleport or a level-script state change of an
+        /// original recording (story mode, a console speed, the grapple
+        /// capacity, the rocket boots), which inputs cannot reproduce.
+        #[arg(long, value_enum, default_value = "stop")]
+        level_events: EventsArg,
         /// Compare our trace with the input trace afterwards.
         #[arg(long)]
         compare: bool,
@@ -314,7 +374,9 @@ fn cmd_convert(
                 StepStats::of_samples(&s.trace.samples).describe()
             );
             for n in s.trace.meta.notes.iter().filter(|n| {
-                n.starts_with("move input:") || n.starts_with("check:") || n.starts_with("input:")
+                ["move input:", "check:", "input:", "event:", "fov:"]
+                    .iter()
+                    .any(|p| n.starts_with(p))
             }) {
                 println!("    {n}");
             }
@@ -513,6 +575,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             placeholder,
             from_tick,
             ticks,
+            one_step,
+            level_events,
             compare,
             json,
             tol,
@@ -550,6 +614,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 placeholder,
                 start_tick: from_tick,
                 max_ticks: ticks,
+                one_step,
+                events: match level_events {
+                    EventsArg::Stop => EventPolicy::Stop,
+                    EventsArg::Inject => EventPolicy::Inject,
+                    EventsArg::Ignore => EventPolicy::Ignore,
+                },
             };
             let r = replay(&original, &opts)?;
             write_trace(&r.trace, &out)?;
@@ -568,11 +638,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 (Stepping::PerSample, None) => "per-sample frame lengths".to_owned(),
             };
             println!(
-                "{}: {} samples, {stepping}{}{}",
+                "{}: {} samples, {stepping}{}{}{}{}",
                 out.display(),
                 r.trace.samples.len(),
+                if r.one_step { ", one-step" } else { "" },
                 r.stopped_at_gap
                     .map(|t| format!(", stopped at the gap after tick {t}"))
+                    .unwrap_or_default(),
+                r.stopped_at_event
+                    .map(|t| format!(", stopped before the event at tick {t}"))
                     .unwrap_or_default(),
                 if r.respawns > 0 {
                     format!(", {} respawn(s)", r.respawns)
@@ -581,19 +655,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             );
             for n in r.trace.meta.notes.iter().filter(|n| {
-                n.starts_with("start") || n.starts_with("warning:") || n.starts_with("note:")
+                n.starts_with("start")
+                    || n.starts_with("note:")
+                    || HARNESS_NOTE_PREFIXES.iter().any(|p| n.starts_with(p))
             }) {
                 println!("  {n}");
             }
             if compare {
-                let s = compare_traces(
+                let mut s = compare_traces_with(
                     &file_name(&trace),
                     &original,
                     &file_name(&out),
                     &r.trace,
                     &tol.tolerances(),
+                    &tol.options(),
                 );
+                // Printed above already.
+                let harness_notes = std::mem::take(&mut s.harness_notes);
                 print!("{}", render_text(&s));
+                s.harness_notes = harness_notes;
                 if let Some(j) = json {
                     write_summary(&s, &j)?;
                 }
@@ -608,7 +688,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let ta = read_trace(&a)?;
             let tb = read_trace(&b)?;
-            let s = compare_traces(&file_name(&a), &ta, &file_name(&b), &tb, &tol.tolerances());
+            let s = compare_traces_with(
+                &file_name(&a),
+                &ta,
+                &file_name(&b),
+                &tb,
+                &tol.tolerances(),
+                &tol.options(),
+            );
             print!("{}", render_text(&s));
             if let Some(j) = json {
                 write_summary(&s, &j)?;

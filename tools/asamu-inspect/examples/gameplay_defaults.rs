@@ -15,8 +15,8 @@
 //!     [--class <Class>]...    # report only these classes
 //!
 //! # Win32 layout: validates the Win32 rules against the Win32 binary data and
-//! # writes native_layout_win32.json (into --win32-data) and the Windows
-//! # recorder layout. Run from the repository root.
+//! # writes native_layout_win32.json and recorder_optional_win32.json (into
+//! # --win32-data) and the Windows recorder layout. Run from the repository root.
 //! cargo run --release -p asamu-inspect --example gameplay_defaults -- --target win32 \
 //!     [--win32-data docs/reverse-engineering/data/win32]
 //!     [--recorder-layout tools/trace-recorder/layout_win_x86.json]
@@ -1077,6 +1077,9 @@ const WIN32_EXTRA_LAYOUTS: &[&str] = &[
     "asamu.GrappleGun",
     "asamu.ASAMUPawn",
     "asamu.ASAMURocketBoots",
+    // Optional recorder fields: the view bob lives in the script class
+    // between UDKPawn and ASAMUPawn.
+    "UTGame.UTPawn",
 ];
 
 /// Script structs whose member layout is written to
@@ -1087,6 +1090,8 @@ const WIN32_STRUCTS: &[&str] = &[
     "Core.Object.TPOV",
     "Core.Object.Vector",
     "Core.Object.Rotator",
+    // Optional recorder fields: the element of Actor.Timers.
+    "Engine.Actor.TimerData",
 ];
 
 /// What each Win32 ablation does instead of the rule.
@@ -1539,6 +1544,79 @@ const WIN32_FUNCTIONS: &[Win32Function] = &[
         Locate::Scan,
         0x002B_1140,
         "paired with the Mac function by content: after testing bit 1 of a flags byte it takes the frame counter modulo 10 (64-bit) and compares it with a random number",
+    ),
+    // Functions behind the optional recorder fields (WIN32_OPTIONAL_FIELDS).
+    wf(
+        "UObject::execGetStateName",
+        Locate::Exec("UObjectexecGetStateName"),
+        0x0018_D100,
+        "native function name table",
+    ),
+    wf(
+        "AActor::execGetTimerCount",
+        Locate::Exec("AActorexecGetTimerCount"),
+        0x0051_6C00,
+        "native function name table",
+    ),
+    wf(
+        "AActor::GetTimerCount",
+        Locate::CalledBy("AActor::execGetTimerCount"),
+        0x0075_B670,
+        "the only direct call of the exec thunk, as on the Mac; it walks the actor's timers and returns the count of the one whose function name and object match",
+    ),
+    wf(
+        "AActor::execIsTimerActive",
+        Locate::Exec("AActorexecIsTimerActive"),
+        0x0051_6B50,
+        "native function name table",
+    ),
+    wf(
+        "AActor::IsTimerActive",
+        Locate::CalledBy("AActor::execIsTimerActive"),
+        0x0075_B540,
+        "the only direct call of the exec thunk, as on the Mac; the same walk, then it tests the timer's rate",
+    ),
+    wf(
+        "AActor::execPauseTimer",
+        Locate::Exec("AActorexecPauseTimer"),
+        0x0051_6A70,
+        "native function name table",
+    ),
+    wf(
+        "AActor::PauseTimer",
+        Locate::CalledBy("AActor::execPauseTimer"),
+        0x0075_B410,
+        "the only direct call of the exec thunk, as on the Mac; the same walk, then it sets or clears the timer's paused bit",
+    ),
+    wf(
+        "AActor::execSetTimer",
+        Locate::Exec("AActorexecSetTimer"),
+        0x0051_6810,
+        "native function name table",
+    ),
+    wf(
+        "AActor::SetTimer",
+        Locate::CalledBy("AActor::execSetTimer"),
+        0x0075_ACF0,
+        "the only direct call of the exec thunk, as on the Mac; like the Mac function it writes its loop argument into bit 0 of the timer's first word and clears bit 1 of it",
+    ),
+    wf(
+        "ACamera::execSetViewTarget",
+        Locate::Exec("ACameraexecSetViewTarget"),
+        0x0052_8ED0,
+        "native function name table",
+    ),
+    wf(
+        "ACamera::SetViewTarget",
+        Locate::CalledBy("ACamera::execSetViewTarget"),
+        0x004C_8B10,
+        "the only direct call of the exec thunk, as on the Mac",
+    ),
+    wf(
+        "ACamera::AssignViewTarget",
+        Locate::CalledBy("ACamera::SetViewTarget"),
+        0x004B_D9B0,
+        "called twice by ACamera::SetViewTarget, as on the Mac; like the Mac function it copies the default aspect ratio and the default field of view into the view target and then loads the owning controller",
     ),
 ];
 
@@ -2349,6 +2427,18 @@ const WIN32_NATIVE: &[Win32Native] = &[
         "8bbfc8040000",
         "loads",
     ),
+    // Optional recorder field: the pawn's collision cylinder. The next two
+    // instructions load the cylinder's radius and height (rows above).
+    wn(
+        "Engine.Pawn",
+        "CylinderComponent",
+        0x38C,
+        None,
+        "APawn::physFalling",
+        0x7279E4,
+        "8b868c030000",
+        "loads",
+    ),
 ];
 
 /// A field offset found a second time, by a route that shares nothing with
@@ -3021,6 +3111,59 @@ const WIN32_SECOND: &[Win32Second] = &[
         "UInput::InputKey",
         0x91_776D,
         "8b9684000000",
+        "loads",
+        &[],
+    ),
+    // Optional recorder fields (WIN32_OPTIONAL_FIELDS): the state frame of
+    // an object, an actor's timers, and the two camera defaults that
+    // bracket the field-of-view lock (bLockedFOV 0x1DC, LockedFOV 0x1E0).
+    ws(
+        "Core.Object",
+        "StateFrame",
+        0x14,
+        "UObject::execGetStateName",
+        0x18_D125,
+        "8b4614",
+        "loads",
+        &[],
+    ),
+    ws(
+        "Engine.Actor",
+        "Timers",
+        0xA4,
+        "AActor::GetTimerCount",
+        0x75_B6D2,
+        "8b83a4000000",
+        "loads",
+        &[],
+    ),
+    ws(
+        "Engine.Camera",
+        "DefaultFOV",
+        0x1D8,
+        "ACamera::AssignViewTarget",
+        0x4B_D9DD,
+        "d987d8010000",
+        "loads",
+        &[],
+    ),
+    ws(
+        "Engine.Camera",
+        "DefaultAspectRatio",
+        0x1E8,
+        "ACamera::AssignViewTarget",
+        0x4B_D9D2,
+        "d987e8010000",
+        "loads",
+        &[],
+    ),
+    ws(
+        "Engine.Camera",
+        "PCOwner",
+        0x1CC,
+        "ACamera::AssignViewTarget",
+        0x4B_D9EA,
+        "8b87cc010000",
         "loads",
         &[],
     ),
@@ -4386,6 +4529,7 @@ fn win32_recorder_layout(
     for r in WIN32_STRUCT_EVIDENCE
         .iter()
         .chain(WIN32_REFLECTION_EVIDENCE)
+        .chain(WIN32_OPTIONAL_STRUCT_EVIDENCE)
     {
         let mut pairs: Vec<(&str, String)> = vec![
             ("what", js(format!("{}: {}", r.structure, r.what))?),
@@ -4458,7 +4602,8 @@ fn win32_recorder_layout(
         "Generated by: cargo run --release -p asamu-inspect --example gameplay_defaults -- --target win32 (DEFAULTS.md, Win32 layout). Do not edit by hand. asamu-trace check-recorder checks this file against native_layout_win32.json, the defaults data, the Win32 binary data, the Mac layout's field list and, when a local copy of the executable is present, the executable's bytes.",
         "evidence: native_code = an instruction listed under native_evidence reads or writes the field at this offset (CONFIRMED statically); native_layout = row of native_layout_win32.json for a native class whose sizeof the Win32 rules reproduce (rules CONFIRMED, this offset STRONG); layout_rule = the same rules applied to a script-only class or to a struct member (STRONG). native_evidence also lists fields the recorder does not read: they bracket the ones it does.",
         "native_evidence holds two independent sets. The first locates most functions by vtable slot. The second (entries whose anchor is a literal, an exec thunk other than the four of the first set, or called_by; and every entry with near_literals) was added by a separate verification pass: it identifies each function by a UTF-16 literal only that function uses, by the native function name table or by a direct call from such a function, and includes the engine's own checks of compiled member offsets in UGameEngine::Init. It also shows where the engine's reflection objects keep a property's offset (struct UProperty, UStruct, UField), which a live check can read for every field.",
-        "Live validation is pending: nothing in this file has been read from the running Windows game yet. The sentinels are the first live check.",
+        "Live validation (2026-10-10, WINDOWS_BINARY.md 8): the running game matched the build, the sentinels and every property offset its reflection objects give (15,081 of 15,081 loaded properties, 3,226 of 3,226 bool masks).",
+        "Optional fields are not in this file: its field list has to equal the Mac layout's (asamu-trace check-recorder). They are in docs/reverse-engineering/data/win32/recorder_optional_win32.json, generated by the same command; their instructions are listed here under native_evidence (the last function entries, and the FStateFrame and TimerData structures).",
     ];
     let notes: Vec<String> = notes.iter().map(js).collect::<Result<_>>()?;
 
@@ -4485,6 +4630,414 @@ fn win32_recorder_layout(
     Ok(out)
 }
 
+// ------------------------------------------ Win32 optional recorder fields
+
+/// File of the optional recorder fields, inside [`WIN32_DATA_DIR`].
+const WIN32_OPTIONAL_FILE: &str = "recorder_optional_win32.json";
+/// Schema of that file.
+const WIN32_OPTIONAL_SCHEMA: &str = "asamu-decomp/recorder-layout-optional/v1";
+/// Folder of the per-class defaults data, relative to [`WIN32_DATA_DIR`]
+/// (the sentinel values are read from it, not typed here).
+const WIN32_DEFAULTS_DIR: &str = "../defaults";
+
+/// A field the Windows recorder reads when the optional file is deployed
+/// next to it. The fields of one `group` are read, checked and dropped
+/// together; the raw record gains the group's members
+/// (`asamu_recorder_core.py`, `Optional`).
+struct OptionalField {
+    group: &'static str,
+    class: &'static str,
+    /// Property name, or a dotted path through struct members.
+    name: &'static str,
+    /// What brackets or confirms the offset beyond its `evidence` class.
+    note: &'static str,
+}
+
+const fn op(
+    group: &'static str,
+    class: &'static str,
+    name: &'static str,
+    note: &'static str,
+) -> OptionalField {
+    OptionalField {
+        group,
+        class,
+        name,
+        note,
+    }
+}
+
+/// Note of a field no record member comes from.
+const SENTINEL_ONLY: &str = "read only as the sentinel of its group";
+/// Bracket of the two field-of-view lock fields.
+const FOV_BRACKET: &str = "between DefaultFOV (0x1D8) and DefaultAspectRatio (0x1E8), which ACamera::AssignViewTarget loads";
+
+/// The optional recorder fields (`docs/PARITY_FINDINGS.md` N1, N5, N9).
+const WIN32_OPTIONAL_FIELDS: &[OptionalField] = &[
+    // The camera's field-of-view lock: what a zoom changes.
+    op("fov", "Engine.Camera", "DefaultFOV", ""),
+    op("fov", "Engine.Camera", "bLockedFOV", FOV_BRACKET),
+    op("fov", "Engine.Camera", "LockedFOV", FOV_BRACKET),
+    op("fov", "Engine.Camera", "DefaultAspectRatio", SENTINEL_ONLY),
+    // The camera's cached point of view: the aim direction of the grapple.
+    op(
+        "camera_pov",
+        "Engine.Camera",
+        "CameraCache.POV.Location",
+        "",
+    ),
+    op(
+        "camera_pov",
+        "Engine.Camera",
+        "CameraCache.POV.Rotation",
+        "",
+    ),
+    op(
+        "camera_pov",
+        "Engine.Camera",
+        "FreeCamDistance",
+        SENTINEL_ONLY,
+    ),
+    // The floor normal the walking physics keeps.
+    op("floor", "Engine.Pawn", "Floor", ""),
+    // The eye: the height the eye height is smoothed towards.
+    op("eye", "Engine.Pawn", "BaseEyeHeight", ""),
+    // The view bob (the aim's origin is Location + EyeHeight + WalkBob).
+    op("bob", "UTGame.UTPawn", "bJustLanded", ""),
+    op("bob", "UTGame.UTPawn", "bLandRecovery", ""),
+    op("bob", "UTGame.UTPawn", "DoubleJumpEyeHeight", SENTINEL_ONLY),
+    op("bob", "UTGame.UTPawn", "Bob", ""),
+    op("bob", "UTGame.UTPawn", "LandBob", ""),
+    op("bob", "UTGame.UTPawn", "JumpBob", ""),
+    op("bob", "UTGame.UTPawn", "AppliedBob", ""),
+    op("bob", "UTGame.UTPawn", "BobTime", ""),
+    op("bob", "UTGame.UTPawn", "WalkBob", ""),
+    // The pawn's collision cylinder.
+    op("cylinder", "Engine.Actor", "CollisionComponent", ""),
+    op("cylinder", "Engine.Pawn", "CylinderComponent", ""),
+    op("cylinder", "Engine.PrimitiveComponent", "Translation", ""),
+    op(
+        "cylinder",
+        "Engine.CylinderComponent",
+        "CollisionHeight",
+        "",
+    ),
+    op(
+        "cylinder",
+        "Engine.CylinderComponent",
+        "CollisionRadius",
+        "",
+    ),
+    // The weapon's script state and its timers (the refire check).
+    op("weapon_state", "Core.Object", "StateFrame", ""),
+    op("timers", "Engine.Actor", "Timers", ""),
+];
+
+/// A class default that a group's object must hold at a field of the group
+/// (a wrong offset shows as another value). The value comes from the
+/// defaults data file.
+struct OptionalSentinel {
+    group: &'static str,
+    object: &'static str,
+    class: &'static str,
+    name: &'static str,
+    data_file: &'static str,
+}
+
+const WIN32_OPTIONAL_SENTINELS: &[OptionalSentinel] = &[
+    OptionalSentinel {
+        group: "fov",
+        object: "camera",
+        class: "Engine.Camera",
+        name: "DefaultAspectRatio",
+        data_file: "ASAMUCamera.json",
+    },
+    OptionalSentinel {
+        group: "camera_pov",
+        object: "camera",
+        class: "Engine.Camera",
+        name: "FreeCamDistance",
+        data_file: "ASAMUCamera.json",
+    },
+    OptionalSentinel {
+        group: "bob",
+        object: "pawn",
+        class: "UTGame.UTPawn",
+        name: "DoubleJumpEyeHeight",
+        data_file: "ASAMUPawn.json",
+    },
+];
+
+/// Offset of the state node in the native state frame an object's
+/// `StateFrame` points at. The structure has no script declaration, so no
+/// layout rule gives this: the instruction of
+/// [`WIN32_OPTIONAL_STRUCT_EVIDENCE`] is its only source.
+const FSTATEFRAME_STATE_NODE: u64 = 0x28;
+
+/// Members of the two structures the optional fields lead to, as Win32
+/// instructions show them.
+const WIN32_OPTIONAL_STRUCT_EVIDENCE: &[Win32StructEvidence] = &[
+    se(
+        "FStateFrame",
+        "StateNode at +0x28: the frame loaded from the object's StateFrame (+0x14) gives the state whose name the function returns",
+        "UObject::execGetStateName",
+        0x0018_D12D,
+        "8b4028",
+    ),
+    se(
+        "TimerData",
+        "28-byte elements: the element offset is built as index * 8 - index, then doubled twice",
+        "AActor::GetTimerCount",
+        0x0075_B6D8,
+        "8d3cf500000000",
+    ),
+    se(
+        "TimerData",
+        "FuncName at +4: loaded and compared with the name argument (index first, number at +8)",
+        "AActor::GetTimerCount",
+        0x0075_B6E5,
+        "8b4c3804",
+    ),
+    se(
+        "TimerData",
+        "TimerObj at +0x18: compared with the object argument (the actor itself when none is given)",
+        "AActor::GetTimerCount",
+        0x0075_B734,
+        "396c3818",
+    ),
+    se(
+        "TimerData",
+        "Count at +0x10: the value the function returns",
+        "AActor::GetTimerCount",
+        0x0075_B793,
+        "f30f10448a10",
+    ),
+    se(
+        "TimerData",
+        "Rate at +0xC: a timer is active while its rate is above zero",
+        "AActor::IsTimerActive",
+        0x0075_B651,
+        "f30f10448a0c",
+    ),
+    se(
+        "TimerData",
+        "bPaused = bit 1 of the word at +0: the mask of the only bit the function changes",
+        "AActor::PauseTimer",
+        0x0075_B518,
+        "83e102",
+    ),
+    se(
+        "TimerData",
+        "bLoop = bit 0 of the word at +0: the loop argument is masked to that bit and written into the word (the same function clears bit 1 of it, the paused bit)",
+        "AActor::SetTimer",
+        0x0075_AF39,
+        "83e101",
+    ),
+];
+
+/// The optional recorder fields for the Win32 build
+/// (`docs/reverse-engineering/data/win32/recorder_optional_win32.json`):
+/// offsets by the Win32 rules, evidence classes as in the recorder layout,
+/// sentinel values from the defaults data.
+fn win32_optional_layout(
+    set: &PackageSet,
+    native: &[Win32Class],
+    data_dir: &Path,
+) -> Result<String> {
+    let mut lay = Layouter::for_target(set, Target::Win32);
+    let registered: std::collections::HashSet<String> = native
+        .iter()
+        .map(|c| c.path().to_ascii_lowercase())
+        .collect();
+
+    // Fields.
+    let mut fields = Vec::new();
+    for o in WIN32_OPTIONAL_FIELDS {
+        let (f, path) = resolve_field(&mut lay, o.class, o.name)?;
+        let kind = f.kind.trim_end_matches("Property");
+        let shown = WIN32_NATIVE
+            .iter()
+            .any(|r| r.class == o.class && r.field == o.name)
+            || WIN32_SECOND
+                .iter()
+                .any(|r| r.class == o.class && r.field == o.name);
+        let evidence = if shown {
+            "native_code"
+        } else if o.name.contains('.') || !registered.contains(&o.class.to_ascii_lowercase()) {
+            "layout_rule"
+        } else {
+            "native_layout"
+        };
+        let mut pairs: Vec<(&str, String)> = vec![
+            ("group", js(o.group)?),
+            ("class", js(o.class)?),
+            ("name", js(o.name)?),
+            ("offset", js(hex(f.offset))?),
+            ("kind", js(kind)?),
+            ("size", js(f.size)?),
+        ];
+        if let Some(b) = f.bit {
+            pairs.push(("bit", js(b)?));
+        }
+        pairs.push(("evidence", js(evidence)?));
+        let mut notes = Vec::new();
+        if path.len() > 1 {
+            let steps: Vec<String> = path
+                .iter()
+                .enumerate()
+                .map(|(i, (_, n, at))| {
+                    if i == 0 {
+                        format!("{n} at {}", hex(*at))
+                    } else {
+                        format!("{n} at +{at:#X}")
+                    }
+                })
+                .collect();
+            notes.push(steps.join(", then "));
+        }
+        if !o.note.is_empty() {
+            notes.push(o.note.to_owned());
+        }
+        if !notes.is_empty() {
+            pairs.push(("note", js(notes.join("; "))?));
+        }
+        fields.push(obj(&pairs)?);
+    }
+
+    // Sentinels: the class default of the data file, as a 32-bit float.
+    let mut sentinels = Vec::new();
+    for s in WIN32_OPTIONAL_SENTINELS {
+        let listed = WIN32_OPTIONAL_FIELDS
+            .iter()
+            .any(|o| o.group == s.group && o.class == s.class && o.name == s.name);
+        if !listed {
+            bail!(
+                "sentinel {}.{} is not a field of group {}",
+                s.class,
+                s.name,
+                s.group
+            );
+        }
+        let f = own_field(&mut lay, s.class, s.name)?;
+        if f.kind != "FloatProperty" {
+            bail!("sentinel {}.{} is not a float", s.class, s.name);
+        }
+        let data = read_json(&data_dir.join(WIN32_DEFAULTS_DIR).join(s.data_file))?;
+        let p = named(&data, "properties", s.name)?;
+        if p["declared_in"].as_str() != Some(s.class) {
+            bail!(
+                "{}: {} is declared in {}, not in {}",
+                s.data_file,
+                s.name,
+                p["declared_in"],
+                s.class
+            );
+        }
+        let value = p["value"]
+            .as_f64()
+            .with_context(|| format!("{}: {} has no numeric value", s.data_file, s.name))?;
+        sentinels.push(obj(&[
+            ("group", js(s.group)?),
+            ("object", js(s.object)?),
+            ("class", js(s.class)?),
+            ("name", js(s.name)?),
+            ("expected", js(value)?),
+            ("data_file", js(s.data_file)?),
+        ])?);
+    }
+
+    // Structures.
+    let timer = lay.layout("Engine.Actor.TimerData")?;
+    let member = |name: &str| -> Result<(u64, Option<u32>)> {
+        timer
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| (f.offset, f.bit))
+            .with_context(|| format!("TimerData has no member {name}"))
+    };
+    let (flags, loop_bit) = member("bLoop")?;
+    let (paused_at, paused_bit) = member("bPaused")?;
+    let (Some(loop_bit), Some(paused_bit)) = (loop_bit, paused_bit) else {
+        bail!("TimerData: bLoop and bPaused are not bits");
+    };
+    if paused_at != flags {
+        bail!("TimerData: bLoop and bPaused are not in one word");
+    }
+    let structs = vec![
+        format!(
+            "\"FStateFrame\": {}",
+            obj(&[
+                (
+                    "members",
+                    obj(&[("StateNode", js(FSTATEFRAME_STATE_NODE)?)])?
+                ),
+                (
+                    "evidence",
+                    js(
+                        "native_code: UObject::execGetStateName loads the state frame from Object.StateFrame (+0x14), the state node from +0x28 of the frame, and returns that object's name (+0x2C); a native structure without a script declaration, so no layout rule applies"
+                    )?
+                ),
+            ])?
+        ),
+        format!(
+            "\"TimerData\": {}",
+            obj(&[
+                ("size", js(timer.size)?),
+                (
+                    "members",
+                    obj(&[
+                        ("flags", js(flags)?),
+                        ("FuncName", js(member("FuncName")?.0)?),
+                        ("Rate", js(member("Rate")?.0)?),
+                        ("Count", js(member("Count")?.0)?),
+                        ("TimerObj", js(member("TimerObj")?.0)?),
+                    ])?
+                ),
+                (
+                    "bits",
+                    obj(&[("bLoop", js(loop_bit)?), ("bPaused", js(paused_bit)?)])?
+                ),
+                (
+                    "evidence",
+                    js(format!(
+                        "native_code: AActor::GetTimerCount steps through Actor.Timers in {}-byte elements, compares FuncName at +4 and TimerObj at +0x18 and returns Count at +0x10; AActor::IsTimerActive tests Rate at +0xC; AActor::PauseTimer changes bit 1 of the word at +0; AActor::SetTimer writes its loop argument into bit 0 of it. Equal to the layout rule for Engine.Actor.TimerData (ends at {}, alignment {})",
+                        timer.size,
+                        hex(timer.end),
+                        timer.align
+                    ))?
+                ),
+            ])?
+        ),
+    ];
+
+    let notes = [
+        "Optional fields of the Windows trace recorder (docs/TRACE_CAPTURE.md 6.10). asamu_win.py reads them when this file lies in data/win32 next to it (win_remote.sh deploy copies it there) and writes them as optional members of the raw record; the raw header lists the members a recording has (optional_fields). Without this file, or with --raw-v1, the recorder writes plain version-1 records.",
+        "Generated by: cargo run -p asamu-inspect --example gameplay_defaults -- --target win32. Do not edit by hand. Offsets are the Win32 layout rules' (the rows are in native_layout_win32.json); evidence has the meaning it has in layout_win_x86.json, whose native_evidence lists the instructions (asamu-trace check-recorder checks those against the executable). A note names what else brackets an offset. A sentinel is a class default the group's object must hold: its value is read from the defaults data file.",
+        "A group is read, checked and dropped as one. Beyond the sentinels the recorder checks what each group leads to: the camera, the cylinder and the state node by class name, the floor normal by its length, a timer by its function name. base_level (the outermost object of the pawn's base actor) needs no field of this file.",
+        "Engine.Pawn stores no distance to the floor or to its base: no property of Actor, Pawn, GamePawn, UDKPawn, UTPawn or ASAMUPawn holds one (the floor check's result is local to the walking physics).",
+    ];
+    let notes: Vec<String> = notes.iter().map(js).collect::<Result<_>>()?;
+
+    let mut out = String::from("{\n");
+    for (k, v) in [
+        ("schema", js(WIN32_OPTIONAL_SCHEMA)?),
+        ("id", js("win-x86-steam-1822049-optional")?),
+        ("extends", js("win-x86-steam-1822049")?),
+        ("build", js(WIN32_BUILD)?),
+        ("game_build", js(WIN32_GAME_BUILD)?),
+        ("pointer_size", js(lay.ptr())?),
+    ] {
+        out.push_str(&format!("  {}: {v},\n", js(k)?));
+    }
+    block(&mut out, "notes", '[', &notes, false)?;
+    block(&mut out, "structs", '{', &structs, false)?;
+    block(&mut out, "fields", '[', &fields, false)?;
+    block(&mut out, "sentinels", '[', &sentinels, true)?;
+    out.push_str("}\n");
+    Ok(out)
+}
+
 /// Options of the Win32 mode.
 struct Win32Options {
     data_dir: PathBuf,
@@ -4500,14 +5053,15 @@ fn read_json(path: &Path) -> Result<Json> {
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// The two files the Win32 mode produces, as text:
-/// `(native_layout_win32.json, layout_win_x86.json)`.
+/// The three files the Win32 mode produces, as text:
+/// `(native_layout_win32.json, layout_win_x86.json,
+/// recorder_optional_win32.json)`.
 fn win32_outputs(
     set: &PackageSet,
     cooked: &Path,
     data_dir: &Path,
     template: &Path,
-) -> Result<(Win32Validation, String, String)> {
+) -> Result<(Win32Validation, String, String, String)> {
     let sizes = data_dir.join("class_sizes.json");
     let text =
         fs::read_to_string(&sizes).with_context(|| format!("reading {}", sizes.display()))?;
@@ -4529,6 +5083,12 @@ fn win32_outputs(
         .filter_map(|f| Some((f["class"].as_str()?, f["name"].as_str()?)))
         .filter(|(_, name)| name.contains('.'))
         .map(|(c, n)| (c.to_owned(), n.to_owned()))
+        .chain(
+            WIN32_OPTIONAL_FIELDS
+                .iter()
+                .filter(|o| o.name.contains('.'))
+                .map(|o| (o.class.to_owned(), o.name.to_owned())),
+        )
         .collect();
     let doc = win32_layout_document(set, &v, &native, &dotted)?;
     let mut layout = String::new();
@@ -4541,7 +5101,8 @@ fn win32_outputs(
         &read_json(&data_dir.join("functions.json"))?,
         &read_json(&data_dir.join("image.json"))?,
     )?;
-    Ok((v, layout, recorder))
+    let optional = win32_optional_layout(set, &native, data_dir)?;
+    Ok((v, layout, recorder, optional))
 }
 
 /// The Win32 mode (`--target win32`).
@@ -4608,7 +5169,8 @@ fn win32_main(set: &PackageSet, cooked: &Path, o: &Win32Options) -> Result<()> {
         }
         return Ok(());
     }
-    let (v, layout, recorder) = win32_outputs(set, cooked, &o.data_dir, &o.recorder_template)?;
+    let (v, layout, recorder, optional) =
+        win32_outputs(set, cooked, &o.data_dir, &o.recorder_template)?;
     println!(
         "win32 class sizes: {} registered, {} compared, {} equal, {} different; without script class {:?}; non-native script classes {}",
         v.registered,
@@ -4637,9 +5199,14 @@ fn win32_main(set: &PackageSet, cooked: &Path, o: &Win32Options) -> Result<()> {
         );
     }
     let layout_path = o.data_dir.join(WIN32_LAYOUT_FILE);
+    let optional_path = o.data_dir.join(WIN32_OPTIONAL_FILE);
     if o.check {
         let mut stale = Vec::new();
-        for (path, text) in [(&layout_path, &layout), (&o.recorder_layout, &recorder)] {
+        for (path, text) in [
+            (&layout_path, &layout),
+            (&o.recorder_layout, &recorder),
+            (&optional_path, &optional),
+        ] {
             if fs::read_to_string(path).ok().as_deref() != Some(text.as_str()) {
                 stale.push(path.display().to_string());
             }
@@ -4647,17 +5214,20 @@ fn win32_main(set: &PackageSet, cooked: &Path, o: &Win32Options) -> Result<()> {
         if !stale.is_empty() {
             bail!("out of date (regenerate without --check): {stale:?}");
         }
-        println!("win32 check: 2 files compared, 0 differ");
+        println!("win32 check: 3 files compared, 0 differ");
         return Ok(());
     }
     fs::write(&layout_path, layout)
         .with_context(|| format!("writing {}", layout_path.display()))?;
     fs::write(&o.recorder_layout, recorder)
         .with_context(|| format!("writing {}", o.recorder_layout.display()))?;
+    fs::write(&optional_path, optional)
+        .with_context(|| format!("writing {}", optional_path.display()))?;
     println!(
-        "wrote {} and {}",
+        "wrote {}, {} and {}",
         layout_path.display(),
-        o.recorder_layout.display()
+        o.recorder_layout.display(),
+        optional_path.display()
     );
     Ok(())
 }
@@ -6449,6 +7019,43 @@ mod tests {
             assert_eq!(r.function, "UGameEngine::Init");
             assert!(!decode(r.bytes).is_empty());
         }
+        // The optional recorder fields: their structures are not the
+        // recorder layout's, every structure row names a function found
+        // through the name table, and the state-node offset is the one its
+        // instruction holds.
+        for r in WIN32_OPTIONAL_STRUCT_EVIDENCE {
+            assert!(!RECORDER_STRUCTS.contains(&r.structure));
+            assert!(["FStateFrame", "TimerData"].contains(&r.structure));
+            let f = win32_function(r.function).unwrap();
+            assert!(matches!(f.locate, Locate::Exec(_) | Locate::CalledBy(_)));
+            assert!(r.rva >= f.rva && r.rva - f.rva < 0x4000, "{}", r.what);
+            assert!((2..=10).contains(&decode(r.bytes).len()));
+        }
+        let state_node = WIN32_OPTIONAL_STRUCT_EVIDENCE
+            .iter()
+            .find(|r| r.structure == "FStateFrame")
+            .unwrap();
+        assert!(decode(state_node.bytes).contains(&u8::try_from(FSTATEFRAME_STATE_NODE).unwrap()));
+        let mut optional = std::collections::HashSet::new();
+        for o in WIN32_OPTIONAL_FIELDS {
+            assert!(
+                optional.insert((o.class, o.name)),
+                "{}.{} is listed twice",
+                o.class,
+                o.name
+            );
+            assert!(!o.group.is_empty() && o.class.contains('.'));
+        }
+        for s in WIN32_OPTIONAL_SENTINELS {
+            assert!(optional.contains(&(s.class, s.name)), "{}", s.name);
+            assert!(
+                WIN32_OPTIONAL_FIELDS
+                    .iter()
+                    .any(|o| o.group == s.group && o.name == s.name)
+            );
+            assert!(["camera", "pawn"].contains(&s.object));
+            assert!(s.data_file.ends_with(".json"));
+        }
         // The second route: no function of it is found through a vtable
         // slot shift or functions.json (three are vtable slots that literals
         // of the Mac function confirm), and it shares no function with the
@@ -6626,7 +7233,7 @@ mod tests {
         let set = PackageSet::new(&[cooked.clone(), cooked.join("Maps")]);
         let root = repo_root();
         let data = root.join(WIN32_DATA_DIR);
-        let (v, layout, recorder) =
+        let (v, layout, recorder, optional) =
             win32_outputs(&set, &cooked, &data, &root.join(RECORDER_TEMPLATE)).unwrap();
         assert_eq!(v.registered, 1982);
         assert_eq!((v.sizes.compared, v.sizes.equal), (1652, 1652));
@@ -6698,5 +7305,63 @@ mod tests {
             recorder,
             "regenerate with --target win32"
         );
+        assert_eq!(
+            committed(data.join(WIN32_OPTIONAL_FILE)),
+            optional,
+            "regenerate with --target win32"
+        );
+        // The optional recorder fields: every one resolves, the two that a
+        // zoom changes lie between the two the camera code is seen to load,
+        // and the timer element is the 28 bytes the timer code steps by.
+        let j: Json = serde_json::from_str(&optional).unwrap();
+        assert_eq!(j["schema"], json!(WIN32_OPTIONAL_SCHEMA));
+        assert_eq!(
+            j["fields"].as_array().unwrap().len(),
+            WIN32_OPTIONAL_FIELDS.len()
+        );
+        assert_eq!(
+            at(&mut lay, "Engine.Camera", "bLockedFOV").unwrap(),
+            (0x1DC, Some(0), 4)
+        );
+        assert_eq!(
+            at(&mut lay, "Engine.Camera", "LockedFOV").unwrap(),
+            (0x1E0, None, 4)
+        );
+        assert_eq!(
+            at(&mut lay, "Engine.Camera", "CameraCache.POV.Rotation").unwrap(),
+            (0x390, None, 12)
+        );
+        assert_eq!(
+            at(&mut lay, "UTGame.UTPawn", "WalkBob").unwrap(),
+            (0x6CC, None, 12)
+        );
+        assert_eq!(j["structs"]["TimerData"]["size"], json!(28));
+        assert_eq!(j["structs"]["TimerData"]["members"]["Count"], json!(16));
+        assert_eq!(j["structs"]["TimerData"]["bits"]["bPaused"], json!(1));
+        assert_eq!(j["structs"]["TimerData"]["bits"]["bLoop"], json!(0));
+        // Each of the two bits has its own instruction: the mask is the
+        // last byte of an `and` with an 8-bit immediate.
+        for (bit, function) in [
+            ("bLoop", "AActor::SetTimer"),
+            ("bPaused", "AActor::PauseTimer"),
+        ] {
+            let rows: Vec<_> = WIN32_OPTIONAL_STRUCT_EVIDENCE
+                .iter()
+                .filter(|r| r.structure == "TimerData" && r.what.starts_with(bit))
+                .collect();
+            assert_eq!(rows.len(), 1, "{bit}");
+            assert_eq!(rows[0].function, function);
+            let bytes = decode(rows[0].bytes);
+            let n = j["structs"]["TimerData"]["bits"][bit].as_u64().unwrap();
+            assert_eq!(bytes[0], 0x83, "{bit}: not an 8-bit immediate form");
+            assert_eq!(u64::from(*bytes.last().unwrap()), 1u64 << n, "{bit}");
+        }
+        assert_eq!(
+            j["structs"]["FStateFrame"]["members"]["StateNode"],
+            json!(FSTATEFRAME_STATE_NODE)
+        );
+        for s in j["sentinels"].as_array().unwrap() {
+            assert!(s["expected"].as_f64().is_some_and(f64::is_finite), "{s}");
+        }
     }
 }

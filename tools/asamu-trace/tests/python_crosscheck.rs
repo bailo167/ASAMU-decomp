@@ -188,6 +188,40 @@ fn python_and_rust_converters_agree() {
         segments += crosscheck(py, &raw, dir.path(), &format!("varied{seed}"));
     }
     assert!(segments >= 8, "only {segments} segments exercised");
+    // Those recordings exercise the event notes: teleports (their positions
+    // are random), level-script state changes of every kind and attaches
+    // seen in the used-grapple counter only.
+    let mut kinds = std::collections::BTreeSet::new();
+    for (i, seed) in [1_u64, 7, 99, 2024].into_iter().enumerate() {
+        let raw = common::varied_recording(seed, 400, i % 2 == 0);
+        for seg in convert(&raw, &ConvertOptions::default()).unwrap() {
+            for n in seg
+                .trace
+                .meta
+                .notes
+                .iter()
+                .filter(|n| n.starts_with("event: "))
+            {
+                for what in [
+                    "teleport(s)",
+                    " and ",
+                    "story mode on",
+                    "story mode off",
+                    "GroundSpeed set (a console speed)",
+                    "grapple capacity changed",
+                    "rocket boots enabled",
+                    "rocket boots disabled",
+                    "inside one frame",
+                    "each with an attached sample",
+                ] {
+                    if n.contains(what) {
+                        kinds.insert(what);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(kinds.len(), 10, "event notes exercised: {kinds:?}");
 
     // Recordings without benchmark mode: every frame has its own length.
     // Both converters write no tick rate and the same sample times (the f64
@@ -195,6 +229,67 @@ fn python_and_rust_converters_agree() {
     let lengths = common::jittery_lengths(3, 150, 60.0);
     let (variable, _) = common::scripted_recording_variable(&lengths, 500);
     assert_eq!(crosscheck(py, &variable, dir.path(), "variable"), 1);
+    // Our own runs with a grapple flight (an attach inside one frame) and
+    // with a respawn (a teleport), and a run whose eye height changes on
+    // more ticks than the state note takes.
+    let flight: Vec<common::Step> = (1..=130)
+        .map(|i| common::Step {
+            d_pitch: match i {
+                3 => 3950,
+                89 => -3000,
+                _ => 0,
+            },
+            grapple: (10..87).contains(&i) || (90..110).contains(&i),
+            ..common::Step::default()
+        })
+        .collect();
+    let (flight, _) = common::scripted_steps(&flight, 100, false);
+    assert_eq!(crosscheck(py, &flight, dir.path(), "flight"), 1);
+    let fall: Vec<common::Step> = (1..=200)
+        .map(|i| common::Step {
+            forward: if i <= 60 { -1 } else { 0 },
+            ..common::Step::default()
+        })
+        .collect();
+    let (fall, _) = common::scripted_steps(&fall, 100, false);
+    assert_eq!(crosscheck(py, &fall, dir.path(), "fall"), 1);
+    for (raw, want) in [(&flight, "inside one frame"), (&fall, "teleport(s)")] {
+        let t = &convert(raw, &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(
+            t.meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with("event: ") && n.contains(want)),
+            "{want}: {:#?}",
+            t.meta.notes
+        );
+    }
+    let mut restless = common::varied_recording(31, 60, true);
+    let template = restless
+        .records
+        .iter()
+        .find(|r| r.player.is_some() && r.world.as_ref().is_some_and(|w| !w.paused))
+        .unwrap()
+        .clone();
+    let ticks = asamu_trace::state::EYE_HEIGHT_MAX_CHANGES + 3;
+    restless.records = (0..ticks)
+        .map(|i| {
+            let mut r = template.clone();
+            r.frame = 10 + i as u64;
+            r.player.as_mut().unwrap().eye_height = Some(30.0 + (i % 2) as f32);
+            r
+        })
+        .collect();
+    assert_eq!(crosscheck(py, &restless, dir.path(), "restless"), 1);
+    let t = &convert(&restless, &ConvertOptions::default()).unwrap()[0].trace;
+    assert!(
+        t.meta
+            .notes
+            .iter()
+            .any(|n| n.starts_with("check: EyeHeight left out of the state: note")),
+        "{:#?}",
+        &t.meta.notes[..t.meta.notes.len().saturating_sub(2)]
+    );
     let rust = convert(&variable, &ConvertOptions::default()).unwrap();
     assert_eq!(rust[0].trace.meta.tick_rate, None);
     let mut variable_segments = 0;

@@ -135,6 +135,31 @@ pub fn header(bindings: Vec<RawBinding>) -> RawHeader {
     }
 }
 
+/// A fake original that keeps our simulation's own samples: the trace
+/// converted from `raw` (its notes: the state timeline, the events) with the
+/// samples of `ours`, the run `raw` was made from. The converted samples
+/// hold the same run with the view angles gone through rotator units, which
+/// can move a yaw by one bit; these are our run bit for bit, as a test of
+/// exactness needs them.
+pub fn fake_original(raw: &RawFile, ours: &Trace) -> Trace {
+    let segments = asamu_trace::convert::convert(raw, &Default::default()).expect("convert");
+    assert_eq!(segments.len(), 1);
+    let converted = &segments[0].trace;
+    assert_eq!(converted.samples.len(), ours.samples.len());
+    for (a, b) in converted.samples.iter().zip(&ours.samples) {
+        assert_eq!(a.input, b.input, "tick {}", a.tick);
+        assert_eq!(a.position, b.position, "tick {}", a.tick);
+    }
+    let mut samples = ours.samples.clone();
+    for (s, c) in samples.iter_mut().zip(&converted.samples) {
+        s.time = c.time;
+    }
+    Trace {
+        meta: converted.meta.clone(),
+        samples,
+    }
+}
+
 /// One scripted tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Step {
@@ -258,6 +283,10 @@ fn base_player() -> RawPlayer {
     }
 }
 
+/// The base actor name the fake recordings give a pawn that stands on
+/// something (hand-made levels have no actor names).
+pub const FLOOR_ACTOR: &str = "StaticMeshActor_1";
+
 /// What the recorder would have read during the run `ours` (sample `i` =
 /// the state at the start of frame `first_frame + i`, with the script state
 /// `states[i]` our simulation had there and the keys of the coming step).
@@ -304,6 +333,8 @@ fn records_of(
         p.air_control = script.air_control;
         p.view_rotation = [pitch, yaw, 0];
         p.pawn_rotation = [0, yaw, 0];
+        p.eye_height = Some(script.eye_height);
+        p.base = states[i].pawn.based.then(|| FLOOR_ACTOR.to_owned());
         p.physics = if attached {
             4
         } else if s.grounded {
@@ -368,14 +399,41 @@ fn scripted(n: usize, first_frame: u64, gamepad: bool) -> (RawFile, Trace) {
 
 /// A "fake original" of the given steps (see [`scripted_recording`]).
 pub fn scripted_steps(steps: &[Step], first_frame: u64, gamepad: bool) -> (RawFile, Trace) {
+    let g = Game::graybox().expect("graybox");
+    scripted_steps_on(g, steps, first_frame, gamepad, |_, _| {})
+}
+
+/// The graybox game with a **test-only copy** of the original's parameters
+/// that `change` has altered (the crates' parameters stay as they are): the
+/// "original" of a test that checks how a difference in one rule shows in a
+/// replay made with the unaltered parameters.
+pub fn graybox_with(change: impl FnOnce(&mut asamu_player::PlayerParams)) -> Game {
+    let mut params = asamu_player::PlayerParams::asamu_original();
+    change(&mut params);
+    let level = Game::graybox().expect("graybox").level().clone();
+    Game::new(level, params, asamu_core::DEFAULT_TICK_RATE_HZ).expect("game")
+}
+
+/// [`scripted_steps`] on a game of the caller's (the graybox with its own
+/// parameters: [`graybox_with`]). `level_script(k, game)` runs after tick
+/// `k` and before the recorder reads the state of record `k` (so what it
+/// changes is in record `k` and acts from tick `k + 1` on, like a level
+/// script's change in the original).
+pub fn scripted_steps_on(
+    mut g: Game,
+    steps: &[Step],
+    first_frame: u64,
+    gamepad: bool,
+    mut level_script: impl FnMut(usize, &mut Game),
+) -> (RawFile, Trace) {
     let n = steps.len();
-    let mut g = Game::graybox().expect("graybox");
     let mut states = vec![*g.player()];
     g.start();
     g.start_recording();
     for (i, s) in steps.iter().enumerate() {
         let prev = i.checked_sub(1).map(|j| &steps[j]);
         g.tick(&input(s, prev)).expect("tick");
+        level_script(i + 1, &mut g);
         states.push(*g.player());
     }
     let ours = g.stop_recording().expect("recording");
@@ -425,10 +483,20 @@ pub fn jittery_lengths(seed: u64, n: usize, fps: f32) -> Vec<f32> {
 /// the coming frame's) and our own trace of the run (`tick_rate: null`,
 /// time = the `f64` sum of the lengths).
 pub fn scripted_recording_variable(lengths: &[f32], first_frame: u64) -> (RawFile, Trace) {
-    let n = lengths.len();
-    let steps = script(n);
     let game = Game::graybox().expect("graybox");
-    let mut sim = VariableStepper::from_game(&game);
+    scripted_variable_on(&game, &script(lengths.len()), lengths, first_frame)
+}
+
+/// [`scripted_recording_variable`] with the caller's game (its level and
+/// parameters: [`graybox_with`]) and steps (one per frame length).
+pub fn scripted_variable_on(
+    game: &Game,
+    steps: &[Step],
+    lengths: &[f32],
+    first_frame: u64,
+) -> (RawFile, Trace) {
+    assert_eq!(steps.len(), lengths.len());
+    let mut sim = VariableStepper::from_game(game);
     let mut states = vec![*sim.player()];
     let mut meta = TraceMeta::runtime(Some("graybox".into()), None);
     meta.notes
@@ -458,7 +526,7 @@ pub fn scripted_recording_variable(lengths: &[f32], first_frame: u64) -> (RawFil
             sim.fov(),
         ));
     }
-    let records = records_of(&ours, &states, &steps, first_frame, false, |i, frame| {
+    let records = records_of(&ours, &states, steps, first_frame, false, |i, frame| {
         let mut w = world(frame);
         // The length of the frame that ended at this record (the first
         // record's is from before the recording).
@@ -556,7 +624,8 @@ impl Lcg {
 /// A pseudo-random recording covering the conversion branches: gaps, paused
 /// frames, missing players, map and pawn changes, FOV fallbacks, axes that
 /// disagree with the keys, odd bindings, rotation wraps, grapple states with
-/// and without gun data.
+/// and without gun data, ground speeds of every kind, eye heights, and
+/// (the positions being random) a teleport on almost every tick.
 pub fn varied_recording(seed: u64, n: usize, with_bindings: bool) -> RawFile {
     let mut r = Lcg(seed);
     let names = [
@@ -629,6 +698,14 @@ pub fn varied_recording(seed: u64, n: usize, with_bindings: bool) -> RawFile {
             mouse_y: r.f32(5.0),
         });
         p.air_control = 0.3 + r.f32(0.05);
+        // The speeds the pawn's script, story mode and a console command
+        // give; an eye height that is absent, at rest or anywhere.
+        p.ground_speed = [440.0, 440.0, 440.0, 880.0, 264.0, 132.0][r.below(6) as usize];
+        p.eye_height = match r.below(4) {
+            0 => None,
+            1 => Some(38.0),
+            _ => Some(20.0 + r.below(300) as f32 / 10.0),
+        };
         p.gun = (r.below(5) != 0).then(|| RawGun {
             grappling: r.below(4) == 0,
             released: false,
