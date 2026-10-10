@@ -38,7 +38,7 @@ evidence for each so a later agent can confirm them against the script property 
 | 2 | **Ground acceleration magnitude is always `AccelRate`**: walking normalises the script's `Acceleration` to a direction and the UDK velocity update multiplies it by `AccelRate`. Analog input magnitude is discarded natively. | CONFIRMED |
 | 3 | Walking velocity is updated **once per physWalking call with the whole delta time**; only the *movement* is sub-stepped (≤ 0.05 s pieces, ≤ 8 iterations per tick shared across modes). | CONFIRMED |
 | 4 | Braking (no input) integrates in 0.03 s pieces with factor `2·GroundFriction`, then **replaces the velocity by the time-weighted average** of the pieces; speeds below 10 uu/s snap to zero. | CONFIRMED |
-| 5 | Walking up slopes is implemented as **step-up → move → step-down**; the pawn hovers 1.9–2.4 uu above the floor (target 2.15). Final walking velocity = actual displacement / dt with Z = 0. | CONFIRMED |
+| 5 | Walking up slopes is implemented as **step-up → move → step-down**; the pawn hovers 1.9–2.4 uu above the floor (target 2.15). Final walking velocity = actual displacement × (1/dt) with Z = 0 (float form: 2.4). | CONFIRMED |
 | 6 | Falling uses semi-implicit Euler per sub-step **followed by a velocity "refinement" `V = 2·avg − V_old`**, which makes the *effective* vertical acceleration **2 × GravityZ** (and doubles air acceleration). With `DefaultGravityZ = −520` this is −1040 uu/s². | CONFIRMED (code + disassembly); TENTATIVE external corroboration from stock UDK jump-height defaults (see 4.6) |
 | 7 | Gravity = `WorldInfo` gravity (lazy: GlobalGravityZ if non-zero, else DefaultGravityZ = **−520.0** from `ASAMU/Config/DefaultGame.ini`), overridden inside GravityVolumes, then × `CustomGravityScaling` (UDKPawn+0x5A4). | CONFIRMED (code + config) |
 | 8 | Air control: if a pawn flag (Pawn+0x298 bit 51, hypothesis `bLimitFallAccel`) is set, air acceleration is clamped to `AccelRate·AirControl` (+ a low-speed boost below 10 uu/s, and a horizontal speed bound when already above GroundSpeed). If the flag is clear, the script acceleration is used unclamped. **The flag's default must be read from script.** | CONFIRMED logic; UNKNOWN default |
@@ -250,6 +250,59 @@ if dot(Velocity, V0) < 0 or |Velocity|^2 < 100: Velocity = 0  // 100 → 10 uu/s
 The result is the **time-weighted average** of the decaying velocity over the sub-intervals, not the
 end value. Constants: 0.03 @ 0x101731DB0, 100.0 @ 0x10163713C.
 
+### 2.4 Velocity derived from a displacement: the float form [CONFIRMED]
+
+Every place where a movement mode replaces `Velocity` by "the distance actually moved over the time it
+took" computes **one f32 reciprocal `r = 1.0 / time` and multiplies each of the three components by
+`r`**. It does not divide the components by the time. The instruction pattern is the same at every site
+in both executables (a scalar division of the constant 1.0 by the time, then three multiplications),
+which is what a vector-divided-by-scalar helper written as "multiply by the reciprocal" compiles to.
+The two forms give different floats for many inputs (one unit in the last place).
+
+| Site | Time | Mac x86_64: reciprocal at | Win32: reciprocal at | Recordings (Windows build) |
+|---|---|---|---|---|
+| Walking, final velocity (3.1) | the call's `dt` | 0x100ADB927 | 0xB27006 | 27,443 of 27,443 consecutive walking records equal the reciprocal form; the division form equals 23,839 (`docs/PARITY_FINDINGS.md` V17) |
+| Falling, average after wall contact (4.5 step 4) | the sub-step | 0x100AE0464 | 0xB2854B | not separable from the refinement |
+| Falling, refinement (4.6) | the sub-step | 0x100AE04D1 | 0xB285E9 | as part of `2·avg − V_old`: 7,798 of 7,885 falling pairs with the reciprocal form, 4,301 with the division (sampling analysis; not re-measured) |
+| Falling, landing velocity (4.4) | `step·Hit.Time` | 0x100AE0747 | 0xB2899B | not measured |
+| Flying, final velocity (`GRAPPLE.md` G-PH-3 step 6) | the call's `dt` | 0x100AE1CE8 | 0xB1AAE3 | not measurable: the script adds the pull to the velocity after the move |
+
+The constant 1.0 is read from 0x101633D88 (Mac) and 0x2211478 (Win32; addresses of the Win32 executable
+are virtual addresses with image base 0x400000). One recorded pair, used as the regression value: with
+`dt = 0.01631380245089531` (f32 bits 0x3C85A486) a displacement of −14.2109375 uu gives
+−871.0989990234375 uu/s; `−14.2109375 / dt` is the next float, −871.0990600585938.
+
+True divisions that are **not** this pattern, and stay divisions in a reimplementation: the low-speed
+air help `(10 − s2) / dt` (4.2; 0x100ADFD02), the slope-slide distance `g·dt / (2·max(F, 0.5))` (3.5;
+0x100ADA8CA) and the walked fraction `moved / |Delta|` when a walking pawn starts to fall (1.4;
+0x100ADBC3B).
+
+Normalisation is a different helper, and here the two builds differ [CONFIRMED]. The Mac executable
+computes `1.0 / sqrt(len²)` with a real square root and a real division, then multiplies. The Win32
+executable takes the processor's approximate reciprocal square root (the `RSQRTSS` instruction) and
+refines it once, `0.5 · (r · (3 − (len²·r)·r))` in that order (3.0 @ 0x2233988, 0.5 @ 0x221152C): for
+example the speed cap of `AUDKPawn::CalcVelocity` (estimate at 0x18B77F8) and the acceleration direction
+at the start of `APawn::physWalking` (0xB25C85). The result is not correctly rounded, and the estimate
+itself is specified only by an error bound, not bit for bit. Measured on the recordings with the
+estimate of the recording machine's processor (2 × 1,024 distinct values over two binades, read out on
+that machine): of 2,832 flat walking frames at the speed cap, the two forms give a different velocity on
+1,205 and a different position on 16; the Windows form reproduces the recorded position on 16 of those
+16, the Mac form on none. This is the "one unit in the last place at the speed cap" of the first
+recordings (13 Workshop frames, 3 elsewhere). The port in `asamu-player` uses the Mac form.
+
+Reproduce (local executables, read-only; `$WIN_EXE` is `Binaries/Win32/ASAMU-Win32-Shipping.exe` of a
+Windows install):
+
+```sh
+D="objdump -d --no-show-raw-insn --x86-asm-syntax=intel"
+$D --start-address=0x100ADB900 --stop-address=0x100ADB960 "$EXE"   # Mac physWalking: divss, mulps, mulss
+$D --start-address=0x100AE0449 --stop-address=0x100AE04F0 "$EXE"   # Mac physFalling: wall average, refinement
+$D --start-address=0x100AE0720 --stop-address=0x100AE0765 "$EXE"   # Mac physFalling: landing
+$D --start-address=0x100AE1CCC --stop-address=0x100AE1D0B "$EXE"   # Mac physFlying
+$D --start-address=0xB26FEF --stop-address=0xB27060 "$WIN_EXE"      # Win32 physWalking
+$D --start-address=0x18B779E --stop-address=0x18B7870 "$WIN_EXE"    # Win32 speed cap: rsqrtss and one refinement
+```
+
 ## 3. Walking: physWalking
 
 `APawn::physWalking(dt, Iterations) @ 0x100ADA470` (not overridden by UDK). All steps CONFIRMED unless
@@ -291,7 +344,7 @@ while remaining > 0 and Iterations <= 7 and (Controller or bit 49):
     if Physics became Swimming: startSwimming(...); return
 after loop:
     if still Walking:
-        if not (old bit 19) and not bJustTeleported: Velocity = (Location - OldLocation) / dt
+        if not (old bit 19) and not bJustTeleported: Velocity = (Location - OldLocation) * (1 / dt)   // 2.4
         Velocity.Z = 0
     Controller.PostPhysWalking(dt)                                              // empty for players
 ```
@@ -517,7 +570,8 @@ returns non-zero values only inside water volumes (Volume+0x291 bit 4); in air `
 
 If `Hit.Normal.Z ≥ WalkableFloorZ` [+0x258]:
 - if `step·Hit.Time > 0.003` and `Hit.Time > 0.1` and not bJustTeleported:
-  `Velocity = (Location − OldLocation) / (step·Hit.Time)` (velocity actually travelled until contact);
+  `Velocity = (Location − OldLocation) · (1 / (step·Hit.Time))` (velocity actually travelled until
+  contact; the reciprocal form of 2.4);
 - `processLanded(Hit.Normal, Hit.Actor, remaining + step·(1 − Hit.Time), Iterations)` (5.2); return.
 
 (If the hit actor is a pawn, the move was upward, `Hit.Time = 0` and the normal is straight up, script
@@ -537,13 +591,14 @@ If `Hit.Normal.Z ≥ WalkableFloorZ` [+0x258]:
      is walkable → land with zero carried time.
 3. If `dot(Slide, Adjusted) < 0`, nothing more is moved.
 4. For the refinement below, the old horizontal velocity is replaced by the actual average horizontal
-   velocity of this sub-step (so no horizontal extrapolation after wall contact).
+   velocity of this sub-step, `(Location − OldLocation) · (1 / step)` (2.4), so there is no horizontal
+   extrapolation after wall contact.
 
 ### 4.6 Velocity refinement after each sub-step (the "2× gravity" effect)
 
 If not landed, not root-motion, not bJustTeleported and Physics ≠ None [CONFIRMED, disassembly]:
 ```
-Velocity = (Location - OldLocation) / step                    // average velocity actually travelled
+Velocity = (Location - OldLocation) * (1 / step)              // average velocity actually travelled (2.4)
 if OldVelocity.Z >= 0 or Velocity.Z < OldVelocity.Z:
     Velocity = 2 * Velocity - OldVelocity                      // "end velocity", all three axes
 if |Velocity| > TerminalVelocity: Velocity = SafeNormal(Velocity) * TerminalVelocity   // 3D
@@ -921,7 +976,7 @@ tick(dt):
   [script] controller: input → Acceleration (expected AccelRate·normalised wish dir), rotation
   [script] pawn Tick / state code; jump sets Velocity.Z and Physics = Falling
   performPhysics(dt): crouch housekeeping → startNewPhysics(dt, 0) → rotation
-      Walking:  CalcVelocity once (2.1) → ≤8 sub-steps of move/step-up/floor-snap/ledge → V = disp/dt, Vz=0
+      Walking:  CalcVelocity once (2.1) → ≤8 sub-steps of move/step-up/floor-snap/ledge → V = disp·(1/dt), Vz=0
       Falling:  air-control clamp once → sub-steps: V=V+(A,g)dt; move by V·h; land/slide; V=2·avg−V_old; clamp terminal
       transitions carry unused sub-step time (1.4)
   TickSpecial: [script] UpdateEyeHeight
@@ -992,7 +1047,7 @@ the call-site disassembly.
 | 11 | ShouldCatchAir always false; WantsLedgeCheck only when crouched or walking slowly | CONFIRMED |
 | 12 | Fall decision flags (bits 10/22/2/4, bJustTeleported, mustJump) incl. the "zero move" flag | CONFIRMED (the zero-move flag was traced in disassembly because the decompiler mistyped it); **corrected** bit-59 wording and the MayFall precondition (3.4) |
 | 13 | Slope slide: Nz < 0.99 and Nz·F < 3.3, `g·dt²/(2·max(F,0.5))`, whole-call dt on every sub-step | CONFIRMED |
-| 14 | Final walking velocity = displacement / dt with Z = 0, suppressed by the bit-19 value at call start or bJustTeleported | CONFIRMED |
+| 14 | Final walking velocity = displacement / dt with Z = 0, suppressed by the bit-19 value at call start or bJustTeleported | CONFIRMED; **refined** (2026-10-10): the float form is displacement × (1/dt), see 2.4 |
 | 15 | Falling: velocity updated by NewFallVelocity(Acceleration + (0,0,GravityZ)) **before** the move; move uses the new velocity; afterwards `V = 2·avg − V_old` when `V_old.Z ≥ 0 or avg.Z < V_old.Z`; terminal-velocity clamp via vtable +0x280 | CONFIRMED (code + disassembly); the 2× effective acceleration is an arithmetic consequence |
 | 16 | Air-control probe and clamp (0.05, 10, BoundSpeed, bit 51 = byte +0x29E bit 3) | CONFIRMED |
 | 17 | Landing threshold WalkableFloorZ (Pawn+0x258); landing velocity only if step·Time > 0.003 and Time > 0.1 | CONFIRMED |
@@ -1015,3 +1070,6 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   the stepUp walking/slide details, the fall-decision preconditions and base-restore rule, the
   CheckForLedges acceptance bound, and the stuck-falling nudge citation; labelled the names of modes
   5/6/13 TENTATIVE; every constants-table row now cites `Function @ address`.
+- 2026-10-10: section 2.4 (float form of every velocity derived from a displacement; the normalisation
+  helper of the two builds), from the disassembly of both executables and the first recordings; the
+  statements in 3.1, 4.4, 4.5, 4.6, 9.3 and verification row 14 now point to it.

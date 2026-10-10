@@ -89,15 +89,17 @@
 //! only; no hashing, no RNG, no globals; collision queries are deterministic
 //! by the [`CollisionWorld`] contract.
 //!
-//! Float form: a velocity derived from a displacement is the displacement
-//! times the `f32` reciprocal of the time ([`velocity_from_displacement`]),
-//! as in the original (CONFIRMED: every such site of walking, falling and
-//! flying in both executables; walking also on 27,443 of 27,443 recorded
-//! pairs). Vector normalisation here is `v · (1 / sqrt(|v|²))` with a
-//! correctly rounded square root, which is what the macOS executable does;
-//! the Windows executable uses the processor's approximate reciprocal square
-//! root with one refinement step, so the last bit of a normalised vector can
-//! differ from this port (NATIVE_PHYSICS.md section 2.4).
+//! Float form (NATIVE_PHYSICS.md section 2.4): a velocity derived from a
+//! displacement is the displacement times the `f32` reciprocal of the time
+//! ([`velocity_from_displacement`]), as in the original (CONFIRMED: every
+//! such site of walking, falling and flying in both executables; walking
+//! also on 27,443 of 27,443 recorded pairs). Vector normalisation
+//! ([`safe_normal`]) is `v · (1 / sqrt(|v|²))` with a correctly rounded
+//! square root and division, which is what the macOS executable does; the
+//! Windows executable uses the processor's approximate reciprocal square
+//! root with one refinement step instead, so against a Windows recording a
+//! normalised vector (the speed cap, the acceleration direction) can be one
+//! unit in the last place off.
 
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
