@@ -244,6 +244,20 @@ pub(crate) fn print_json<T: Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
+/// `file` relative to `dir`, with `/` between its components on every host:
+/// the rows and JSON that `census` and `coverage` print for a cooked folder
+/// are then the same on Windows as elsewhere (`Maps/X.asamu`, not `Maps\X.asamu`).
+pub(crate) fn relative_label(dir: &Path, file: &Path) -> String {
+    match file.strip_prefix(dir) {
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => file.to_string_lossy().into_owned(),
+    }
+}
+
 fn file_label(file: &Path) -> String {
     file.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -726,11 +740,7 @@ fn cmd_census(dir: &Path, deep: bool, json: bool) -> Result<()> {
     collect_packages(dir, &mut files, 0)?;
     let mut rows = Vec::with_capacity(files.len());
     for f in &files {
-        let rel = f
-            .strip_prefix(dir)
-            .unwrap_or(f)
-            .to_string_lossy()
-            .into_owned();
+        let rel = relative_label(dir, f);
         match Summary::read_from_path(f) {
             Ok((s, size)) => {
                 let deep_row = deep.then(|| match Package::open(f) {
@@ -869,4 +879,21 @@ fn cmd_decompress(file: &Path, out: &Path, force: bool, json: bool) -> Result<()
         report.output
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_labels_use_forward_slashes_on_every_host() {
+        let dir = Path::new("cooked");
+        // Built with the host's separator, as a directory walk does.
+        let map = dir.join("Maps").join("A.asamu");
+        assert_eq!(relative_label(dir, &map), "Maps/A.asamu");
+        assert_eq!(relative_label(dir, &dir.join("Core.u")), "Core.u");
+        // A file outside the folder keeps its path as given.
+        let other = Path::new("elsewhere").join("B.upk");
+        assert_eq!(relative_label(dir, &other), other.to_string_lossy());
+    }
 }
