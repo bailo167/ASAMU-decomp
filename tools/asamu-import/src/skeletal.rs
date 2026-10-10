@@ -308,10 +308,18 @@ fn quat_from_rows(m: [[f64; 3]; 3]) -> Q {
 /// quaternion, through the engine's `FRotationMatrix` rows (row-vector
 /// convention `v' = v · M`).
 pub fn rotator_to_quat(pitch: i32, yaw: i32, roll: i32) -> [f64; 4] {
-    let a = |u: i32| f64::from(u) * std::f64::consts::TAU / 65536.0;
-    let (sp, cp) = a(pitch).sin_cos();
-    let (sy, cy) = a(yaw).sin_cos();
-    let (sr, cr) = a(roll).sin_cos();
+    // Portable sine and cosine: the quaternions reach converted data, which
+    // must be the same whatever system converted it.
+    let sin_cos = |u: i32| {
+        let a = f64::from(u) * std::f64::consts::TAU / 65536.0;
+        (
+            asamu_ue3::portable_math::sin(a),
+            asamu_ue3::portable_math::cos(a),
+        )
+    };
+    let (sp, cp) = sin_cos(pitch);
+    let (sy, cy) = sin_cos(yaw);
+    let (sr, cr) = sin_cos(roll);
     let rows = [
         [cp * cy, cp * sy, sp],
         [sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp],

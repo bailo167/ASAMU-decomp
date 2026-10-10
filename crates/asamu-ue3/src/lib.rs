@@ -54,6 +54,7 @@ pub mod model;
 pub mod object;
 pub mod package;
 pub mod particle;
+pub mod portable_math;
 pub mod property;
 pub mod reader;
 pub mod schema;

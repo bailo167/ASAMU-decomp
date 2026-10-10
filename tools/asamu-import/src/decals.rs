@@ -207,14 +207,15 @@ pub fn mask_source_of(
 }
 
 /// The sRGB transfer function's inverse (texel value → linear), as the GPU
-/// applies it to the colour channels of an sRGB texture.
+/// applies it to the colour channels of an sRGB texture. (The power is the
+/// portable one, so every system computes the same masks.)
 #[must_use]
 pub fn srgb_to_linear(v: u8) -> f32 {
     let c = f32::from(v) / 255.0;
     if c <= 0.04045 {
         c / 12.92
     } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+        asamu_ue3::portable_math::powf((c + 0.055) / 1.055, 2.4)
     }
 }
 

@@ -49,6 +49,7 @@ use crate::error::Ue3Error;
 use crate::model::{LoadedPackage, PackageSet};
 use crate::object::{DecodedObject, ObjResult, ObjectError};
 use crate::package::Package;
+use crate::portable_math::sin;
 use crate::property::{Property, Value};
 use crate::reader::Reader;
 use crate::schema::{Schema, last_component};
@@ -435,10 +436,14 @@ pub fn level_exports(pkg: &Package) -> Vec<usize> {
 /// them: a 16384-entry table indexed by `(angle >> 2) & 0x3FFF` (CONFIRMED in
 /// `AActor::LocalToWorld`), cosine read a quarter turn later. The table holds
 /// `sin(i · 2π / 16384)` (TENTATIVE: UE3 convention; filled at run time).
+///
+/// Evaluated with [`crate::portable_math::sin`], not the platform's C
+/// library: the transforms end up in converted data, which must be the same
+/// whatever system converted it.
 pub fn rotator_sin_cos(units: i32) -> (f64, f64) {
-    let entry = |u: u32| f64::from((u >> 2) & 0x3FFF) * TAU / 16384.0;
+    let entry = |u: u32| sin(f64::from((u >> 2) & 0x3FFF) * TAU / 16384.0);
     let bits = units as u32;
-    (entry(bits).sin(), entry(bits.wrapping_add(0x4000)).sin())
+    (entry(bits), entry(bits.wrapping_add(0x4000)))
 }
 
 /// Rotation × scale rows (`FRotationMatrix` scaled per axis), f64.

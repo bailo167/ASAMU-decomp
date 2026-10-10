@@ -447,6 +447,7 @@ dependencies = [
 name = "asamu-ue3"
 version = "0.0.1"
 dependencies = [
+ "libm",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
