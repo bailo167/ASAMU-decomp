@@ -32,7 +32,12 @@
 //!   the box sweep tests the solid ([`hull::ConvexHull`]): its face
 //!   directions, its edge directions and the box's axes. A mesh passed as
 //!   convex that is not closed and convex has no solid and is swept triangle
-//!   by triangle, one-sided.
+//!   by triangle, one-sided. A ray that starts inside a hull leaves it
+//!   without a hit; the original's zero-extent check of a convex element
+//!   instead reports a hit at time 0 with the reversed direction as the
+//!   normal (0x100AA5A70 in the user's macOS executable, CONFIRMED). No
+//!   trace of ours goes to a simple body yet (bullet traces go to the
+//!   triangles, P1), so nothing depends on it.
 //! - **Pawn cylinders** ([`CollisionScene::add_cylinder_mesh`]).
 //!
 //! The simple-collision bodies of the original's meshes are made of convex
@@ -59,12 +64,20 @@
 //! | kind | box (extent) traces | zero-extent traces |
 //! |---|---|---|
 //! | [`PrimitiveKind::Bsp`] | min(0.1 × length, 1.0) | flat 0.5 |
-//! | [`PrimitiveKind::BrushHull`] | min(0.1 × length, 1.0) | min(0.1 × length, 1.0), TENTATIVE |
+//! | [`PrimitiveKind::BrushHull`] | min(0.1 × length, 1.0) | min(0.1 × length, 1.0) |
 //! | [`PrimitiveKind::SimpleHull`] | min(0.1 × length, 1.0) | the same per V2; not read separately for zero extent |
 //! | [`PrimitiveKind::TriangleMesh`] | min(0.1 × length, 4.0) | min(0.1 × length, 4.0) |
 //! | [`PrimitiveKind::PawnCylinder`] | 0.001 × length (NPCS.md §12) | the same |
 //!
-//! (For traces shorter than 1 uu the first four rows use a flat 0.1.)
+//! (For traces shorter than 1 uu the first four rows use a flat 0.1. The
+//! brush row is one computation for both columns: the brush component's
+//! check at 0x100759CB0 hands any trace to its convex elements and then
+//! pulls the hit back without looking at the extent, CONFIRMED. The same
+//! routine lets a trace carrying flag 0x20000, one of the two bits that
+//! force the per-triangle path of meshes (V3), through any brush whose
+//! flag bit 0 at component offset 0x2AC is clear; whether that makes the
+//! grapple's trace pass blocking volumes depends on that bit in the level
+//! data, which nothing here reads yet.)
 //!
 //! # Collision flags and the enabled switch
 //!

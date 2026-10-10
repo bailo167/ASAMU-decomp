@@ -582,3 +582,98 @@ fn bvh_box_queries_equal_brute_force() {
         again.sweep_box(&dynamic, s, e, halves[0], QueryFilter::PAWN)
     );
 }
+
+#[test]
+fn box_performance_smoke_test() {
+    // A 256 × 256-cell terrain (131 072 triangles) as 64 instances of one
+    // 32 × 32-cell patch, 3 000 small triangle meshes and 3 000 convex
+    // solids; 2 000 short box sweeps and as many cylinder sweeps for
+    // comparison. Timing is only asserted in release builds.
+    let mut b = CollisionSceneBuilder::new();
+    let n = 32;
+    let mut vertices = Vec::new();
+    let mut tris = Vec::new();
+    for y in 0..=n {
+        for x in 0..=n {
+            let h = ((x as f32 * 0.7).sin() + (y as f32 * 0.4).cos()) * 30.0;
+            vertices.push(Vec3::new(x as f32 * 100.0, y as f32 * 100.0, h));
+        }
+    }
+    for y in 0..n {
+        for x in 0..n {
+            let i = (y * (n + 1) + x) as u32;
+            let j = i + (n + 1) as u32;
+            tris.push([i, i + 1, j + 1]);
+            tris.push([i, j + 1, j]);
+        }
+    }
+    let patch = b.add_mesh(vertices, tris).unwrap();
+    let mut rng = Rng(1);
+    for py in 0..8 {
+        for px in 0..8 {
+            let t = DVec3::new(f64::from(px) * 3200.0, f64::from(py) * 3200.0, 0.0);
+            b.add_static(patch, Affine::from_translation(t), solid_info());
+        }
+    }
+    let (cv, ct) = random_mesh(&mut rng);
+    let small = b.add_mesh(cv, ct).unwrap();
+    let hulls: Vec<u32> = solids()
+        .into_iter()
+        .map(|(v, t)| b.add_convex_mesh(v, t).unwrap())
+        .collect();
+    for k in 0..6000 {
+        let mut a = random_affine(&mut rng, 0.0);
+        a.translation = DVec3::new(
+            rng.range(0.0, 25600.0),
+            rng.range(0.0, 25600.0),
+            rng.range(0.0, 300.0),
+        );
+        let mesh = if k % 2 == 0 { small } else { hulls[k % 3] };
+        b.add_static(mesh, a, solid_info());
+    }
+    let scene = b.build();
+    assert!(scene.stats().instance_triangles > 131_072);
+    let queries: Vec<(Vec3, Vec3)> = (0..2000)
+        .map(|_| {
+            let p = Vec3::new(
+                rng.range(500.0, 25000.0) as f32,
+                rng.range(500.0, 25000.0) as f32,
+                200.0,
+            );
+            (p, p + rng.vec(20.0).as_vec3() - Vec3::Z * 300.0)
+        })
+        .collect();
+    let half = Vec3::new(21.0, 21.0, 44.0);
+    let start = std::time::Instant::now();
+    let box_hits = queries
+        .iter()
+        .filter(|(p, q)| {
+            scene
+                .sweep_box(&[], *p, *q, half, QueryFilter::PAWN)
+                .is_some()
+        })
+        .count();
+    let box_time = start.elapsed();
+    let start = std::time::Instant::now();
+    let cylinder_hits = queries
+        .iter()
+        .filter(|(p, q)| {
+            scene
+                .sweep_cylinder(&[], *p, *q, 21.0, 44.0, QueryFilter::PAWN)
+                .is_some()
+        })
+        .count();
+    let cylinder_time = start.elapsed();
+    let per_query_us = box_time.as_secs_f64() * 1e6 / queries.len() as f64;
+    eprintln!(
+        "box: {box_hits} hits, {per_query_us:.1} us per query ({box_time:?}); \
+         cylinder: {cylinder_hits} hits ({cylinder_time:?})"
+    );
+    // Every sweep ends below the terrain, and a box reaches whatever the
+    // cylinder inside it reaches.
+    assert_eq!(box_hits, queries.len());
+    assert_eq!(cylinder_hits, queries.len());
+    if !cfg!(debug_assertions) {
+        assert!(per_query_us < 150.0, "{per_query_us} us per query");
+    }
+}

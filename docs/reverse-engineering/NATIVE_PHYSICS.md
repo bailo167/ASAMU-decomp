@@ -1102,6 +1102,18 @@ test, the first three with the axes of one of the two boxes. The same family of 
 axis order and start rules were not read [UNKNOWN]. The user's data has no box element (0 boxes, 0
 sphyls, 1 sphere, 2,439 convex elements in the 882 converted meshes).
 
+**Brushes** (blocking volumes: `UBrushComponent::LineCheck @ 0x100759CB0`). The component hands
+the trace, with or without extent, to the aggregate check of its own convex elements (the routine
+above, so the convex rule applies), and on a hit pulls the time back by 0.1 uu of travel for a trace
+shorter than 1 uu and by min(0.1 × length, 1.0) uu otherwise (0.1: f32 at 0x1016457B8; 1.0: f32 at
+0x101633D88), unless the trace carries flag 0x80000. There is one computation for both kinds of
+trace, so the cap of 1.0 holds for zero-extent traces of brushes too (this was TENTATIVE in
+`docs/PARITY_FINDINGS.md` section 7). Before anything else the routine returns "no hit" for a trace
+carrying flag 0x20000 when bit 0 of the component's byte at +0x2AC is clear. 0x20000 is one of the
+two bits that force the per-triangle path of static meshes (`docs/PARITY_FINDINGS.md` V3), so a
+bullet-style trace such as the grapple's would pass every brush with that bit clear [TENTATIVE: the
+bit's property name and its value on the level's volumes were not read].
+
 **BSP** (`UModel::LineCheck @ 0x10092BD20` → `FBoxLineCheckInfo::BoxLineCheck @ 0x10092C440`,
 `FBoxLineCheckInfo::ClipTo @ 0x10092E920`): per convex leaf hull, the line is clipped against the
 hull's planes pushed out by the box, then against the six axis-aligned planes of the hull's bounds,
@@ -1196,6 +1208,6 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   recounted, and the wall-contact average and the flying velocity, first listed as not measurable,
   measured on the recordings (the flying one through a model of the gun's pull).
 - 2026-10-10: section 10.1 (the box checks of triangles, convex elements, spheres, sphyls, box
-  elements and BSP: shape, axis order, contact normal, rules for a start in contact), from the
+  elements, brushes and BSP: shape, axis order, contact normal, rules for a start in contact), from the
   disassembly and from running the triangle and convex routines in a local interpreter; 3 and 9.2
   now say "box" where they said "cylinder".
