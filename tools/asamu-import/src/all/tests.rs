@@ -914,6 +914,7 @@ fn redaction_removes_output_install_and_home_paths() {
 fn stage_names() {
     assert_eq!(parse_stage("Textures"), Ok(StageId::Textures));
     assert_eq!(parse_stage(" lightmaps "), Ok(StageId::Lightmaps));
+    assert_eq!(parse_stage("localization"), Ok(StageId::Localization));
     assert!(parse_stage("shaders").is_err());
     let names: Vec<&str> = StageId::ALL.iter().map(|s| s.name()).collect();
     assert_eq!(
@@ -927,7 +928,10 @@ fn stage_names() {
             "matinee",
             "skeletal",
             "kismet",
-            "lightmaps"
+            "lightmaps",
+            "particles",
+            "decals",
+            "localization"
         ]
     );
     let a = args(&["--only", "audio,levels", "--skip", "levels"]);
@@ -961,6 +965,9 @@ fn real_stage_arguments_parse_with_the_module_args() {
     parse_stage_args::<crate::skeletal::Args>(&argv(StageId::Skeletal)).unwrap();
     parse_stage_args::<crate::kismet::Args>(&argv(StageId::Kismet)).unwrap();
     parse_stage_args::<crate::lightmaps::Args>(&argv(StageId::Lightmaps)).unwrap();
+    parse_stage_args::<crate::particles::Args>(&argv(StageId::Particles)).unwrap();
+    parse_stage_args::<crate::decals::Args>(&argv(StageId::Decals)).unwrap();
+    parse_stage_args::<crate::localization::Args>(&argv(StageId::Localization)).unwrap();
     // Only stages that read nothing but packages may use the package cache.
     let cache_ok: Vec<StageId> = st
         .iter()
@@ -985,6 +992,9 @@ fn real_stage_arguments_parse_with_the_module_args() {
     assert_eq!(key(StageId::Materials), Some("materials.json"));
     assert_eq!(key(StageId::Kismet), Some("manifest.json"));
     assert_eq!(key(StageId::Lightmaps), None);
+    assert_eq!(key(StageId::Particles), Some("particles.json"));
+    assert_eq!(key(StageId::Decals), Some("manifest.json"));
+    assert_eq!(key(StageId::Localization), Some("manifest.json"));
     assert!(parse_stage_args::<crate::textures::Args>(&["--bogus".to_owned()]).is_err());
 }
 

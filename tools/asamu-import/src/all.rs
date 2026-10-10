@@ -11,9 +11,10 @@
 //!    time): missing files refuse the run, different sizes or hashes only warn
 //!    (`--no-verify` skips the comparison).
 //! 4. **Convert**: textures, meshes (`--collision`), materials, levels, audio,
-//!    matinee, skeletal, kismet and lightmaps, each through its own module's
-//!    `run` with arguments built here. A stage whose module is still a stub
-//!    is reported as unavailable, not as a failure.
+//!    matinee, skeletal, kismet, lightmaps, particles, decals and
+//!    localization, each through its own module's `run` with arguments built
+//!    here. A stage whose module is still a stub is reported as unavailable,
+//!    not as a failure.
 //!
 //! # Output (all user-local; never the repository or the install)
 //!
@@ -46,8 +47,9 @@
 //! number of files and bytes (so a deleted or added file is noticed; a
 //! same-size edit is not, `--force` covers that). Otherwise it runs again:
 //!
-//! Every stage reads only the install and writes only its own folder. It
-//! runs with `<out>/.staging/` as its output root, and its folder is swapped
+//! Every stage reads only the install and writes only its own folder
+//! (`localization` also reads, when present, two Steam metadata files next to
+//! the install: the app manifest and the cached stats schema). It runs with `<out>/.staging/` as its output root, and its folder is swapped
 //! into place when the stage ends, so an interrupted run never leaves a
 //! half-written stage folder behind (the old output stays usable until the
 //! new one is complete) and stale files of an older run never linger. A stage
@@ -103,7 +105,8 @@ const NOTICE: &str = "Converted locally from the user's own copy of A Story Abou
 #[derive(clap::Args, Debug, Clone)]
 pub struct Args {
     /// Run only these stages (comma-separated or repeated): textures, meshes,
-    /// materials, levels, audio, matinee, skeletal, kismet, lightmaps.
+    /// materials, levels, audio, matinee, skeletal, kismet, lightmaps,
+    /// particles, decals, localization.
     #[arg(long, value_delimiter = ',', value_parser = parse_stage)]
     only: Vec<StageId>,
     /// Do not run these stages (comma-separated or repeated).
@@ -151,11 +154,14 @@ pub enum StageId {
     Skeletal,
     Kismet,
     Lightmaps,
+    Particles,
+    Decals,
+    Localization,
 }
 
 impl StageId {
     /// Every stage in run order.
-    pub const ALL: [StageId; 9] = [
+    pub const ALL: [StageId; 12] = [
         StageId::Textures,
         StageId::Meshes,
         StageId::Materials,
@@ -165,6 +171,9 @@ impl StageId {
         StageId::Skeletal,
         StageId::Kismet,
         StageId::Lightmaps,
+        StageId::Particles,
+        StageId::Decals,
+        StageId::Localization,
     ];
 
     /// Subcommand / folder name.
@@ -179,6 +188,9 @@ impl StageId {
             StageId::Skeletal => "skeletal",
             StageId::Kismet => "kismet",
             StageId::Lightmaps => "lightmaps",
+            StageId::Particles => "particles",
+            StageId::Decals => "decals",
+            StageId::Localization => "localization",
         }
     }
 }
@@ -337,6 +349,32 @@ pub fn real_stages(args: &Args) -> Vec<Stage> {
                 Vec::new()
             },
             crate::lightmaps::run,
+        ),
+        // The three below read the install directly (packages; decals also
+        // the texture caches for their masks) and write only their own folder.
+        stage(
+            StageId::Particles,
+            Some("particles.json"),
+            false,
+            Vec::new(),
+            crate::particles::run,
+        ),
+        stage(
+            StageId::Decals,
+            manifest,
+            false,
+            Vec::new(),
+            crate::decals::run,
+        ),
+        // Every language of the install. Also reads Steam's app manifest and
+        // cached stats schema when they are there (default language,
+        // achievement names); without them it converts the install's text.
+        stage(
+            StageId::Localization,
+            manifest,
+            false,
+            Vec::new(),
+            crate::localization::run,
         ),
     ]
 }
