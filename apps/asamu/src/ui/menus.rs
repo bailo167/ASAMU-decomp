@@ -67,6 +67,9 @@ pub(crate) enum UiAction {
     Set(SettingAction),
     /// Next (`true`) / previous language (handled by `ui::locale`).
     Language(bool),
+    /// Main menu: open the Sandbox (handled by `crate::sandbox`).
+    #[cfg(feature = "sandbox")]
+    OpenSandbox,
 }
 
 /// A settings change.
@@ -246,6 +249,23 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
                 UiAction::OpenTimeTrial,
                 converted && saves.progression.time_trial_unlocked(),
             ));
+            // The Sandbox only runs while the saves stay in memory, so it can
+            // never touch a save on disk.
+            #[cfg(feature = "sandbox")]
+            {
+                let in_memory = saves.store().is_none();
+                items.push(button(
+                    "Sandbox (experimental)",
+                    UiAction::OpenSandbox,
+                    in_memory,
+                ));
+                if !in_memory {
+                    items.push(Item::Line(
+                        "The Sandbox keeps away from your saves: start with --sandbox to use it."
+                            .into(),
+                    ));
+                }
+            }
             items.push(button(
                 t.get("menu.settings", "Settings"),
                 UiAction::OpenSettings,
@@ -484,6 +504,10 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
                 true,
             ));
         }
+        // Drawn by `crate::sandbox`: no items, so `rebuild_menu` spawns
+        // nothing.
+        #[cfg(feature = "sandbox")]
+        Screen::Sandbox => return items,
         Screen::Confirm => {
             items.push(Item::Title(
                 t.get("menu.confirm_title", "Start over?").into(),
@@ -829,6 +853,9 @@ pub(crate) fn menu_keys(
             Screen::Chapters | Screen::TimeTrial | Screen::Settings | Screen::Confirm => {
                 actions.write(UiAction::Back);
             }
+            // `crate::sandbox` reads Esc for its own screen.
+            #[cfg(feature = "sandbox")]
+            Screen::Sandbox => {}
         }
     }
     if keys.just_pressed(KeyCode::F8)
@@ -1029,6 +1056,9 @@ fn run_action(
         // `ui::locale::handle_language_actions` changes the language; the
         // menu rebuilds when it is applied.
         UiAction::Language(_) => {}
+        // `crate::sandbox` reads the message itself.
+        #[cfg(feature = "sandbox")]
+        UiAction::OpenSandbox => {}
     }
 }
 
@@ -1419,5 +1449,37 @@ mod tests {
             );
         }
         assert!(screen_items(&ctx(Screen::None, &saves, &launch, &s, &t, &p)).is_empty());
+    }
+
+    /// The Sandbox never runs next to saves on disk: its main-menu button is
+    /// enabled only while the save session is in memory.
+    #[cfg(feature = "sandbox")]
+    #[test]
+    fn sandbox_button_needs_in_memory_saves() {
+        let launch = UiLaunch::default();
+        let (s, t, p) = (Settings::default(), UiStrings::default(), Play::default());
+        let sandbox = |saves: &SaveSession| {
+            let items = screen_items(&ctx(Screen::Main, saves, &launch, &s, &t, &p));
+            let enabled = buttons(&items)
+                .iter()
+                .find(|x| x.1 == UiAction::OpenSandbox)
+                .map(|x| x.2);
+            let hint = items
+                .iter()
+                .any(|i| matches!(i, Item::Line(l) if l.contains("--sandbox")));
+            (enabled, hint)
+        };
+        assert_eq!(sandbox(&SaveSession::in_memory()), (Some(true), false));
+
+        let dir =
+            std::env::temp_dir().join(format!("asamu-ui-menus-sandbox-{}", std::process::id()));
+        let on_disk = SaveSession::open(asamu_game::save::SaveStore::new(&dir));
+        assert!(on_disk.store().is_some());
+        assert_eq!(sandbox(&on_disk), (Some(false), true));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The Sandbox draws its own screen: the menu has no items for it.
+        let saves = SaveSession::in_memory();
+        assert!(screen_items(&ctx(Screen::Sandbox, &saves, &launch, &s, &t, &p)).is_empty());
     }
 }

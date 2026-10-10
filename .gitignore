@@ -96,3 +96,9 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# --- Local tooling state (never commit) ---------------------------------------
+# Agent worktrees and session state.
+/.claude/
+# Sandbox recordings are local experiments.
+*.sbxrec.jsonl

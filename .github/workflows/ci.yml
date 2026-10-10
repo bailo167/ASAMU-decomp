@@ -65,10 +65,15 @@ jobs:
           cache-on-failure: true
       - name: Clippy (all targets incl. the Bevy app, warnings are errors)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Test (all library/tool crates; the Bevy app has no tests)
+      - name: Test (all library and tool crates; the Bevy app is not a default member, its Sandbox tests run below)
         run: cargo test --locked
       - name: Build executable
         run: cargo build -p asamu --locked
+      - name: Clippy without the Sandbox (the feature compiles out cleanly)
+        run: cargo clippy -p asamu --all-targets --locked --no-default-features -- -D warnings
+      - name: Sandbox app tests (the name filter runs only the sandbox tests)
+        if: runner.os == 'Linux'
+        run: cargo test -p asamu --locked -- sandbox
       - name: Report host target
         shell: bash
         run: rustc -vV | grep host

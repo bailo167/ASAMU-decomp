@@ -2,6 +2,46 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-10 — Session 2 (continued): parity findings, Sandbox v1, a Windows build machine
+
+**Done**
+- **Parity findings** (`docs/PARITY_FINDINGS.md`): the recordings became replayable (movement input derived
+  from the recorded pawn acceleration for gamepad recordings; replays start from recorded state), and five
+  independent analyses compared them with our simulation. Most movement and grapple rules are confirmed by the
+  recordings, with counts. The differences are mostly collision: props without simple collision, simplified
+  collision bodies, the native hit pull-back, a box-shaped pawn sweep, dynamic blocking volumes that start
+  disabled; plus the Workshop's `setspeed` console command (132 uu/s in the original, 264 in ours) and three
+  float/angle details. Every comparison still has the verdict "diverged". The "66 uu/s" reading in the previous
+  entry is in no recording and is withdrawn.
+- **Sandbox v1** (`docs/SANDBOX.md`): an opt-in lab (`asamu --sandbox`, or the main-menu entry when saves are
+  in memory): live parameter overrides on the Classic set, rules (grapple budget, boots), time control, save
+  states, teleport, telemetry and visualisers, two hand-made arenas, profiles and sandbox-tagged recordings.
+  Own crate (`crates/asamu-sandbox`) and an app feature that compiles out. Three adversarial reviews: the
+  Classic guards fail under every deliberate leak tried (and two blind spots were closed), a `--sandbox` process
+  left save files untouched, and four robustness defects in the Sandbox's own code were fixed (a teleport that
+  could hang, writes through a planted symlink, a lax profile reader, unbounded notices). **Not used by hand
+  yet**: sessions were only driven by tests and unattended runs.
+- **Gamepad** found unconnected by the documentation fact-check, then wired into the simulation tick with a test.
+- **Documentation fact-check**: an adversarial review of every public document; corrections pushed.
+- **A Windows machine now builds and tests** (`tools/dev/win_host.sh`): the development Mac is out of disk, so
+  checkouts are mirrored to a Windows laptop over SSH and built there. Rust was the only install it needed.
+
+**True now**
+- Tracker: 150 items (seven Sandbox items, which can reach `implemented` at most). Nothing was upgraded to
+  verified.
+- In flight: the first whole-suite run on Windows, the importer on the Windows build of the game, a way to run
+  the app on that machine's screen, and the parity groundwork that does not touch the simulation (decoding
+  simplified collision bodies, a one-step comparison mode, more recorder fields).
+
+**Next**
+1. The collision and physics fixes of `docs/PARITY_FINDINGS.md` section 4 (pull-back, box sweep, simple
+   collision, switchable blocking volumes, `setspeed`), each with its regression test, then the gated
+   real-recording tests.
+2. A short keyboard-and-mouse recording session with the extended recorder (list in the findings, section 6).
+3. Use the Sandbox by hand; close its known gaps (`docs/SANDBOX.md`, last section).
+4. Owner decisions still open: a first tagged pre-release (and whether releases carry the Sandbox); the
+   developer keys F2/F3/F4/F6 can change abilities that a story save then stores.
+
 ## 2026-10-10 — Session 2: first recordings of the original, showcase pass, Phase 8 merged
 
 **Done**

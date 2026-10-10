@@ -1237,3 +1237,60 @@ id = "parity-suite"
 name = "Trace-replay parity suite against original traces"
 status = "partial"
 note = "First recordings of the original exist locally (2026-10-10, Windows build: story-mode walk, free play with sprint, jumps and grapples). The record -> convert -> replay -> compare pipeline runs end to end; the first comparison diverges (docs/PARITY.md, First comparison). No regression suite yet."
+
+# --------------------------------------------------------------------------
+# Sandbox — ours, experimental, not original content (docs/SANDBOX.md).
+# The ceiling for these items is `implemented`: `verified` means agreement
+# with the original, which does not apply to a tool of our own.
+# --------------------------------------------------------------------------
+
+[[category]]
+id = "sandbox"
+name = "Sandbox (not original)"
+
+[[category.item]]
+id = "sandbox-classic-guards"
+name = "Classic-unchanged guard suite (empty overlay, pristine session, snapshot, boundary scans)"
+status = "implemented"
+evidence = "crates/asamu-sandbox/tests/classic_guard.rs; crates/asamu-sandbox/tests/boundary.rs; crates/asamu-game/src/tooling.rs (tests)"
+note = "Differential guards: a pristine Sandbox session leaves a Classic game bit-identical (graybox, synthetic converted and scripted levels; real converted maps only when ASAMU_CONVERTED_DIR is set, so not in CI). Source scans keep the Sandbox out of the Classic crates and the parity tool. Shows the Sandbox does not change the recreation's Classic mode; says nothing about the original."
+
+[[category.item]]
+id = "sandbox-tuning"
+name = "Parameter overlay, live retune, profiles"
+status = "implemented"
+evidence = "crates/asamu-sandbox/tests/overlay.rs; tests/keys.rs; tests/relatch.rs; tests/profile.rs; docs/SANDBOX.md"
+note = "Overrides on a copy of the Classic set (placeholder provenance, 'sandbox override' note), Game::set_params between ticks, re-latching of the pawn's run-time copies, versioned profile files. 37 of the 67 keys have no effect class yet. Ours; not original behaviour."
+
+[[category.item]]
+id = "sandbox-session"
+name = "Commands, rules, time control, save-state slots"
+status = "implemented"
+evidence = "crates/asamu-sandbox/tests/session.rs; tests/time.rs; tests/snapshot.rs; docs/SANDBOX.md"
+note = "One serialisable command enum through Session::execute; sticky rules; freeze/step/speed model; four in-memory slots and a keyframe rewind (hand-made levels only). On scripted levels a slot restores the simulation only. Ours."
+
+[[category.item]]
+id = "sandbox-recording"
+name = "Sandbox-tagged recordings rejected by the parity reader"
+status = "implemented"
+evidence = "crates/asamu-sandbox/tests/recording.rs; crates/asamu-sandbox/tests/classic_guard.rs (parity_reader_rejects_sandbox_recordings)"
+note = "Own container (header line + embedded trace), always tagged not_parity; the parity trace reader refuses it without any change to the parity tools. No replay tool for these recordings yet."
+
+[[category.item]]
+id = "sandbox-arenas"
+name = "Hand-made lab arenas"
+status = "implemented"
+evidence = "crates/asamu-sandbox/tests/arenas.rs; docs/SANDBOX.md"
+note = "movement-lab and grapple-lab: box levels written by us, no original content. Parameter rulers are Classic values read at build time; jump rulers are measured in this recreation, not in the original. No slopes."
+
+[[category.item]]
+id = "sandbox-app"
+name = "In-app Sandbox: launcher, inspector, hotkeys, lifecycle"
+status = "partial"
+note = "Built behind the app's `sandbox` feature (default on; compiles out). Covered by headless app tests with the real tick (apps/asamu/src/sandbox/*.rs: lifecycle, single-writer control, storage, CLI, key mapping) and by unattended runs with window screenshots. Not yet driven by a person: real key presses, mouse clicks on the panel, a converted map started from the launcher and profile save/load in the running app are untested. The new CI steps have not run yet."
+
+[[category.item]]
+id = "sandbox-viz"
+name = "Visualisers, telemetry read-outs, graphs"
+status = "partial"
+note = "Telemetry and prediction are tested in the model (crates/asamu-sandbox/tests/telemetry.rs); HUD, graphs and gizmo helpers have pure tests. On screen only in unattended screenshots: the aim ray on a hit, the reach and release rings and the floor normal have not been seen drawn. Read-outs describe this recreation, not the original."

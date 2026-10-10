@@ -13,7 +13,17 @@ asamu-assets.workspace = true
 asamu-core.workspace = true
 asamu-game.workspace = true
 asamu-player.workspace = true
+# Sandbox mode (experimental, ours): compiled in by default, removable with
+# `--no-default-features`. See `src/sandbox.rs`.
+asamu-sandbox = { workspace = true, optional = true }
 bevy.workspace = true
+
+[features]
+default = ["sandbox"]
+# The in-app Sandbox (launcher, inspector, live tuning, time control). The
+# feature exists on this crate only: nothing under `crates/` or `tools/` is
+# compiled differently by it.
+sandbox = ["dep:asamu-sandbox"]
 
 [lints]
 workspace = true

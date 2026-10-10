@@ -1,0 +1,26 @@
+[package]
+name = "asamu-sandbox"
+description = "Sandbox mode for the ASAMU recreation: parameter overlays, sessions, time control, save states and hand-made arenas (ours; render-free; never evidence of parity)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Boundary (checked by `tests/boundary.rs`): only the dependencies below, and
+# no dependency feature beyond `float_roundtrip` on `serde_json`, which
+# `asamu-player` already turns on. Adding this crate to a build therefore
+# changes nothing in how the Classic crates are compiled.
+[dependencies]
+asamu-core.workspace = true
+asamu-game.workspace = true
+asamu-player.workspace = true
+asamu-world.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true

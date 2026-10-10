@@ -34,6 +34,7 @@ flowchart TB
 | `asamu-world` | Level scenes in runtime form: triangle collision, volumes, checkpoints, kill zones, movers, world objects (recharge crystals, attractor pads, falling rocks), the built-in graybox level | core |
 | `asamu-kismet` | Interpreter for the levels' Kismet graphs and Matinee tracks; talks to the game through a host interface | core |
 | `asamu-game` | The game frame: tick order, level script host, NPCs and the worm, saves and progression, time trial, the smoke harness | core, player, world, kismet |
+| `asamu-sandbox` | Sandbox mode, render-free (experimental, ours, never evidence of parity): parameter overlays on a copy of the Classic set, sessions and commands, time control, in-memory save states, hand-made arenas ([SANDBOX.md](SANDBOX.md)) | core, player, world, game |
 | `asamu-assets` | Runtime view of converted data: level render plans, material descriptions, sound cue evaluation, particle simulation, lightmap and localization tables | core |
 | `asamu-ue3` | Defensive reader for the game's UE3 package generation (v868): summary, tables, LZO, objects and properties, bytecode, meshes, textures, materials, Kismet, Matinee, audio, particles | — |
 | `apps/asamu` | The Bevy executable: windowing, input, rendering, audio output, UI, and the glue that presents the simulation | core, player, game, assets, bevy |
@@ -60,7 +61,8 @@ How the pieces run together inside one frame is described in [INTEGRATION.md](IN
 4. **Classic ↔ experiments.** The faithful game ("Classic": original parameters, original tick order, the parity
    tooling) is the authoritative target. Anything experimental has to live beside it, not inside it: it may read
    and wrap the simulation, but the Classic path must behave bit-identically whether or not the experiment is
-   compiled in.
+   compiled in. The Sandbox is built this way: `asamu-sandbox` depends on the simulation crates and is used only
+   by the app's optional `sandbox` feature, while no simulation crate and no parity tool depends on it.
 
 ## Coordinate conventions
 

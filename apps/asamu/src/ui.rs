@@ -39,7 +39,13 @@ use asamu_game::TickReport;
 use asamu_game::save::{Achievement, ChapterId, FRONT_END_MAP, PlayMode, SaveSession, SaveStore};
 use bevy::prelude::*;
 
+// For `crate::sandbox`: it starts a converted level through the unchanged
+// load flow and reads the main menu's "Sandbox" button itself.
+#[cfg(feature = "sandbox")]
+pub(crate) use flow::FlowRequest;
 pub(crate) use flow::{LoadedLevel, load_level};
+#[cfg(feature = "sandbox")]
+pub(crate) use menus::UiAction;
 pub(crate) use settings::UserSettings;
 pub(crate) use strings::UiStrings;
 
@@ -122,6 +128,11 @@ pub(crate) enum Screen {
     Loading,
     /// "This replaces your checkpoint progress" confirmation.
     Confirm,
+    /// The Sandbox's launcher or inspector. `menus` draws nothing for it
+    /// (`crate::sandbox` owns the screen); like every open screen it frees
+    /// the cursor and gates the gameplay input.
+    #[cfg(feature = "sandbox")]
+    Sandbox,
 }
 
 /// Menu state.
