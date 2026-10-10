@@ -1,7 +1,8 @@
 //! Unattended runs: take a screenshot and/or exit after a delay
 //! (`--screenshot PATH`, `--exit-after SECONDS`). Used to check locally that
-//! a converted level renders; screenshots of game content stay local and are
-//! never committed.
+//! a converted level renders. Screenshots of game content stay local: the
+//! few showcase images in `docs/images/` are chosen and copied there by
+//! hand (`docs/LEGAL.md`), never written by the app.
 //!
 //! With a converted level the screenshot waits until its assets have settled
 //! (loaded or failed), then one more second (or `--screenshot-delay`
@@ -12,7 +13,15 @@
 //! (1600 × 900) that follows the player camera, not read back from the
 //! window: macOS stops presenting to a window that is occluded or on a locked
 //! screen, and a window read-back then comes out black. The HUD is not in the
-//! image (gizmos, such as the grapple aim marker, are).
+//! image (gizmos, such as the grapple aim marker, are), and neither is the
+//! first-person overlay (the hands). `--screenshot-window` reads the window
+//! back instead: exactly what the player sees, HUD and hands included, but
+//! only while the window is visible on an unlocked screen.
+//!
+//! `--watch-window DIR` keeps reading the window back while someone plays
+//! ([`WindowWatch`]): one image every [`WATCH_PERIOD`] seconds into a small
+//! ring of files, so a second person (or a tool) can look at what the player
+//! is seeing without asking for screenshots. Same path rules as below.
 //!
 //! A screenshot of a converted level is copyrighted game content, so the
 //! path is checked before the window opens ([`check_screenshot_path`]): never
@@ -32,6 +41,56 @@ use crate::converted::ConvertedLevel;
 /// Size of the offscreen screenshot image.
 const SHOT_SIZE: (u32, u32) = (1600, 900);
 
+/// Seconds between two images of [`WindowWatch`] (ours).
+pub const WATCH_PERIOD: f32 = 2.0;
+/// Images [`WindowWatch`] keeps before it starts over (ours).
+pub const WATCH_KEEP: usize = 12;
+
+/// `--watch-window DIR`: the window, read back every [`WATCH_PERIOD`] seconds
+/// into `DIR/window-NN.png` (`NN` runs through `0..WATCH_KEEP` and starts
+/// over; the newest file is the most recent view).
+#[derive(Resource, Debug, Clone)]
+pub struct WindowWatch {
+    dir: PathBuf,
+    next: usize,
+    last: f32,
+}
+
+impl WindowWatch {
+    /// A watch writing into `dir` (already checked with
+    /// [`check_screenshot_path`]).
+    #[must_use]
+    pub fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            next: 0,
+            last: 0.0,
+        }
+    }
+
+    /// The file of image `index` in `dir`.
+    #[must_use]
+    pub fn file(dir: &Path, index: usize) -> PathBuf {
+        dir.join(format!("window-{:02}.png", index % WATCH_KEEP))
+    }
+}
+
+fn watch_window(mut commands: Commands, time: Res<Time<Real>>, watch: Option<ResMut<WindowWatch>>) {
+    let Some(mut watch) = watch else {
+        return;
+    };
+    let now = time.elapsed_secs();
+    if now - watch.last < WATCH_PERIOD {
+        return;
+    }
+    watch.last = now;
+    let path = WindowWatch::file(&watch.dir, watch.next);
+    watch.next = (watch.next + 1) % WATCH_KEEP;
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+}
+
 /// What to do unattended.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct AutoCapture {
@@ -41,6 +100,8 @@ pub struct AutoCapture {
     pub exit_after: Option<f32>,
     /// Seconds after the assets settled before the screenshot (default 1).
     pub delay: f32,
+    /// Read the window back instead of rendering the offscreen image.
+    pub window: bool,
     taken_at: Option<f32>,
     settled_at: Option<f32>,
     target: Option<Handle<Image>>,
@@ -54,6 +115,7 @@ impl AutoCapture {
             screenshot,
             exit_after,
             delay: 1.0,
+            window: false,
             taken_at: None,
             settled_at: None,
             target: None,
@@ -66,6 +128,14 @@ impl AutoCapture {
         if delay.is_finite() && delay >= 0.0 {
             self.delay = delay;
         }
+        self
+    }
+
+    /// Read the window back (HUD and first-person overlay included) instead
+    /// of rendering the offscreen image.
+    #[must_use]
+    pub fn with_window(mut self, window: bool) -> Self {
+        self.window = window;
         self
     }
 
@@ -245,7 +315,7 @@ impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AutoCapture>()
             .add_systems(PostStartup, setup_offscreen)
-            .add_systems(Update, auto_capture)
+            .add_systems(Update, (auto_capture, watch_window))
             .add_systems(Last, arm_exit_watchdog);
     }
 }
@@ -257,7 +327,7 @@ fn setup_offscreen(
     mut images: ResMut<Assets<Image>>,
     camera: Query<Entity, With<PlayerCamera>>,
 ) {
-    if capture.screenshot.is_none() {
+    if capture.screenshot.is_none() || capture.window {
         return;
     }
     let Some(parent) = camera.iter().next() else {

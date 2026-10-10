@@ -208,7 +208,7 @@ pub fn panel_line(run: Option<&TimeTrialRun>, saves: &Saves, tick: u64) -> Strin
         Some(b) => format!("Best {b} ({})", medal_word(v.best_medal)),
         None => "Best --:--:--".to_owned(),
     };
-    format!("{target} \u{b7} {best}")
+    format!("{target} | {best}")
 }
 
 fn update_panel(
@@ -244,20 +244,20 @@ mod tests {
         assert_eq!(panel_line(None, &saves, 0), "");
         assert_eq!(
             panel_line(Some(&run), &saves, 0),
-            "Target gold 03:20:00 \u{b7} Best --:--:--"
+            "Target gold 03:20:00 | Best --:--:--"
         );
         saves.0.time_trial.record(ChapterId::Village, 215.0);
         run.start(0);
         run.update_target(60 * 201);
         assert_eq!(
             panel_line(Some(&run), &saves, 60 * 201),
-            "Target silver 03:40:00 \u{b7} Best 03:35:00 (silver)"
+            "Target silver 03:40:00 | Best 03:35:00 (silver)"
         );
         run.update_target(60 * 900);
         run.update_target(60 * 900);
         assert_eq!(
             panel_line(Some(&run), &saves, 60 * 900),
-            "Target: no medal \u{b7} Best 03:35:00 (silver)"
+            "Target: no medal | Best 03:35:00 (silver)"
         );
     }
 
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(panel(&mut app), "");
         app.insert_resource(sim());
         app.update();
-        assert_eq!(panel(&mut app), "Target gold 03:20:00 \u{b7} Best --:--:--");
+        assert_eq!(panel(&mut app), "Target gold 03:20:00 | Best --:--:--");
         app.world_mut().write_message(TimeTrialStart);
         app.update();
         assert!(

@@ -2,6 +2,11 @@
 //! crosshair (centre), an ability panel (bottom left: grapple count and
 //! ability state) and a subtitle area (bottom centre).
 //!
+//! The information panel is a developer read-out (model, parameters, speeds,
+//! states, key help). F1 shows or hides it ([`DebugInfo`]); it starts shown
+//! on the graybox test level and hidden on converted levels, where it would
+//! cover the game.
+//!
 //! The original's HUD and menus are Scaleform movies (not ported); this is a
 //! functional stand-in. The audio module writes the subtitle line
 //! ([`Subtitle`]; narration and Kismet sounds) and the box hides itself when
@@ -21,6 +26,21 @@ use bevy::prelude::*;
 /// Top-left information text.
 #[derive(Component)]
 pub struct HudInfo;
+
+/// The information panel's box.
+#[derive(Component)]
+pub struct HudInfoPanel;
+
+/// Whether the information panel (the developer read-out) is shown; F1
+/// toggles it.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DebugInfo(pub bool);
+
+impl Default for DebugInfo {
+    fn default() -> Self {
+        Self(true)
+    }
+}
 
 /// Centre crosshair text (its colour shows the grapple target state).
 #[derive(Component)]
@@ -87,13 +107,15 @@ impl Plugin for HudPlugin {
         app.init_resource::<Subtitle>()
             .init_resource::<SubtitleLanguage>()
             .init_resource::<HudStyle>()
+            .init_resource::<DebugInfo>()
             .add_systems(Startup, spawn_hud)
-            .add_systems(Update, sync_subtitle);
+            .add_systems(Update, (sync_subtitle, toggle_debug_info));
     }
 }
 
 fn spawn_hud(mut commands: Commands, style: Res<HudStyle>) {
     commands.spawn((
+        HudInfoPanel,
         Node {
             position_type: PositionType::Absolute,
             top: px(10),
@@ -111,13 +133,20 @@ fn spawn_hud(mut commands: Commands, style: Res<HudStyle>) {
             TextColor(style.info_color),
         )],
     ));
+    // A full-window box that centres the crosshair glyph (the box itself
+    // takes no clicks).
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
-            left: percent(50),
-            top: percent(50),
+            left: px(0),
+            right: px(0),
+            top: px(0),
+            bottom: px(0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
             ..default()
         },
+        Pickable::IGNORE,
         children![(
             Crosshair,
             Text::new("+"),
@@ -201,6 +230,27 @@ fn sync_subtitle(
             .as_deref()
             .map(|l| language.show(l))
             .unwrap_or_default();
+    }
+}
+
+/// F1 flips [`DebugInfo`]; the panel follows it.
+fn toggle_debug_info(
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut info: ResMut<DebugInfo>,
+    mut panels: Query<&mut Visibility, With<HudInfoPanel>>,
+) {
+    if keys.is_some_and(|k| k.just_pressed(KeyCode::F1)) {
+        info.0 = !info.0;
+    }
+    let wanted = if info.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut v in &mut panels {
+        if *v != wanted {
+            *v = wanted;
+        }
     }
 }
 

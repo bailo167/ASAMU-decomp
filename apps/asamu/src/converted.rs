@@ -30,7 +30,7 @@ use asamu_core::coords::ue_dir_to_bevy;
 use bevy::asset::io::AssetSourceBuilder;
 use bevy::asset::io::file::FileAssetReader;
 use bevy::asset::{AssetId, AssetPath, RenderAssetUsages, UntypedAssetId};
-use bevy::camera::visibility::NoFrustumCulling;
+use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
 use bevy::gltf::convert_coordinates::GltfConvertCoordinates;
 use bevy::gltf::{GltfAssetLabel, GltfLoaderSettings};
 use bevy::image::{
@@ -508,6 +508,14 @@ fn log_plan(plan: &LevelPlan) {
     }
 }
 
+/// Render layers of the level's lights: the world and the first-person
+/// overlay, so the hands are lit by the lights around the player (in the
+/// original the foreground mesh is lit by the scene too) and not by a light
+/// of their own.
+fn scene_light_layers() -> RenderLayers {
+    RenderLayers::from_layers(&[0, crate::FIRST_PERSON_LAYER])
+}
+
 fn gltf_settings(s: &mut GltfLoaderSettings) {
     s.load_materials = RenderAssetUsages::empty();
     s.load_cameras = false;
@@ -623,6 +631,26 @@ fn standard_material(
         uv_transform,
         ..default()
     }
+}
+
+/// A Bevy material for a converted render material outside the level plan
+/// (skinned meshes): the mapping level meshes use, registered for the
+/// failed-texture repair.
+pub(crate) fn add_render_material(
+    m: &RenderMaterial,
+    settings: &RenderSettings,
+    server: &AssetServer,
+    materials: &mut Assets<StandardMaterial>,
+    users: &mut TextureUsers,
+) -> Handle<StandardMaterial> {
+    let mut images = ImageCache {
+        server,
+        handles: HashMap::new(),
+    };
+    let sm = standard_material(m, false, settings, &mut images);
+    let handle = materials.add(sm.clone());
+    users.register(handle.id(), &sm, m.path.as_deref());
+    handle
 }
 
 /// The scene light of each render light of `plan` (same order: the plan maps
@@ -835,6 +863,7 @@ fn spawn_plan(
                     },
                     Transform::from_translation(pos),
                     slot,
+                    scene_light_layers(),
                 ));
             }
             RenderLightKind::Spot {
@@ -855,6 +884,7 @@ fn spawn_plan(
                     },
                     Transform::from_translation(pos).looking_to(dir, Vec3::Y),
                     slot,
+                    scene_light_layers(),
                 ));
             }
             RenderLightKind::Directional { lux } => {
@@ -866,6 +896,7 @@ fn spawn_plan(
                         ..default()
                     },
                     Transform::default().looking_to(dir, Vec3::Y),
+                    scene_light_layers(),
                     // Shadows near the player only (cost grows with the
                     // distance and cascade count; a render setting).
                     CascadeShadowConfigBuilder {

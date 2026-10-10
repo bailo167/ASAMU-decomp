@@ -206,7 +206,7 @@ pub(crate) fn counter_line(saves: &SaveSession, chapter: Option<ChapterId>) -> O
     let chapter = chapter.filter(|c| c.has_collectibles())?;
     let p = &saves.progression;
     Some(format!(
-        "Collectibles {}/{} \u{b7} total {}/{}",
+        "Collectibles {}/{} | total {}/{}",
         p.collectible_count(chapter),
         asamu_game::save::COLLECTIBLES_PER_CHAPTER,
         p.collectible_total(),
@@ -305,7 +305,7 @@ mod tests {
         );
         assert_eq!(
             counter_line(&saves, Some(ChapterId::Village)).as_deref(),
-            Some("Collectibles 1/5 \u{b7} total 1/25")
+            Some("Collectibles 1/5 | total 1/25")
         );
         let trial = Play {
             chapter: Some(ChapterId::Village),

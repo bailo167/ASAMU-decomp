@@ -1082,7 +1082,7 @@ pub(crate) fn spawn_overlays(mut commands: Commands) {
         Visibility::Hidden,
         GlobalZIndex(75),
         children![(
-            Text::new("ASAMU-decomp \u{b7} title logo (the original's logo movie is not ported)"),
+            Text::new("ASAMU-decomp | title logo (the original's logo movie is not ported)"),
             TextFont {
                 font_size: FontSize::Px(30.0),
                 ..default()

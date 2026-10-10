@@ -478,7 +478,7 @@ pub(crate) fn credits_lines(data: &Localization, strings: &UiStrings) -> Vec<(St
     };
     let mut out = Vec::new();
     for row in &credits.rows {
-        let text = row.line("   \u{b7}   ");
+        let text = row.line("   |   ");
         if text.is_empty() {
             continue;
         }
@@ -681,7 +681,7 @@ mod tests {
         let mut strings = UiStrings::default();
         strings.set_localized(t);
         let lines = credits_lines(locale.data().unwrap(), &strings);
-        assert_eq!(lines[0], ("Role   \u{b7}   Person".to_owned(), 21.0));
+        assert_eq!(lines[0], ("Role   |   Person".to_owned(), 21.0));
         assert_eq!(lines.last().unwrap().0, "skip me");
         // No data: English defaults, no language row.
         let none = Locale::with_data(None, None, Some("TST"));
@@ -831,10 +831,7 @@ mod tests {
             .iter()
             .map(|e| app.world().get::<Text>(e).unwrap().0.clone())
             .collect();
-        assert_eq!(
-            rows.first().map(String::as_str),
-            Some("Role   \u{b7}   Person")
-        );
+        assert_eq!(rows.first().map(String::as_str), Some("Role   |   Person"));
         assert_eq!(rows.last().map(String::as_str), Some("skip me"));
         // A language change rebuilds the list once.
         app.world_mut().resource_mut::<Locale>().set_language("TST");

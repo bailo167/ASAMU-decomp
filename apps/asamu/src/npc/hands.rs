@@ -7,8 +7,11 @@
 //! places the hand (CONFIRMED (cdo, src)). Here: an overlay camera on its own
 //! render layer, child of the player camera (so it follows it), clearing only
 //! depth, with the mesh as its child in camera-local axes. The hand bob of
-//! ABILITIES.md A-CM-5 moves it ([`hand_bob_offset`]). Lighting of the overlay
-//! is our own (one directional light on the overlay layer).
+//! ABILITIES.md A-CM-5 moves it ([`hand_bob_offset`]). The overlay is lit by
+//! the level's lights (they are on the overlay layer as well) plus a weak
+//! fill light of our own; its materials are the converted ones
+//! ([`super::materials`]). The level's post-processing (tonemapper, colour
+//! grading, fog) is not applied to the overlay.
 
 use asamu_core::coords::ue_dir_to_bevy;
 use asamu_game::npc::{HAND_MESH, HAND_MESH_FOV, HandAnim, hand_bob_offset};
@@ -25,7 +28,13 @@ use super::skins::{
 use crate::{PlayerCamera, Sim, bevy_vec};
 
 /// Render layer of the first-person overlay (ours).
-const OVERLAY_LAYER: usize = 1;
+const OVERLAY_LAYER: usize = crate::FIRST_PERSON_LAYER;
+
+/// Illuminance of the overlay's own fill light, lux (ours, presentation): a
+/// weak light from behind the camera so the hands keep their shape where no
+/// level light reaches them. The level's lights do the real lighting (they
+/// are on the overlay layer too, `converted.rs`).
+const FILL_LUX: f32 = 120.0;
 
 /// The overlay camera.
 #[derive(Component)]
@@ -115,7 +124,7 @@ pub(super) fn spawn_hands(
             h.spawn((
                 Name::new("first-person overlay light"),
                 DirectionalLight {
-                    illuminance: 4_000.0,
+                    illuminance: FILL_LUX,
                     shadow_maps_enabled: false,
                     ..default()
                 },

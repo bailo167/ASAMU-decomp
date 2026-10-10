@@ -549,7 +549,7 @@ pub(crate) fn handle_integration(
         match saves.0.on_collectible(chapter, &m.key) {
             Ok(out) if out.new => {
                 toasts.push(format!(
-                    "Collectible found \u{b7} {}/{} here \u{b7} {}/{} in total",
+                    "Collectible found | {}/{} here | {}/{} in total",
                     out.chapter_count,
                     asamu_game::save::COLLECTIBLES_PER_CHAPTER,
                     out.total,
@@ -620,15 +620,15 @@ pub(crate) fn handle_integration(
         match saves.0.on_time_trial_end(chapter, seconds as f32) {
             Ok(out) => {
                 let medal = match out.medal {
-                    Some(asamu_game::save::Medal::Gold) => " \u{b7} gold",
-                    Some(asamu_game::save::Medal::Silver) => " \u{b7} silver",
-                    Some(asamu_game::save::Medal::Bronze) => " \u{b7} bronze",
+                    Some(asamu_game::save::Medal::Gold) => " | gold",
+                    Some(asamu_game::save::Medal::Silver) => " | silver",
+                    Some(asamu_game::save::Medal::Bronze) => " | bronze",
                     None => "",
                 };
                 toasts.push(format!(
                     "Time {}{}{}",
                     format_trial_time(seconds),
-                    if out.new_best { " \u{b7} new best" } else { "" },
+                    if out.new_best { " | new best" } else { "" },
                     medal
                 ));
                 if out.all_gold {

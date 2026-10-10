@@ -209,7 +209,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
         Screen::Main => {
             items.push(Item::Title("ASAMU-decomp".into()));
             items.push(Item::Line(
-                "engine recreation \u{b7} plays data converted from your own install".into(),
+                "engine recreation | plays data converted from your own install".into(),
             ));
             if ctx.in_game {
                 items.push(button(
@@ -223,7 +223,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
                 .filter(|c| converted && ctx.launch.has_chapter(*c));
             let continue_label = match target {
                 Some(c) => format!(
-                    "{} \u{2014} {}",
+                    "{} - {}",
                     t.get("menu.continue", "Continue"),
                     t.chapter_title(c)
                 ),
@@ -254,7 +254,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
             items.push(button(t.get("menu.quit", "Quit"), UiAction::Quit, true));
             let p = &saves.progression;
             items.push(Item::Line(format!(
-                "chapters entered {}/{} \u{b7} collectibles {}/{} \u{b7} story items {}/{} \u{b7} achievements {}/{}",
+                "chapters entered {}/{} | collectibles {}/{} | story items {}/{} | achievements {}/{}",
                 ChapterId::ALL
                     .iter()
                     .filter(|c| p.unlocked.contains(c))
@@ -294,7 +294,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
                 let mut label = format!("{}. {}", n + 1, t.chapter_title(c));
                 if c.has_collectibles() {
                     label.push_str(&format!(
-                        "  \u{b7}  {}/{}",
+                        "  |  {}/{}",
                         saves.progression.collectible_count(c),
                         asamu_game::save::COLLECTIBLES_PER_CHAPTER
                     ));
@@ -325,7 +325,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
             {
                 let best = saves.time_trial.best.get(&c).copied();
                 let label = format!(
-                    "{}  \u{b7}  best {}  ({})  \u{b7}  gold {}",
+                    "{}  |  best {}  ({})  |  gold {}",
                     t.chapter_title(c),
                     best.map_or_else(
                         || "--:--:--".to_owned(),
@@ -355,7 +355,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
             }
             items.push(Item::Stepper {
                 label: t.get("settings.fov", "Field of view").into(),
-                value: format!("{:.0}\u{b0}", s.fov_degrees),
+                value: format!("{:.0} deg", s.fov_degrees),
                 minus: UiAction::Set(SettingAction::Fov(-1)),
                 plus: UiAction::Set(SettingAction::Fov(1)),
             });
@@ -363,7 +363,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
                 label: t
                     .get("settings.mouse_sensitivity", "Mouse sensitivity")
                     .into(),
-                value: format!("{:.1}\u{d7}", s.mouse_sensitivity),
+                value: format!("{:.1}x", s.mouse_sensitivity),
                 minus: UiAction::Set(SettingAction::Sensitivity(-1)),
                 plus: UiAction::Set(SettingAction::Sensitivity(1)),
             });
@@ -414,7 +414,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
                 label: t.get("settings.resolution", "Window size").into(),
                 value: s
                     .resolution
-                    .map_or_else(|| "default".to_owned(), |[w, h]| format!("{w}\u{d7}{h}")),
+                    .map_or_else(|| "default".to_owned(), |[w, h]| format!("{w}x{h}")),
                 minus: UiAction::Set(SettingAction::Resolution(false)),
                 plus: UiAction::Set(SettingAction::Resolution(true)),
             });
@@ -438,7 +438,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
             if let Some(c) = ctx.play.chapter {
                 let mut line = t.chapter_title(c);
                 if ctx.play.mode == PlayMode::TimeTrial {
-                    line.push_str(" \u{b7} time trial");
+                    line.push_str(" | time trial");
                 }
                 items.push(Item::Line(line));
             }
@@ -606,7 +606,7 @@ fn spawn_item(parent: &mut ChildSpawnerCommands, item: &Item, tab: &mut i32) {
                             ..default()
                         },
                     ));
-                    spawn_button(row, "\u{2212}", *minus, true, px(44), tab);
+                    spawn_button(row, "-", *minus, true, px(44), tab);
                     row.spawn((
                         text(value, 17.0, TEXT),
                         Node {

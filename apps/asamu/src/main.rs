@@ -99,6 +99,10 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 /// (50 UU per metre). Not a gameplay value; the simulation runs in UU.
 pub(crate) const SCALE: WorldScale = WorldScale::PRESENTATION_METRES;
 
+/// Render layer of the first-person overlay (the hands): drawn by its own
+/// camera over the world, lit by the level's lights (ours, presentation).
+pub(crate) const FIRST_PERSON_LAYER: usize = 1;
+
 /// Mouse sensitivity in radians per mouse count. An app input setting, not a
 /// gameplay constant.
 pub(crate) const MOUSE_RADIANS_PER_COUNT: f32 = 0.0025;
@@ -140,10 +144,10 @@ fn banner(game: &Game) -> String {
             "graybox abilities: everything on, 3 grapples (test configuration)"
         };
         format!(
-            "ASAMU-decomp pre-alpha \u{b7} {movement} + ASAMU script layer (original grapple gun, rocket boots)\n\
+            "ASAMU-decomp pre-alpha | {movement} + ASAMU script layer (original grapple gun, rocket boots)\n\
              ORIGINAL values ({original} params): GroundSpeed {}, AccelRate {}, JumpZ {}, AirControl {}, \
-             cylinder {}/{}, eye {}, FOV {} \u{b7} {gun}\n\
-             PLACEHOLDER: {} params read only by the debug models (placeholder movement, rope grapple) \u{b7} \
+             cylinder {}/{}, eye {}, FOV {} | {gun}\n\
+             PLACEHOLDER: {} params read only by the debug models (placeholder movement, rope grapple) | \
              {abilities}",
             m.max_ground_speed.value,
             m.ground_acceleration.value,
@@ -157,7 +161,7 @@ fn banner(game: &Game) -> String {
         )
     } else {
         format!(
-            "ASAMU-decomp pre-alpha \u{b7} {movement} \u{b7} PLACEHOLDER parameters \
+            "ASAMU-decomp pre-alpha | {movement} | PLACEHOLDER parameters \
              ({} of {}; debug configuration, no ASAMU script layer)",
             placeholders.len(),
             report.len()
@@ -197,12 +201,19 @@ const USAGE: &str = "usage: asamu [options]\n\
     --light-shadows N       point/spot lights with shadow maps (default 4)\n  \
     --no-shadows            no directional light shadows\n  \
     --no-fog                no placeholder fog\n  \
-    --normal-maps           use converted normal maps (unverified convention)\n\
+    --normal-maps           use converted normal maps (unverified convention)\n  \
+    --debug-info            start with the developer read-out shown (F1 toggles it; the graybox\n                          \
+    always starts with it)\n\
     \n\
     unattended runs:\n  \
     --no-menu               graybox: skip the main menu (click to play)\n  \
     --screenshot PATH       save a screenshot once the level has loaded (keep it local)\n  \
     --screenshot-delay S    seconds after the assets settled before the screenshot (default 1)\n  \
+    --screenshot-window     read the screenshot back from the window (with HUD and hands; the\n                          \
+    window must be visible) instead of rendering it offscreen\n  \
+    --hidden-window         do not show the window (unattended runs with an offscreen screenshot)\n  \
+    --watch-window DIR      while playing, save the window every 2 s into DIR/window-NN.png\n                          \
+    (a ring of 12 files; keep them local)\n  \
     --exit-after SECONDS    quit after this many seconds\n  \
     --walk SECONDS          start playing at once and hold forward for this simulated time";
 
@@ -231,6 +242,10 @@ struct Cli {
     normal_maps: bool,
     screenshot: Option<PathBuf>,
     screenshot_delay: f32,
+    screenshot_window: bool,
+    watch_window: Option<PathBuf>,
+    hidden_window: bool,
+    debug_info: bool,
     exit_after: Option<f32>,
     walk: f32,
     no_menu: bool,
@@ -252,6 +267,10 @@ impl Default for Cli {
             normal_maps: false,
             screenshot: None,
             screenshot_delay: 1.0,
+            screenshot_window: false,
+            watch_window: None,
+            hidden_window: false,
+            debug_info: false,
             exit_after: None,
             walk: 0.0,
             no_menu: false,
@@ -341,6 +360,12 @@ fn parse_cli(
                     return Err("--screenshot-delay must not be negative".to_owned());
                 }
                 cli.screenshot_delay = v;
+            }
+            "--screenshot-window" => cli.screenshot_window = true,
+            "--debug-info" => cli.debug_info = true,
+            "--hidden-window" => cli.hidden_window = true,
+            "--watch-window" => {
+                cli.watch_window = Some(PathBuf::from(value("--watch-window")?));
             }
             "--exit-after" => {
                 let v = parse_f32("--exit-after", &value("--exit-after")?)?;
@@ -464,6 +489,17 @@ fn main() -> AppExit {
     };
     // Screenshots of converted levels are game content: check the path
     // before a window opens (see `capture::check_screenshot_path`).
+    if let Some(dir) = &cli.watch_window {
+        let install = std::env::var_os("ASAMU_ORIGINAL_DIR").map(PathBuf::from);
+        let probe = capture::WindowWatch::file(dir, 0);
+        match capture::check_screenshot_path(&probe, install.as_deref()) {
+            Ok(resolved) => cli.watch_window = resolved.parent().map(PathBuf::from),
+            Err(message) => {
+                eprintln!("{message}");
+                return AppExit::error();
+            }
+        }
+    }
     if let Some(path) = &cli.screenshot {
         let install = std::env::var_os("ASAMU_ORIGINAL_DIR").map(PathBuf::from);
         match capture::check_screenshot_path(path, install.as_deref()) {
@@ -482,10 +518,13 @@ fn main() -> AppExit {
 }
 
 /// The window and default plugins (after any asset sources are registered).
-fn add_default_plugins(app: &mut App, title: &str) {
+fn add_default_plugins(app: &mut App, title: &str, cli: &Cli) {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: title.into(),
+            // `--hidden-window`: an unattended run that renders its
+            // screenshot offscreen needs no window on screen.
+            visible: !cli.hidden_window,
             ..default()
         }),
         ..default()
@@ -527,7 +566,7 @@ fn run_graybox(cli: &Cli) -> AppExit {
     println!("{banner}");
 
     let mut app = App::new();
-    add_default_plugins(&mut app, "ASAMU-decomp (pre-alpha graybox)");
+    add_default_plugins(&mut app, "ASAMU-decomp (pre-alpha graybox)", cli);
     app.insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
         .insert_resource(GlobalAmbientLight {
             brightness: 400.0,
@@ -535,7 +574,8 @@ fn run_graybox(cli: &Cli) -> AppExit {
         })
         .insert_resource(
             capture::AutoCapture::new(cli.screenshot.clone(), cli.exit_after)
-                .with_delay(cli.screenshot_delay),
+                .with_delay(cli.screenshot_delay)
+                .with_window(cli.screenshot_window),
         )
         .add_systems(Startup, (spawn_level, spawn_camera_and_light))
         // The main menu first (graybox: New Game plays the test level),
@@ -546,6 +586,9 @@ fn run_graybox(cli: &Cli) -> AppExit {
         });
     add_simulation(&mut app, game, banner);
     app.insert_resource(ScriptedWalk(cli.walk));
+    if let Some(dir) = &cli.watch_window {
+        app.insert_resource(capture::WindowWatch::new(dir.clone()));
+    }
     app.run()
 }
 
@@ -751,6 +794,7 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
     add_default_plugins(
         &mut app,
         &format!("ASAMU-decomp - {level} (converted, pre-alpha)"),
+        cli,
     );
     app.insert_resource(ClearColor(Color::srgb(0.04, 0.045, 0.06)))
         .insert_resource(GlobalAmbientLight {
@@ -760,9 +804,12 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         .insert_resource(hud::HudStyle {
             info_color: Color::srgb(0.92, 0.92, 0.88),
         })
+        // The developer read-out would cover the game: F1 shows it.
+        .insert_resource(hud::DebugInfo(cli.debug_info))
         .insert_resource(
             capture::AutoCapture::new(cli.screenshot.clone(), cli.exit_after)
-                .with_delay(cli.screenshot_delay),
+                .with_delay(cli.screenshot_delay)
+                .with_window(cli.screenshot_window),
         )
         .insert_resource(converted::ConvertedLevel {
             dir,
@@ -789,6 +836,9 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         );
     add_simulation_systems(&mut app);
     app.insert_resource(ScriptedWalk(cli.walk));
+    if let Some(dir) = &cli.watch_window {
+        app.insert_resource(capture::WindowWatch::new(dir.clone()));
+    }
     app.run()
 }
 
@@ -858,10 +908,10 @@ fn update_converted_hud(
     }
     let p = fly.position;
     info.0 = format!(
-        "ASAMU-decomp pre-alpha \u{b7} converted original level (render approximation: dynamic \
-         lights, no lightmaps) \u{b7} FLY CAMERA (render only, no collision)\n\
+        "ASAMU-decomp pre-alpha | converted original level (render approximation: dynamic \
+         lights, no lightmaps) | FLY CAMERA (render only, no collision)\n\
          {}\n\
-         camera UE ({:.0}, {:.0}, {:.0}) uu | yaw {:.0}\u{b0} pitch {:.0}\u{b0} | speed {:.0} uu/s | {} fps\n\
+         camera UE ({:.0}, {:.0}, {:.0}) uu | yaw {:.0} deg pitch {:.0} deg | speed {:.0} uu/s | {} fps\n\
          click to capture the mouse | WASD move | Space/E up | Ctrl/Q down | Shift fast | wheel speed | Esc release",
         level.status(),
         p.x,
@@ -1535,7 +1585,7 @@ fn update_hud(
          tick {} @ {:.0} Hz | checkpoint {checkpoint} | respawns {} | {state}{}\n\
          WASD move | mouse look | Space jump (air: rocket boost) | LShift sprint | LMB grapple | hold RMB power jump / zoom | \
          E use | F7/R respawn | debug: F2 story mode, F3 grapple capacity, F4 boots, F6 attractor, F9 record trace, \
-         F10 level gizmos | Esc release mouse",
+         F10 level gizmos, F1 this read-out | Esc release mouse",
         uu_per_s_to_presentation_m_per_s(speed),
         player.horizontal_speed(),
         if player.pawn.flying {
@@ -1673,6 +1723,7 @@ mod tests {
                 "--normal-maps",
                 "--screenshot",
                 "/tmp/shot.png",
+                "--screenshot-window",
                 "--exit-after",
                 "5",
                 "--walk",
@@ -1695,6 +1746,7 @@ mod tests {
             })
         );
         assert_eq!(cli.exit_after, Some(5.0));
+        assert!(cli.screenshot_window);
         assert_eq!(cli.walk, 1.5);
         assert_eq!(
             cli.converted_dir(Some(PathBuf::from("/elsewhere")))

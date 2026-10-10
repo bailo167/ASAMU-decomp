@@ -18,6 +18,8 @@
 //! - renders the first-person hands (`PlayerHand`) on an overlay camera with
 //!   the original's mesh FOV (70°) and picks the hand animation from the
 //!   player's state ([`hands`]);
+//! - gives every skinned mesh the converted (approximate) material of each
+//!   of its sections ([`materials`]);
 //! - draws state gizmos for collectibles, story interactables, glow flowers
 //!   and the worm (F10, with the other level gizmos).
 //!
@@ -27,6 +29,7 @@
 //! simulation still runs).
 
 mod hands;
+mod materials;
 mod skins;
 
 use asamu_core::glam as sim_glam;
@@ -45,6 +48,7 @@ pub struct NpcPlugin;
 impl Plugin for NpcPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcLoad>()
+            .init_resource::<materials::SkinMaterials>()
             .add_systems(
                 Update,
                 (
@@ -56,6 +60,8 @@ impl Plugin for NpcPlugin {
                     hands::spawn_hands,
                     hands::tag_overlay_meshes,
                     hands::update_hands,
+                    materials::load_skin_materials,
+                    materials::apply_skin_materials,
                     draw_npc_gizmos,
                 )
                     .chain(),
