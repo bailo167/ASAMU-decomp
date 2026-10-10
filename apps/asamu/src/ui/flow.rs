@@ -29,6 +29,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use super::notify::{TimeTrialClock, Toasts};
+use super::strings::UiStrings;
 use super::{
     AchievementEarned, CollectibleFound, GameFinished, GameTick, OpenMap, Play, SaveStringEdited,
     Saves, Screen, StoryItemFound, TimeTrialEnd, TimeTrialStart, UiLaunch, UiState,
@@ -509,14 +510,11 @@ fn extra_name(e: Extra) -> &'static str {
     }
 }
 
-/// `FLOOR_IS_LAVA` → `Floor is lava`.
+/// `FLOOR_IS_LAVA` → `Floor is lava` (the fallback of
+/// [`UiStrings::achievement_title`]).
+#[cfg(test)]
 fn achievement_label(a: Achievement) -> String {
-    let lower = a.name().replace('_', " ").to_lowercase();
-    let mut chars = lower.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+    super::strings::achievement_words(a)
 }
 
 /// The integration messages: progression events, Kismet flags, time
@@ -537,7 +535,9 @@ pub(crate) fn handle_integration(
     mut clock: ResMut<TimeTrialClock>,
     sim: Option<Res<Sim>>,
     mut flow: MessageWriter<FlowRequest>,
+    texts: Res<UiStrings>,
 ) {
+    let achievement_label = |a: Achievement| texts.achievement_title(a);
     fn report(toasts: &mut Toasts, e: asamu_game::save::SaveError) {
         warn!("save failed: {e}");
         toasts.push(format!("Could not write the save: {e}"));
@@ -845,6 +845,7 @@ mod tests {
             .init_resource::<UiLaunch>()
             .init_resource::<UiState>()
             .init_resource::<LevelLoad>()
+            .init_resource::<UiStrings>()
             .insert_resource(Sim::new(Game::graybox().unwrap(), String::new()))
             .add_systems(Update, (handle_integration, run_flow).chain());
         app.world_mut().write_message(OpenMap {

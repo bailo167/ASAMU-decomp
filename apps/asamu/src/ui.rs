@@ -14,8 +14,13 @@
 //! - [`settings`]: user settings (FOV, mouse, volumes, window, subtitles),
 //!   persisted in `settings.json` next to the saves and applied live.
 //! - [`notify`]: toasts, the collectibles counter, the time-trial stopwatch.
-//! - [`strings`]: menu text (ours, English) with optional per-user overrides
-//!   produced from the user's own install (`<converted>/ui/strings.json`).
+//! - [`strings`]: menu text (ours, English) under the localized layer and
+//!   optional per-user overrides (`<converted>/ui/strings.json`).
+//! - [`locale`]: the language setting and the localized text converted from
+//!   the user's own install (`asamu-import localization`): menu labels,
+//!   chapter titles, tutorial pop-ups, achievement names, the title and
+//!   credits text, the subtitle language. See
+//!   `docs/reverse-engineering/LOCALIZATION.md`.
 //!
 //! Saves live in the user-local data directory
 //! ([`asamu_game::save::SaveStore::default_root`], `ASAMU_SAVE_DIR`
@@ -23,6 +28,7 @@
 //! saves in memory only.
 
 mod flow;
+mod locale;
 mod menus;
 mod notify;
 mod settings;
@@ -257,6 +263,7 @@ impl Plugin for UiPlugin {
             .init_resource::<Play>()
             .init_resource::<UserSettings>()
             .init_resource::<strings::UiStrings>()
+            .init_resource::<locale::Locale>()
             .init_resource::<notify::Toasts>()
             .init_resource::<notify::TimeTrialClock>()
             .init_resource::<flow::LevelLoad>()
@@ -279,6 +286,8 @@ impl Plugin for UiPlugin {
                     flow::handle_integration,
                     menus::menu_keys,
                     menus::handle_actions,
+                    locale::handle_language_actions,
+                    locale::apply_language,
                     flow::run_flow,
                     flow::poll_level_load,
                     flow::detect_pause,
@@ -295,6 +304,8 @@ impl Plugin for UiPlugin {
                     settings::apply_settings,
                     notify::update_toasts,
                     notify::update_hud,
+                    locale::localize_overlays,
+                    locale::log_tutorials,
                 ),
             )
             .add_systems(FixedUpdate, flow::process_ticks.after(crate::fixed_tick))
@@ -361,6 +372,7 @@ fn setup(
     mut saves: ResMut<Saves>,
     mut user: ResMut<UserSettings>,
     mut texts: ResMut<strings::UiStrings>,
+    mut locale: ResMut<locale::Locale>,
     mut state: ResMut<UiState>,
     mut toasts: ResMut<notify::Toasts>,
     mut actions: MessageWriter<menus::UiAction>,
@@ -368,8 +380,17 @@ fn setup(
     let root = SaveStore::default_root();
     *user = UserSettings::load(root.as_deref());
     if let Some(dir) = &launch.converted {
-        *texts = strings::UiStrings::load(dir.root());
+        *texts = strings::UiStrings::load(dir.root()).with_localized_from(&texts);
     }
+    let env_language = std::env::var(locale::LANGUAGE_ENV).ok();
+    *locale = locale::Locale::load(
+        launch.converted.as_ref().map(ConvertedDir::root),
+        root.as_deref(),
+        env_language.as_deref(),
+    );
+    // The text is in place before the first frame; `locale::apply_language`
+    // still runs once for the subtitle language and the menu.
+    texts.set_localized(locale.texts());
     saves.0 = match (&root, launch.saves) {
         (Some(root), true) => {
             let session = SaveSession::open(SaveStore::new(root.join("saves")));

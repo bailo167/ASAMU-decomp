@@ -65,6 +65,8 @@ pub(crate) enum UiAction {
     CancelLoad,
     /// Change a setting.
     Set(SettingAction),
+    /// Next (`true`) / previous language (handled by `ui::locale`).
+    Language(bool),
 }
 
 /// A settings change.
@@ -178,6 +180,8 @@ pub(crate) struct MenuContext<'a> {
     pub settings_path: Option<String>,
     /// Name of the level being loaded.
     pub loading: Option<&'a str>,
+    /// The chosen language's name (`None`: no choice, the row is hidden).
+    pub language: Option<String>,
 }
 
 fn medal_name(m: Option<Medal>) -> &'static str {
@@ -341,43 +345,73 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
         Screen::Settings => {
             let s = ctx.settings;
             items.push(Item::Title(t.get("menu.settings", "Settings").into()));
+            if let Some(name) = &ctx.language {
+                items.push(Item::Stepper {
+                    label: t.get("menu.language", "Language").into(),
+                    value: name.clone(),
+                    minus: UiAction::Language(false),
+                    plus: UiAction::Language(true),
+                });
+            }
             items.push(Item::Stepper {
-                label: "Field of view".into(),
+                label: t.get("settings.fov", "Field of view").into(),
                 value: format!("{:.0}\u{b0}", s.fov_degrees),
                 minus: UiAction::Set(SettingAction::Fov(-1)),
                 plus: UiAction::Set(SettingAction::Fov(1)),
             });
             items.push(Item::Stepper {
-                label: "Mouse sensitivity".into(),
+                label: t
+                    .get("settings.mouse_sensitivity", "Mouse sensitivity")
+                    .into(),
                 value: format!("{:.1}\u{d7}", s.mouse_sensitivity),
                 minus: UiAction::Set(SettingAction::Sensitivity(-1)),
                 plus: UiAction::Set(SettingAction::Sensitivity(1)),
             });
             items.push(Item::Toggle {
-                label: "Invert mouse".into(),
+                label: t.get("settings.invert_mouse", "Invert mouse").into(),
                 on: s.invert_mouse,
                 action: UiAction::Set(SettingAction::Invert),
             });
-            for (label, kind, v) in [
-                ("Master volume", VolumeKind::Master, s.master_volume),
-                ("Music volume", VolumeKind::Music, s.music_volume),
-                ("Effects volume", VolumeKind::Sfx, s.sfx_volume),
-                ("Voice volume", VolumeKind::Voice, s.voice_volume),
+            for (key, label, kind, v) in [
+                (
+                    "settings.master_volume",
+                    "Master volume",
+                    VolumeKind::Master,
+                    s.master_volume,
+                ),
+                (
+                    "settings.music_volume",
+                    "Music volume",
+                    VolumeKind::Music,
+                    s.music_volume,
+                ),
+                (
+                    "settings.sfx_volume",
+                    "Effects volume",
+                    VolumeKind::Sfx,
+                    s.sfx_volume,
+                ),
+                (
+                    "settings.voice_volume",
+                    "Voice volume",
+                    VolumeKind::Voice,
+                    s.voice_volume,
+                ),
             ] {
                 items.push(Item::Stepper {
-                    label: label.into(),
+                    label: t.get(key, label).into(),
                     value: percent_text(v),
                     minus: UiAction::Set(SettingAction::Volume(kind, -1)),
                     plus: UiAction::Set(SettingAction::Volume(kind, 1)),
                 });
             }
             items.push(Item::Toggle {
-                label: "Fullscreen".into(),
+                label: t.get("settings.fullscreen", "Fullscreen").into(),
                 on: s.fullscreen,
                 action: UiAction::Set(SettingAction::Fullscreen),
             });
             items.push(Item::Stepper {
-                label: "Window size".into(),
+                label: t.get("settings.resolution", "Window size").into(),
                 value: s
                     .resolution
                     .map_or_else(|| "default".to_owned(), |[w, h]| format!("{w}\u{d7}{h}")),
@@ -385,7 +419,7 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
                 plus: UiAction::Set(SettingAction::Resolution(true)),
             });
             items.push(Item::Toggle {
-                label: "Subtitles".into(),
+                label: t.get("settings.subtitles", "Subtitles").into(),
                 on: s.subtitles,
                 action: UiAction::Set(SettingAction::Subtitles),
             });
@@ -451,14 +485,19 @@ pub(crate) fn screen_items(ctx: &MenuContext<'_>) -> Vec<Item> {
             ));
         }
         Screen::Confirm => {
-            items.push(Item::Title("Start over?".into()));
-            items.push(Item::Line(
-                "This replaces your Continue point (the latest checkpoint). Unlocked chapters, \
-                 collectibles, achievements and time-trial times are kept."
-                    .into(),
+            items.push(Item::Title(
+                t.get("menu.confirm_title", "Start over?").into(),
             ));
-            items.push(button("Yes", UiAction::Confirm, true));
-            items.push(button("No", UiAction::Back, true));
+            items.push(Item::Line(
+                t.get(
+                    "menu.confirm_text",
+                    "This replaces your Continue point (the latest checkpoint). Unlocked \
+                     chapters, collectibles, achievements and time-trial times are kept.",
+                )
+                .into(),
+            ));
+            items.push(button(t.get("menu.yes", "Yes"), UiAction::Confirm, true));
+            items.push(button(t.get("menu.no", "No"), UiAction::Back, true));
         }
     }
     if let Some(m) = ctx.message {
@@ -635,6 +674,7 @@ pub(crate) fn rebuild_menu(
     sim: Option<Res<Sim>>,
     load: Res<LevelLoad>,
     mut focus: ResMut<InputFocus>,
+    locale: Res<super::locale::Locale>,
 ) {
     if !state.dirty {
         return;
@@ -660,6 +700,7 @@ pub(crate) fn rebuild_menu(
         message: state.message.as_deref(),
         settings_path,
         loading: load.pending_map(),
+        language: locale.display_name(),
     };
     let items = screen_items(&ctx);
     if items.is_empty() {
@@ -985,6 +1026,9 @@ fn run_action(
             user.set(next);
             state.dirty = true;
         }
+        // `ui::locale::handle_language_actions` changes the language; the
+        // menu rebuilds when it is applied.
+        UiAction::Language(_) => {}
     }
 }
 
@@ -1012,6 +1056,7 @@ mod tests {
             message: None,
             settings_path: None,
             loading: None,
+            language: None,
         }
     }
 
@@ -1181,6 +1226,54 @@ mod tests {
                 |i| matches!(i, Item::Toggle { label, on: true, .. } if label == "Invert mouse")
             )
         );
+    }
+
+    #[test]
+    fn settings_offer_the_language_and_screens_use_localized_labels() {
+        let saves = SaveSession::in_memory();
+        let launch = UiLaunch::default();
+        let (s, p) = (Settings::default(), Play::default());
+        let mut t = UiStrings::default();
+        t.set_localized(
+            [
+                ("menu.language", "Tongue"),
+                ("settings.fov", "View angle"),
+                ("menu.yes", "Aye"),
+                ("menu.confirm_title", "Really?"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+        );
+        let mut c = ctx(Screen::Settings, &saves, &launch, &s, &t, &p);
+        let items = screen_items(&c);
+        assert!(
+            !items.iter().any(|i| matches!(
+                i,
+                Item::Stepper {
+                    minus: UiAction::Language(_),
+                    ..
+                }
+            )),
+            "no language row without a choice"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, Item::Stepper { label, .. } if label == "View angle"))
+        );
+        c.language = Some("Tst-own".into());
+        let items = screen_items(&c);
+        assert!(items.iter().any(|i| matches!(
+            i,
+            Item::Stepper { label, value, minus: UiAction::Language(false), plus: UiAction::Language(true) }
+                if label == "Tongue" && value == "Tst-own"
+        )));
+        let confirm = screen_items(&ctx(Screen::Confirm, &saves, &launch, &s, &t, &p));
+        assert_eq!(confirm[0], Item::Title("Really?".into()));
+        let b = buttons(&confirm);
+        assert_eq!(b[0].0, "Aye");
+        assert_eq!(b[1].0, "No");
     }
 
     #[test]

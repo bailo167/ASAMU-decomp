@@ -1,9 +1,14 @@
 //! Menu text. The defaults are ours (English, written for this project);
-//! nothing here is the original's text. A user's converted directory may
-//! carry `ui/strings.json` — produced on the user's machine from their own
-//! install's localization files — whose entries override the defaults by
-//! key (e.g. `chapter.Sanctuary` for a chapter's display title). That file
-//! is user-local data and never enters the repository.
+//! nothing here is the original's text. Two user-local layers override them
+//! by key (e.g. `chapter.Sanctuary` for a chapter's display title):
+//!
+//! 1. the localized layer, filled by [`super::locale`] from the tables
+//!    `asamu-import localization` converted from the user's own install, in
+//!    the chosen language (falling back to `INT`);
+//! 2. on top, an optional `<converted>/ui/strings.json` (hand-made
+//!    overrides).
+//!
+//! Both are user-local data and never enter the repository.
 //!
 //! Format: `{"format": "asamu-decomp/ui-strings", "format_version": 1,
 //! "strings": {"<key>": "<text>", ...}}`; unknown keys are ignored, entries
@@ -27,7 +32,10 @@ const MAX_CHARS: usize = 256;
 /// Text overrides by key.
 #[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct UiStrings {
+    /// `ui/strings.json` (wins over everything).
     overrides: BTreeMap<String, String>,
+    /// The chosen language's texts ([`super::locale`]).
+    localized: BTreeMap<String, String>,
 }
 
 impl UiStrings {
@@ -85,13 +93,63 @@ impl UiStrings {
                 }
             }
         }
-        Ok(Self { overrides })
+        Ok(Self {
+            overrides,
+            localized: BTreeMap::new(),
+        })
     }
 
-    /// The text for `key`, or `default`.
+    /// The text for `key`: the user override, else the localized text, else
+    /// `default`.
     #[must_use]
     pub fn get<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
-        self.overrides.get(key).map_or(default, String::as_str)
+        self.overrides
+            .get(key)
+            .or_else(|| self.localized.get(key))
+            .map_or(default, String::as_str)
+    }
+
+    /// The text for `key` when a layer has it.
+    #[must_use]
+    pub fn lookup(&self, key: &str) -> Option<&str> {
+        self.overrides
+            .get(key)
+            .or_else(|| self.localized.get(key))
+            .map(String::as_str)
+    }
+
+    /// The first key starting with `prefix` whose text is exactly `text`
+    /// (overrides first), for diagnostics.
+    #[must_use]
+    pub fn key_with_text(&self, prefix: &str, text: &str) -> Option<&str> {
+        self.overrides
+            .iter()
+            .chain(&self.localized)
+            .find(|(k, v)| k.starts_with(prefix) && v.as_str() == text)
+            .map(|(k, _)| k.as_str())
+    }
+
+    /// Replaces the localized layer (the overrides stay on top).
+    pub fn set_localized(&mut self, localized: BTreeMap<String, String>) {
+        self.localized = localized;
+    }
+
+    /// Keeps the localized layer of `previous` (used when the overrides
+    /// file is reloaded).
+    #[must_use]
+    pub fn with_localized_from(mut self, previous: &Self) -> Self {
+        self.localized.clone_from(&previous.localized);
+        self
+    }
+
+    /// An achievement's display name (`achievement.<NAME>`; default: the
+    /// enumerator name as words, ours).
+    #[must_use]
+    pub fn achievement_title(&self, achievement: asamu_game::save::Achievement) -> String {
+        match self.lookup(&format!("achievement.{}", achievement.name())) {
+            Some(t) => t.to_owned(),
+            None => achievement_words(achievement),
+        }
     }
 
     /// A chapter's display title (`chapter.<EnumName>`; default: the
@@ -104,6 +162,17 @@ impl UiStrings {
         )
         .to_owned()
     }
+}
+
+/// `FLOOR_IS_LAVA` → `Floor is lava` (ours).
+#[must_use]
+pub(crate) fn achievement_words(a: asamu_game::save::Achievement) -> String {
+    let lower = a.name().replace('_', " ").to_lowercase();
+    let mut chars = lower.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// The file as UTF-8 text, refusing more than [`MAX_FILE_BYTES`] even when
@@ -160,6 +229,48 @@ mod tests {
         assert_eq!(s.chapter_title(ChapterId::Sanctuary), "Title X");
         assert_eq!(s.chapter_title(ChapterId::Village), "Village");
         assert_eq!(s.get("menu.quit", "Quit"), "Quit", "blank entries ignored");
+        // The localized layer sits under the overrides.
+        let mut s = s;
+        s.set_localized(
+            [
+                ("chapter.Village".to_owned(), "Loc village".to_owned()),
+                ("chapter.Sanctuary".to_owned(), "Loc sanctuary".to_owned()),
+                (
+                    "achievement.FLOOR_IS_LAVA".to_owned(),
+                    "Loc lava".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(s.chapter_title(ChapterId::Village), "Loc village");
+        assert_eq!(
+            s.chapter_title(ChapterId::Sanctuary),
+            "Title X",
+            "override wins"
+        );
+        assert_eq!(
+            s.achievement_title(asamu_game::save::Achievement::FLOOR_IS_LAVA),
+            "Loc lava"
+        );
+        assert_eq!(
+            s.achievement_title(asamu_game::save::Achievement::ALL_COLLECTIBLES_FOUND),
+            "All collectibles found"
+        );
+        assert_eq!(
+            s.key_with_text("chapter.", "Loc village"),
+            Some("chapter.Village")
+        );
+        assert_eq!(
+            s.key_with_text("chapter.", "Title X"),
+            Some("chapter.Sanctuary"),
+            "an override"
+        );
+        assert_eq!(s.key_with_text("menu.", "Loc village"), None);
+        assert_eq!(s.key_with_text("chapter.", "unknown"), None);
+        let reloaded = UiStrings::default().with_localized_from(&s);
+        assert_eq!(reloaded.chapter_title(ChapterId::Village), "Loc village");
+        assert_eq!(reloaded.lookup("menu.quit"), None);
         assert!(UiStrings::parse("{}").is_err());
         assert!(UiStrings::parse("[").is_err());
         assert!(

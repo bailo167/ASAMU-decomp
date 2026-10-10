@@ -7,7 +7,14 @@
 //! ([`Subtitle`]; narration and Kismet sounds) and the box hides itself when
 //! it is `None` (or when subtitles are off in the settings). Kismet hides the
 //! crosshair and the ability panel (`crate::kismet`).
+//!
+//! Subtitle language: the line is shown through [`SubtitleLanguage`] (set by
+//! the UI's language setting, `ui::locale`), which turns the audio export's
+//! line into the chosen language's line for the same wave.
 
+use std::sync::Arc;
+
+use asamu_assets::localization::SubtitleTranslation;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
@@ -35,9 +42,23 @@ pub struct SubtitleBox;
 #[derive(Component)]
 pub struct SubtitleText;
 
-/// Current subtitle line (placeholder; nothing sets it yet).
+/// Current subtitle line (written by the audio module).
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Subtitle(pub Option<String>);
+
+/// The subtitle language: lines of the converted audio (any language) →
+/// the chosen language (`None`: shown as written).
+#[derive(Resource, Default, Debug, Clone)]
+pub struct SubtitleLanguage(pub Option<Arc<SubtitleTranslation>>);
+
+impl SubtitleLanguage {
+    /// `line` in the chosen language.
+    #[must_use]
+    pub fn show(&self, line: &str) -> String {
+        let text = self.0.as_ref().map_or(line, |t| t.translate(line));
+        asamu_assets::localization::display_text(text)
+    }
+}
 
 /// Text colour of the information panel (dark on the graybox sky, light on
 /// converted levels).
@@ -64,6 +85,7 @@ impl Plugin for HudPlugin {
             app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         }
         app.init_resource::<Subtitle>()
+            .init_resource::<SubtitleLanguage>()
             .init_resource::<HudStyle>()
             .add_systems(Startup, spawn_hud)
             .add_systems(Update, sync_subtitle);
@@ -159,10 +181,11 @@ fn spawn_hud(mut commands: Commands, style: Res<HudStyle>) {
 
 fn sync_subtitle(
     subtitle: Res<Subtitle>,
+    language: Res<SubtitleLanguage>,
     mut boxes: Query<&mut Visibility, With<SubtitleBox>>,
     mut texts: Query<&mut Text, With<SubtitleText>>,
 ) {
-    if !subtitle.is_changed() {
+    if !subtitle.is_changed() && !language.is_changed() {
         return;
     }
     for mut v in &mut boxes {
@@ -173,7 +196,11 @@ fn sync_subtitle(
         };
     }
     for mut t in &mut texts {
-        t.0 = subtitle.0.clone().unwrap_or_default();
+        t.0 = subtitle
+            .0
+            .as_deref()
+            .map(|l| language.show(l))
+            .unwrap_or_default();
     }
 }
 
@@ -183,4 +210,40 @@ pub fn fps(diagnostics: &DiagnosticsStore) -> Option<f64> {
     diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(bevy::diagnostic::Diagnostic::smoothed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asamu_assets::audio::SubtitleLine;
+    use asamu_assets::localization::{LanguageTable, Localization};
+
+    #[test]
+    fn subtitles_follow_the_language() {
+        let line = |t: &str| SubtitleLine {
+            text: t.to_owned(),
+            time: 0.0,
+        };
+        let mut int = LanguageTable::new("INT");
+        int.insert_subtitles("P.W", vec![line("Hello")]);
+        let mut tst = LanguageTable::new("TST");
+        tst.insert_subtitles("P.W", vec![line("Hallo\\nWelt")]);
+        let l = Localization::from_tables(vec![int, tst]);
+        let mut app = App::new();
+        app.init_resource::<Subtitle>()
+            .init_resource::<SubtitleLanguage>()
+            .add_systems(Update, sync_subtitle);
+        let text = app.world_mut().spawn((SubtitleText, Text::new(""))).id();
+        app.world_mut().resource_mut::<Subtitle>().0 = Some("Hello".into());
+        app.update();
+        assert_eq!(app.world().get::<Text>(text).unwrap().0, "Hello");
+        // Changing the language alone re-renders the shown line.
+        app.world_mut().resource_mut::<SubtitleLanguage>().0 =
+            Some(Arc::new(l.subtitle_translation("TST")));
+        app.update();
+        assert_eq!(app.world().get::<Text>(text).unwrap().0, "Hallo\nWelt");
+        app.world_mut().resource_mut::<Subtitle>().0 = Some("Unknown".into());
+        app.update();
+        assert_eq!(app.world().get::<Text>(text).unwrap().0, "Unknown");
+    }
 }
