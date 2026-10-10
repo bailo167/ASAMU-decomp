@@ -1161,7 +1161,21 @@ mod tests {
             .join("..")
             .join("..")
             .join("levels");
+        // Unix cannot resolve through the missing component and refuses; Windows
+        // normalises `..` lexically, so the same spelling is just a directory
+        // beside the temp dir there. What must hold everywhere is that a climb
+        // can never land inside the repository.
+        #[cfg(unix)]
         assert!(prepare_dir(&climb, &input, &install).is_err());
+        #[cfg(not(unix))]
+        let _ = &climb;
+        let into_repo = root
+            .join("no-such-dir")
+            .join("..")
+            .join("docs")
+            .join("levels-climb");
+        assert!(prepare_dir(&into_repo, &input, &install).is_err());
+        assert!(!root.join("docs").join("levels-climb").exists());
         let research = root.join("research").join("local");
         if research.is_dir() {
             let up = research.join("..").join("..").join("docs").join("levels");

@@ -666,8 +666,22 @@ mod tests {
         let install = tmp.path().join("Games").join("ASAMU");
         std::fs::create_dir_all(install.join("ASAMU")).unwrap_or_else(|e| panic!("{e}"));
         // `..` out of a missing directory.
+        // Unix cannot resolve through the missing component and refuses; Windows
+        // normalises `..` lexically, so the same spelling is just a directory
+        // beside the temp dir there. What must hold everywhere is that a climb
+        // can never land inside the repository.
         let climb = tmp.path().join("missing").join("..").join("..").join("m");
+        #[cfg(unix)]
         assert!(prepare_dir(&climb, &input, &install).is_err());
+        #[cfg(not(unix))]
+        let _ = &climb;
+        let into_repo = root
+            .join("no-such-dir")
+            .join("..")
+            .join("docs")
+            .join("materials-climb");
+        assert!(prepare_dir(&into_repo, &input, &install).is_err());
+        assert!(!root.join("docs").join("materials-climb").exists());
         let research = root.join("research").join("local");
         if research.is_dir() {
             let up = research
