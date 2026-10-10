@@ -891,8 +891,18 @@ pub fn default_executable(l: &RecorderLayout) -> Option<PathBuf> {
                 )
             })
         })?;
-    let p = root.join(&l.executable);
+    let p = install_file(&root, &l.executable);
     p.is_file().then_some(p)
+}
+
+/// `relative` (a path of a layout file, written with `/`) below `root`, with
+/// the host's separator between its components. A plain `join` keeps the `/`
+/// on Windows, and the report then names the executable it read as
+/// `...\Binaries/Win32/...`.
+fn install_file(root: &Path, relative: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    path.extend(relative.split('/').filter(|part| !part.is_empty()));
+    path
 }
 
 /// All checks of a repository checkout.
@@ -2307,7 +2317,7 @@ pub fn default_win32_executable(root: &Path, l: &RecorderLayout) -> Option<PathB
     let candidates = [
         std::env::var_os(WIN32_EXECUTABLE_ENV).map(PathBuf::from),
         Some(root.join(WIN32_LOCAL_EXECUTABLE)),
-        std::env::var_os("ASAMU_ORIGINAL_DIR").map(|d| PathBuf::from(d).join(&l.executable)),
+        std::env::var_os("ASAMU_ORIGINAL_DIR").map(|d| install_file(Path::new(&d), &l.executable)),
     ];
     candidates.into_iter().flatten().find(|p| p.is_file())
 }
@@ -3036,6 +3046,17 @@ mod tests {
                 assert_eq!(binary, 1);
             }
         }
+    }
+
+    #[test]
+    fn layout_paths_are_joined_with_the_host_separator() {
+        let root = Path::new("install");
+        let joined = install_file(root, "Binaries/Win32/game.exe");
+        let expected = root.join("Binaries").join("Win32").join("game.exe");
+        // Compared as text: `Path` equality does not tell `/` from `\` on
+        // Windows, and the text is what the report prints.
+        assert_eq!(joined.to_string_lossy(), expected.to_string_lossy());
+        assert_eq!(install_file(root, "game"), root.join("game"));
     }
 
     #[test]

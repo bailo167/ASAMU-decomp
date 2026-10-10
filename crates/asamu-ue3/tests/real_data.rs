@@ -59,6 +59,45 @@ fn name_of(p: &Path) -> String {
     p.file_name().unwrap().to_string_lossy().into_owned()
 }
 
+/// The lookup that every real-data test file shares, on folders made here
+/// (no game data, so this runs on CI on every host): each retail layout is
+/// found with its own content and cooked folders, the Mac bundle first when
+/// a root has both, and a folder with neither is not an install.
+#[test]
+fn the_install_lookup_knows_both_retail_layouts() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(empty.join("ASAMU")).unwrap();
+    assert!(original_data::original_data_in(&empty).is_none());
+    // A file named like the cooked folder is not one.
+    std::fs::write(empty.join("ASAMU").join("CookedPC"), b"").unwrap();
+    assert!(original_data::original_data_in(&empty).is_none());
+
+    let windows = tmp.path().join("windows");
+    let windows_cooked = windows.join("ASAMU").join("CookedPC");
+    std::fs::create_dir_all(&windows_cooked).unwrap();
+    let found = original_data::original_data_in(&windows).unwrap();
+    assert_eq!(found.content_dir, windows);
+    assert_eq!(found.cooked_dir, windows_cooked);
+
+    let mac = tmp.path().join("mac");
+    let resources = mac
+        .join("A Story About My Uncle.app")
+        .join("Contents")
+        .join("Resources");
+    let mac_cooked = resources.join("ASAMU").join("CookedMac");
+    std::fs::create_dir_all(&mac_cooked).unwrap();
+    let found = original_data::original_data_in(&mac).unwrap();
+    assert_eq!(found.content_dir, resources);
+    assert_eq!(found.cooked_dir, mac_cooked);
+
+    std::fs::create_dir_all(mac.join("ASAMU").join("CookedPC")).unwrap();
+    let found = original_data::original_data_in(&mac).unwrap();
+    assert_eq!(found.content_dir, resources);
+    assert_eq!(found.cooked_dir, mac_cooked);
+}
+
 #[test]
 fn every_package_parses_and_resolves() {
     let dir = require_data!();
