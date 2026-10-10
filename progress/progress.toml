@@ -636,12 +636,16 @@ note = "30,284 actor LocalToWorld matrices and 3,437 light components re-derived
 [[category.item]]
 id = "particles"
 name = "Particle systems (emitters, modules, beams/trails)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/PARTICLES.md; crates/asamu-ue3/tests/particle_real_data.rs"
+note = "10,978 particle exports decode exactly; independent decoder agreed on every count and value."
 
 [[category.item]]
 id = "decals"
 name = "Decals (DecalActor / DecalComponent)"
-status = "not_started"
+status = "verified"
+evidence = "docs/reverse-engineering/VFX_DECALS.md; crates/asamu-ue3/tests/decal_real_data.rs"
+note = "469 level decals decoded and re-checked independently."
 [[category]]
 id = "player"
 name = "Player"
@@ -717,7 +721,9 @@ note = "DefaultInput.ini actions; mouse-look scaling formula not ported (documen
 [[category.item]]
 id = "gamepad"
 name = "Gamepad input per DefaultInput.ini"
-status = "not_started"
+status = "implemented"
+evidence = "apps/asamu/src/gamepad.rs"
+note = "Bindings from DefaultInput.ini; untested on real hardware in our runtime."
 [[category]]
 id = "grapple"
 name = "Grapple"
@@ -864,17 +870,23 @@ note = "Interactables, collectibles and story items reach Kismet events and prog
 [[category.item]]
 id = "camera-anims"
 name = "Camera animations, AnimNotify events, look-at"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-kismet/src/camera_anim.rs; docs/reverse-engineering/KISMET_RUNTIME.md"
+note = "Camera anims with native blending rules, AnimNotify routing, look-at; not verified against the original."
 
 [[category.item]]
 id = "npc-collision"
 name = "NPC pawns block the player"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-world/src/npc.rs"
+note = "NPC cylinders block the player (checked with the worm on AG-Darkcave)."
 
 [[category.item]]
 id = "time-trial"
 name = "Time trial mode"
-status = "not_started"
+status = "implemented"
+evidence = "crates/asamu-game/src/timetrial.rs; docs/reverse-engineering/TIME_TRIAL.md"
+note = "Rules, medals, best times, timer HUD."
 [[category]]
 id = "rendering"
 name = "Rendering"
@@ -925,17 +937,23 @@ note = "Skinned NPCs + first-person hands from skeletal glTF with animation play
 [[category.item]]
 id = "particles-render"
 name = "Particle effects at runtime"
-status = "not_started"
+status = "implemented"
+evidence = "apps/asamu/src/particles; crates/asamu-assets/src/particles.rs"
+note = "Simulator follows the executable tick order and limits; visual parity unmeasured; collision/mesh emitters approximated."
 
 [[category.item]]
 id = "gameplay-vfx"
 name = "Grapple beam, hit decal/light, velocity cone, speed lines, lens effects"
-status = "not_started"
+status = "implemented"
+evidence = "apps/asamu/src/vfx; docs/reverse-engineering/VFX_DECALS.md"
+note = "Grapple beam, hit decal/light, velocity cone, speed lines, lens effect, decals with baked opacity masks."
 
 [[category.item]]
 id = "water-foliage"
 name = "Water/fluid surfaces, foliage, SpeedTree"
-status = "not_started"
+status = "implemented"
+evidence = "apps/asamu/src/water.rs; docs/reverse-engineering/WATER_FOLIAGE.md"
+note = "Instanced foliage, fluid surfaces (approximate material), SpeedTree placements."
 [[category.item]]
 id = "post"
 name = "Post-processing, fog, sky"
@@ -958,7 +976,9 @@ note = "Main/pause/settings/chapter-select menus, HUD, collectibles counter (fun
 [[category.item]]
 id = "localized-text"
 name = "Localized UI text, tutorials, credits from the user install"
-status = "not_started"
+status = "implemented"
+evidence = "docs/reverse-engineering/LOCALIZATION.md; apps/asamu/src/ui/locale.rs"
+note = "Text exported from the user install per language; none committed."
 [[category]]
 id = "audio"
 name = "Audio"
@@ -1096,7 +1116,7 @@ id = "import-cli"
 name = "asamu-import end-to-end CLI"
 status = "implemented"
 evidence = "tools/asamu-import/src/all.rs; docs/PLAYING.md"
-note = "asamu-import all: inventory check, all stages, resumable manifests; real run 13,108 files / 2.2 GB."
+note = "All original stages; particles/decals/localization are separate subcommands not yet chained into `all`."
 
 # --------------------------------------------------------------------------
 # Platforms
