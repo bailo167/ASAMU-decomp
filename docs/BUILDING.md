@@ -21,6 +21,120 @@ cargo run -p asamu           # Bevy runtime (pre-alpha)
 - **macOS:** Xcode command line tools. Both `aarch64-apple-darwin` and `x86_64-apple-darwin` are targets:
   `rustup target add x86_64-apple-darwin && cargo check --workspace --target x86_64-apple-darwin`.
 
+## Building on a second machine
+
+`tools/dev/win_host.sh` builds, tests and runs a checkout on a second machine that runs Windows, over SSH. Use
+it when the development machine is short of disk (one debug target folder of this workspace is about 20 GB) or
+when a change has to be proven on Windows. The checkout stays where it is; nothing is installed on the other machine
+by the script, and its PowerShell half (`tools/dev/win_host_remote.ps1`) travels with every command.
+
+```bash
+export ASAMU_WIN_HOST=<ssh host>            # required; ASAMU_WIN_ROOT (default D:\asamu) is the work root there
+tools/dev/win_host.sh sync NAME             # mirror this checkout to <root>\work\NAME
+tools/dev/win_host.sh gate NAME             # fmt, clippy, test, build: one line per step, logs kept there
+tools/dev/win_host.sh cargo NAME test -p asamu-ue3 --locked      # any cargo command, output streamed
+tools/dev/win_host.sh exec NAME 'D:\asamu\target-NAME\debug\asamu-locate.exe'   # any program, exact arguments
+tools/dev/win_host.sh fetch logs/NAME/test.log /tmp/test.log     # copy one file back
+tools/dev/win_host.sh disk                  # free space, size of every work tree and target folder
+tools/dev/win_host.sh clean NAME            # remove the work tree and its target folder, report what was freed
+tools/dev/win_host.sh --help                # all commands, the environment variables and the exit codes
+```
+
+| Command | What it does there |
+|---|---|
+| `sync [--dry-run] [NAME]` | Replaces `<root>\work\NAME` with the files of this checkout that git does not ignore (tracked or not, as they are on disk, modification times kept to 100 ns, so cargo rebuilds only what changed). A file deleted here disappears there. The tree is usable only after the other side has compared every name and the total size with what was sent; until then `cargo`, `exec`, `gate` and `ps NAME` refuse it. `--dry-run` lists what would be sent and contacts nothing. |
+| `cargo NAME ARGS...` | `cargo ARGS` in the work tree with `CARGO_TARGET_DIR=<root>\target-NAME`; the exit code is cargo's. |
+| `exec NAME PROGRAM [ARGS...]` | Runs a program in the work tree. Arguments arrive exactly as given (spaces, quotes, empty arguments, non-ASCII text); there is no shell syntax. |
+| `gate NAME [STEP...]` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `cargo build --workspace --locked`. Every step runs even after a failure. One summary line per step (result, seconds, log file), the whole output of each step in `<root>\logs\NAME\{fmt,clippy,test,build}.log`, the last 30 lines of a failed step on standard error, exit code 1 if any step failed. The summary is also in `<root>\logs\NAME\gate.txt`, rewritten after every step (its last line is `still running` until the end), so `fetch logs/NAME/gate.txt` shows how far a gate has come, also after a lost connection. Naming steps (`gate NAME clippy test`) runs only those. |
+| `ps [NAME]` | Runs a PowerShell script read from standard input (`$root` is the work root; with NAME it starts in the work tree, `$work`). For scripts up to about 90 KB. |
+| `fetch REMOTE LOCAL` | Copies one file back; REMOTE is relative to the root, with `/`. |
+| `clean NAME` | Removes `<root>\work\NAME` and `<root>\target-NAME`, nothing else (the logs stay), and says how much that freed. |
+| `disk`, `info` | Free space with the size of every work tree and target folder; toolchain versions and the work trees that exist. |
+
+Exit codes: the program's own for `cargo`, `exec` and `ps`; 1 a gate step failed; 2 bad usage, name or root;
+3 the checkout cannot be mirrored as it is (nothing was changed on the other machine); 4 the other machine refused
+or failed (no such work tree, unfinished sync, folder in use); 255 the machine could not be reached, with ssh's
+reason in one line, or the connection was lost. A program that was running when the connection was lost keeps
+running there.
+
+What the script refuses, by design:
+
+- A NAME that is not 1 to 64 letters, digits, `.`, `_`, `-` starting with a letter or digit (so `..`, paths,
+  quotes and Windows device names never reach the other machine), and a root that is not a plain folder on a
+  drive. `sync`, `gate` and `clean` write and delete only `<root>\work\NAME`, `<root>\target-NAME` and
+  `<root>\logs\NAME`; the PowerShell side checks the name and the root again and never deletes through a
+  junction or symbolic link.
+- A checkout that cannot be mirrored exactly: a symbolic link (Windows needs a privilege to create one, and
+  following it could send files from outside the checkout), a file name Windows cannot hold (`< > : " | ? * \`,
+  control characters, a trailing dot or space, a device name such as `NUL.txt`), two names that differ only in
+  case, or no files at all. It says which files and sends nothing. A repository of its own inside the checkout
+  (another worktree, a submodule) is left out and reported.
+
+### Setting up the second machine
+
+Windows 10 or 11 with the OpenSSH server enabled, key authentication for your user, and `cmd.exe` as the SSH
+default shell (the Windows default); Rust with the MSVC build tools; a folder for the work root. PowerShell 5.1
+and `tar` ship with Windows. On the development machine: bash, `ssh`/`scp`, `git`, `python3` (for `sync`),
+`iconv` and `base64`. To run tests that need the game or converted data there, point them at it with
+`ASAMU_WIN_ENV`, e.g. `ASAMU_WIN_ENV='$env:ASAMU_CONVERTED_DIR="D:\asamu\converted"'`.
+
+Rules for a machine that is somebody's own computer:
+
+- Write only below the work root. One work tree and one target folder per NAME; do not touch another
+  person's or agent's NAME.
+- An original game install on that machine is read-only, as everywhere: never modify, move or delete anything
+  in it, and never start the game or Steam over SSH. Converted game data produced there stays there; it is
+  never copied into a checkout or uploaded.
+- Install nothing and change no setting (system, power, registry, services, firewall, antivirus); do not
+  reboot, log off or lock the machine, and do not stop processes you did not start. A program started over SSH
+  cannot put a window on that machine's screen.
+
+### What was measured (Windows 11 build 26200, OpenSSH for Windows 9.5, PowerShell 5.1; 2026-10-10)
+
+These explain the less obvious parts of the script. Each was observed on the real machine; the scripts that
+showed them are not kept.
+
+| Observation | Consequence in the script |
+|---|---|
+| Windows' `tar` (bsdtar 3.8.8) cannot create a file whose name has characters outside the machine's legacy code page: from a pax archive with UTF-8 names it wrote `über-äö café.txt` but skipped `日本語/日本語.txt` and an emoji name ("empty or unreadable filename"), with or without `chcp 65001`, `LC_ALL`, `LANG` or `--options hdrcharset=UTF-8`. | `sync` sends the files numbered (`.win_host_incomplete\000001`, ...) with the list of names as a file; PowerShell moves each to its name. That folder is also the mark of an unfinished sync. |
+| Standard input for PowerShell stops arriving after 0.27 to 2.3 MB (10 of 10 runs with 4 MB or more, with three different ways of reading; 350 KB and 1.4 MB arrived), and `ReadToEnd` on 40 KB waited forever in 9 of 18 runs. Native programs had no such trouble: Python read 16 MB in under a second (8 of 8 runs), and `tar` unpacked a 42 MB checkout 30 times in a row. | The PowerShell text of a command (about 40 KB) ends with a line holding a dot and is checked against its announced length; nothing waits for the end of input. Scripts over about 90 KB are refused. File contents never pass through PowerShell's standard input. |
+| A nested `cmd /c` in an SSH command keeps the closing quote (`ssh host 'cmd /c echo hi'` prints `hi"`). | No nested `cmd`: PowerShell text travels as `-EncodedCommand`, and the only other command line (`tar -xf - -C <root>\work\NAME`) needs no quoting because of the NAME and root rules. |
+| PowerShell 5.1 drops empty arguments and splits arguments that contain quotes when it starts a program. | `cargo` and `exec` build the command line themselves (Microsoft C runtime rules); 23 awkward arguments, among them `a b\`, `sp q"uo te`, an empty one, `$env:PATH`, a line break and non-ASCII text, arrived unchanged. |
+| PowerShell reports its own errors as CLIXML on standard error when started this way. | Errors are caught and printed as one plain line; warnings are converted back to text. |
+| Killing the SSH client leaves the PowerShell process (and what it started) running on the other machine. | Exit code 255 says so; look with `ps` before starting the same build again. |
+
+Checked on the real machine with a scratch checkout: 20 files, among them names with spaces, an apostrophe,
+`-rf`, `--help`, `%OS%`, `$HOME`, `&`, `^`, a backtick, Japanese and an emoji, arrived with identical names,
+sizes and SHA-256 and a modification time exact to 100 ns; after deleting two files and syncing again they were
+gone there; a file held open by another program made `sync` fail with exit code 4 and left the tree marked
+unfinished (`cargo` and `gate` refused it) until the next successful sync; a junction inside the work tree was
+removed by `sync` without touching the folder it pointed to; a work tree that was itself a junction was refused
+by `sync` and `clean`; `clean` with a file of the work tree held open removed the target folder, reported the
+work tree as in use (exit code 4) and finished on the next call. Timings: `sync` of this checkout (450 files,
+14 MB) 3.1 to 3.4 s; of a 42 MB scratch checkout 4 s, 30 times in a row; `clean` of a 19.5 GB target folder
+(19,970 files) 3.7 s; any other command costs about 1.3 s before its own work starts.
+
+The gate on this workspace, from an empty target folder while four other builds were running on the machine
+(24 cores): fmt 2.2 s, clippy 254.0 s, test 941.2 s, build 100.9 s, 1298.3 s in all. The test step failed, which
+the gate reported with exit code 1 and the end of the log: two tests do not yet expect a Windows install of the
+game on the machine (`asamu-inventory --test real_install` compares it with the Mac inventory, and
+`asamu-locate`'s `windows_backslash_paths_in_vdf_are_unescaped` finds the real install where it expects none).
+With `--no-fail-fast` the same tree ran 115 test binaries: 1863 passed, those 2 failed, 5 ignored.
+
+### Testing the script without a Windows machine
+
+```bash
+tools/dev/test_win_host.sh
+```
+
+puts a fake `ssh` and `scp` first in `PATH` that record their arguments and standard input, and checks what
+`win_host.sh` would have sent: the command lines, the decoded PowerShell text and the tar stream of `sync`
+(names, bytes, times), for normal use and for hostile input (work tree names such as `..`, `a;b` or `$(id)`,
+roots such as `D:\`, hosts that look like options, file names with spaces, quotes, leading dashes and non-ASCII
+characters, symbolic links, an empty checkout, an unreachable machine, a connection lost half way). It needs
+bash, git and python3 and runs on Linux and macOS. It does not run the PowerShell half; that was exercised on
+the real machine as listed above.
+
 ## Using your original install
 
 The tools find the game through Steam (App ID 278360). To point them elsewhere:

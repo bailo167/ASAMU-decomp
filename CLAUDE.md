@@ -94,6 +94,25 @@ Rules of thumb:
 | `ASAMU_STEAM_ROOT` | Override the Steam root used for discovery. |
 | `ASAMU_RESEARCH_DIR` | Where local (ignored) RE output goes. Defaults to `research/local`. |
 | `GHIDRA_INSTALL_DIR` | Ghidra installation used by headless scripts. |
+| `ASAMU_WIN_HOST`, `ASAMU_WIN_ROOT`, `ASAMU_WIN_ENV` | SSH host, work root (default `D:\asamu`) and extra environment of the second machine that `tools/dev/win_host.sh` builds on (see "Where to build"). |
+
+## Where to build
+
+When the development machine is short of disk (one debug target folder of this workspace is about 20 GB), or a
+change has to be proven on Windows, builds and tests run on a second machine over SSH with
+`tools/dev/win_host.sh` (`docs/BUILDING.md`, "Building on a second machine"): `export ASAMU_WIN_HOST=<host>`,
+then `sync NAME` (mirror this checkout; run it again after every edit), `gate NAME` (fmt, clippy, test, build; one
+line per step, logs kept there) or `cargo NAME <args>`, and `clean NAME` when the work is merged. Pick a NAME of
+your own and use only that work tree and target folder. `rustfmt`, `bash -n`, `tools/dev/test_win_host.sh` and a
+prebuilt `repo-hygiene` still run locally. Exit code 255 means the machine could not be reached: wait and retry.
+The rules for that machine:
+
+- Write only below its work root. The original game install there is read-only: never modify it, never start
+  the game or Steam.
+- Converted game data stays on that machine (or in the local user data folder); it never enters a checkout and
+  is never uploaded.
+- Install nothing and change no setting, service or power option there; do not reboot it or stop processes you
+  did not start.
 
 ## Where things are (quick map)
 
