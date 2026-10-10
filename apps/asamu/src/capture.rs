@@ -23,6 +23,10 @@
 //! ring of files, so a second person (or a tool) can look at what the player
 //! is seeing without asking for screenshots. Same path rules as below.
 //!
+//! `--record-frames DIR` records the window as numbered PNG frames while
+//! someone plays ([`FrameRecorder`]; F12 starts and stops it), for short
+//! clips of the recreation. Same path rules as below.
+//!
 //! A screenshot of a converted level is copyrighted game content, so the
 //! path is checked before the window opens ([`check_screenshot_path`]): never
 //! inside this repository (except its git-ignored `research/` folders), never
@@ -86,6 +90,119 @@ fn watch_window(mut commands: Commands, time: Res<Time<Real>>, watch: Option<Res
     watch.last = now;
     let path = WindowWatch::file(&watch.dir, watch.next);
     watch.next = (watch.next + 1) % WATCH_KEEP;
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+}
+
+/// Seconds between two frames of [`FrameRecorder`] (20 per second; ours).
+pub const RECORD_PERIOD: f32 = 1.0 / 20.0;
+/// A recording stops by itself after this many seconds (ours).
+pub const RECORD_MAX_SECONDS: f32 = 60.0;
+/// Window size while frames are recorded, physical pixels (ours: small
+/// frames keep the read-back cheap enough to play through).
+pub const RECORD_WINDOW: (u32, u32) = (1280, 720);
+
+/// `--record-frames DIR`: F12 starts and stops recording the window into
+/// `DIR/frame-NNNNNN.png`, one frame every [`RECORD_PERIOD`] seconds of real
+/// time. Numbering continues across recordings of one run.
+#[derive(Resource, Debug, Clone)]
+pub struct FrameRecorder {
+    dir: PathBuf,
+    next: u32,
+    last: f32,
+    /// Start time of the running recording.
+    started: Option<f32>,
+    /// Unattended runs: start by itself this many seconds after the level's
+    /// assets settled (once).
+    autostart: Option<f32>,
+    settled_at: Option<f32>,
+}
+
+/// Seconds between the level's assets settling and an automatic start
+/// (the baked lighting is applied a few seconds after the meshes; ours).
+pub const RECORD_AUTOSTART_DELAY: f32 = 6.0;
+
+impl FrameRecorder {
+    /// A recorder writing into `dir` (already checked with
+    /// [`check_screenshot_path`]).
+    #[must_use]
+    pub fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            next: 1,
+            last: 0.0,
+            started: None,
+            autostart: None,
+            settled_at: None,
+        }
+    }
+
+    /// Start by itself [`RECORD_AUTOSTART_DELAY`] seconds after the level's
+    /// assets settled (unattended runs, e.g. with `--walk`).
+    #[must_use]
+    pub fn with_autostart(mut self, autostart: bool) -> Self {
+        self.autostart = autostart.then_some(RECORD_AUTOSTART_DELAY);
+        self
+    }
+
+    /// The file of frame `index` in `dir`.
+    #[must_use]
+    pub fn file(dir: &Path, index: u32) -> PathBuf {
+        dir.join(format!("frame-{index:06}.png"))
+    }
+}
+
+fn record_frames(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    level: Option<Res<ConvertedLevel>>,
+    recorder: Option<ResMut<FrameRecorder>>,
+) {
+    let Some(mut recorder) = recorder else {
+        return;
+    };
+    let now = time.elapsed_secs();
+    if let Some(delay) = recorder.autostart {
+        if recorder.settled_at.is_none() && level.as_ref().is_none_or(|l| l.assets_settled()) {
+            recorder.settled_at = Some(now);
+        }
+        if recorder.settled_at.is_some_and(|t| now >= t + delay) {
+            recorder.autostart = None;
+            recorder.started = Some(now);
+            info!("frame recording started (unattended)");
+        }
+    }
+    if keys.is_some_and(|k| k.just_pressed(KeyCode::F12)) {
+        recorder.started = match recorder.started {
+            Some(_) => None,
+            None => Some(now),
+        };
+        info!(
+            "frame recording {} (next frame {})",
+            if recorder.started.is_some() {
+                "started"
+            } else {
+                "stopped"
+            },
+            recorder.next
+        );
+    }
+    let Some(started) = recorder.started else {
+        return;
+    };
+    if now - started > RECORD_MAX_SECONDS {
+        recorder.started = None;
+        info!("frame recording stopped after {RECORD_MAX_SECONDS} s");
+        return;
+    }
+    if now - recorder.last < RECORD_PERIOD {
+        return;
+    }
+    recorder.last = now;
+    let path = FrameRecorder::file(&recorder.dir, recorder.next);
+    recorder.next += 1;
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path));
@@ -315,7 +432,7 @@ impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AutoCapture>()
             .add_systems(PostStartup, setup_offscreen)
-            .add_systems(Update, (auto_capture, watch_window))
+            .add_systems(Update, (auto_capture, watch_window, record_frames))
             .add_systems(Last, arm_exit_watchdog);
     }
 }

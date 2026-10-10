@@ -212,6 +212,8 @@ const USAGE: &str = "usage: asamu [options]\n\
     --screenshot-window     read the screenshot back from the window (with HUD and hands; the\n                          \
     window must be visible) instead of rendering it offscreen\n  \
     --hidden-window         do not show the window (unattended runs with an offscreen screenshot)\n  \
+    --record-frames DIR     F12 starts/stops recording the window into DIR/frame-NNNNNN.png (20 per\n                          \
+    second, 1280x720, at most 60 s; with --walk it starts by itself; keep them local)\n  \
     --watch-window DIR      while playing, save the window every 2 s into DIR/window-NN.png\n                          \
     (a ring of 12 files; keep them local)\n  \
     --exit-after SECONDS    quit after this many seconds\n  \
@@ -244,6 +246,7 @@ struct Cli {
     screenshot_delay: f32,
     screenshot_window: bool,
     watch_window: Option<PathBuf>,
+    record_frames: Option<PathBuf>,
     hidden_window: bool,
     debug_info: bool,
     exit_after: Option<f32>,
@@ -269,6 +272,7 @@ impl Default for Cli {
             screenshot_delay: 1.0,
             screenshot_window: false,
             watch_window: None,
+            record_frames: None,
             hidden_window: false,
             debug_info: false,
             exit_after: None,
@@ -366,6 +370,9 @@ fn parse_cli(
             "--hidden-window" => cli.hidden_window = true,
             "--watch-window" => {
                 cli.watch_window = Some(PathBuf::from(value("--watch-window")?));
+            }
+            "--record-frames" => {
+                cli.record_frames = Some(PathBuf::from(value("--record-frames")?));
             }
             "--exit-after" => {
                 let v = parse_f32("--exit-after", &value("--exit-after")?)?;
@@ -500,6 +507,17 @@ fn main() -> AppExit {
             }
         }
     }
+    if let Some(dir) = &cli.record_frames {
+        let install = std::env::var_os("ASAMU_ORIGINAL_DIR").map(PathBuf::from);
+        let probe = capture::FrameRecorder::file(dir, 1);
+        match capture::check_screenshot_path(&probe, install.as_deref()) {
+            Ok(resolved) => cli.record_frames = resolved.parent().map(PathBuf::from),
+            Err(message) => {
+                eprintln!("{message}");
+                return AppExit::error();
+            }
+        }
+    }
     if let Some(path) = &cli.screenshot {
         let install = std::env::var_os("ASAMU_ORIGINAL_DIR").map(PathBuf::from);
         match capture::check_screenshot_path(path, install.as_deref()) {
@@ -519,16 +537,28 @@ fn main() -> AppExit {
 
 /// The window and default plugins (after any asset sources are registered).
 fn add_default_plugins(app: &mut App, title: &str, cli: &Cli) {
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: title.into(),
-            // `--hidden-window`: an unattended run that renders its
-            // screenshot offscreen needs no window on screen.
-            visible: !cli.hidden_window,
+    app.add_plugins(
+        DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: title.into(),
+                // `--hidden-window`: an unattended run that renders its
+                // screenshot offscreen needs no window on screen.
+                visible: !cli.hidden_window,
+                // `--record-frames`: a small window in physical pixels, so the
+                // frames are cheap to read back.
+                resolution: match cli.record_frames {
+                    Some(_) => bevy::window::WindowResolution::new(
+                        capture::RECORD_WINDOW.0,
+                        capture::RECORD_WINDOW.1,
+                    )
+                    .with_scale_factor_override(1.0),
+                    None => default(),
+                },
+                ..default()
+            }),
             ..default()
         }),
-        ..default()
-    }))
+    )
     .add_plugins((hud::HudPlugin, capture::CapturePlugin))
     .add_plugins((
         audio::AudioPlugin,
@@ -588,6 +618,11 @@ fn run_graybox(cli: &Cli) -> AppExit {
     app.insert_resource(ScriptedWalk(cli.walk));
     if let Some(dir) = &cli.watch_window {
         app.insert_resource(capture::WindowWatch::new(dir.clone()));
+    }
+    if let Some(dir) = &cli.record_frames {
+        app.insert_resource(
+            capture::FrameRecorder::new(dir.clone()).with_autostart(cli.walk > 0.0),
+        );
     }
     app.run()
 }
@@ -838,6 +873,11 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
     app.insert_resource(ScriptedWalk(cli.walk));
     if let Some(dir) = &cli.watch_window {
         app.insert_resource(capture::WindowWatch::new(dir.clone()));
+    }
+    if let Some(dir) = &cli.record_frames {
+        app.insert_resource(
+            capture::FrameRecorder::new(dir.clone()).with_autostart(cli.walk > 0.0),
+        );
     }
     app.run()
 }
