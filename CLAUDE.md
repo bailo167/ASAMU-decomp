@@ -55,6 +55,13 @@ Safe to publish: hashes, sizes, counts, format structures and offsets, class/fun
 needed to explain architecture, behavioural descriptions, sanitized inventories, evidence summaries,
 independently written Rust, tests, importer code.
 
+**Showcase images** are the one narrow exception to "no game content": a handful of curated screenshots and
+short clips of **our runtime** (never the original's screen, never an asset shown on its own, no audio) may live
+in `docs/images/` and nowhere else; `repo-hygiene` enforces the folder, formats and size. The rules are in
+`docs/LEGAL.md` ("Screenshots and clips"). Screenshots taken while developing stay under ignored
+`research/local/` (the app refuses to write them anywhere else in the repository); copy a chosen few to
+`docs/images/` by hand.
+
 Rules of thumb:
 
 - Never modify, patch, move or delete anything inside the Steam install. Read only.
