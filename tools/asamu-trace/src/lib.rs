@@ -17,6 +17,12 @@
 //! - [`convert`]: raw → canonical trace (unit normalisation, frame alignment,
 //!   segmentation at gaps). The Python recorder's converter mirrors it; a test
 //!   checks the two agree.
+//! - [`move_input`]: the move axes of a gamepad recording, from the pawn's
+//!   recorded acceleration (with the evidence for the mapping).
+//! - [`state`]: the script state the recorder read on every frame, kept in
+//!   the trace's notes so that a replay can start from any tick.
+//! - [`segments`]: where a replay of a recording may start (standing still,
+//!   nothing held) and what the player did in between.
 //! - [`replay`]: drives [`asamu_game::Game`] (graybox or a converted level,
 //!   optionally with Kismet) with a trace's initial state and inputs: with
 //!   fixed ticks for a fixed-rate trace, with each sample's own frame length
@@ -38,9 +44,12 @@ pub mod compare;
 pub mod convert;
 pub mod layout;
 pub mod macho;
+pub mod move_input;
 pub mod raw;
 pub mod replay;
 pub mod report;
+pub mod segments;
+pub mod state;
 pub mod stepper;
 pub mod timestep;
 

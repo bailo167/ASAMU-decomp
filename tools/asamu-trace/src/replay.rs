@@ -3,12 +3,42 @@
 //! The replay builds an [`asamu_game::Game`] on the graybox level or on a
 //! level converted by `asamu-import` (optionally with the map's Kismet,
 //! [`asamu_game::load_level_with_kismet`]), puts the pawn in the trace's
-//! initial state (sample 0: position, velocity, yaw, pitch, walking or
-//! falling), applies the recorded initial script state from the `init:` note
-//! (grapple capacity and used count, rocket boots) and then feeds every
-//! sample's input, one tick each. It stops at the first tick gap. The result
-//! is a runtime trace aligned tick for tick with the input trace, ready for
+//! state at the start tick (position, velocity, yaw, pitch, walking or
+//! falling from the sample; the recorded script state from the `state:`
+//! note, see "Start state" below) and then feeds every later sample's
+//! input, one tick each. It stops at the first tick gap. The result is a
+//! runtime trace aligned tick for tick with the input trace, ready for
 //! [`crate::compare`].
+//!
+//! # Start state
+//!
+//! What the original's script had latched at the start tick decides its
+//! next move, so the replay sets it from the recording ([`crate::state`]),
+//! and only from the recording:
+//!
+//! | Our state | From |
+//! |---|---|
+//! | `GroundSpeed`, `AirControl` (0.3 before the first normal landing, the landed value after), `JumpZ`, `AirSpeed` | the recorded values |
+//! | sprint applied | the pawn's `bSprinting` |
+//! | story mode | `GroundSpeed` when it is the story speed (on) or the walking or sprint speed (off): the pawn's own script writes no other value (ABILITIES.md A-WK-3). Any other value (a console `SetSpeed`, as in AG-Workshop) shows nothing: the replay then leaves it as it is and says so; [`ReplayOptions::story_mode`] states it |
+//! | grapple capacity, used count, fire latch | the gun's `iMaxGrapples`, `iTimesGrappled`, `bCanGrapple` |
+//! | rocket boots enabled | the boots' `bEnabled` |
+//! | button levels of the tick before (for press and release edges) | the start sample's own input |
+//! | FOV | the start sample's FOV |
+//!
+//! Not recorded, so left as our simulation starts them: "sprint after
+//! landing", the pawn's and the power jump's state code (jump-release
+//! damping, a charging power jump, a running zoom), zoom availability, the
+//! gun's timers and attachment, the boots' boost, the eye height's
+//! smoothing (the raw record has `EyeHeight`; it changes on most frames and
+//! is not in the timeline), the floor the pawn is based on. All of these
+//! are at rest when the pawn stands still with no button held, so a replay
+//! of an original recording starts only at such a tick
+//! ([`crate::segments`], [`StartPolicy`]): a start in the air, while moving
+//! or while the grapple is attached is refused (the error names the
+//! standing-still ticks before and after it), moved forward to the next
+//! standing-still tick, or forced. A trace converted before the `state:`
+//! note existed has an `init:` note for its first sample only.
 //!
 //! # Time step ([`Stepping`])
 //!
@@ -37,13 +67,10 @@
 //! that started at the spawn point), the spawn state is kept unchanged, so
 //! replaying a runtime recording reproduces it exactly.
 //!
-//! Limits (schema v1 carries no more state): a replay that starts while the
-//! grapple is attached does not recreate the attachment; script state other
-//! than the `init:` fields (jump damping, power-jump charge, boost timeline,
-//! sprint latch) starts fresh, which is why scenarios start standing still.
-//! With `--kismet` the map's Kismet always starts from level start, also for
-//! a segment replay (`start_tick`), and its level-start actions may override
-//! the `init:` grapple and boots state; the notes say so.
+//! Limits: a forced start while the grapple is attached does not recreate
+//! the attachment. With `--kismet` the map's Kismet always starts from level
+//! start, also for a segment replay (`start_tick`), and its level-start
+//! actions may override the start state; the notes say so.
 
 use std::path::PathBuf;
 
@@ -51,13 +78,16 @@ use anyhow::{Context, Result, bail};
 use asamu_core::DEFAULT_TICK_RATE_HZ;
 use asamu_core::rotator::wrap_radians;
 use asamu_game::{Game, LevelScript, load_level_with_kismet};
+use asamu_player::pawn::SprintState;
 use asamu_player::trace::{TraceGrappleState, TraceSample, TraceSource};
 use asamu_player::{
     InputFrame, MAX_STEP_DT, MovementModelKind, PawnPhysicsState, PlayerParams, Trace, grapple_gun,
-    rocket_boots,
+    pawn, rocket_boots,
 };
 
 use crate::convert::InitState;
+use crate::segments::{is_clean_start, next_clean_start, not_clean_reasons, previous_clean_start};
+use crate::state::{StateTimeline, TickState, story_mode_shown};
 use crate::stepper::VariableStepper;
 use crate::timestep::{FrameLength, StepStats, finite};
 
@@ -78,6 +108,20 @@ pub enum ReplayLevel {
     },
 }
 
+/// What a replay of an original recording does when its start tick is not
+/// a clean start ([`crate::segments`]). Traces of our own runtime start
+/// anywhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StartPolicy {
+    /// An error that names the standing-still ticks before and after.
+    #[default]
+    Refuse,
+    /// Start at the next clean start instead.
+    Snap,
+    /// Start there all the same (the notes carry a warning).
+    Force,
+}
+
 /// Replay options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplayOptions {
@@ -90,8 +134,14 @@ pub struct ReplayOptions {
     /// Step with each sample's own frame length even when the trace has a
     /// fixed tick rate ([`Stepping::PerSample`]). Excludes `tick_rate`.
     pub variable_dt: bool,
-    /// Apply the trace's `init:` note.
+    /// Apply the recorded start state (the trace's `state:` or `init:`
+    /// note, the start sample's button levels and FOV).
     pub use_init: bool,
+    /// Story mode at the start, when the recording does not show it or is
+    /// to be overruled.
+    pub story_mode: Option<bool>,
+    /// What to do with a start tick that is not a clean start.
+    pub start: StartPolicy,
     /// Grapple capacity override (`SetMaxGrapples`).
     pub max_grapples: Option<i32>,
     /// Use the placeholder parameters and model (debugging).
@@ -110,6 +160,8 @@ impl Default for ReplayOptions {
             tick_rate: None,
             variable_dt: false,
             use_init: true,
+            story_mode: None,
+            start: StartPolicy::Refuse,
             max_grapples: None,
             placeholder: false,
             start_tick: None,
@@ -174,6 +226,8 @@ pub struct VariableSteps {
 pub struct ReplayResult {
     /// Our trace, with the input trace's tick numbers.
     pub trace: Trace,
+    /// The tick the replay started from (after [`StartPolicy::Snap`]).
+    pub start_tick: u64,
     /// The input trace's tick after which a gap stopped the replay.
     pub stopped_at_gap: Option<u64>,
     /// Respawns during the replay.
@@ -260,7 +314,7 @@ fn lengths_until_gap(samples: &[TraceSample]) -> Vec<f64> {
 /// fixed rate whose sample times never advance, a per-sample replay with
 /// Kismet, level loading or game construction errors.
 pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
-    let start = match opts.start_tick {
+    let mut start = match opts.start_tick {
         None => 0,
         Some(t) => original
             .samples
@@ -268,6 +322,46 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
             .position(|s| s.tick == t)
             .with_context(|| format!("the trace has no sample at tick {t}"))?,
     };
+    let mut start_notes = Vec::new();
+    let all = original.samples.as_slice();
+    if original.meta.source == TraceSource::Original
+        && let Some(asked) = all.get(start)
+        && !is_clean_start(all, start)
+    {
+        let why = not_clean_reasons(all, start).join(", ");
+        let tick_of = |i: Option<usize>| {
+            i.and_then(|i| all.get(i))
+                .map_or_else(|| "none".to_owned(), |s| s.tick.to_string())
+        };
+        match opts.start {
+            StartPolicy::Refuse => bail!(
+                "tick {} of this recording is not a standing-still start ({why}); the script \
+                 state that no record shows (jump damping, a charging power jump, the grapple's \
+                 attachment and timers) would start fresh. Standing-still starts: {} before it, \
+                 {} after it. Start from one of them (--from-tick), let the replay move to the \
+                 next one (--start snap), or start here all the same (--start force)",
+                asked.tick,
+                tick_of(previous_clean_start(all, start)),
+                tick_of(next_clean_start(all, start))
+            ),
+            StartPolicy::Snap => {
+                let next = next_clean_start(all, start).with_context(|| {
+                    format!("no standing-still start at or after tick {}", asked.tick)
+                })?;
+                start_notes.push(format!(
+                    "start: moved from tick {} ({why}) to the next standing-still tick {}",
+                    asked.tick,
+                    tick_of(Some(next))
+                ));
+                start = next;
+            }
+            StartPolicy::Force => start_notes.push(format!(
+                "warning: forced start at tick {}, which is not a standing-still start ({why}); \
+                 script state that no record shows starts fresh",
+                asked.tick
+            )),
+        }
+    }
     let end = match opts.max_ticks {
         None => original.samples.len(),
         Some(n) => usize::try_from(n)
@@ -325,6 +419,7 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
     if let Some(l) = &original.meta.level {
         notes.push(format!("input trace level: {l}"));
     }
+    notes.append(&mut start_notes);
     if script.is_some() && start > 0 {
         notes.push(format!(
             "note: Kismet starts from level start, not from the state at tick {}",
@@ -335,7 +430,13 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
     // Initial state.
     {
         let p = game.player_mut();
-        let yaw = wrap_radians(s0.yaw);
+        // A yaw already in [−π, π) is taken as it is (wrapping it again can
+        // move it by one bit).
+        let yaw = if (-core::f32::consts::PI..core::f32::consts::PI).contains(&s0.yaw) {
+            s0.yaw
+        } else {
+            wrap_radians(s0.yaw)
+        };
         let same = p.position == s0.position
             && p.velocity == s0.velocity
             && p.yaw == yaw
@@ -369,31 +470,33 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
             );
         }
     }
-    if opts.use_init
-        && let Some(init) = InitState::from_notes(&original.meta.notes)
-    {
-        let p = game.player_mut();
-        let mut applied = Vec::new();
-        if s0.tick != original.samples.first().map_or(s0.tick, |f| f.tick) {
+    if opts.use_init {
+        let first_tick = original.samples.first().map_or(s0.tick, |f| f.tick);
+        let recorded = match StateTimeline::from_notes(&original.meta.notes)? {
+            Some(timeline) => timeline.at(s0.tick)?,
+            None => InitState::from_notes(&original.meta.notes).map(|init| {
+                if s0.tick != first_tick {
+                    notes.push(
+                        "note: the init: state belongs to the first sample, not the start tick"
+                            .to_owned(),
+                    );
+                }
+                TickState::from(&init)
+            }),
+        };
+        if original.meta.source == TraceSource::Original && s0.tick == first_tick {
             notes.push(
-                "note: the init: state belongs to the first sample, not the start tick".to_owned(),
+                "note: the buttons held before the first record are unknown (taken as released)"
+                    .to_owned(),
             );
         }
-        if let Some(n) = init.max_grapples {
-            grapple_gun::set_max_grapples(p, n);
-            applied.push(format!("max_grapples {n}"));
-        }
-        if let Some(n) = init.times_grappled {
-            p.script.gun.times_grappled = n;
-            applied.push(format!("times_grappled {n}"));
-        }
-        if let Some(on) = init.rocket_boots {
-            rocket_boots::enable_rocket_boots(p, on);
-            applied.push(format!("rocket_boots {on}"));
-        }
-        if !applied.is_empty() {
-            notes.push(format!("init applied: {}", applied.join(", ")));
-        }
+        apply_start_state(
+            &mut game,
+            &recorded.unwrap_or_default(),
+            s0,
+            opts.story_mode,
+            &mut notes,
+        );
     }
     if let Some(n) = opts.max_grapples {
         grapple_gun::set_max_grapples(game.player_mut(), n);
@@ -446,6 +549,12 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
             (trace, stopped_at_gap, respawns, Some(variable))
         }
     };
+    // The start sample is the input trace's own: its input is the one that
+    // led to the start state (not simulated here), so that a comparison
+    // counts no input mismatch at the start tick.
+    if let Some(first) = trace.samples.first_mut() {
+        first.input = s0.input;
+    }
     if let Some(t) = stopped_at_gap {
         notes.push(format!("stopped at the tick gap after input tick {t}"));
     }
@@ -456,11 +565,135 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
     trace.validate()?;
     Ok(ReplayResult {
         trace,
+        start_tick: s0.tick,
         stopped_at_gap,
         respawns,
         stepping,
         variable,
     })
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// Puts the script state `recorded` (the original's at the start tick), the
+/// button levels of the start sample `s0` and its FOV into the game's player
+/// (see the module docs, "Start state"). Writes what it set to `notes`.
+fn apply_start_state(
+    game: &mut Game,
+    recorded: &TickState,
+    s0: &TraceSample,
+    story_mode: Option<bool>,
+    notes: &mut Vec<String>,
+) {
+    let params = game.params().clone();
+    let p = game.player_mut();
+    let mut applied = Vec::new();
+    if p.script.started
+        && let Some(pawn_params) = params.pawn.as_ref()
+    {
+        let walk = pawn_params.move_speed.value;
+        let story_speed = walk * pawn_params.story_speed_multiplier.value;
+        let sprint_speed = walk * pawn_params.sprint_speed_multiplier.value;
+        let shown = recorded
+            .ground_speed
+            .and_then(|g| story_mode_shown(g, pawn_params));
+        let was = p.script.is_story();
+        match story_mode.or(shown) {
+            Some(true) if !was => {
+                pawn::enter_story_mode(p, &params);
+            }
+            Some(false) if was => pawn::exit_story_mode(p, &params),
+            _ => {}
+        }
+        match (story_mode, shown, recorded.ground_speed) {
+            (Some(on), _, _) => applied.push(format!("story mode {} (--story-mode)", on_off(on))),
+            (None, Some(true), Some(g)) => {
+                applied.push(format!(
+                    "story mode on (GroundSpeed {g} is the story speed)"
+                ));
+            }
+            (None, Some(false), Some(g)) => applied.push(format!(
+                "story mode off (GroundSpeed {g} is the walking or the sprint speed)"
+            )),
+            (None, None, Some(g)) => notes.push(format!(
+                "warning: the recording does not show whether the pawn is in story mode \
+                 (GroundSpeed {g} is none of the story, walking and sprint speeds \
+                 {story_speed}, {walk}, {sprint_speed}); left {}; state it with --story-mode",
+                on_off(was)
+            )),
+            _ => {}
+        }
+        let s = &mut p.script;
+        if let Some(v) = recorded.ground_speed {
+            s.ground_speed = v;
+            applied.push(format!("ground_speed {v}"));
+        }
+        if let Some(v) = recorded.sprinting {
+            s.sprint = SprintState {
+                active: v,
+                armed: false,
+            };
+            applied.push(format!("sprinting {v}"));
+        }
+        if let Some(v) = recorded.air_control {
+            s.air_control = v;
+            applied.push(format!("air_control {v}"));
+        }
+        if let Some(v) = recorded.jump_z {
+            s.jump_z = v;
+            applied.push(format!("jump_z {v}"));
+        }
+        if let Some(v) = recorded.air_speed {
+            s.air_speed = v;
+            applied.push(format!("air_speed {v}"));
+        }
+        let i = &s0.input;
+        s.jump_was_held = i.jump_held;
+        s.sprint_was_held = i.sprint_held;
+        s.power_jump_was_held = i.power_jump_held;
+        let held: Vec<&str> = [
+            (i.jump_held, "jump"),
+            (i.sprint_held, "sprint"),
+            (i.power_jump_held, "power jump"),
+            (i.grapple_held, "grapple"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        if !held.is_empty() {
+            applied.push(format!("buttons held: {}", held.join(" + ")));
+        }
+        if s.fov != s0.fov {
+            s.fov = s0.fov;
+            applied.push(format!("fov {}", s0.fov));
+        }
+    }
+    p.grapple_was_held = s0.input.grapple_held;
+    if let Some(n) = recorded.max_grapples {
+        grapple_gun::set_max_grapples(p, n);
+        applied.push(format!("max_grapples {n}"));
+    }
+    if let Some(n) = recorded.times_grappled {
+        p.script.gun.times_grappled = n;
+        applied.push(format!("times_grappled {n}"));
+    }
+    if let Some(on) = recorded.can_grapple {
+        grapple_gun::enable_grapple(p, on);
+        applied.push(format!("can_grapple {on}"));
+    }
+    if let Some(on) = recorded.boots_enabled {
+        rocket_boots::enable_rocket_boots(p, on);
+        applied.push(format!("rocket_boots {on}"));
+    }
+    if !applied.is_empty() {
+        notes.push(format!(
+            "start state applied (tick {}): {}",
+            s0.tick,
+            applied.join(", ")
+        ));
+    }
 }
 
 /// The per-sample loop: steps a [`VariableStepper`] snapshot of `game` with
@@ -668,13 +901,11 @@ mod tests {
                 .to_owned(),
         );
         let r = replay(&t, &ReplayOptions::default()).unwrap();
-        assert!(
-            r.trace
-                .meta
-                .notes
-                .iter()
-                .any(|n| n == "init applied: max_grapples 3, times_grappled 1, rocket_boots true")
-        );
+        assert!(r.trace.meta.notes.iter().any(|n| n
+            == "start state applied (tick 0): story mode off (GroundSpeed 440 is the \
+                        walking or the sprint speed), ground_speed 440, sprinting false, \
+                        air_control 0.3, jump_z 1000, max_grapples 3, times_grappled 1, \
+                        rocket_boots true"));
         let no = replay(
             &t,
             &ReplayOptions {
@@ -689,7 +920,7 @@ mod tests {
                 .meta
                 .notes
                 .iter()
-                .any(|n| n.starts_with("init applied"))
+                .any(|n| n.starts_with("start state applied"))
         );
         assert!(
             no.trace
@@ -745,6 +976,267 @@ mod tests {
             ..ReplayOptions::default()
         };
         assert!(replay(&t, &k).is_err());
+    }
+
+    /// A trace of the original standing at the graybox spawn for
+    /// `inputs.len()` ticks, with the given notes. (Only the inputs and the
+    /// first sample matter to a replay.)
+    fn standing_original(notes: &[&str], inputs: &[InputFrame]) -> Trace {
+        let g = Game::graybox().unwrap();
+        let mut meta = asamu_player::TraceMeta::runtime(Some("graybox".into()), Some(60.0));
+        meta.source = TraceSource::Original;
+        meta.notes = notes.iter().map(|n| (*n).to_owned()).collect();
+        let mut t = Trace::new(meta);
+        let neutral = InputFrame::default();
+        t.samples
+            .push(TraceSample::capture(0, 0.0, &neutral, g.player(), g.fov()));
+        for (i, input) in inputs.iter().enumerate() {
+            let tick = i as u64 + 1;
+            t.samples.push(TraceSample::capture(
+                tick,
+                tick as f64 / 60.0,
+                input,
+                g.player(),
+                g.fov(),
+            ));
+        }
+        t
+    }
+
+    fn state_note(ground_speed: f32, air_control: f32) -> String {
+        format!(
+            "state: {{\"changes\":[[0,{{\"air_control\":{air_control:?},\"air_speed\":2000.0,\
+             \"boots_enabled\":false,\"can_grapple\":true,\"ground_speed\":{ground_speed:?},\
+             \"jump_z\":1000.0,\"max_grapples\":2,\"physics\":1,\"sprinting\":false,\
+             \"times_grappled\":0}}]],\"v\":1}}"
+        )
+    }
+
+    /// Forward from tick 3, one jump press at tick 40.
+    fn walk_and_jump(n: usize) -> Vec<InputFrame> {
+        (1..=n)
+            .map(|i| InputFrame {
+                move_forward: if i >= 3 { 1.0 } else { 0.0 },
+                jump_pressed: i == 40,
+                jump_held: (40..50).contains(&i),
+                ..InputFrame::default()
+            })
+            .collect()
+    }
+
+    /// The highest horizontal speed while walking.
+    fn top_speed(t: &Trace) -> f32 {
+        t.samples
+            .iter()
+            .filter(|s| s.grounded)
+            .map(|s| s.velocity.truncate().length())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn start_state_comes_from_the_recording() {
+        let has =
+            |r: &ReplayResult, text: &str| r.trace.meta.notes.iter().any(|n| n.contains(text));
+        // Walking speed, landed air control: a jump leaves the ground.
+        let t = standing_original(&[&state_note(440.0, 0.35)], &walk_and_jump(90));
+        let r = replay(&t, &ReplayOptions::default()).unwrap();
+        assert_eq!(r.start_tick, 0);
+        assert!(
+            has(
+                &r,
+                "start state applied (tick 0): story mode off (GroundSpeed 440 is the walking or \
+                 the sprint speed), ground_speed 440, sprinting false, air_control 0.35, jump_z \
+                 1000, air_speed 2000, max_grapples 2, times_grappled 0, can_grapple true, \
+                 rocket_boots false"
+            ),
+            "{:#?}",
+            r.trace.meta.notes
+        );
+        assert!(has(
+            &r,
+            "the buttons held before the first record are unknown"
+        ));
+        assert!(r.trace.samples.iter().any(|s| !s.grounded), "the jump");
+        assert!(
+            (top_speed(&r.trace) - 440.0).abs() < 1.0,
+            "{}",
+            top_speed(&r.trace)
+        );
+
+        // The story speed shows story mode: the jump does nothing, the walk
+        // is slower.
+        let t = standing_original(&[&state_note(264.0, 0.3)], &walk_and_jump(90));
+        let r = replay(&t, &ReplayOptions::default()).unwrap();
+        assert!(has(
+            &r,
+            "story mode on (GroundSpeed 264 is the story speed)"
+        ));
+        assert!(r.trace.samples.iter().all(|s| s.grounded));
+        assert!(
+            (top_speed(&r.trace) - 264.0).abs() < 1.0,
+            "{}",
+            top_speed(&r.trace)
+        );
+
+        // A console speed shows nothing about story mode: said, and left as
+        // the simulation starts (off) unless stated.
+        let t = standing_original(&[&state_note(132.0, 0.3)], &walk_and_jump(90));
+        let r = replay(&t, &ReplayOptions::default()).unwrap();
+        assert!(
+            has(
+                &r,
+                "warning: the recording does not show whether the pawn is in story mode \
+                 (GroundSpeed 132 is none of the story, walking and sprint speeds 264, 440, \
+                 880); left off; state it with --story-mode"
+            ),
+            "{:#?}",
+            r.trace.meta.notes
+        );
+        assert!(r.trace.samples.iter().any(|s| !s.grounded));
+        assert!(top_speed(&r.trace) < 133.0);
+        let stated = ReplayOptions {
+            story_mode: Some(true),
+            ..ReplayOptions::default()
+        };
+        let r = replay(&t, &stated).unwrap();
+        assert!(has(&r, "story mode on (--story-mode), ground_speed 132"));
+        assert!(!has(&r, "does not show"));
+        assert!(r.trace.samples.iter().all(|s| s.grounded));
+        assert!(
+            (top_speed(&r.trace) - 132.0).abs() < 1.0,
+            "{}",
+            top_speed(&r.trace)
+        );
+        // Stated the other way, it overrules what the speed shows.
+        let t264 = standing_original(&[&state_note(264.0, 0.3)], &walk_and_jump(90));
+        let off = ReplayOptions {
+            story_mode: Some(false),
+            ..ReplayOptions::default()
+        };
+        let r = replay(&t264, &off).unwrap();
+        assert!(has(&r, "story mode off (--story-mode), ground_speed 264"));
+        assert!(r.trace.samples.iter().any(|s| !s.grounded));
+
+        // Without the recorded state the replay starts as the level does.
+        let none = ReplayOptions {
+            use_init: false,
+            ..ReplayOptions::default()
+        };
+        let r = replay(&t264, &none).unwrap();
+        assert!(!has(&r, "start state applied"));
+        assert!((top_speed(&r.trace) - 440.0).abs() < 1.0);
+        // A broken state: note is an error, not a silent fresh start.
+        let broken = standing_original(&["state: {\"v\":7,\"changes\":[]}"], &walk_and_jump(5));
+        assert!(replay(&broken, &ReplayOptions::default()).is_err());
+    }
+
+    #[test]
+    fn replays_of_the_original_start_standing_still() {
+        // Standing for 20 ticks, walking 21..=40 (sprint held from 15),
+        // standing again from 41.
+        let inputs: Vec<InputFrame> = (1..=60)
+            .map(|i| InputFrame {
+                move_forward: if (21..=40).contains(&i) { 1.0 } else { 0.0 },
+                sprint_held: i >= 15,
+                ..InputFrame::default()
+            })
+            .collect();
+        let t = standing_original(&[&state_note(440.0, 0.35)], &inputs);
+        let from = |tick: u64, start: StartPolicy| {
+            replay(
+                &t,
+                &ReplayOptions {
+                    start_tick: Some(tick),
+                    start,
+                    ..ReplayOptions::default()
+                },
+            )
+        };
+        // Inside a standing stretch: fine, with the held sprint button known.
+        let r = from(18, StartPolicy::Refuse).unwrap();
+        assert_eq!(r.start_tick, 18);
+        assert_eq!(r.trace.samples[0].tick, 18);
+        assert!(
+            r.trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with("start state applied (tick 18):")
+                    && n.contains("buttons held: sprint")),
+            "{:#?}",
+            r.trace.meta.notes
+        );
+        assert!(
+            !r.trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.contains("before the first record"))
+        );
+        // While walking: refused, with the ticks to use instead.
+        let e = from(30, StartPolicy::Refuse).unwrap_err().to_string();
+        assert!(
+            e.contains(
+                "tick 30 of this recording is not a standing-still start (a move input is held)"
+            ) && e.contains("Standing-still starts: 20 before it, 42 after it")
+                && e.contains("--start snap"),
+            "{e}"
+        );
+        // The first tick after the walk is quiet, but the tick before it is not.
+        let e = from(41, StartPolicy::Refuse).unwrap_err().to_string();
+        assert!(
+            e.contains("the tick before it is not standing still"),
+            "{e}"
+        );
+        let r = from(30, StartPolicy::Snap).unwrap();
+        assert_eq!(r.start_tick, 42);
+        assert_eq!(r.trace.samples.len(), 19);
+        assert!(
+            r.trace.meta.notes.iter().any(|n| n
+                == "start: moved from tick 30 (a move input is held) to the next \
+                    standing-still tick 42"),
+            "{:#?}",
+            r.trace.meta.notes
+        );
+        let r = from(30, StartPolicy::Force).unwrap();
+        assert_eq!(r.start_tick, 30);
+        assert!(
+            r.trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with("warning: forced start at tick 30"))
+        );
+        // Nothing to move to.
+        let mut moving = t.clone();
+        for s in &mut moving.samples[50..] {
+            s.input.move_right = 1.0;
+        }
+        let e = replay(
+            &moving,
+            &ReplayOptions {
+                start_tick: Some(55),
+                start: StartPolicy::Snap,
+                ..ReplayOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("no standing-still start at or after tick 55")
+        );
+        // Our own traces start anywhere, as before.
+        let mut ours = t.clone();
+        ours.meta.source = TraceSource::Runtime;
+        let r = replay(
+            &ours,
+            &ReplayOptions {
+                start_tick: Some(30),
+                ..ReplayOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.start_tick, 30);
     }
 
     /// Scripted inputs with the given frame lengths, recorded on the

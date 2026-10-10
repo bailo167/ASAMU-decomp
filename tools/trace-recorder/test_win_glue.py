@@ -218,6 +218,11 @@ class Engine:
         grappling = "LeftMouseButton" in self.keys
         self.m.setbit(g.gun + o.gun_grappling[0], o.gun_grappling[1], grappling)
         self.m.write(g.pawn + o.physics, bytes([4 if grappling else 1]))
+        if grappling:
+            # The gun's own distance to its anchor (vGrappleLocation, which
+            # FakeGame.set_state put at x = 500), measured after the pawn moved.
+            d = ((500.0 - self.x) ** 2 + 3.5 ** 2 + 45.05 ** 2) ** 0.5
+            self.m.f(g.gun + o.gun_distance, core.f32(d))
 
     def actors_b(self, f):
         g, o = self.g, self.o

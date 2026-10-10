@@ -23,6 +23,7 @@ What it does
 Command line (no debugger needed)::
 
     python3 -I asamu_recorder_core.py convert RAW.raw.jsonl [--out-dir DIR]
+        [--move-input auto|keys|acceleration] [--move-frame original|yaw]
     python3 -I asamu_recorder_core.py selftest [--layout layout_win_x86.json]
 
 Raw records never contain addresses or pointers; see docs/TRACE_CAPTURE.md.
@@ -56,6 +57,14 @@ MAX_OUTER_DEPTH = 16
 # included); mirrors MAX_PARTS_PER_KEY in tools/asamu-trace/src/bindings.rs.
 MAX_PARTS_PER_KEY = 256
 TAU_OVER_UNITS = math.tau / 65536.0
+# Movement input from the pawn's acceleration (mirrors
+# tools/asamu-trace/src/move_input.rs, which has the evidence): the step of the
+# original's angle table in rotator units, and the determinant of the
+# horizontal axes below which the yaw-only axes are used.
+AXES_TABLE_STEP = 4
+MIN_AXES_DETERMINANT = 1.0e-3
+MOVE_INPUTS = ("auto", "keys", "acceleration")
+MOVE_FRAMES = ("original", "yaw")
 
 
 class LayoutError(Exception):
@@ -932,6 +941,81 @@ def key_actions(bindings):
     return result
 
 
+def has_move_key(rec, kmap):
+    """True if a held key is bound to a move axis (also when opposite keys cancel)."""
+    for k in rec["player"]["keys"]:
+        for tag, _ in kmap.get(ascii_lower(k), ()):
+            if tag in ("forward", "right"):
+                return True
+    return False
+
+
+def _table_angle(units):
+    u = int(units) % 65536
+    return float(u - u % AXES_TABLE_STEP) * TAU_OVER_UNITS
+
+
+def _exact_angle(units):
+    return float(int(units) % 65536) * TAU_OVER_UNITS
+
+
+def horizontal_magnitude(acceleration):
+    """Horizontal length of an acceleration (0 for a zero or non-finite one)."""
+    ax, ay = float(f32(acceleration[0])), float(f32(acceleration[1]))
+    if not (math.isfinite(ax) and math.isfinite(ay)):
+        return 0.0
+    return math.sqrt(ax * ax + ay * ay)
+
+
+def move_direction(rotation, acceleration, frame="original"):
+    """The unit move direction (forward, right, steep) that gives the
+    horizontal part of ``acceleration`` in the axes of ``rotation`` (pitch,
+    yaw, roll in rotator units: the pawn rotation of the previous record), or
+    None when the acceleration is zero or not finite. The same arithmetic,
+    operation for operation, as asamu_trace::move_input::move_direction."""
+    ax, ay = float(f32(acceleration[0])), float(f32(acceleration[1]))
+    if not (math.isfinite(ax) and math.isfinite(ay)) or (ax == 0.0 and ay == 0.0):
+        return None
+    steep = False
+    if frame == "original":
+        p = _table_angle(rotation[0])
+        y = _table_angle(rotation[1])
+        ro = _table_angle(rotation[2])
+        cp, sp = math.cos(p), math.sin(p)
+        cy, sy = math.cos(y), math.sin(y)
+        cr, sr = math.cos(ro), math.sin(ro)
+        xx, xy = cp * cy, cp * sy
+        yx, yy = sr * sp * cy - cr * sy, sr * sp * sy + cr * cy
+        det = xx * yy - xy * yx
+        if abs(det) >= MIN_AXES_DETERMINANT:
+            f = (ax * yy - ay * yx) / det
+            r = (xx * ay - xy * ax) / det
+        else:
+            steep = True
+            f = ax * cy + ay * sy
+            r = ay * cy - ax * sy
+    else:
+        y = _exact_angle(rotation[1])
+        cy, sy = math.cos(y), math.sin(y)
+        f = ax * cy + ay * sy
+        r = ay * cy - ax * sy
+    n = math.sqrt(f * f + r * r)
+    if not (n > 0.0 and math.isfinite(n)):
+        return None
+    return f32(f / n), f32(r / n), steep
+
+
+def _is_attached(p):
+    gun = p.get("gun")
+    return p["physics"] == PHYS_FLYING or bool(gun and gun["grappling"])
+
+
+def _rounded(x):
+    """floor(x + 0.5) as an integer for a note, saturating like Rust's cast."""
+    v = math.floor(x + 0.5)
+    return max(-(2 ** 63), min(2 ** 63 - 1, int(v)))
+
+
 def actions_of(rec, kmap):
     a = Actions()
     p = rec["player"]
@@ -988,6 +1072,13 @@ def split_runs(records):
     return [r for r in runs if len(r) >= 2]
 
 
+def _distance_squared(a, b):
+    dx = float(f32(a[0])) - float(f32(b[0]))
+    dy = float(f32(a[1])) - float(f32(b[1]))
+    dz = float(f32(a[2])) - float(f32(b[2]))
+    return dx * dx + dy * dy + dz * dz
+
+
 def _state(rec, counters):
     p = rec["player"]
     fov = p.get("fov_camera")
@@ -999,12 +1090,23 @@ def _state(rec, counters):
     physics = p["physics"]
     flying = physics == PHYS_FLYING
     gun = p.get("gun")
-    # Without gun data there is no anchor, and an attached sample needs one.
+    # The anchor is the gun's vGrappleLocation (the helper's own location, raw
+    # "anchor", is the anchor of a moving target only; convert.rs has the
+    # evidence). Without gun data there is no anchor, and an attached sample
+    # needs one.
     if gun is not None:
         attached = bool(gun["grappling"])
-        anchor = gun["anchor"] if gun["anchor"] is not None else gun["grapple_location"]
+        anchor = gun["grapple_location"]
         if attached != flying:
             counters["grapple_physics"] += 1
+        if attached:
+            counters["attached"] += 1
+            helper = gun["anchor"]
+            if helper is not None and _distance_squared(helper, anchor) > 1.0:
+                counters["helper_elsewhere"] += 1
+            to_anchor = math.sqrt(_distance_squared(anchor, p["location"]))
+            if abs(to_anchor - float(f32(gun["distance"]))) > 1.0:
+                counters["anchor_distance"] += 1
     else:
         attached = False
         anchor = None
@@ -1043,6 +1145,123 @@ def _init_note(rec):
     return "init: " + json.dumps(init, sort_keys=True, separators=(",", ":"))
 
 
+def _tick_fields(rec):
+    p = rec["player"]
+    gun = p.get("gun")
+    flags = p.get("pawn_flags")
+    boots = p.get("boots")
+    return {
+        "air_control": f32(p["air_control"]),
+        "air_speed": f32(p["air_speed"]),
+        "base": p.get("base"),
+        "boots_enabled": boots["enabled"] if boots else None,
+        "boots_finished": boots["finished"] if boots else None,
+        "can_grapple": gun["can_grapple"] if gun else None,
+        "grappling": gun["grappling"] if gun else None,
+        "ground_speed": f32(p["ground_speed"]),
+        "has_jumped": flags["has_jumped"] if flags else None,
+        "has_released_jump": flags["has_released_jump"] if flags else None,
+        "is_falling": flags["is_falling"] if flags else None,
+        "jump_z": f32(p["jump_z"]),
+        "max_grapples": gun["max_grapples"] if gun else None,
+        "physics": p["physics"],
+        "power_jumped": flags["power_jumped"] if flags else None,
+        "released": gun["released"] if gun else None,
+        "sprinting": flags["sprinting"] if flags else None,
+        "times_grappled": gun["times_grappled"] if gun else None,
+    }
+
+
+def _state_note(run):
+    """The ``state:`` notes line (tools/asamu-trace/src/state.rs): the script
+    state of every tick as a list of [tick, {changed fields}]."""
+    changes = []
+    last = None
+    for k, rec in enumerate(run):
+        cur = _tick_fields(rec)
+        if last is None:
+            diff = cur
+        else:
+            diff = {name: v for name, v in cur.items() if last[name] != v}
+        if diff:
+            changes.append([k, diff])
+        last = cur
+    return "state: " + json.dumps(
+        {"changes": changes, "v": 1}, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+
+
+def _move_notes(notes, source, why_count, frame, c, magnitudes, total):
+    if source == "no-bindings":
+        return
+    why = {
+        "asked-keys": "--move-input keys",
+        "asked-acceleration": "--move-input acceleration",
+        "auto-keys": "auto: a move key is held on %d records" % why_count,
+        "auto-acceleration": "auto: no move key in this run",
+        "auto-nothing": "auto: no move key and no acceleration in this run",
+    }[source]
+    if source not in ("asked-acceleration", "auto-acceleration"):
+        notes.append("move input: the mapped move keys (%s)" % why)
+        if c["accel_without_key"]:
+            notes.append(
+                "check: acceleration without a mapped move key on %d of %d samples"
+                % (c["accel_without_key"], total)
+            )
+        return
+    if frame == "original":
+        axes = (
+            "in the axes of the previous record's pawn rotation, each angle truncated to "
+            "%d rotator units" % AXES_TABLE_STEP
+        )
+    else:
+        axes = (
+            "in the previous record's exact pawn yaw, without pitch and roll "
+            "(--move-frame yaw: reproduces the acceleration's direction, not the "
+            "stick's)"
+        )
+    notes.append(
+        "move input: derived from the pawn's Acceleration (%s): its horizontal direction "
+        "%s; magnitude 1 (the stick's is not recorded); %d of %d samples"
+        % (why, axes, c["derived"], total)
+    )
+    notes.append(
+        "move input: 0 on %d samples with zero acceleration: %d while the grapple is attached "
+        "(no steering is read then), %d within two frames after an attached record (the "
+        "controller's release gap), %d others (no deflection beyond the dead zone, or a move "
+        "suppressed in a way the record does not show)"
+        % (
+            c["zero_attached"] + c["zero_release"] + c["zero_other"],
+            c["zero_attached"],
+            c["zero_release"],
+            c["zero_other"],
+        )
+    )
+    if c["accel_attached"]:
+        notes.append(
+            "check: acceleration while the grapple is attached on %d samples (not used)"
+            % c["accel_attached"]
+        )
+    largest = 0.0
+    for _, m in magnitudes:
+        if m > largest:
+            largest = m
+    below = [k for k, m in magnitudes if m < 0.5 * largest]
+    if below:
+        notes.append(
+            "check: acceleration below half the run's largest (%d uu/s^2) on %d derived samples "
+            "(direction used; first at tick %d)" % (_rounded(largest), len(below), below[0])
+        )
+    if c["steep"]:
+        notes.append(
+            "check: pawn rotation too steep to invert on %d samples (yaw-only axes used)" % c["steep"]
+        )
+    if c["yaw_differs"]:
+        notes.append(
+            "check: pawn yaw differs from the view yaw on %d derived samples" % c["yaw_differs"]
+        )
+
+
 def tick_rate_of(dts):
     if not dts:
         return None
@@ -1056,16 +1275,51 @@ def tick_rate_of(dts):
     return f32(rate)
 
 
-def convert_raw(header, records, level=None):
-    """List of (meta, samples) for every usable run."""
+def convert_raw(header, records, level=None, move_input="auto", move_frame="original"):
+    """List of (meta, samples) for every usable run.
+
+    ``move_input``: where the move axes come from. "keys": the held keys
+    through the bindings; "acceleration": the pawn's acceleration
+    (``move_direction``); "auto": per run, the keys if any record holds a key
+    bound to a move axis, else the acceleration if the run has any.
+    ``move_frame``: the axes an acceleration is read in ("original" or the
+    diagnostic "yaw")."""
     if header.get("format") != RAW_FORMAT or header.get("version") != RAW_VERSION:
         raise ValueError("not an %s v%d file" % (RAW_FORMAT, RAW_VERSION))
+    if move_input not in MOVE_INPUTS or move_frame not in MOVE_FRAMES:
+        raise ValueError("unknown move input %r or move frame %r" % (move_input, move_frame))
     bindings = header.get("bindings") or []
     kmap = key_actions(bindings) if bindings else None
     runs = split_runs(records)
     out = []
     for si, run in enumerate(runs):
-        counters = {"fov_controller": 0, "grapple_physics": 0, "flying_without_gun": 0, "axis_mismatch": 0}
+        counters = {
+            "fov_controller": 0, "grapple_physics": 0, "flying_without_gun": 0, "axis_mismatch": 0,
+            "accel_without_key": 0, "derived": 0, "steep": 0, "yaw_differs": 0,
+            "zero_attached": 0, "zero_release": 0, "zero_other": 0, "accel_attached": 0,
+            "attached": 0, "helper_elsewhere": 0, "anchor_distance": 0,
+        }
+        total = len(run) - 1
+        move_key_records = (
+            sum(1 for r in run[:total] if has_move_key(r, kmap)) if kmap is not None else 0
+        )
+        has_acceleration = any(
+            horizontal_magnitude(r["player"]["acceleration"]) > 0.0 for r in run[1:]
+        )
+        if move_input == "keys":
+            source = "asked-keys"
+        elif move_input == "acceleration":
+            source = "asked-acceleration"
+        elif kmap is None:
+            source = "no-bindings"
+        elif move_key_records > 0:
+            source = "auto-keys"
+        elif has_acceleration:
+            source = "auto-acceleration"
+        else:
+            source = "auto-nothing"
+        from_acceleration = source in ("asked-acceleration", "auto-acceleration")
+        magnitudes = []
         samples = []
         st = _state(run[0], counters)
         neutral = {
@@ -1089,7 +1343,7 @@ def convert_raw(header, records, level=None):
                 pa = actions_of(prev, kmap) if prev is not None else None
                 fwd, right = a.forward, a.right
                 axes = np_.get("axes")
-                if axes is not None and (
+                if not from_acceleration and axes is not None and (
                     _sign(axes["base_y"]) != fwd or _sign(axes["strafe"]) != right
                 ):
                     counters["axis_mismatch"] += 1
@@ -1105,14 +1359,41 @@ def convert_raw(header, records, level=None):
                 key_edge = False
                 use_pressed = False
                 grapple = sprint = power = False
+            magnitude = horizontal_magnitude(np_["acceleration"])
+            if from_acceleration:
+                direction = None
+                if not _is_attached(np_):
+                    direction = move_direction(cp["pawn_rotation"], np_["acceleration"], move_frame)
+                if direction is not None:
+                    move_forward, move_right, steep = direction
+                    counters["derived"] += 1
+                    counters["steep"] += 1 if steep else 0
+                    if signed16(cp["pawn_rotation"][1]) != signed16(cp["view_rotation"][1]):
+                        counters["yaw_differs"] += 1
+                    magnitudes.append((k, magnitude))
+                else:
+                    move_forward = move_right = 0.0
+                    if _is_attached(np_):
+                        counters["accel_attached" if magnitude > 0.0 else "zero_attached"] += 1
+                    elif _is_attached(cp) or (prev is not None and _is_attached(prev["player"])):
+                        counters["zero_release"] += 1
+                    else:
+                        counters["zero_other"] += 1
+            else:
+                if (
+                    kmap is not None and fwd == 0 and right == 0 and magnitude > 0.0
+                    and not _is_attached(np_)
+                ):
+                    counters["accel_without_key"] += 1
+                move_forward, move_right = float(fwd), float(right)
             flag_edge = bool(cp["pressed_jump"]) and not (
                 prev is not None and prev["player"]["pressed_jump"]
             )
             dyaw = signed16(np_["view_rotation"][1] - cp["view_rotation"][1])
             dpitch = signed16(np_["view_rotation"][0] - cp["view_rotation"][0])
             inp = {
-                "move_forward": float(fwd),
-                "move_right": float(right),
+                "move_forward": float(move_forward),
+                "move_right": float(move_right),
                 "look_yaw_delta": units_to_radians(dyaw),
                 "look_pitch_delta": units_to_radians(dpitch),
                 "jump_pressed": bool(key_edge or flag_edge),
@@ -1145,9 +1426,21 @@ def convert_raw(header, records, level=None):
                 "input: no key bindings in the recording; move axes from the signs of "
                 "PlayerInput aBaseY/aStrafe, jump from bPressedJump, other actions unknown (false)"
             )
+        _move_notes(notes, source, move_key_records, move_frame, counters, magnitudes, total)
         if counters["grapple_physics"]:
             notes.append(
                 "check: grapple flag and PHYS_Flying disagree on %d samples" % counters["grapple_physics"]
+            )
+        if counters["helper_elsewhere"]:
+            notes.append(
+                "anchor: the gun's vGrappleLocation; the anchor helper is more than 1 uu from it on "
+                "%d of %d attached samples (it carries the anchor of a moving target only)"
+                % (counters["helper_elsewhere"], counters["attached"])
+            )
+        if counters["anchor_distance"]:
+            notes.append(
+                "check: the gun's vDistance is more than 1 uu off the pawn's distance to the "
+                "anchor on %d of %d attached samples" % (counters["anchor_distance"], counters["attached"])
             )
         if counters["flying_without_gun"]:
             notes.append(
@@ -1160,6 +1453,7 @@ def convert_raw(header, records, level=None):
                 % counters["fov_controller"]
             )
         notes.extend(header.get("notes") or [])
+        notes.append(_state_note(run))
         notes.append(_init_note(run[0]))
         meta = {
             "format": TRACE_FORMAT,
@@ -1256,9 +1550,9 @@ def write_trace(meta, samples, path):
             fh.write(dumps(s) + "\n")
 
 
-def convert_file(raw_path, out_dir=None):
+def convert_file(raw_path, out_dir=None, move_input="auto", move_frame="original"):
     header, records = read_raw(raw_path)
-    traces = convert_raw(header, records)
+    traces = convert_raw(header, records, move_input=move_input, move_frame=move_frame)
     paths = output_paths(raw_path, len(traces), out_dir)
     for (meta, samples), p in zip(traces, paths):
         write_trace(meta, samples, p)
@@ -1455,7 +1749,10 @@ class FakeGame:
         m.i(self.pc + o.rotation, pitch)
         m.write(self.pawn + o.physics, bytes([physics]))
         m.setbit(self.gun + o.gun_grappling[0], o.gun_grappling[1], grappling)
-        m.f(self.helper + o.location, 500.0)
+        # The anchor is the gun's own hit location; the helper is elsewhere
+        # (where an earlier moving target left it).
+        m.f(self.helper + o.location, -7000.0)
+        m.f(self.gun + o.gun_location, 500.0)
 
     # The scripted frames of the self-tests:
     # (keys, location x, yaw units, physics, grappling, pitch units)
@@ -1485,6 +1782,119 @@ def check_selftest_trace(meta, samples):
     assert samples[4]["pitch"] == units_to_radians(-1000)
     assert samples[2]["position"][0] == 7.25
     assert any(n.startswith("init: ") for n in meta["notes"])
+
+
+def _selftest_move_input(header, template):
+    """The move axes of a gamepad recording (no move key; the stick only in the
+    pawn's acceleration), of a keyboard recording, and the state timeline: the
+    cases of convert.rs' unit tests, with the same expected notes."""
+    import copy
+
+    header = copy.deepcopy(header)
+    header["bindings"] = header["bindings"] + [
+        {"name": "GBA_MoveForward_Gamepad", "command": "Axis aBaseY Speed=1.0 DeadZone=0.4"},
+        {"name": "XboxTypeS_LeftY", "command": "GBA_MoveForward_Gamepad"},
+        {"name": "GBA_PadJump", "command": "Jump | OnRelease ReleaseJump"},
+        {"name": "XboxTypeS_A", "command": "GBA_PadJump | RocketBoostKeyDown"},
+        {"name": "XboxTypeS_RightTrigger", "command": "StartFire | OnRelease StopFire"},
+        {"name": "XboxTypeS_LeftShoulder", "command": "StartSprinting | OnRelease StopSprinting"},
+    ]
+
+    def rec(i, yaw, keys, accel=(0.0, 0.0), physics=1, grappling=False):
+        r = copy.deepcopy(template)
+        r["frame"] = 200 + i
+        r["world"]["time_seconds"] = 10.0 + i / 60.0
+        p = r["player"]
+        p.update(keys=list(keys), pressed_jump=False, physics=physics, axes=None,
+                 acceleration=[accel[0], accel[1], 0.0],
+                 pawn_rotation=[0, yaw, 0], view_rotation=[0, yaw, 0], location=[float(i), 0.0, 0.0])
+        p["gun"] = dict(p["gun"], grappling=grappling, anchor=[900.0, 0.0, 50.0] if grappling else None)
+        return r
+
+    # Yaw 16386 reads as 16384 in the original's angle table: forward is +Y,
+    # right is -X.
+    pad = [
+        rec(0, 0, []),
+        rec(1, 16386, ["XboxTypeS_LeftShoulder"], (2048.0, 0.0)),
+        rec(2, 16386, ["XboxTypeS_RightTrigger"], (f32(2048.0 * -0.8), f32(2048.0 * 0.6))),
+        rec(3, 16386, ["XboxTypeS_RightTrigger"], physics=PHYS_FLYING, grappling=True),
+        rec(4, 16386, [], physics=2),
+        rec(5, 16386, [], physics=2),
+        rec(6, 16386, ["XboxTypeS_A"], physics=2),
+        rec(7, 0, [], (0.0, -1.0)),
+        rec(8, 0, ["XboxTypeS_RightTrigger"], (0.0, 2048.0)),
+        rec(9, 0, [], (5.0, 5.0), physics=PHYS_FLYING, grappling=True),
+    ]
+
+    def moves(samples):
+        return [(x["input"]["move_forward"], x["input"]["move_right"]) for x in samples]
+
+    def close(a, b):
+        return abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
+
+    (meta, samples), = convert_raw(header, pad)
+    m = moves(samples)
+    assert m[0] == (0.0, 0.0) and m[1] == (1.0, 0.0), m
+    assert close(m[2], (0.6, 0.8)), m[2]
+    assert m[3:7] == [(0.0, 0.0)] * 4, m
+    assert close(m[7], (-1.0, 0.0)) and close(m[8], (0.0, 1.0)) and m[9] == (0.0, 0.0), m
+    assert samples[2]["input"]["sprint_held"] and samples[3]["input"]["grapple_held"]
+    assert samples[7]["input"]["jump_pressed"] and samples[7]["input"]["jump_held"]
+    notes = meta["notes"]
+    for want in (
+        "move input: derived from the pawn's Acceleration (auto: no move key in this run): its "
+        "horizontal direction in the axes of the previous record's pawn rotation, each angle "
+        "truncated to 4 rotator units; magnitude 1 (the stick's is not recorded); 4 of 9 samples",
+        "move input: 0 on 4 samples with zero acceleration: 1 while the grapple is attached (no "
+        "steering is read then), 2 within two frames after an attached record (the controller's "
+        "release gap), 1 others (no deflection beyond the dead zone, or a move suppressed in a way "
+        "the record does not show)",
+        "check: acceleration while the grapple is attached on 1 samples (not used)",
+        "check: acceleration below half the run's largest (2048 uu/s^2) on 1 derived samples "
+        "(direction used; first at tick 7)",
+    ):
+        assert want in notes, (want, notes)
+    assert notes[-1].startswith("init: ") and notes[-2].startswith("state: "), notes[-2:]
+    timeline = json.loads(notes[-2][len("state: "):])
+    assert timeline["v"] == 1 and timeline["changes"][0][0] == 0, timeline
+    assert len(timeline["changes"][0][1]) == 18, timeline["changes"][0]
+    flying = [c for c in timeline["changes"] if c[1].get("physics") == PHYS_FLYING]
+    assert [c[0] for c in flying] == [3, 9] and flying[0][1]["grappling"] is True, timeline
+
+    # The exact-yaw axes read sample 2 two rotator units further round.
+    (meta, samples), = convert_raw(header, pad, move_frame="yaw")
+    f, r = moves(samples)[2]
+    turned = math.atan2(r, f) - math.atan2(0.8, 0.6)
+    assert abs(turned + 2 * TAU_OVER_UNITS) < 1e-6, turned
+    assert any("--move-frame yaw" in n for n in meta["notes"])
+    # Asked for keys: nothing moves, and the acceleration is reported.
+    (meta, samples), = convert_raw(header, pad, move_input="keys")
+    assert all(x == (0.0, 0.0) for x in moves(samples))
+    assert "move input: the mapped move keys (--move-input keys)" in meta["notes"]
+    assert "check: acceleration without a mapped move key on 4 of 9 samples" in meta["notes"]
+    # A keyboard recording keeps its keys whatever the acceleration says.
+    keyboard = copy.deepcopy(pad)
+    keyboard[1]["player"]["keys"] = ["W"]
+    (meta, samples), = convert_raw(header, keyboard)
+    assert moves(samples)[2] == (1.0, 0.0) and moves(samples)[1] == (0.0, 0.0), moves(samples)
+    assert "move input: the mapped move keys (auto: a move key is held on 1 records)" in meta["notes"]
+    # Hostile values: a rotation that cannot be inverted, huge numbers.
+    steep = copy.deepcopy(pad)
+    steep[0]["player"]["pawn_rotation"] = [16384, -(2 ** 31), 2 ** 31 - 1]
+    steep[1]["player"]["acceleration"] = [3.0e38, -3.0e38, 0.0]
+    (meta, samples), = convert_raw(header, steep)
+    f, r = moves(samples)[1]
+    assert abs(math.hypot(f, r) - 1.0) < 1e-6, (f, r)
+    assert "check: pawn rotation too steep to invert on 1 samples (yaw-only axes used)" in meta["notes"]
+    assert move_direction([0, 0, 0], [0.0, -0.0, 9.0]) is None
+    assert move_direction([0, 0, 0], [float("nan"), 1.0, 0.0]) is None
+    for bad in ("stick", None):
+        try:
+            convert_raw(header, pad, move_input=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an unknown move input must be refused")
 
 
 def _selftest(layout_path=None):
@@ -1531,6 +1941,7 @@ def _selftest(layout_path=None):
     assert [len(s) for _, s in convert_raw(header, again)] == [3, 2]
     steady = [dict(r, world=dict(r["world"], time_seconds=50.0)) for r in lines]
     assert [len(s) for _, s in convert_raw(header, steady)] == [5]
+    _selftest_move_input(header, lines[0])
     # Sentinel mismatch is detected.
     g.m.f(g.gun + g.o.gun_max_distance, 1234.0)
     sampler2 = Sampler(g.L, g.m.read, g.symbols)
@@ -1611,11 +2022,16 @@ def main(argv):
     c = sub.add_parser("convert", help="raw recording -> canonical asamu-trace v1 file(s)")
     c.add_argument("raw")
     c.add_argument("--out-dir")
+    c.add_argument("--move-input", choices=MOVE_INPUTS, default="auto",
+                   help="source of the move axes (auto: keys if a move key is held in the run, "
+                        "else the pawn's acceleration)")
+    c.add_argument("--move-frame", choices=MOVE_FRAMES, default="original",
+                   help="axes an acceleration is read in (yaw: diagnostic)")
     t = sub.add_parser("selftest", help="exercise sampler and converter on a fake memory image")
     t.add_argument("--layout", help="layout file to build the image from (default: the Mac layout)")
     args = ap.parse_args(argv)
     if args.cmd == "convert":
-        for p in convert_file(args.raw, args.out_dir):
+        for p in convert_file(args.raw, args.out_dir, args.move_input, args.move_frame):
             print(p)
         return 0
     if args.cmd == "selftest":

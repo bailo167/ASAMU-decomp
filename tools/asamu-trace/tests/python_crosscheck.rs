@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use asamu_player::Trace;
-use asamu_trace::convert::{ConvertOptions, INIT_NOTE_PREFIX, convert, output_names};
+use asamu_trace::convert::{ConvertOptions, INIT_NOTE_PREFIX, MoveInput, convert, output_names};
+use asamu_trace::move_input::MoveFrame;
 use asamu_trace::raw::{RawBinding, RawFile};
+use asamu_trace::state::STATE_NOTE_PREFIX;
 
 fn python() -> Option<&'static str> {
     ["python3", "python"].into_iter().find(|p| {
@@ -90,29 +92,53 @@ fn python_windows_front_end_tests() {
     assert!(out.contains("win glue test ok"), "{out}");
 }
 
+/// The notes agree: text for text, and the two JSON notes (the state
+/// timeline and the older `init:` note) value for value.
 fn same_notes(py: &[String], rs: &[String]) {
     assert_eq!(py.len(), rs.len(), "notes differ:\n{py:#?}\n{rs:#?}");
     for (a, b) in py.iter().zip(rs) {
-        match (
-            a.strip_prefix(INIT_NOTE_PREFIX),
-            b.strip_prefix(INIT_NOTE_PREFIX),
-        ) {
-            (Some(ja), Some(jb)) => {
+        let json = [INIT_NOTE_PREFIX, STATE_NOTE_PREFIX]
+            .into_iter()
+            .find_map(|p| Some((a.strip_prefix(p)?, b.strip_prefix(p)?)));
+        match json {
+            Some((ja, jb)) => {
                 let va: serde_json::Value = serde_json::from_str(ja).unwrap();
                 let vb: serde_json::Value = serde_json::from_str(jb).unwrap();
-                assert_eq!(va, vb, "init notes differ");
+                assert_eq!(va, vb, "JSON notes differ");
             }
-            _ => assert_eq!(a, b),
+            None => assert_eq!(a, b),
         }
     }
 }
 
 fn crosscheck(py: &str, raw: &RawFile, dir: &Path, stem: &str) -> usize {
+    crosscheck_with(py, raw, dir, stem, &ConvertOptions::default())
+}
+
+/// Converts `raw` with both converters under `opts` and compares every
+/// trace: samples bit for bit, metadata and notes. Returns the number of
+/// traces.
+fn crosscheck_with(
+    py: &str,
+    raw: &RawFile,
+    dir: &Path,
+    stem: &str,
+    opts: &ConvertOptions,
+) -> usize {
     let raw_path = dir.join(format!("{stem}.raw.jsonl"));
     std::fs::write(&raw_path, raw.to_jsonl_string().unwrap()).unwrap();
     let core = recorder_dir().join("asamu_recorder_core.py");
     let out_dir = dir.join(stem);
     std::fs::create_dir_all(&out_dir).unwrap();
+    let move_input = match opts.move_input {
+        MoveInput::Auto => "auto",
+        MoveInput::Keys => "keys",
+        MoveInput::Acceleration => "acceleration",
+    };
+    let move_frame = match opts.move_frame {
+        MoveFrame::Original => "original",
+        MoveFrame::Yaw => "yaw",
+    };
     let printed = run_python(
         py,
         &[
@@ -121,9 +147,13 @@ fn crosscheck(py: &str, raw: &RawFile, dir: &Path, stem: &str) -> usize {
             raw_path.as_os_str(),
             "--out-dir".as_ref(),
             out_dir.as_os_str(),
+            "--move-input".as_ref(),
+            move_input.as_ref(),
+            "--move-frame".as_ref(),
+            move_frame.as_ref(),
         ],
     );
-    let rust = convert(raw, &ConvertOptions::default()).unwrap();
+    let rust = convert(raw, opts).unwrap();
     let names = output_names(&format!("{stem}.raw.jsonl"), rust.len());
     assert_eq!(printed.lines().count(), rust.len(), "{printed}");
     for (seg, name) in rust.iter().zip(&names) {
@@ -196,6 +226,51 @@ fn python_and_rust_converters_agree() {
         crosscheck(py, &reloaded, dir.path(), "reloaded"),
         before + 1
     );
+
+    // Recordings made with a gamepad: the move axes from the pawn's
+    // acceleration, in both converters bit for bit; also when asked for on
+    // pseudo-random recordings (pawn rotations with pitch and roll, zero,
+    // unit-length, tiny and huge accelerations, flying with and without gun
+    // data), in either frame, and with the keys forced.
+    let (pad, _) = common::scripted_gamepad_recording(150, 3_000);
+    assert_eq!(crosscheck(py, &pad, dir.path(), "pad"), 1);
+    let derived = convert(&pad, &ConvertOptions::default()).unwrap();
+    assert!(
+        derived[0]
+            .trace
+            .samples
+            .iter()
+            .any(|s| s.input.move_forward != 0.0 && s.input.move_right != 0.0),
+        "the pad run moves diagonally"
+    );
+    let mut moved = 0;
+    for (i, seed) in [21_u64, 22, 23, 24].into_iter().enumerate() {
+        let mut raw = common::varied_recording(seed, 400, i % 2 == 0);
+        common::with_accelerations(&mut raw, seed);
+        for (move_input, move_frame) in [
+            (MoveInput::Acceleration, MoveFrame::Original),
+            (MoveInput::Acceleration, MoveFrame::Yaw),
+            (MoveInput::Auto, MoveFrame::Original),
+            (MoveInput::Keys, MoveFrame::Original),
+        ] {
+            let opts = ConvertOptions {
+                level: None,
+                move_input,
+                move_frame,
+            };
+            let stem = format!("accel{seed}-{move_input:?}-{move_frame:?}");
+            crosscheck_with(py, &raw, dir.path(), &stem, &opts);
+            if move_input == MoveInput::Acceleration {
+                moved += convert(&raw, &opts)
+                    .unwrap()
+                    .iter()
+                    .flat_map(|s| &s.trace.samples)
+                    .filter(|s| s.input.move_forward != 0.0 || s.input.move_right != 0.0)
+                    .count();
+            }
+        }
+    }
+    assert!(moved > 800, "only {moved} derived samples exercised");
 
     // A hostile binding table (wide alias fan-out, self references, empty
     // parts): both converters stop at the same expansion budget.

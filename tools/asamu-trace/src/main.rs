@@ -2,9 +2,12 @@
 //!
 //! ```text
 //! asamu-trace convert RAW.raw.jsonl [--out FILE | --out-dir DIR] [--segment N] [--level NAME] [--list]
+//!                    [--move-input auto|keys|acceleration] [--move-frame original|yaw]
+//! asamu-trace starts TRACE [--events]
 //! asamu-trace replay TRACE --out OURS [--converted DIR [--map NAME] [--kismet]]
 //!                    [--tick-rate HZ | --variable-dt]
-//!                    [--from-tick T] [--ticks N] [--no-init] [--max-grapples N] [--placeholder]
+//!                    [--from-tick T] [--ticks N] [--start refuse|snap|force] [--story-mode on|off]
+//!                    [--no-init] [--max-grapples N] [--placeholder]
 //!                    [--compare [--json SUMMARY] [--tol-*]]
 //! asamu-trace compare A B [--tol-position UU] [--tol-velocity UU/S] [--tol-angle RAD] [--tol-fov DEG]
 //!                    [--tol-anchor UU] [--json SUMMARY] [--fail-on-divergence]
@@ -27,12 +30,13 @@ use anyhow::{Context, Result, bail};
 use asamu_player::Trace;
 use asamu_player::trace::CompareTolerances;
 use asamu_trace::compare::{CompareSummary, Verdict, compare_traces, render_text};
-use asamu_trace::convert::{ConvertOptions, convert, output_names, raw_timing};
+use asamu_trace::convert::{ConvertOptions, MoveInput, convert, output_names, raw_timing};
+use asamu_trace::move_input::MoveFrame;
 use asamu_trace::raw::{RawFile, looks_raw};
-use asamu_trace::replay::{ReplayLevel, ReplayOptions, Stepping, replay};
+use asamu_trace::replay::{ReplayLevel, ReplayOptions, StartPolicy, Stepping, replay};
 use asamu_trace::timestep::StepStats;
-use asamu_trace::{layout, read_trace, report, write_trace};
-use clap::{Args, Parser, Subcommand};
+use asamu_trace::{layout, read_trace, report, segments, write_trace};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -90,6 +94,46 @@ impl TolArgs {
     }
 }
 
+/// `--move-input`.
+#[derive(Clone, Copy, ValueEnum)]
+enum MoveInputArg {
+    /// Per run: the keys if a move key is held in it, else the acceleration.
+    Auto,
+    /// The held keys through the game's bindings.
+    Keys,
+    /// The pawn's recorded acceleration (gamepad recordings).
+    Acceleration,
+}
+
+/// `--move-frame`.
+#[derive(Clone, Copy, ValueEnum)]
+enum MoveFrameArg {
+    /// The original's axes (the stick's direction).
+    Original,
+    /// The exact yaw only (diagnostic: the acceleration's direction).
+    Yaw,
+}
+
+/// `--start`.
+#[derive(Clone, Copy, ValueEnum)]
+enum StartArg {
+    /// Fail and name the standing-still ticks around the start tick.
+    Refuse,
+    /// Start at the next standing-still tick.
+    Snap,
+    /// Start at the tick all the same.
+    Force,
+}
+
+/// `--story-mode`.
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    /// In story mode.
+    On,
+    /// Not in story mode.
+    Off,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Raw recording (asamu-trace-raw v1) -> canonical trace(s) (asamu-trace v1, source original).
@@ -111,6 +155,21 @@ enum Cmd {
         /// Only list the segments.
         #[arg(long)]
         list: bool,
+        /// Where the move axes come from.
+        #[arg(long, value_enum, default_value = "auto")]
+        move_input: MoveInputArg,
+        /// The axes an acceleration is read in.
+        #[arg(long, value_enum, default_value = "original")]
+        move_frame: MoveFrameArg,
+    },
+    /// List where a replay of a trace may start (standing still, nothing held) and what
+    /// happens in between.
+    Starts {
+        /// The trace.
+        trace: PathBuf,
+        /// List every event instead of a summary per stretch.
+        #[arg(long)]
+        events: bool,
     },
     /// Replay a trace's inputs through our simulation and record our trace.
     Replay {
@@ -137,9 +196,17 @@ enum Cmd {
         /// even if the trace has a fixed tick rate.
         #[arg(long, conflicts_with = "tick_rate")]
         variable_dt: bool,
-        /// Ignore the trace's init: note (grapple capacity, boots).
+        /// Do not apply the recorded start state (the trace's state: or init: note,
+        /// the start sample's button levels and FOV).
         #[arg(long)]
         no_init: bool,
+        /// What to do when the start tick of an original recording is not a
+        /// standing-still start.
+        #[arg(long, value_enum, default_value = "refuse")]
+        start: StartArg,
+        /// Story mode at the start (when the recording does not show it).
+        #[arg(long, value_enum)]
+        story_mode: Option<OnOff>,
         /// Grapple capacity override.
         #[arg(long, allow_hyphen_values = true)]
         max_grapples: Option<i32>,
@@ -230,11 +297,11 @@ fn cmd_convert(
     out: Option<&Path>,
     out_dir: Option<&Path>,
     segment: Option<usize>,
-    level: Option<String>,
+    opts: &ConvertOptions,
     list: bool,
 ) -> Result<()> {
     let file = read_raw(raw)?;
-    let segs = convert(&file, &ConvertOptions { level })?;
+    let segs = convert(&file, opts)?;
     if list {
         for (i, s) in segs.iter().enumerate() {
             println!(
@@ -246,6 +313,11 @@ fn cmd_convert(
                 s.trace.meta.tick_rate,
                 StepStats::of_samples(&s.trace.samples).describe()
             );
+            for n in s.trace.meta.notes.iter().filter(|n| {
+                n.starts_with("move input:") || n.starts_with("check:") || n.starts_with("input:")
+            }) {
+                println!("    {n}");
+            }
         }
         return Ok(());
     }
@@ -354,6 +426,30 @@ fn cmd_validate(files: &[PathBuf]) -> Result<bool> {
     Ok(all_ok)
 }
 
+/// The map to load for a trace's level name: the converted level whose
+/// name equals it, ignoring ASCII case (the engine reports a map under the
+/// name it was opened with, `ag-workshop` as well as `AG-Workshop`), else
+/// the name as given.
+fn converted_map(dir: &Path, level: &str) -> String {
+    const SUFFIX: &str = ".scene.json";
+    let Ok(entries) = std::fs::read_dir(dir.join("levels")) else {
+        return level.to_owned();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| n.strip_suffix(SUFFIX).map(str::to_owned))
+        .collect();
+    names.sort();
+    if names.iter().any(|n| n == level) {
+        return level.to_owned();
+    }
+    names
+        .into_iter()
+        .find(|n| n.eq_ignore_ascii_case(level))
+        .unwrap_or_else(|| level.to_owned())
+}
+
 fn repo_root(arg: Option<PathBuf>) -> PathBuf {
     if let Some(r) = arg {
         return r;
@@ -373,15 +469,34 @@ fn run(cli: Cli) -> Result<ExitCode> {
             segment,
             level,
             list,
+            move_input,
+            move_frame,
         } => {
+            let opts = ConvertOptions {
+                level,
+                move_input: match move_input {
+                    MoveInputArg::Auto => MoveInput::Auto,
+                    MoveInputArg::Keys => MoveInput::Keys,
+                    MoveInputArg::Acceleration => MoveInput::Acceleration,
+                },
+                move_frame: match move_frame {
+                    MoveFrameArg::Original => MoveFrame::Original,
+                    MoveFrameArg::Yaw => MoveFrame::Yaw,
+                },
+            };
             cmd_convert(
                 &raw,
                 out.as_deref(),
                 out_dir.as_deref(),
                 segment,
-                level,
+                &opts,
                 list,
             )?;
+        }
+        Cmd::Starts { trace, events } => {
+            let t = read_trace(&trace)?;
+            println!("{}: level {:?}", trace.display(), t.meta.level);
+            print!("{}", segments::describe(&t, events)?);
         }
         Cmd::Replay {
             trace,
@@ -392,6 +507,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             tick_rate,
             variable_dt,
             no_init,
+            start,
+            story_mode,
             max_grapples,
             placeholder,
             from_tick,
@@ -404,9 +521,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let level = match converted {
                 None => ReplayLevel::Graybox,
                 Some(dir) => {
-                    let map = map
-                        .or_else(|| original.meta.level.clone())
-                        .context("the trace names no level; pass --map")?;
+                    let map = match map {
+                        Some(m) => m,
+                        None => converted_map(
+                            &dir,
+                            original
+                                .meta
+                                .level
+                                .as_deref()
+                                .context("the trace names no level; pass --map")?,
+                        ),
+                    };
                     ReplayLevel::Converted { dir, map, kismet }
                 }
             };
@@ -415,6 +540,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 tick_rate,
                 variable_dt,
                 use_init: !no_init,
+                story_mode: story_mode.map(|m| matches!(m, OnOff::On)),
+                start: match start {
+                    StartArg::Refuse => StartPolicy::Refuse,
+                    StartArg::Snap => StartPolicy::Snap,
+                    StartArg::Force => StartPolicy::Force,
+                },
                 max_grapples,
                 placeholder,
                 start_tick: from_tick,
@@ -449,6 +580,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     String::new()
                 }
             );
+            for n in r.trace.meta.notes.iter().filter(|n| {
+                n.starts_with("start") || n.starts_with("warning:") || n.starts_with("note:")
+            }) {
+                println!("  {n}");
+            }
             if compare {
                 let s = compare_traces(
                     &file_name(&trace),

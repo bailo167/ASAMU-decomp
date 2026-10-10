@@ -63,7 +63,7 @@ All from the Mac depot 278362, build 1822049, `A Story About My Uncle.app/Conten
 | E8 | Command-line words present as UTF-32 strings: `BENCHMARK`, `FPS=`, `FIXEDSEED`, `WINDOWED`, `ResX=`, `ResY=`, `DEMOREC`, `EXEC=`, `NOSTEAM`; absent: `ALLOWCONSOLE`, `NOSOUND`, `VSYNC`. | CONFIRMED (R5); what each does is TENTATIVE |
 | E9 | `SteamAPI_RestartAppIfNecessary` is imported: started outside Steam the game may relaunch itself through Steam, which would detach a debugger that started it. | CONFIRMED (import); behaviour TENTATIVE |
 | E10 | Native field offsets of the engine classes on this build (the script layout reproduces all 1,447 native class sizes). | CONFIRMED ([DEFAULTS.md](reverse-engineering/DEFAULTS.md) §2) |
-| E11 | While the grapple is attached the pawn is in `PHYS_Flying` (4); the anchor is the location of the gun's `GrappleGunHitLocActor`. | CONFIRMED ([GRAPPLE.md](reverse-engineering/GRAPPLE.md) §1, §2); "nothing else flies" STRONG |
+| E11 | While the grapple is attached the pawn is in `PHYS_Flying` (4); the anchor is the gun's `vGrappleLocation` (the hit point), which follows the gun's `GrappleGunHitLocActor` only for a target that carries its anchor. The helper's own location is **not** the anchor otherwise (corrected 2026-10-10 from the first recordings, section 3.3). | CONFIRMED ([GRAPPLE.md](reverse-engineering/GRAPPLE.md) §1, §2, G-AT-4/7/8; measured, 3.3); "nothing else flies" STRONG |
 | E12 | The camera updates once per frame at the end of `UWorld::Tick`. | CONFIRMED (native; [PARITY.md](PARITY.md) deviation 2) |
 | E13 | The depot ships no anti-cheat component. | CONFIRMED (inventory) |
 | E14 | The Windows executable is a 32-bit `Binaries/Win32/ASAMU-Win32-Shipping.exe`, not in the Mac depot. | STRONG (`PCTOC.txt`) |
@@ -201,28 +201,107 @@ values above U+10FFFF) replaced by U+FFFD, so every JSON reader accepts the file
 | `keys`, `pressed_jump`, `axes` | `PressedKeys` names, `bPressedJump`, the `PlayerInput` axes |
 | `ground_speed`, `air_speed`, `jump_z`, `air_control` | pawn movement values (script changes them: sprint, story mode, grapple) |
 | `eye_height` | pawn `EyeHeight` (0x378, CONFIRMED offset): the camera height above the centre before bob; not in v1 samples |
-| `gun` | `grappling`, `released`, `can_grapple`, `anchor` (helper location), `grapple_location`, `distance`, `times_grappled`, `max_grapples` |
+| `gun` | `grappling`, `released`, `can_grapple`, `anchor` (the helper actor's location: the anchor only while it rides a moving target, 3.3), `grapple_location` (`vGrappleLocation`: the anchor), `distance` (`vDistance`), `times_grappled`, `max_grapples` |
 | `pawn_flags`, `boots` | `ASAMUPawn` flags; boots `enabled`, `finished` |
 
 ### 3.3 Canonical trace (schema v1, unchanged)
 
-`asamu-trace convert` (Rust, the reference; the recorder's Python converter is tested to agree) writes the format
-of `crates/asamu-player/src/trace.rs` ([PARITY.md](PARITY.md#trace-format)) with `source: "original"`:
+`asamu-trace convert` (Rust, the reference; the recorder's Python converter is tested to agree, bit for bit)
+writes the format of `crates/asamu-player/src/trace.rs` ([PARITY.md](PARITY.md#trace-format)) with
+`source: "original"`:
 
 | Canonical | From the raw records (run `R_0..R_n` → samples `0..n`) |
 |---|---|
 | sample 0 | state of `R_0`, neutral input, time 0 |
-| sample `k ≥ 1`: input | keys of `R_(k−1)` mapped through the recorded bindings: `move_forward`/`move_right` = summed signs of `Axis aBaseY` / `Axis aStrafe` commands (clamped to ±1), `jump_held` (`Jump`), `grapple_held` (`StartFire`), `sprint_held` (`StartSprinting`), `power_jump_held` (`PowerJumpKeyDown`); `jump_pressed` = jump key rising edge against `R_(k−2)` or a rising `bPressedJump` (catches a press and release inside one frame; at `k = 1` there is no `R_(−1)`, so only a set `bPressedJump` counts); `use_pressed` = rising edge of `use`. Aliases are expanded up to depth 8 and at most 256 command parts per key (a hostile table cannot stall the conversion; real tables use a few) |
+| sample `k ≥ 1`: buttons | keys of `R_(k−1)` mapped through the recorded bindings: `jump_held` (`Jump`), `grapple_held` (`StartFire`), `sprint_held` (`StartSprinting`), `power_jump_held` (`PowerJumpKeyDown`); `jump_pressed` = jump key rising edge against `R_(k−2)` or a rising `bPressedJump` (catches a press and release inside one frame; at `k = 1` there is no `R_(−1)`, so only a set `bPressedJump` counts); `use_pressed` = rising edge of `use`. Aliases are expanded up to depth 8 and at most 256 command parts per key (a hostile table cannot stall the conversion; real tables use a few). A gamepad's buttons are keys like any other (`XboxTypeS_A`, ...) |
+| sample `k ≥ 1`: `move_forward`, `move_right` | **keyboard:** summed signs of the held keys' `Axis aBaseY` / `Axis aStrafe` commands (clamped to ±1). **Gamepad:** the stick's direction, derived from the pawn's `Acceleration` of `R_k` in the axes of `R_(k−1)`'s pawn rotation (3.4). Chosen per run (`--move-input auto`): the keys if any record of the run holds a key bound to a move axis, else the acceleration if the run has any |
 | look deltas | wrapped change of the controller rotation `R_(k−1) → R_k`, × 2π/65536 — exact and independent of the mouse scaling we have not ported (PARITY deviation 13) |
-| state | `R_k`: `position`, `velocity`; `yaw`/`pitch` = signed 16-bit rotator units × 2π/65536; `fov` = camera POV FOV, else `FOVAngle`; `grapple_state` attached ⇔ `bIsGrappling`, anchor = helper location (else `vGrappleLocation`); without gun data (weapon not a `GrappleGun`) no anchor is known, so the sample is idle even in `Physics` 4, and such samples are counted in a `check:` note; `rope_length` null; `grounded` ⇔ `Physics` 1 |
+| state | `R_k`: `position`, `velocity`; `yaw`/`pitch` = signed 16-bit rotator units × 2π/65536; `fov` = camera POV FOV, else `FOVAngle`; `grapple_state` attached ⇔ `bIsGrappling`, anchor = the gun's `vGrappleLocation` (see below); without gun data (weapon not a `GrappleGun`) no anchor is known, so the sample is idle even in `Physics` 4, and such samples are counted in a `check:` note; `rope_length` null; `grounded` ⇔ `Physics` 1 |
 | `time` | Σ `DeltaSeconds` of `R_1..R_k` |
 | `tick_rate` | `1 / DeltaSeconds` when every frame of the run had the same length (rounded to an integer within 0.001 Hz), else `null` |
-| `notes` | recorder, sample point, launch options, scenario, frame range and segment, input source, cross-check counts (axes vs keys, grapple flag vs `PHYS_Flying`, `PHYS_Flying` without gun data, FOV fallbacks), and `init: {...}`: the initial `physics`, `base`, `max_grapples`, `times_grappled`, `rocket_boots`, `sprinting`, `ground_speed`, `air_control`, `jump_z` (replay applies the grapple and boots fields) |
+| `notes` | recorder, sample point, launch options, scenario, frame range and segment; `input:` (bindings); `move input:` (where the move axes come from, how many samples got a direction and how many got 0 for which reason, 3.4); `anchor:` and `check:` lines (counts: axes vs keys, acceleration without a move key, grapple flag vs `PHYS_Flying`, `PHYS_Flying` without gun data, helper away from the anchor, `vDistance` vs the distance to the anchor, FOV fallbacks); `state: {...}` (the recorded script state of every tick, 3.5); `init: {...}` (the older form: tick 0 only) |
 
-A run ends at a frame gap, a paused frame, a frame without a player, or a change of map, pawn object or class;
-each run of at least two records is one trace (`<stem>.trace.jsonl`, or `<stem>.seg<i>.trace.jsonl`). Without
-recorded bindings the converter falls back to the signs of `aBaseY`/`aStrafe` (of `R_k`) and `bPressedJump`, and
-says so in the notes.
+A run ends at a frame gap, a paused frame, a frame without a player, a change of map, pawn object or class, and
+where `WorldInfo.TimeSeconds` goes back (the level was loaded again); each run of at least two records is one
+trace (`<stem>.trace.jsonl`, or `<stem>.seg<i>.trace.jsonl`). Without recorded bindings the converter falls back
+to the signs of `aBaseY`/`aStrafe` (of `R_k`) and `bPressedJump`, and says so in the notes.
+
+**The anchor** (corrected 2026-10-10). The converter used to write the location of the gun's helper actor
+(raw `anchor`). The first recordings show that this is the anchor only for some grapples: the gun's own
+`vDistance` equals the pawn's distance to `vGrappleLocation` within 0.01 uu on 9,594 of 9,601 attached records
+(the other 7, up to 6.1 uu off, are each the first record of a grapple), but its distance to the helper within
+1 uu on 5,071 only; in one segment the helper was 24,700 uu from the anchor and moving. That is what
+GRAPPLE.md G-AT-7/8 describe (the helper is placed, and followed, only for a target that carries its anchor;
+otherwise it stays where an earlier target left it): CONFIRMED by the measurement
+(`ASAMU_TRACE_RAW_DIR=... cargo test -p asamu-trace --test real_recordings -- --nocapture`). Conversions made
+before the change (`research/local/traces/win/{WS1.trace.jsonl,DC1,PLAY2}`) have wrong anchors on those
+samples.
+
+### 3.4 Move axes of a gamepad recording
+
+A stick is not a key, and the polling recorder reads the `PlayerInput` axes after the engine cleared them: on
+all 45,237 records of the first three recordings `aBaseY = aStrafe = 0`, while the keys list holds only pad
+buttons. So the first conversions had `move_forward = move_right = 0` on every tick. The recorded pawn
+`Acceleration` carries the direction; `tools/asamu-trace/src/move_input.rs` inverts the original's mapping and
+documents the evidence (M1–M6 there, with counts). In short:
+
+| Pawn state of `R_k` | What the acceleration is | Derived move axes |
+|---|---|---|
+| Walking or falling, acceleration ≠ 0 | `AccelRate` (2048) along `normal(aForward·X + aStrafe·Y)` without its Z part, `X`/`Y` = forward and right axes of the pawn's rotation **as the frame began** (`R_(k−1)`), each angle **truncated to 4 rotator units**; pitch and roll take part. The stick's magnitude is not in it (the original discards it). After a landing the value can have unit length instead (2 records) | the unit vector `(forward, right)` that solves it: the stick's direction after the dead zone. CONFIRMED for the yaw, its time and its truncation (10,051 of 10,051 on-axis samples), STRONG for pitch and roll (kept pitch: 15 of 22 decidable samples continue into the next frame, against 1 with yaw-only axes; lean alone: the direction holds still in 14 of 188 decidable windows, against none) |
+| Walking or falling, acceleration = 0 | no deflection beyond the dead zone, **or** a move suppressed in a way the record does not show (the move-input lock, a controller state without a walking move) | 0, counted as "others" |
+| Up to two records after a grapple let go, acceleration = 0 | the controller's tick after a release runs no move (GRAPPLE.md G-RL-7; measured: after 75 releases by the button never fewer than one zero record, exactly one after 69; after 43 releases with the button held exactly two after 30, one after one, more after the rest) | 0, counted apart: what the stick did is not known and neither game reads it |
+| Grapple attached (`Physics` 4) | always 0 (9,601 of 9,601 records): no steering is read (G-PH-1) | 0, counted apart |
+
+Not well defined, in other words: the stick's magnitude anywhere; its direction while attached and in the
+release gap (irrelevant to either game); and whether a zero outside those is "no input" or "input ignored".
+The last matters if our simulation ignores input at other moments than the original: the replay then gets 0
+where the player may have pushed the stick, and that difference does not show.
+
+Because the derived axes are the stick's direction as the **original** used it, a replay shows where our
+simulation maps it differently: it builds its axes from the exact yaw alone (no 4-unit truncation: up to 0.017°;
+no lean roll: up to 0.56°, on 3,133 of the 14,744 derived samples without pitch; no kept pitch in the first move after a
+flight: up to 4.8°, on 105 samples). `convert --move-frame yaw` is the diagnostic for that: it reads the
+acceleration in the exact yaw-only axes instead, so a yaw-only simulation reproduces the recorded acceleration
+direction (and those three differences no longer show). `--move-input keys|acceleration` overrules the per-run
+choice; a keyboard recording keeps its keys under `auto`, and a `check:` note counts samples that have an
+acceleration but no move key.
+
+### 3.5 Recorded script state and where a replay starts
+
+`state:` (one notes line, `tools/asamu-trace/src/state.rs`) lists, for every tick, the fields of the raw record
+that the samples do not carry, as changes: `physics`, `base`, `ground_speed`, `air_speed`, `jump_z`,
+`air_control`, the pawn flags (`sprinting`, `has_jumped`, `power_jumped`, `has_released_jump`, `is_falling`),
+the gun's `grappling`, `released`, `can_grapple`, `times_grappled`, `max_grapples`, and the boots'
+`boots_enabled`, `boots_finished`. `EyeHeight` is left out (it changes on most frames).
+
+`asamu-trace replay` starts from any tick `T` (`--from-tick`): position, velocity, view and walking/falling
+from sample `T`, and from the recording, never from a guess:
+
+| Our state | From |
+|---|---|
+| `GroundSpeed`, `AirControl`, `JumpZ`, `AirSpeed` | the recorded values at `T` (so 0.3 before the first normal landing and the landed value after it, 880 while sprinting, 132 in AG-Workshop) |
+| sprint applied | `bSprinting` |
+| story mode | `GroundSpeed` when it is the story speed 264 (on) or the walking or sprint speed 440/880 (off): the pawn's own script writes no other value (ABILITIES.md A-WK-3). Any other value comes from a console `SetSpeed` (AG-Workshop, AG-Epilogue) and shows nothing: the replay leaves story mode as it is, prints a warning, and `--story-mode on|off` states it (for AG-Workshop: on, [LEVELS.md](reverse-engineering/LEVELS.md); in the recording the jump button never lifts the pawn) |
+| grapple capacity, used count, fire latch; rocket boots enabled | the gun's and boots' recorded values at `T` |
+| button levels before `T` (for press and release edges in the first tick) | sample `T`'s own input; at the first sample they are unknown and taken as released |
+| FOV | sample `T` |
+
+Not recorded, so they start as our simulation starts them: "sprint after landing", the pawn's and the power
+jump's state code (jump-release damping, a charging power jump, a running zoom), zoom availability, the gun's
+attachment and timers, the boots' boost, the eye height's smoothing, the floor the pawn is based on. All of
+these are at rest when the pawn stands still with nothing held, so **a replay of an original recording starts
+only there**: at a sample that is walking, has zero velocity, no attached grapple, no move input and no jump,
+grapple or power-jump button (a held sprint button is fine), and whose previous sample is the same. A start
+anywhere else (in the air, moving, attached) is **refused**, with the standing-still ticks before and after it
+in the error; `--start snap` moves the start forward to the next such tick, `--start force` starts there all the
+same with a warning in the notes (a forced start while attached does not recreate the attachment). Traces of
+our own runtime start anywhere, as before. A trace converted before the `state:` note existed has `init:` for
+its first sample only.
+
+`asamu-trace starts TRACE` lists the standing-still stretches with the recorded state at each (speed, story
+mode, air control, grapple budget, floor actor) and what happens between them (moves, sprint, jumps, power-jump
+button, grapple button, attach, release by the button or with it held, leaving the ground, landing; `--events`
+for every event with its tick): that is how a segment is picked.
 
 ## 4. Recording on this Mac (Route A): step by step
 
@@ -354,6 +433,7 @@ quit the game).
 T=research/local/traces
 cargo run -p asamu-trace -- validate $T/*.raw.jsonl                       # records, segments, bindings
 cargo run -p asamu-trace -- convert $T/<run>.raw.jsonl [--list] [--segment N]   # (the recorder already did this)
+cargo run -p asamu-trace -- starts $T/<run>.trace.jsonl [--events]              # where a replay may start (3.5)
 # Replay on the converted map with its Kismet (ASAMU_CONVERTED_DIR = asamu-import output), or on the graybox
 # for flat-ground scenarios:
 cargo run -p asamu-trace -- replay $T/<run>.trace.jsonl --out $T/<run>.replay.jsonl \
@@ -364,9 +444,9 @@ cargo run -p asamu-trace -- replay $T/<run>.trace.jsonl --out $T/<run>.from300.j
 cargo run -p asamu-trace -- report $T/*.summary.json --out $T/parity.md      # paste into docs/PARITY.md
 ```
 
-`--from-tick`/`--ticks` restart from the original's state at any tick (segment replays) to separate local error
-from accumulated drift. With `--kismet` the map's Kismet always starts from level start (also for a segment
-replay; the replay's notes say so), its level-start actions may override the `init:` grapple and boots state, and
+`--from-tick`/`--ticks` restart from the original's state at a standing-still tick (segment replays, 3.5) to
+separate local error from accumulated drift. With `--kismet` the map's Kismet always starts from level start (also for a segment
+replay; the replay's notes say so), its level-start actions may override the recorded start state, and
 a map without a Kismet export replays without Kismet (also stated in the notes). Tolerances must be finite and
 non-negative (use a large value such as `1e30` to ignore a field; an infinity cannot be stored in the summary
 JSON). The tolerances above are a starting point for analysis, not properties of the game; state the ones used
@@ -407,9 +487,10 @@ recorder reads the actual bindings.
 | T19 | move the mouse continuously across a release | 200 | one controller tick with unchanged rotation |
 | R-level | one start-to-checkpoint route per level | as needed | accumulated drift, regression baseline (M12) |
 
-Each scenario starts standing still with 30 neutral frames (the replay starts from sample 0's position, velocity,
-view and walking/falling, plus the `init:` grapple and boots state; other script state starts fresh) and ends 30
-frames after landing.
+Each scenario starts standing still with 30 neutral frames and ends 30 frames after landing: a replay starts
+from a standing-still sample (position, velocity, view, walking, plus the recorded script state of 3.5; what no
+record shows starts fresh). In a longer recording every standing-still moment is such a start
+(`asamu-trace starts`), so free play with pauses gives many scenarios.
 
 ## 6. Route B: Windows build (read-only polling, no debugger)
 
@@ -691,6 +772,64 @@ late marker); `pressed_jump` (6.3 table); a level left running for days: `RealTi
 and once a frame's length is below half its spacing (after about 36 hours at 144 frames per second, later at
 lower rates) the store no longer changes it and no tick start is seen (nothing is recorded; nothing wrong is
 written).
+
+### 6.9 The first recordings (2026-10-10): conversion and replay
+
+Three recordings were made on the Windows build, with a gamepad, at about 60 frames per second with variable
+frame lengths: `WS1` (AG-Workshop, 3,001 records), `DC1` (AG-ParadiseCave then AG-BeautifulCity, 14,311) and
+`PLAY2` (AG-BeautifulCity then AG-Darkcave, 27,925). They stay under `research/local/traces/win/`. What they
+changed in conversion and replay:
+
+| Finding | Consequence |
+|---|---|
+| With a gamepad the recorded `PlayerInput` axes are 0 on every record and the stick is no key, so the first conversions had no move input at all | the move axes are derived from the pawn's acceleration (3.4) |
+| The helper actor's location is not the anchor for about half of the attached records | the anchor is `vGrappleLocation` (3.3) |
+| A replay from the middle of a level started with level-start script state | the `state:` note and the standing-still start rule (3.5) |
+| The recorded map name follows the name the level was opened with (`ag-workshop`) | `replay --converted` finds the converted level ignoring case |
+| `GroundSpeed` 132 throughout AG-Workshop, 264 in story mode elsewhere | the recorded speed is applied as it is; story mode there has to be stated (`--story-mode on`) |
+
+The reconverted traces are in `research/local/traces/win/v2/{WS1,DC1,PLAY2}/` (14 traces; the earlier ones next
+to the raw files were left as they are and have neither move input nor the right anchors). First replays on
+the converted levels, each with its samples' own frame lengths (no Kismet), tolerances position 1 uu, velocity
+10 uu/s, angle 0.001 rad, FOV 0.1°, anchor 1 uu:
+
+| Replay | Trace, start tick, ticks | First exceeded (tick: error) | Maxima (position uu / velocity uu/s) | Flags |
+|---|---|---|---|---|
+| WS1, whole (`--story-mode on`) | `WS1/…trace.jsonl`, 0, 3000 | position 1515: 1.0; velocity 1563: 119.7; FOV 1881: 2.1 | 646.7 / 333.4; FOV 40.0 | grounded differs on 77 ticks (first 2001) |
+| walk | `DC1/…seg0`, 1010, 68 | position 1015: 2.875 | 3.48 / 0.000034 | — |
+| sprint | `PLAY2/…seg1`, 7627, 114 | position 7628: 2.2; velocity 7675: 149.5 | 13.07 / 213.9 | grounded differs on 11 ticks (first 7692) |
+| jump | `PLAY2/…seg4`, 3014, 96 | position 3015: 1.55; velocity 3076: 33.8 | 5.24 / 33.8 | — |
+| power jump | `PLAY2/…seg5`, 1750, 155 | position 1811: 1.0 | 1.96 / 2.79 | — |
+| grapple, released with the button held | `PLAY2/…seg5`, 6920, 150 | position 6921: 4.7; anchor 6950: 5.7; velocity 7027: 12.3 | 283.9 / 977.8 | attached on the same 80 ticks |
+| grapple, released by the button | `PLAY2/…seg4`, 3110, 150 | position 3111: 3.1; anchor 3112: 4.5; velocity 3145: 348.5 | 1279.6 / 1739.1 | attached on the same 114 ticks |
+| jump, then a grapple released with the button held | `DC1/…seg0`, 3987, 60 | position 3988: 3.3; anchor 4015: 8.1; velocity 4018: 13.4 | 4.22 / 38.0 | attached on the same 17 ticks |
+
+In every replay the inputs agree on all ticks, the frame lengths agree, view angles stay within 0.000003 rad
+and every verdict is "diverged": these are the first measurements, not parity (the analysis belongs in
+[PARITY.md](PARITY.md)). What they show about the harness: the replay now moves, accelerates, jumps and
+grapples when the original does, and the grapple attaches and lets go on the same ticks. Two things recur and
+are the simulation's (or the converted collision's), not the harness's: in all eight replays our pawn drops
+at the first replayed tick, by 0.73 to 4.68 uu depending on the place, and stays lower than the original's
+(purely vertical: the position column's first entry is that offset in every row); and in AG-BeautifulCity at
+DC1 segment 3, tick 742, our pawn does not move at all where the original walks (with or without the recorded
+start state).
+
+**What the harness still cannot reproduce.**
+
+- Per-sample replays on a converted level simulate the player and the level objects only: no Kismet, touch
+  volumes, checkpoints, kill zones, deaths and respawns, falling rocks, level streaming, NPCs or Matinee movers
+  (6.4, step 5). A segment that crosses a trigger (story mode switching on or off, the grapple budget changing,
+  a respawn) is right only up to it; `asamu-trace starts` shows the recorded state at every standing stretch,
+  which is where such a change becomes visible.
+- Script state no record shows (3.5): starts are limited to standing-still ticks for that reason. Recordings
+  with long stretches without a standstill (PLAY2 segment 7 has one in 1,525 ticks) give few starts.
+- The stick's magnitude and its direction while attached or in the release gap (3.4); whether a zero
+  acceleration is "no input" or "input ignored".
+- The eye height at the start tick (recorded per frame, not applied): the aim's origin can be off by the eye
+  height's smoothing after a landing or on stairs.
+- The camera's FOV as recorded stayed at 90 on every record, also while the zoom button was held in
+  AG-Workshop: either the zoom was unavailable there or the recorded field does not show it (UNKNOWN).
+- `pressed_jump` is read early in the frame (6.3); jump presses come from the button's edge.
 
 ## 7. Other routes (coarse cross-checks only)
 

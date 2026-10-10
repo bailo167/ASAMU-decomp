@@ -172,6 +172,18 @@ impl KeyMap {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// `true` if one of `keys` is bound to a move axis (also when opposite
+    /// keys cancel): the sign of a keyboard, which a gamepad's stick never
+    /// leaves in `PressedKeys`.
+    #[must_use]
+    pub fn has_move_key(&self, keys: &[String]) -> bool {
+        keys.iter().any(|k| {
+            self.key(k)
+                .iter()
+                .any(|a| matches!(a, Action::Forward(_) | Action::Right(_)))
+        })
+    }
+
     /// Combined actions of the held `keys` (axes summed and clamped).
     #[must_use]
     pub fn actions(&self, keys: &[String]) -> Actions {

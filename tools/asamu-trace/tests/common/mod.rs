@@ -2,9 +2,12 @@
 //!
 //! `scripted_recording` makes a "fake original" from **our own** simulation:
 //! it runs the graybox game with scripted inputs and writes what the recorder
-//! would have read (state at the start of each frame, keys of the coming
-//! frame). Converting and replaying it must reproduce our run, which tests
-//! the whole convert → replay → compare chain. `scripted_recording_variable`
+//! would have read (state at the start of each frame with the script state
+//! our simulation has there, keys of the coming frame). Converting and
+//! replaying it must reproduce our run, which tests the whole convert →
+//! replay → compare chain. `scripted_gamepad_recording` is the same run as a
+//! gamepad would leave it: buttons under their pad names, no move key, and
+//! the move axes only in the pawn's acceleration. `scripted_recording_variable`
 //! does the same with a different length for every frame (the original
 //! without benchmark mode), on `asamu_trace::stepper`. `varied_recording` is
 //! a pseudo-random recording that exercises every conversion branch, for the
@@ -13,10 +16,11 @@
 
 #![allow(dead_code)]
 
+use asamu_core::coords::{ue_forward_flat, ue_right_flat};
 use asamu_core::glam::Vec3;
 use asamu_game::Game;
 use asamu_player::trace::TraceGrappleState;
-use asamu_player::{InputFrame, Trace};
+use asamu_player::{InputFrame, PlayerState, Trace};
 use asamu_player::{TraceMeta, TraceSample};
 use asamu_trace::convert::units_to_radians;
 use asamu_trace::raw::{
@@ -63,6 +67,53 @@ pub fn bindings() -> Vec<RawBinding> {
         name: n.into(),
         command: c.into(),
     })
+    .collect()
+}
+
+/// The bindings of a recording made with a gamepad: the keyboard's plus the
+/// pad's buttons and stick axes (names and commands as the game reports
+/// them).
+pub fn gamepad_bindings() -> Vec<RawBinding> {
+    let mut b = bindings();
+    b.extend(
+        [
+            (
+                "GBA_StrafeLeft_Gamepad",
+                "Axis aStrafe Speed=1.0 DeadZone=0.4",
+            ),
+            (
+                "GBA_MoveForward_Gamepad",
+                "Axis aBaseY Speed=1.0 DeadZone=0.4",
+            ),
+            ("XboxTypeS_LeftX", "GBA_StrafeLeft_Gamepad"),
+            ("XboxTypeS_LeftY", "GBA_MoveForward_Gamepad"),
+            ("XboxTypeS_RightShoulder", "GBA_PowerJump"),
+            ("XboxTypeS_RightTrigger", "GBA_Fire"),
+            ("XboxTypeS_LeftShoulder", "GBA_Sprint"),
+            ("XboxTypeS_A", "GBA_ReleaseableJump | RocketBoostKeyDown"),
+            ("XboxTypeS_X", "GBA_Use"),
+        ]
+        .into_iter()
+        .map(|(n, c)| RawBinding {
+            name: n.into(),
+            command: c.into(),
+        }),
+    );
+    b
+}
+
+/// Pad button names held for a step (the stick is not a key).
+pub fn gamepad_keys(s: &Step) -> Vec<String> {
+    [
+        (s.jump, "XboxTypeS_A"),
+        (s.grapple, "XboxTypeS_RightTrigger"),
+        (s.sprint, "XboxTypeS_LeftShoulder"),
+        (s.power, "XboxTypeS_RightShoulder"),
+        (s.use_, "XboxTypeS_X"),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, name)| name.to_owned())
     .collect()
 }
 
@@ -197,7 +248,7 @@ fn base_player() -> RawPlayer {
         pressed_jump: false,
         axes: None,
         ground_speed: 440.0,
-        air_speed: 440.0,
+        air_speed: 2000.0,
         jump_z: 1000.0,
         air_control: 0.3,
         eye_height: Some(38.0),
@@ -208,30 +259,49 @@ fn base_player() -> RawPlayer {
 }
 
 /// What the recorder would have read during the run `ours` (sample `i` =
-/// the state at the start of frame `first_frame + i`, with the keys of the
-/// coming step). `timing(i)` gives record `i`'s world timing and its tick
-/// argument.
+/// the state at the start of frame `first_frame + i`, with the script state
+/// `states[i]` our simulation had there and the keys of the coming step).
+/// With `gamepad` the buttons carry their pad names, no move key is held and
+/// the pawn's acceleration holds what the controller's walking move writes
+/// from the step's move axes (`AccelRate` along them, in the pawn's yaw
+/// before the step's turn). `timing(i)` gives record `i`'s world timing and
+/// its tick argument.
 fn records_of(
     ours: &Trace,
+    states: &[PlayerState],
     steps: &[Step],
     first_frame: u64,
-    max_grapples: i32,
-    boots: bool,
+    gamepad: bool,
     timing: impl Fn(usize, u64) -> (RawWorld, Option<f32>),
 ) -> Vec<RawRecord> {
+    assert_eq!(ours.samples.len(), states.len());
     let mut records = Vec::new();
     let (mut yaw, mut pitch) = (0_i32, 0_i32);
     for (i, s) in ours.samples.iter().enumerate() {
+        let mut acceleration = Vec3::ZERO;
         if i > 0 {
-            yaw += steps[i - 1].d_yaw;
-            pitch += steps[i - 1].d_pitch;
+            let step = &steps[i - 1];
+            if gamepad {
+                let before = units_to_radians(yaw);
+                let wish = ue_forward_flat(before) * step.forward as f32
+                    + ue_right_flat(before) * step.right as f32;
+                acceleration = wish.normalize_or_zero() * 2048.0;
+            }
+            yaw += step.d_yaw;
+            pitch += step.d_pitch;
         }
         let next = steps.get(i);
         let prev_step = i.checked_sub(1).and_then(|j| steps.get(j));
         let attached = s.grapple_state == TraceGrappleState::Attached;
+        let script = &states[i].script;
         let mut p = base_player();
         p.location = s.position;
         p.velocity = s.velocity;
+        p.acceleration = acceleration;
+        p.ground_speed = script.ground_speed;
+        p.air_speed = script.air_speed;
+        p.jump_z = script.jump_z;
+        p.air_control = script.air_control;
         p.view_rotation = [pitch, yaw, 0];
         p.pawn_rotation = [0, yaw, 0];
         p.physics = if attached {
@@ -243,27 +313,29 @@ fn records_of(
         };
         p.fov_camera = Some(s.fov);
         p.fov_controller = s.fov;
-        p.keys = next.map(keys).unwrap_or_default();
+        p.keys = next
+            .map(if gamepad { gamepad_keys } else { keys })
+            .unwrap_or_default();
         p.pressed_jump = next.is_some_and(|n| n.jump && !prev_step.is_some_and(|q| q.jump));
         p.gun = Some(RawGun {
             grappling: attached,
-            released: false,
-            can_grapple: true,
+            released: script.gun.released,
+            can_grapple: script.gun.can_grapple,
             anchor: s.grapple_anchor,
             grapple_location: s.grapple_anchor.unwrap_or(Vec3::ZERO),
             distance: 0.0,
-            times_grappled: 0,
-            max_grapples,
+            times_grappled: script.gun.times_grappled,
+            max_grapples: script.gun.max_grapples,
         });
         p.boots = Some(RawBoots {
-            enabled: boots,
+            enabled: script.boots.enabled,
             finished: false,
         });
         p.pawn_flags = Some(RawPawnFlags {
             has_jumped: false,
             power_jumped: false,
             has_released_jump: false,
-            sprinting: false,
+            sprinting: script.sprint.active,
             is_falling: !s.grounded,
         });
         let frame = first_frame + i as u64;
@@ -281,31 +353,43 @@ fn records_of(
 /// A "fake original" raw recording of `n` ticks made with our graybox game,
 /// and our own runtime trace of the same run.
 pub fn scripted_recording(n: usize, first_frame: u64) -> (RawFile, Trace) {
-    let steps = script(n);
+    scripted(n, first_frame, false)
+}
+
+/// The same run as a gamepad would leave it in a recording (see
+/// [`records_of`]).
+pub fn scripted_gamepad_recording(n: usize, first_frame: u64) -> (RawFile, Trace) {
+    scripted(n, first_frame, true)
+}
+
+fn scripted(n: usize, first_frame: u64, gamepad: bool) -> (RawFile, Trace) {
+    scripted_steps(&script(n), first_frame, gamepad)
+}
+
+/// A "fake original" of the given steps (see [`scripted_recording`]).
+pub fn scripted_steps(steps: &[Step], first_frame: u64, gamepad: bool) -> (RawFile, Trace) {
+    let n = steps.len();
     let mut g = Game::graybox().expect("graybox");
-    let (max_grapples, boots) = (
-        g.player().script.gun.max_grapples,
-        g.player().script.boots.enabled,
-    );
+    let mut states = vec![*g.player()];
     g.start();
     g.start_recording();
     for (i, s) in steps.iter().enumerate() {
         let prev = i.checked_sub(1).map(|j| &steps[j]);
         g.tick(&input(s, prev)).expect("tick");
+        states.push(*g.player());
     }
     let ours = g.stop_recording().expect("recording");
     assert_eq!(ours.samples.len(), n + 1);
-    let records = records_of(
-        &ours,
-        &steps,
-        first_frame,
-        max_grapples,
-        boots,
-        |_, frame| (world(frame), Some(1.0 / 60.0)),
-    );
+    let records = records_of(&ours, &states, steps, first_frame, gamepad, |_, frame| {
+        (world(frame), Some(1.0 / 60.0))
+    });
     (
         RawFile {
-            header: header(bindings()),
+            header: header(if gamepad {
+                gamepad_bindings()
+            } else {
+                bindings()
+            }),
             records,
         },
         ours,
@@ -344,11 +428,8 @@ pub fn scripted_recording_variable(lengths: &[f32], first_frame: u64) -> (RawFil
     let n = lengths.len();
     let steps = script(n);
     let game = Game::graybox().expect("graybox");
-    let (max_grapples, boots) = (
-        game.player().script.gun.max_grapples,
-        game.player().script.boots.enabled,
-    );
     let mut sim = VariableStepper::from_game(&game);
+    let mut states = vec![*sim.player()];
     let mut meta = TraceMeta::runtime(Some("graybox".into()), None);
     meta.notes
         .push("variable frame lengths; made by the asamu-trace tests".into());
@@ -367,6 +448,7 @@ pub fn scripted_recording_variable(lengths: &[f32], first_frame: u64) -> (RawFil
         let before = times[i];
         let after = before + f64::from(lengths[i]);
         sim.tick(&frame_input, FrameLength::of(after - before).dt(), after);
+        states.push(*sim.player());
         times.push(after);
         ours.samples.push(TraceSample::capture(
             i as u64 + 1,
@@ -376,22 +458,15 @@ pub fn scripted_recording_variable(lengths: &[f32], first_frame: u64) -> (RawFil
             sim.fov(),
         ));
     }
-    let records = records_of(
-        &ours,
-        &steps,
-        first_frame,
-        max_grapples,
-        boots,
-        |i, frame| {
-            let mut w = world(frame);
-            // The length of the frame that ended at this record (the first
-            // record's is from before the recording).
-            w.delta_seconds = i.checked_sub(1).map_or(1.0 / 59.0, |j| lengths[j]);
-            w.time_seconds = 100.0 + times[i] as f32;
-            w.real_time_seconds = w.time_seconds;
-            (w, lengths.get(i).copied())
-        },
-    );
+    let records = records_of(&ours, &states, &steps, first_frame, false, |i, frame| {
+        let mut w = world(frame);
+        // The length of the frame that ended at this record (the first
+        // record's is from before the recording).
+        w.delta_seconds = i.checked_sub(1).map_or(1.0 / 59.0, |j| lengths[j]);
+        w.time_seconds = 100.0 + times[i] as f32;
+        w.real_time_seconds = w.time_seconds;
+        (w, lengths.get(i).copied())
+    });
     let mut h = header(bindings());
     h.launch_options = Some("-WINDOWED".into());
     h.benchmarking = Some(false);
@@ -413,6 +488,48 @@ pub fn with_frame_lengths(raw: &mut RawFile, seed: u64) {
         }
     }
     raw.header.benchmarking = Some(false);
+}
+
+/// Gives the records of `raw` pawn rotations (with pitch and roll, the yaw
+/// mostly the view's) and accelerations of every kind a converter has to
+/// read: none, `AccelRate` in any direction, the unit length a landing
+/// leaves, tiny, huge, with a vertical part.
+pub fn with_accelerations(raw: &mut RawFile, seed: u64) {
+    let mut r = Lcg(seed ^ 0x9E37_79B9_7F4A_7C15);
+    for rec in &mut raw.records {
+        let Some(p) = rec.player.as_mut() else {
+            continue;
+        };
+        let yaw = if r.below(10) == 0 {
+            r.next() as i32
+        } else {
+            p.view_rotation[1]
+        };
+        let pitch = match r.below(6) {
+            0 => r.below(20_000) as i32 - 10_000,
+            1 => 16_384,
+            _ => 0,
+        };
+        let roll = if r.below(3) == 0 {
+            r.below(4000) as i32 - 2000
+        } else {
+            0
+        };
+        p.pawn_rotation = [pitch, yaw, roll];
+        let angle = r.f32(std::f32::consts::PI);
+        let length = match r.below(12) {
+            0..=3 => 0.0,
+            4..=8 => 2048.0,
+            9 => 1.0,
+            10 => 1.0e-30,
+            _ => 3.0e37,
+        };
+        p.acceleration = Vec3::new(
+            length * angle.cos(),
+            length * angle.sin(),
+            if r.below(5) == 0 { -520.0 } else { 0.0 },
+        );
+    }
 }
 
 /// Deterministic pseudo-random numbers (64-bit LCG, high bits).

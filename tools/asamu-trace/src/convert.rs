@@ -21,11 +21,40 @@
 //! rotation, so they are exact and independent of mouse scaling. Positions
 //! (UU), velocities (UU/s) and FOV (degrees) are copied. `grounded` ⇔
 //! `Physics == PHYS_Walking (1)`. Attached ⇔ the gun's `bIsGrappling`,
-//! anchor = the anchor helper's location (else `vGrappleLocation`). Without
+//! anchor = the gun's `vGrappleLocation`: the world hit point, which the gun
+//! moves along with the anchor helper only for a target that carries its
+//! anchor (GRAPPLE.md G-AT-4, G-AT-7, G-AT-8). The helper's own location
+//! (raw `anchor`) is **not** the anchor otherwise: it stays where an earlier
+//! moving target left it. Measured on the recordings of 2026-10-10: the
+//! gun's own `vDistance` equals the pawn's distance to `vGrappleLocation`
+//! within 0.01 uu on 9,594 of 9,601 attached records (the other 7, up to
+//! 6.1 uu off, are the first record of a grapple), to the helper within 1 uu
+//! on 5,071 only (`tests/real_recordings.rs` prints the counts). Conversions made
+//! before this was measured used the helper. Both disagreements are counted
+//! in the notes. Without
 //! gun data (the pawn's weapon is not a `GrappleGun`) no anchor is known, so
 //! the sample is idle even in `PHYS_Flying (4)`; such samples are counted in
 //! a `check:` note. `rope_length` is always `null` (the original grapple has
 //! no rope). FOV = the camera's POV FOV, else the controller's `FOVAngle`.
+//!
+//! # Move axes
+//!
+//! `move_forward` / `move_right` come from the held keys through the game's
+//! bindings, or, for a recording made with a gamepad (whose stick is neither
+//! a key nor readable from the `PlayerInput` axes at the sample point), from
+//! the pawn's `Acceleration` of `R_k` in the axes of `R_(k−1)`'s pawn
+//! rotation ([`crate::move_input`], which has the evidence and says where
+//! the result is not defined). [`MoveInput::Auto`] decides per run: the keys
+//! if any record of the run holds a key bound to a move axis, else the
+//! acceleration if the run has any; the notes say which and count the
+//! samples of each kind. A keyboard recording therefore keeps its keys.
+//!
+//! # Script state
+//!
+//! The `state:` note ([`crate::state`]) holds what the recorder read beyond
+//! the sample fields (`GroundSpeed`, `AirControl`, the sprint flag, the
+//! grapple budget, ...) for every tick, so that [`crate::replay`] can start
+//! from any tick; the `init:` note is the older form for tick 0 only.
 //!
 //! # Frame lengths
 //!
@@ -68,7 +97,9 @@ use asamu_player::{InputFrame, Trace, TraceMeta, TraceSample};
 use serde::Serialize;
 
 use crate::bindings::{Actions, KeyMap};
+use crate::move_input::{AXES_TABLE_STEP, MoveFrame, horizontal_magnitude, move_direction};
 use crate::raw::{RawFile, RawPlayer, RawRecord};
+use crate::state::state_note;
 use crate::timestep::StepStats;
 
 /// `Physics` value of walking (NATIVE_PHYSICS.md 1.3, CONFIRMED).
@@ -89,11 +120,29 @@ pub struct Segment {
     pub last_frame: u64,
 }
 
+/// Where the move axes of a converted run come from (see the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MoveInput {
+    /// Per run: the keys if any record holds a key bound to a move axis,
+    /// else the acceleration if the run has any, else the keys.
+    #[default]
+    Auto,
+    /// The held keys through the bindings (without bindings: the signs of
+    /// the `PlayerInput` axes).
+    Keys,
+    /// The pawn's acceleration ([`crate::move_input`]).
+    Acceleration,
+}
+
 /// Options of [`convert`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConvertOptions {
     /// Overrides the level name taken from the recording.
     pub level: Option<String>,
+    /// Source of the move axes.
+    pub move_input: MoveInput,
+    /// Axes an acceleration is read in.
+    pub move_frame: MoveFrame,
 }
 
 /// The initial script state written as the `init:` note (keys sorted).
@@ -208,6 +257,64 @@ struct Counters {
     grapple_physics: usize,
     flying_without_gun: usize,
     axis_mismatch: usize,
+    /// Keys mode: samples without a move from the keys whose record has a
+    /// horizontal acceleration (and no attached grapple).
+    accel_without_key: usize,
+    /// Acceleration mode: samples with a derived direction.
+    derived: usize,
+    /// Of those, the pawn rotation could not be inverted.
+    steep: usize,
+    /// Of those, the previous record's pawn yaw is not its view yaw.
+    yaw_differs: usize,
+    /// Acceleration mode: zero acceleration while attached.
+    zero_attached: usize,
+    /// Zero acceleration within two frames after an attached record.
+    zero_release: usize,
+    /// Zero acceleration otherwise.
+    zero_other: usize,
+    /// A non-zero acceleration while attached (not used).
+    accel_attached: usize,
+    /// Attached samples (the first sample included).
+    attached: usize,
+    /// Of those, the anchor helper is more than 1 uu from the anchor.
+    helper_elsewhere: usize,
+    /// Of those, the gun's `vDistance` is more than 1 uu off the pawn's
+    /// distance to the anchor.
+    anchor_distance: usize,
+}
+
+/// Why a run's move axes come from where they do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MoveSource {
+    /// Asked for: keys.
+    AskedKeys,
+    /// Asked for: acceleration.
+    AskedAcceleration,
+    /// Auto: this many records hold a move key.
+    AutoKeys(usize),
+    /// Auto: no move key, but acceleration.
+    AutoAcceleration,
+    /// Auto: neither a move key nor acceleration.
+    AutoNothing,
+    /// Auto without bindings: the axes' signs, as before.
+    NoBindings,
+}
+
+impl MoveSource {
+    fn uses_acceleration(self) -> bool {
+        matches!(self, Self::AskedAcceleration | Self::AutoAcceleration)
+    }
+}
+
+/// The grapple holds the pawn (no steering is read then, GRAPPLE.md G-PH-1).
+fn is_attached(p: &RawPlayer) -> bool {
+    p.physics == PHYS_FLYING || p.gun.is_some_and(|g| g.grappling)
+}
+
+/// `floor(x + 0.5)` as an integer for a note (saturating; mirrored by the
+/// Python converter).
+fn rounded(x: f64) -> i64 {
+    (x + 0.5).floor() as i64
 }
 
 fn player(r: &RawRecord) -> Result<&RawPlayer> {
@@ -256,7 +363,19 @@ fn state(r: &RawRecord, c: &mut Counters) -> Result<State> {
             if g.grappling != flying {
                 c.grapple_physics += 1;
             }
-            (g.grappling, Some(g.anchor.unwrap_or(g.grapple_location)))
+            if g.grappling {
+                c.attached += 1;
+                if g.anchor
+                    .is_some_and(|helper| distance_squared(helper, g.grapple_location) > 1.0)
+                {
+                    c.helper_elsewhere += 1;
+                }
+                let to_anchor = distance_squared(g.grapple_location, p.location).sqrt();
+                if (to_anchor - f64::from(g.distance)).abs() > 1.0 {
+                    c.anchor_distance += 1;
+                }
+            }
+            (g.grappling, Some(g.grapple_location))
         }
         None => {
             if flying {
@@ -279,6 +398,17 @@ fn state(r: &RawRecord, c: &mut Counters) -> Result<State> {
         grapple_anchor: if attached { anchor } else { None },
         grounded: p.physics == PHYS_WALKING,
     })
+}
+
+/// Squared distance of two points in `f64` (as the Python converter
+/// computes it).
+fn distance_squared(a: Vec3, b: Vec3) -> f64 {
+    let (dx, dy, dz) = (
+        f64::from(a.x) - f64::from(b.x),
+        f64::from(a.y) - f64::from(b.y),
+        f64::from(a.z) - f64::from(b.z),
+    );
+    dx * dx + dy * dy + dz * dz
 }
 
 fn sample(tick: u64, time: f64, input: InputFrame, s: State) -> TraceSample {
@@ -433,6 +563,30 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
     let mut out = Vec::with_capacity(total);
     for (si, run) in runs.iter().enumerate() {
         let mut c = Counters::default();
+        let players: Vec<&RawPlayer> = run.iter().map(player).collect::<Result<_>>()?;
+        // Samples with an input: every one but the first.
+        let inputs = run.len() - 1;
+        let move_key_records = keymap.as_ref().map_or(0, |m| {
+            players
+                .iter()
+                .take(inputs)
+                .filter(|p| m.has_move_key(&p.keys))
+                .count()
+        });
+        let has_acceleration = players
+            .iter()
+            .skip(1)
+            .any(|p| horizontal_magnitude(p.acceleration.x, p.acceleration.y) > 0.0);
+        let source = match opts.move_input {
+            MoveInput::Keys => MoveSource::AskedKeys,
+            MoveInput::Acceleration => MoveSource::AskedAcceleration,
+            MoveInput::Auto if keymap.is_none() => MoveSource::NoBindings,
+            MoveInput::Auto if move_key_records > 0 => MoveSource::AutoKeys(move_key_records),
+            MoveInput::Auto if has_acceleration => MoveSource::AutoAcceleration,
+            MoveInput::Auto => MoveSource::AutoNothing,
+        };
+        // (tick, horizontal magnitude) of every derived sample.
+        let mut magnitudes: Vec<(usize, f64)> = Vec::new();
         let mut samples = Vec::with_capacity(run.len());
         samples.push(sample(
             0,
@@ -443,19 +597,20 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
         let mut time = 0.0_f64;
         let mut dts = Vec::with_capacity(run.len());
         for k in 1..run.len() {
-            let (cur, next) = (&run[k - 1], &run[k]);
+            let next = &run[k];
             let prev = k.checked_sub(2).and_then(|j| run.get(j));
             let dt = delta_seconds(next)?;
             dts.push(dt);
             time += f64::from(dt);
-            let (cp, np) = (player(cur)?, player(next)?);
+            let (cp, np) = (players[k - 1], players[k]);
             let input_actions: Actions;
             let (jump_held, key_edge, use_pressed);
             match &keymap {
                 Some(m) => {
                     input_actions = m.actions(&cp.keys);
                     let pa = prev.map(player).transpose()?.map(|p| m.actions(&p.keys));
-                    if let Some(ax) = &np.axes
+                    if !source.uses_acceleration()
+                        && let Some(ax) = &np.axes
                         && (sign(ax.base_y) != input_actions.forward
                             || sign(ax.strafe) != input_actions.right)
                     {
@@ -477,14 +632,65 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
                     use_pressed = false;
                 }
             }
+            let magnitude = horizontal_magnitude(np.acceleration.x, np.acceleration.y);
+            let (move_forward, move_right) = if source.uses_acceleration() {
+                let direction = if is_attached(np) {
+                    None
+                } else {
+                    move_direction(
+                        cp.pawn_rotation,
+                        np.acceleration.x,
+                        np.acceleration.y,
+                        opts.move_frame,
+                    )
+                };
+                match direction {
+                    Some(d) => {
+                        c.derived += 1;
+                        c.steep += usize::from(d.steep);
+                        c.yaw_differs += usize::from(
+                            normalize_rotator_axis(cp.pawn_rotation[1])
+                                != normalize_rotator_axis(cp.view_rotation[1]),
+                        );
+                        magnitudes.push((k, magnitude));
+                        (d.forward, d.right)
+                    }
+                    None => {
+                        if is_attached(np) {
+                            if magnitude > 0.0 {
+                                c.accel_attached += 1;
+                            } else {
+                                c.zero_attached += 1;
+                            }
+                        } else if is_attached(cp)
+                            || prev.map(player).transpose()?.is_some_and(is_attached)
+                        {
+                            c.zero_release += 1;
+                        } else {
+                            c.zero_other += 1;
+                        }
+                        (0.0, 0.0)
+                    }
+                }
+            } else {
+                if keymap.is_some()
+                    && input_actions.forward == 0
+                    && input_actions.right == 0
+                    && magnitude > 0.0
+                    && !is_attached(np)
+                {
+                    c.accel_without_key += 1;
+                }
+                (input_actions.forward as f32, input_actions.right as f32)
+            };
             let prev_flag = prev
                 .map(player)
                 .transpose()?
                 .is_some_and(|p| p.pressed_jump);
             let flag_edge = cp.pressed_jump && !prev_flag;
             let input = InputFrame {
-                move_forward: input_actions.forward as f32,
-                move_right: input_actions.right as f32,
+                move_forward,
+                move_right,
                 look_yaw_delta: delta_radians(np.view_rotation[1], cp.view_rotation[1]),
                 look_pitch_delta: delta_radians(np.view_rotation[0], cp.view_rotation[0]),
                 jump_pressed: key_edge || flag_edge,
@@ -530,10 +736,25 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
                     .to_owned(),
             );
         }
+        move_notes(&mut notes, source, opts.move_frame, &c, &magnitudes, inputs);
         if c.grapple_physics > 0 {
             notes.push(format!(
                 "check: grapple flag and PHYS_Flying disagree on {} samples",
                 c.grapple_physics
+            ));
+        }
+        if c.helper_elsewhere > 0 {
+            notes.push(format!(
+                "anchor: the gun's vGrappleLocation; the anchor helper is more than 1 uu from it on \
+                 {} of {} attached samples (it carries the anchor of a moving target only)",
+                c.helper_elsewhere, c.attached
+            ));
+        }
+        if c.anchor_distance > 0 {
+            notes.push(format!(
+                "check: the gun's vDistance is more than 1 uu off the pawn's distance to the \
+                 anchor on {} of {} attached samples",
+                c.anchor_distance, c.attached
             ));
         }
         if c.flying_without_gun > 0 {
@@ -549,7 +770,8 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
             ));
         }
         notes.extend(h.notes.iter().cloned());
-        let init = InitState::of(player(&run[0])?);
+        notes.push(state_note(&players)?);
+        let init = InitState::of(players[0]);
         notes.push(format!(
             "{INIT_NOTE_PREFIX}{}",
             serde_json::to_string(&init)?
@@ -579,6 +801,92 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
         });
     }
     Ok(out)
+}
+
+/// The notes about the move axes of one run (`total` samples with input).
+fn move_notes(
+    notes: &mut Vec<String>,
+    source: MoveSource,
+    frame: MoveFrame,
+    c: &Counters,
+    magnitudes: &[(usize, f64)],
+    total: usize,
+) {
+    let why = match source {
+        MoveSource::NoBindings => return,
+        MoveSource::AskedKeys => "--move-input keys".to_owned(),
+        MoveSource::AskedAcceleration => "--move-input acceleration".to_owned(),
+        MoveSource::AutoKeys(n) => format!("auto: a move key is held on {n} records"),
+        MoveSource::AutoAcceleration => "auto: no move key in this run".to_owned(),
+        MoveSource::AutoNothing => "auto: no move key and no acceleration in this run".to_owned(),
+    };
+    if !source.uses_acceleration() {
+        notes.push(format!("move input: the mapped move keys ({why})"));
+        if c.accel_without_key > 0 {
+            notes.push(format!(
+                "check: acceleration without a mapped move key on {} of {total} samples",
+                c.accel_without_key
+            ));
+        }
+        return;
+    }
+    let axes = match frame {
+        MoveFrame::Original => format!(
+            "in the axes of the previous record's pawn rotation, each angle truncated to \
+             {AXES_TABLE_STEP} rotator units"
+        ),
+        MoveFrame::Yaw => "in the previous record's exact pawn yaw, without pitch and roll \
+                           (--move-frame yaw: reproduces the acceleration's direction, not the \
+                           stick's)"
+            .to_owned(),
+    };
+    notes.push(format!(
+        "move input: derived from the pawn's Acceleration ({why}): its horizontal direction \
+         {axes}; magnitude 1 (the stick's is not recorded); {} of {total} samples",
+        c.derived
+    ));
+    notes.push(format!(
+        "move input: 0 on {} samples with zero acceleration: {} while the grapple is attached \
+         (no steering is read then), {} within two frames after an attached record (the \
+         controller's release gap), {} others (no deflection beyond the dead zone, or a move \
+         suppressed in a way the record does not show)",
+        c.zero_attached + c.zero_release + c.zero_other,
+        c.zero_attached,
+        c.zero_release,
+        c.zero_other
+    ));
+    if c.accel_attached > 0 {
+        notes.push(format!(
+            "check: acceleration while the grapple is attached on {} samples (not used)",
+            c.accel_attached
+        ));
+    }
+    let largest = magnitudes.iter().map(|m| m.1).fold(0.0_f64, f64::max);
+    let below: Vec<usize> = magnitudes
+        .iter()
+        .filter(|m| m.1 < 0.5 * largest)
+        .map(|m| m.0)
+        .collect();
+    if let Some(first) = below.first() {
+        notes.push(format!(
+            "check: acceleration below half the run's largest ({} uu/s^2) on {} derived samples \
+             (direction used; first at tick {first})",
+            rounded(largest),
+            below.len()
+        ));
+    }
+    if c.steep > 0 {
+        notes.push(format!(
+            "check: pawn rotation too steep to invert on {} samples (yaw-only axes used)",
+            c.steep
+        ));
+    }
+    if c.yaw_differs > 0 {
+        notes.push(format!(
+            "check: pawn yaw differs from the view yaw on {} derived samples",
+            c.yaw_differs
+        ));
+    }
 }
 
 /// Output file names for `count` segments of `raw_name` (mirrors the Python
@@ -626,7 +934,11 @@ mod tests {
         p4.view_rotation[0] = -1000;
         let g = p4.gun.as_mut().unwrap();
         g.grappling = true;
-        g.anchor = Some(Vec3::new(500.0, 0.0, 0.0));
+        // The helper is where an earlier moving target left it; the anchor
+        // is the gun's own hit location.
+        g.anchor = Some(Vec3::new(-7000.0, 12.0, 3.0));
+        g.grapple_location = Vec3::new(500.0, 0.0, 0.0);
+        g.distance = (Vec3::new(500.0, 0.0, 0.0) - p4.location).length();
         r
     }
 
@@ -657,7 +969,18 @@ mod tests {
         );
         assert!(x[2].grounded && !x[3].grounded);
         assert_eq!(x[4].grapple_state, TraceGrappleState::Attached);
+        // The anchor is the gun's hit location, not the helper's (which the
+        // scripted record has 7,500 uu away); the gun's distance fits it.
         assert_eq!(x[4].grapple_anchor, Some(Vec3::new(500.0, 0.0, 0.0)));
+        assert!(
+            t.meta.notes.iter().any(|n| n
+                == "anchor: the gun's vGrappleLocation; the anchor helper is more than 1 uu \
+                    from it on 1 of 1 attached samples (it carries the anchor of a moving \
+                    target only)"),
+            "{:#?}",
+            t.meta.notes
+        );
+        assert!(!t.meta.notes.iter().any(|n| n.contains("vDistance")));
         assert_eq!(x[4].rope_length, None);
         assert_eq!(x[4].pitch, units_to_radians(-1000));
         assert_eq!(x[2].position.x, 7.25);
@@ -714,6 +1037,7 @@ mod tests {
         r[1].player = None;
         let opts = ConvertOptions {
             level: Some("Override".into()),
+            ..ConvertOptions::default()
         };
         let segs = convert(&raw(r), &opts).unwrap();
         assert_eq!(segs.len(), 1);
@@ -825,7 +1149,8 @@ mod tests {
         let mut r = scripted();
         // Record 4 is flying and grappling; without gun data it is idle.
         r[4].player.as_mut().unwrap().gun = None;
-        // Record 3 claims a grapple although the pawn is falling.
+        // Record 3 claims a grapple although the pawn is falling (and its
+        // gun's distance does not fit its hit location).
         r[3].player
             .as_mut()
             .unwrap()
@@ -852,6 +1177,13 @@ mod tests {
                 .any(|n| n == "check: grapple flag and PHYS_Flying disagree on 1 samples"),
             "{notes:#?}"
         );
+        assert!(
+            notes.iter().any(|n| n
+                == "check: the gun's vDistance is more than 1 uu off the pawn's distance to the \
+                    anchor on 1 of 1 attached samples"),
+            "{notes:#?}"
+        );
+        assert!(!notes.iter().any(|n| n.starts_with("anchor:")));
         assert!(
             t.samples[1].input.jump_pressed,
             "a set flag in the first record is a press (no earlier record)"
@@ -911,6 +1243,287 @@ mod tests {
         r[4].frame = 1;
         let segs = convert(&raw(r), &ConvertOptions::default()).unwrap();
         assert_eq!(segs.len(), 2);
+    }
+
+    /// A recording made with a gamepad: pad buttons under their own names,
+    /// the stick only in the pawn's acceleration.
+    fn gamepad() -> RawFile {
+        let mut h = header();
+        for (name, command) in [
+            (
+                "GBA_MoveForward_Gamepad",
+                "Axis aBaseY Speed=1.0 DeadZone=0.4",
+            ),
+            ("XboxTypeS_LeftY", "GBA_MoveForward_Gamepad"),
+            ("XboxTypeS_A", "GBA_ReleaseableJump | RocketBoostKeyDown"),
+            ("XboxTypeS_RightTrigger", "GBA_Fire"),
+            ("XboxTypeS_LeftShoulder", "GBA_Sprint"),
+        ] {
+            h.bindings.push(crate::raw::RawBinding {
+                name: name.into(),
+                command: command.into(),
+            });
+        }
+        // Yaw 16386 reads as 16384 in the original's angle table: forward is
+        // +Y, right is −X.
+        let mut r = vec![
+            record(200, player(0.0, 0, &[])),
+            record(201, player(0.0, 16386, &["XboxTypeS_LeftShoulder"])),
+            record(202, player(1.0, 16386, &["XboxTypeS_RightTrigger"])),
+            record(203, player(2.0, 16386, &["XboxTypeS_RightTrigger"])),
+            record(204, player(3.0, 16386, &[])),
+            record(205, player(4.0, 16386, &[])),
+            record(206, player(5.0, 16386, &["XboxTypeS_A"])),
+            record(207, player(6.0, 0, &[])),
+            record(208, player(7.0, 0, &["XboxTypeS_RightTrigger"])),
+            record(209, player(8.0, 0, &[])),
+        ];
+        let accel = |i: usize, x: f32, y: f32, r: &mut Vec<RawRecord>| {
+            r[i].player.as_mut().unwrap().acceleration = Vec3::new(x, y, 0.0);
+        };
+        // Sample 1: stick forward at yaw 0. Sample 2: stick (0.6, 0.8) in the
+        // axes of record 1.
+        accel(1, 2048.0, 0.0, &mut r);
+        accel(2, 2048.0 * -0.8, 2048.0 * 0.6, &mut r);
+        // Sample 3: attached. Samples 4, 5: the release gap. Sample 6: no
+        // deflection.
+        let p3 = r[3].player.as_mut().unwrap();
+        p3.physics = PHYS_FLYING;
+        p3.gun.as_mut().unwrap().grappling = true;
+        p3.gun.as_mut().unwrap().anchor = Some(Vec3::new(900.0, 0.0, 50.0));
+        for i in [4, 5, 6] {
+            r[i].player.as_mut().unwrap().physics = 2;
+        }
+        // Sample 7: the unit-length acceleration a landing leaves, in the
+        // axes of record 6 (forward = +Y).
+        accel(7, 0.0, -1.0, &mut r);
+        // Sample 8: stick right at yaw 0. Sample 9: attached, with an
+        // acceleration that must not be read.
+        accel(8, 0.0, 2048.0, &mut r);
+        accel(9, 5.0, 5.0, &mut r);
+        let p9 = r[9].player.as_mut().unwrap();
+        p9.physics = PHYS_FLYING;
+        p9.gun.as_mut().unwrap().grappling = true;
+        RawFile {
+            header: h,
+            records: r,
+        }
+    }
+
+    fn moves(t: &Trace) -> Vec<(f32, f32)> {
+        t.samples
+            .iter()
+            .map(|s| (s.input.move_forward, s.input.move_right))
+            .collect()
+    }
+
+    fn close(a: (f32, f32), b: (f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+    }
+
+    #[test]
+    fn gamepad_runs_take_the_move_axes_from_the_acceleration() {
+        let t = &convert(&gamepad(), &ConvertOptions::default()).unwrap()[0].trace;
+        let m = moves(t);
+        assert_eq!(m[0], (0.0, 0.0));
+        assert_eq!(m[1], (1.0, 0.0));
+        assert!(close(m[2], (0.6, 0.8)), "{:?}", m[2]);
+        for (k, got) in m.iter().enumerate().take(7).skip(3) {
+            assert_eq!(*got, (0.0, 0.0), "sample {k}");
+        }
+        assert!(close(m[7], (-1.0, 0.0)), "{:?}", m[7]);
+        assert!(close(m[8], (0.0, 1.0)), "{:?}", m[8]);
+        assert_eq!(m[9], (0.0, 0.0));
+        // The buttons still come from the keys, one frame ahead of the state.
+        assert!(t.samples[2].input.sprint_held && !t.samples[3].input.sprint_held);
+        assert!(t.samples[3].input.grapple_held && t.samples[4].input.grapple_held);
+        assert!(t.samples[7].input.jump_pressed && t.samples[7].input.jump_held);
+        let notes = &t.meta.notes;
+        let has = |text: &str| notes.iter().any(|n| n == text);
+        assert!(
+            has(
+                "move input: derived from the pawn's Acceleration (auto: no move key in this \
+                 run): its horizontal direction in the axes of the previous record's pawn \
+                 rotation, each angle truncated to 4 rotator units; magnitude 1 (the stick's is \
+                 not recorded); 4 of 9 samples"
+            ),
+            "{notes:#?}"
+        );
+        assert!(
+            has(
+                "move input: 0 on 4 samples with zero acceleration: 1 while the grapple is \
+                 attached (no steering is read then), 2 within two frames after an attached \
+                 record (the controller's release gap), 1 others (no deflection beyond the dead \
+                 zone, or a move suppressed in a way the record does not show)"
+            ),
+            "{notes:#?}"
+        );
+        assert!(
+            has("check: acceleration while the grapple is attached on 1 samples (not used)"),
+            "{notes:#?}"
+        );
+        assert!(
+            has(
+                "check: acceleration below half the run's largest (2048 uu/s^2) on 1 derived \
+                 samples (direction used; first at tick 7)"
+            ),
+            "{notes:#?}"
+        );
+        assert!(!notes.iter().any(|n| n.contains("aBaseY/aStrafe sign")));
+        // The state timeline is there, and the older init: note after it.
+        let timeline = crate::state::StateTimeline::from_notes(notes)
+            .unwrap()
+            .unwrap();
+        assert_eq!(timeline.at(3).unwrap().unwrap().physics, Some(PHYS_FLYING));
+        assert_eq!(timeline.at(6).unwrap().unwrap().grappling, Some(false));
+        assert!(notes.last().unwrap().starts_with(INIT_NOTE_PREFIX));
+        t.validate().unwrap();
+
+        // The exact-yaw axes read the same acceleration two units further
+        // round (16386 instead of 16384), and say so.
+        let yaw = ConvertOptions {
+            move_frame: MoveFrame::Yaw,
+            ..ConvertOptions::default()
+        };
+        let y = &convert(&gamepad(), &yaw).unwrap()[0].trace;
+        let two_units = f64::from(units_to_radians(2));
+        let (f, r) = moves(y)[2];
+        let turned = f64::from(r).atan2(f64::from(f)) - 0.8_f64.atan2(0.6);
+        assert!((turned + two_units).abs() < 1e-6, "{turned}");
+        assert_eq!(moves(y)[1], (1.0, 0.0));
+        assert!(
+            y.meta
+                .notes
+                .iter()
+                .any(|n| n.contains("exact pawn yaw") && n.contains("--move-frame yaw")),
+        );
+
+        // Asked for keys: nothing moves, and the acceleration is reported.
+        let keys = ConvertOptions {
+            move_input: MoveInput::Keys,
+            ..ConvertOptions::default()
+        };
+        let k = &convert(&gamepad(), &keys).unwrap()[0].trace;
+        assert!(moves(k).iter().all(|m| *m == (0.0, 0.0)));
+        let notes = &k.meta.notes;
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == "move input: the mapped move keys (--move-input keys)"),
+            "{notes:#?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == "check: acceleration without a mapped move key on 4 of 9 samples"),
+            "{notes:#?}"
+        );
+    }
+
+    #[test]
+    fn keyboard_runs_keep_their_keys() {
+        // The scripted run holds W; give every record an acceleration that
+        // points somewhere else.
+        let mut r = scripted();
+        for rec in &mut r {
+            rec.player.as_mut().unwrap().acceleration = Vec3::new(0.0, -2048.0, 0.0);
+        }
+        let file = raw(r);
+        let t = &convert(&file, &ConvertOptions::default()).unwrap()[0].trace;
+        assert_eq!(
+            moves(t),
+            [(0.0, 0.0), (0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (0.0, 0.0)]
+        );
+        let notes = &t.meta.notes;
+        assert!(
+            notes
+                .iter()
+                .any(|n| n
+                    == "move input: the mapped move keys (auto: a move key is held on 2 records)"),
+            "{notes:#?}"
+        );
+        // Samples 1 (no key yet) and 4 would move by the acceleration; sample
+        // 4's record is attached and not counted.
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == "check: acceleration without a mapped move key on 1 of 4 samples"),
+            "{notes:#?}"
+        );
+        // Opposite keys cancel but are still keys.
+        let mut r = scripted();
+        for rec in &mut r {
+            let p = rec.player.as_mut().unwrap();
+            p.keys = vec!["W".into(), "S".into()];
+            p.acceleration = Vec3::new(2048.0, 0.0, 0.0);
+        }
+        let t = &convert(&raw(r), &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(moves(t).iter().all(|m| *m == (0.0, 0.0)));
+        // Asked for the acceleration: the keys are ignored for the move axes
+        // (yaw 0, then 182 units: +X is forward, then almost).
+        let asked = ConvertOptions {
+            move_input: MoveInput::Acceleration,
+            ..ConvertOptions::default()
+        };
+        let a = &convert(&file, &asked).unwrap()[0].trace;
+        let m = moves(a);
+        assert!(close(m[1], (0.0, -1.0)), "{:?}", m[1]);
+        assert!(m[3].0 < 0.0 && m[3].1 < -0.99, "{:?}", m[3]);
+        assert_eq!(m[4], (0.0, 0.0), "attached");
+        assert!(a.meta.notes.iter().any(|n| n.starts_with(
+            "move input: derived from the pawn's Acceleration \
+                                        (--move-input acceleration)"
+        )),);
+        // Nothing held and nothing accelerating: the keys, and the note says
+        // why. Without bindings the older fallback stays as it was.
+        let mut still = scripted();
+        for rec in &mut still {
+            rec.player.as_mut().unwrap().keys.clear();
+        }
+        let t = &convert(&raw(still.clone()), &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(t.meta.notes.iter().any(|n| n
+            == "move input: the mapped move keys (auto: no move key and no acceleration in \
+                this run)"));
+        let mut f = raw(still);
+        f.header.bindings.clear();
+        let t = &convert(&f, &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(!t.meta.notes.iter().any(|n| n.starts_with("move input:")));
+    }
+
+    #[test]
+    fn hostile_accelerations_and_rotations() {
+        let mut f = gamepad();
+        let p = f.records[1].player.as_mut().unwrap();
+        p.acceleration = Vec3::new(f32::MAX, -f32::MAX, f32::MAX);
+        f.records[0].player.as_mut().unwrap().pawn_rotation = [i32::MIN, i32::MAX, i32::MIN];
+        // Straight up: the forward axis has no horizontal part.
+        f.records[7].player.as_mut().unwrap().pawn_rotation = [16384, 0, 0];
+        let t = &convert(&f, &ConvertOptions::default()).unwrap()[0].trace;
+        for s in &t.samples {
+            let len = f64::from(s.input.move_forward).hypot(f64::from(s.input.move_right));
+            assert!(
+                len == 0.0 || (len - 1.0).abs() < 1e-6,
+                "tick {}: {len}",
+                s.tick
+            );
+        }
+        assert!(
+            t.meta.notes.iter().any(|n| n
+                == "check: pawn rotation too steep to invert on 1 samples (yaw-only axes \
+                        used)"),
+            "{:#?}",
+            t.meta.notes
+        );
+        // Record 0's pawn yaw is not its view yaw; make record 1's differ too.
+        let differs = |t: &Trace, n: usize| {
+            t.meta.notes.iter().any(|x| {
+                *x == format!("check: pawn yaw differs from the view yaw on {n} derived samples")
+            })
+        };
+        assert!(differs(t, 1), "{:#?}", t.meta.notes);
+        f.records[1].player.as_mut().unwrap().view_rotation[1] += 7;
+        let t = &convert(&f, &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(differs(t, 2), "{:#?}", t.meta.notes);
     }
 
     #[test]
