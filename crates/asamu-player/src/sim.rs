@@ -105,8 +105,9 @@ use crate::world::CollisionWorld;
 /// is floored to a multiple of 4 units (towards −∞, also for negative angles:
 /// the shift works on the two's-complement bits) and everything above bit 15
 /// is dropped. CONFIRMED (native); measured on the Windows recordings (the
-/// floor fits 2,192 of 2,192 on-axis accelerations, truncation towards zero
-/// none of the 1,109 with a negative yaw that is no multiple of 4).
+/// table axes of the floored yaw fit 2,349 of 2,349 on-axis accelerations,
+/// the yaw truncated towards zero none of the 1,112 with a negative yaw
+/// that is no multiple of 4; gated test `tests/parity_recordings.rs`).
 pub const ANGLE_TABLE_SHIFT: u32 = 2;
 
 /// Entries of the original's sine table (one per 4 rotator units).
@@ -140,9 +141,10 @@ pub fn angle_table_index(units: i32) -> u16 {
 /// NativeCode `FGlobalMath::FGlobalMath @ 0x1000FA0A0` (constants π at
 /// `0x101645730`, 2⁻¹⁴ at `0x101645740`; the Windows constructor at
 /// `0x5B1E70` reads 2.0, π and 2⁻¹⁴ the same way). CONFIRMED (native);
-/// measured: with these entries 2,192 of 2,192 recorded on-axis
-/// accelerations are within 3 ulp, with the exact sine of the floored angle
-/// 1,803.
+/// measured: with these entries all 2,349 recorded on-axis accelerations
+/// are within 8.2e-8 rad of the axis; the exact sine of the floored angle
+/// is up to 2.3e-7 rad away, more than 1e-7 on 330 (gated test
+/// `tests/parity_recordings.rs`).
 ///
 /// The sine itself is the platform's in the original (`sinf` on macOS,
 /// `__libm_sse2_sinf` of the Visual C++ 2010 runtime on Windows, which

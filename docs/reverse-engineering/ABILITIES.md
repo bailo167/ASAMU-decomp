@@ -471,20 +471,29 @@ the aim rotation.
   (`GetAxes`, A-WK-1), the walk bob's right axis (`GetAxes`, A-CM-4), the fire trace and the crosshair trace
   (`vector(aim)`, G-TG-1/2), the boost aim (`vector(aim)`, A-RB-3/4) and the boost's corkscrew rotation
   (a vector rotated by the rotator of the aim direction).
-- **Measured** (the three Windows recordings; acceleration of walking or falling frames whose previous pawn
-  rotation has no pitch or roll and whose stick is on an axis, 2,192 samples; prediction `2048 · normal(axis)`):
-  within 3 ulp on both components with this table and the floor on 2,192; with the exact sine of the
-  floored angle on 1,803; with a table whose argument is `f32(i) · f32(2π/16384)` on 1,781; with the angle
-  truncated towards zero on 811 (none of the 1,109 samples whose yaw is negative and no multiple of 4);
-  with the exact angle on 281. Example: raw WS1 records 1513 and 1514 (previous yaw −32 768) have the
+- **Measured** (the three Windows recordings; reproduce with the gated test
+  `crates/asamu-player/tests/parity_recordings.rs` and `ASAMU_TRACE_RAW_DIR`): acceleration of walking or
+  falling frames whose previous pawn rotation the table reads as yaw only (pitch and roll below 4 units) and
+  whose stick is on an axis: 2,349 samples (2,217 walking, 132 falling).
+  - The recorded acceleration is within 8.2e-8 rad of the table axis of the floored previous yaw on all
+    2,349 (the rounding of three single-precision scalings, by the stick's size and by two normalisations,
+    allows 1.8e-7 rad).
+  - Floor, not truncation towards zero: the axis of the yaw truncated towards zero is 4 units (3.8e-4 rad)
+    away on every one of the 1,112 samples whose previous yaw is negative and no multiple of 4.
+  - Not the exact angle: it fits none of the 1,933 samples whose previous yaw is no multiple of 4.
+  - The table, not the exact sine of the floored angle: that is more than 1e-7 rad away on 330 samples (up
+    to 2.3e-7 rad, the table's own argument rounding).
+  - The previous record's yaw, not the same record's: the same record's fits 1,845 (the view did not turn).
+  Example: raw WS1 records 1513 and 1514 (previous yaw −32 768) have the
   acceleration y = −1.7904183e-4 = 2048 × −8.742278e-8, and record 1515 (previous yaw −32 777, read as
   −32 780) has y = 2.3562655 against 2.3562658 from the table and 2.3561940 from the exact sine.
 - **Last bit of the entries** [STRONG]: our entries are the correctly rounded sines of the same arguments
   (all 16 384 equal an independent computation). The Windows routine converts its argument to double
   precision, evaluates there and narrows once (read from the routine's main path in runtime version
   10.0.40219.325), which gives the correctly rounded value except in vanishingly rare ties; the table of
-  the running game has not been read out. Apple's `sinf` is 1 ulp off the correctly rounded value on 220
-  of the 16 384 entries, so the macOS build's table is not bit-identical to the Windows one.
+  the running game has not been read out. Apple's `sinf` in the x86_64 library the macOS build loads is 1
+  ulp off the correctly rounded value on 4 of the 16 384 entries (called on macOS 26 under Rosetta; the
+  arm64 library on 220), so the macOS build's table need not be bit-identical to the Windows one.
 → Rust: `asamu_player::sim::{angle_table_index, angle_table_entry, rotator_sin, rotator_cos,
 rotator_vector, rotator_axes_flat}`, used by the controller move, the walk bob and every aim of the script
 layer. Not ported: pitch and roll in the move axes (A-WK-1) and the table in the boost's corkscrew rotation
@@ -500,7 +509,17 @@ layer. Not ported: pitch and roll in the move axes (A-WK-1) and the table in the
   bytecode; `UObject::execFloatToInt @ 0x1000B8AB0` truncates). Nothing carries the fraction over.
 - The yaw is never reduced (recorded values run past ±32 768, e.g. −32 777); every reader drops the bits
   above 15 (A-CM-8). The pitch is reduced to 0…65 535 by its limit.
-- Measured: whole-unit deltas reproduce the recorded yaw and pitch on 45,223 of 45,223 ticks.
+- Measured: whole-unit deltas reproduce the recorded yaw and pitch on 45,223 of 45,223 ticks, and
+  `sim::apply_look`, fed each recorded change as the trace converter encodes it and carried from the first
+  record of a run to its last (14 runs, the longest 10,631 ticks), reproduces both bit for bit on all 45,223
+  (`crates/asamu-player/tests/parity_recordings.rs`). The recorded pitch is always the masked value
+  (0…65 535), as the limit leaves it.
+- A whole replay can still lose the view after a grapple release: the tick after a release has no look
+  update (G-RL-7), so when our simulation releases on a tick where the original did not (its grapple ended
+  on another tick, or never attached), the delta of that tick is skipped. Free-running replays of the 14
+  recorded runs (45,237 ticks): yaw and pitch bit-equal on every tick of 12 runs; in the other two (PLAY2
+  runs 0 and 5) up to the first such tick. That is a consequence of the grapple differences
+  (docs/PARITY_FINDINGS.md P1 to P5), not of the look update.
 → Rust: `sim::apply_look`. The public view angles stay radians; each holds the exact radian image of a
 unit, the update decodes it, works in integers and stores the image of the result, so nothing accumulates
 (before: 1.1e-5 rad of drift per 10,632 ticks). A look delta within one `f32` ulp of a whole number of
@@ -729,3 +748,7 @@ Method as in GRAPPLE.md §0/§19. Outcome per item:
   roll/pitch part; A-CM-2 **corrected**: the lower pitch limit is −18 001, and the limit is a band on the
   16-bit circle; A-WK-3: what `SetSpeed` writes and what overwrites it, from the stock script (the earlier
   "UNKNOWN" about sprinting is now a script rule without a measurement).
+- 2026-10-10 (independent verification of the above): the measurements of A-CM-8 and A-CM-9 are now a gated
+  test on the raw recordings (`parity_recordings.rs`) and the counts here are its output; the floor against
+  a truncation towards zero is counted on negative angles (1,112 samples; 13 anchors, GRAPPLE.md G-TG-1);
+  the `sinf` count for macOS corrected to the x86_64 library (4 entries, not 220).

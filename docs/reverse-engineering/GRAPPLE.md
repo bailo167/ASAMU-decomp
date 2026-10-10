@@ -163,8 +163,11 @@ returns, the gun has traced, decided and — on success — switched the pawn to
   angle table, which floors pitch and yaw each to a multiple of 4 rotator units (up to 0.016° low;
   ABILITIES.md A-CM-8) [CONFIRMED (native, `FRotator::Vector @ 0x1000FC740`); measured: with the floored
   angles 47 of 52 recorded airborne anchors on static targets lie within 0.05 uu of the ray (median 0.00) at
-  ranges up to 4,939 uu; with the exact angles the median distance is 0.74 uu and the largest 1.99]. The
-  crosshair trace (G-TG-2) and the boost aim use the same conversion.
+  ranges up to 4,939 uu; with the exact angles the median distance is 0.74 uu and the largest 1.99. A local
+  recount from the eye of the record before the first attached one (pawn location plus recorded eye height)
+  along that record's view: floored 47 of 52, truncated towards zero instead 34 (none of the 13 whose yaw is
+  negative and no multiple of 4, against 13 of 13 floored), exact angles 5]. The crosshair trace (G-TG-2)
+  and the boost aim use the same conversion.
 - End `E = S + 16384·dir`. One zero-extent trace that reports actors, flag `TRACEFLAG_Bullet`, issued by the
   pawn (weapon trace owner = instigator), so the pawn itself is not hit [STRONG].
 - The stock instant-hit routine builds an **ordered impact list**: a first hit that is a non-blocking
