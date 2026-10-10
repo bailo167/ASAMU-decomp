@@ -33,8 +33,11 @@
 //! - [`flags`]: object/class/function/property/struct/state flag names.
 //! - [`coverage`]: exact-consumption coverage over real packages.
 //! - [`kismet`]: Kismet (sequence) graphs of map packages.
+//! - [`bodysetup`]: `RB_BodySetup` simple collision shapes (convex hulls, boxes,
+//!   spheres, capsules).
 
 pub mod anim;
+pub mod bodysetup;
 pub mod bsp;
 pub mod bulkdata;
 pub mod bytecode;

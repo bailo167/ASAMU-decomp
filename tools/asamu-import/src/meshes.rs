@@ -16,6 +16,7 @@
 //! manifest.json                       object path -> files, LODs, sections, ...
 //! <Package>/<Path...>/<Name>.gltf     LOD 0 (+ <Name>_LOD<n>.gltf with --all-lods)
 //! <Package>/<Path...>/<Name>.bin      binary buffer of the .gltf next to it
+//! <Package>/<Path...>/<Name>.collision.json   simple collision shapes (meshes with a body setup)
 //! ```
 //!
 //! An object path cooked into several packages (the same mesh in several
@@ -52,12 +53,31 @@
 //!   after the UE3 material path (`None` for an unassigned slot).
 //! - **Collision** (`--collision`): the kDOP collision triangles (which index
 //!   LOD 0's vertices) become a second mesh on a node named `UCX_<Name>`.
+//!
+//! # Simple collision
+//!
+//! Every manifest entry carries `simple_collision`: the mesh's three
+//! simple-collision switches (the stored value, else the native default
+//! `true`), whether the mesh has a body setup, and for a mesh with one the
+//! `.collision.json` file with its shapes ([`SimpleCollisionDoc`]: convex
+//! elements, boxes, spheres and capsules).
+//!
+//! The shapes are **not** converted to glTF axes: they are in the mesh's
+//! local space, UE3 axes (X forward, Y right, Z up, left-handed) and Unreal
+//! units, whatever `--scale` is. It is the same local space the mesh's
+//! vertices and collision triangles are in, so a shape point `(x, y, z)`
+//! corresponds to the glTF point `(y, z, -x) * scale` of the mesh's files.
+//! A component's scale and placement apply to the shapes as they do to the
+//! triangles. See `docs/reverse-engineering/MESHES.md`, "Simple collision".
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use asamu_ue3::PackageSet;
+use asamu_ue3::bodysetup::{
+    BodyProperty, BodySetup, Matrix, ScalarValue, decode_body_setup, validate_body_setup,
+};
 use asamu_ue3::model::LoadedPackage;
 use asamu_ue3::staticmesh::{
     CollisionTriangle, LodModel, StaticMesh, ValidationContext, decode_static_mesh, is_static_mesh,
@@ -68,8 +88,18 @@ use serde_json::{Value, json};
 
 use crate::safety;
 
-/// Manifest format version.
-const MANIFEST_VERSION: u32 = 1;
+/// Manifest format version. Version 2 added `simple_collision` to every
+/// entry (and the `.collision.json` files), and the content hash covers them.
+const MANIFEST_VERSION: u32 = 2;
+
+/// `format` of a `.collision.json` document.
+pub const SIMPLE_COLLISION_FORMAT: &str = "asamu-simple-collision";
+/// `version` of a `.collision.json` document.
+pub const SIMPLE_COLLISION_VERSION: u32 = 1;
+/// Coordinate system note stored in every `.collision.json` document.
+const SIMPLE_COLLISION_SPACE: &str = "mesh local space, UE3 axes (x forward, y right, z up, \
+     left-handed), Unreal units, unscaled; the mesh's glTF files hold the same points as \
+     (y, z, -x) * scale";
 
 /// Notice stored in every manifest and glTF file.
 const NOTICE: &str = "Converted locally from the user's own copy of A Story About My Uncle. \
@@ -970,14 +1000,369 @@ pub struct MeshEntry {
     pub body_setup: Option<String>,
     /// kDOP collision triangles (indices into LOD 0).
     pub collision_triangles: usize,
+    /// Simple collision: the switches, and the shapes file of a mesh with a
+    /// body setup.
+    pub simple_collision: SimpleCollisionEntry,
     /// UE3 bounds.
     pub bounds_ue: BoundsEntry,
     /// glTF units per Unreal unit used for the files.
     pub scale: f32,
-    /// FNV-1a 64 of the decoded source geometry of every LOD and the section
-    /// material paths (independent of the conversion options; detects
-    /// differing copies of the same path in different packages).
+    /// FNV-1a 64 of the decoded source geometry of every LOD, the section
+    /// material paths, the simple-collision switches and the body setup's
+    /// shapes (independent of the conversion options; detects differing
+    /// copies of the same path in different packages).
     pub content_hash: String,
+}
+
+/// Simple collision of one mesh in the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimpleCollisionEntry {
+    /// `UseSimpleBoxCollision`: swept (non-zero-extent) traces, the pawn's
+    /// among them, use the simple shapes instead of the triangles. The
+    /// stored value, else the native default `true`.
+    pub use_simple_box_collision: bool,
+    /// `UseSimpleLineCollision`: line (zero-extent) traces that are not
+    /// forced to the triangles use the simple shapes. Stored, else `true`.
+    pub use_simple_line_collision: bool,
+    /// `UseSimpleRigidBodyCollision`. Stored, else `true`.
+    pub use_simple_rigid_body_collision: bool,
+    /// The mesh has a body setup (`body_setup` of the entry names it). A
+    /// mesh without one has no simple shapes at all.
+    pub has_body_setup: bool,
+    /// The `.collision.json` file with the shapes, relative to the manifest
+    /// (present exactly when the mesh has a body setup).
+    pub shapes: Option<String>,
+    /// Convex elements in that file.
+    pub convex: usize,
+    /// Boxes.
+    pub boxes: usize,
+    /// Spheres.
+    pub spheres: usize,
+    /// Capsules.
+    pub sphyls: usize,
+}
+
+/// One convex element (`KConvexElem`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConvexShape {
+    /// `VertexData`.
+    pub vertices: Vec<[f32; 3]>,
+    /// `FacePlaneData` as `[nx, ny, nz, d]`: the plane `n . p = d`, with the
+    /// normal pointing out of the element.
+    pub planes: Vec<[f32; 4]>,
+    /// `FaceTriData`: the surface as triangles of vertex indices.
+    pub face_triangles: Vec<[u32; 3]>,
+    /// `EdgeDirections`.
+    pub edge_directions: Vec<[f32; 3]>,
+    /// `FaceNormalDirections`.
+    pub face_normal_directions: Vec<[f32; 3]>,
+    /// `ElemBox.Min` (the vertices' bounding box).
+    pub bounds_min: [f32; 3],
+    /// `ElemBox.Max`.
+    pub bounds_max: [f32; 3],
+}
+
+/// One box (`KBoxElem`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoxShape {
+    /// `TM`: rows X axis, Y axis, Z axis, origin, each `[x, y, z, w]`
+    /// (row-vector convention: a local point `p` is at
+    /// `p.x * row0 + p.y * row1 + p.z * row2 + row3`).
+    pub transform: Matrix,
+    /// `X`, `Y`, `Z`: the full edge lengths along the local axes.
+    pub size: [f32; 3],
+    /// `bNoRBCollision`.
+    pub no_rb_collision: bool,
+    /// `bPerPolyShape`.
+    pub per_poly_shape: bool,
+}
+
+/// One sphere (`KSphereElem`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SphereShape {
+    /// `TM` (see [`BoxShape::transform`]); the centre is its fourth row.
+    pub transform: Matrix,
+    /// `Radius`.
+    pub radius: f32,
+    /// `bNoRBCollision`.
+    pub no_rb_collision: bool,
+    /// `bPerPolyShape`.
+    pub per_poly_shape: bool,
+}
+
+/// One capsule (`KSphylElem`): a segment of `length` along the local Z axis,
+/// centred on the origin, swept by a sphere of `radius`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SphylShape {
+    /// `TM` (see [`BoxShape::transform`]).
+    pub transform: Matrix,
+    /// `Radius`.
+    pub radius: f32,
+    /// `Length` of the segment (the capsule is `length + 2 * radius` long).
+    pub length: f32,
+    /// `bNoRBCollision`.
+    pub no_rb_collision: bool,
+    /// `bPerPolyShape`.
+    pub per_poly_shape: bool,
+}
+
+/// A `.collision.json` document: the simple collision shapes of one mesh's
+/// body setup, in the mesh's local space, UE3 axes and Unreal units (never
+/// scaled, never converted to glTF axes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SimpleCollisionDoc {
+    /// [`SIMPLE_COLLISION_FORMAT`].
+    pub format: String,
+    /// [`SIMPLE_COLLISION_VERSION`].
+    pub version: u32,
+    /// Redistribution notice.
+    pub notice: String,
+    /// Coordinate system of every point and direction in the document.
+    pub space: String,
+    /// Object path of the mesh.
+    pub mesh: String,
+    /// Object path of the body setup.
+    pub body_setup: String,
+    /// Scalar properties stored on the body setup (name → value; object
+    /// references as object paths).
+    pub body_properties: BTreeMap<String, Value>,
+    /// Convex elements.
+    pub convex: Vec<ConvexShape>,
+    /// Boxes.
+    pub boxes: Vec<BoxShape>,
+    /// Spheres.
+    pub spheres: Vec<SphereShape>,
+    /// Capsules.
+    pub sphyls: Vec<SphylShape>,
+}
+
+fn require<T: Clone>(v: Option<&T>, what: &str) -> Result<T> {
+    v.cloned()
+        .with_context(|| format!("{what} is not stored (the struct default would apply)"))
+}
+
+/// Build the shapes document of `body` (the body setup of mesh `mesh_path`).
+/// `object_path` resolves the object references among its scalar
+/// properties. The body must pass `validate_body_setup`: every member
+/// present, every value finite, valid triangle indices.
+pub fn simple_collision_doc(
+    mesh_path: &str,
+    body_path: &str,
+    body: &BodySetup,
+    object_path: &dyn Fn(asamu_ue3::PackageIndex) -> Option<String>,
+) -> Result<SimpleCollisionDoc> {
+    let issues = validate_body_setup(body);
+    if !issues.is_empty() {
+        bail!("inconsistent body setup: {}", issues.join("; "));
+    }
+    let mut body_properties = BTreeMap::new();
+    for p in &body.properties {
+        let BodyProperty::Scalar(s) = p else { continue };
+        let value = match &s.value {
+            ScalarValue::Bool(v) => json!(v),
+            ScalarValue::Int(v) => json!(v),
+            ScalarValue::Float(v) if v.is_finite() => json!(v),
+            ScalarValue::Float(v) => bail!("{} is {v}", s.name),
+            ScalarValue::Name { text, .. } => json!(text),
+            ScalarValue::Object(o) => json!(object_path(*o)),
+            ScalarValue::Byte { value, .. } => json!(value),
+            ScalarValue::Enum { value, .. } => json!(value),
+        };
+        body_properties.insert(s.name.clone(), value);
+    }
+    let geom = body.agg_geom().context("the body setup has no AggGeom")?;
+    let mut convex = Vec::with_capacity(geom.convex().len());
+    for (i, c) in geom.convex().iter().enumerate() {
+        let w = |m: &str| format!("convex {i}: {m}");
+        let tris = require(c.face_tri_data.as_ref(), &w("FaceTriData"))?;
+        let mut face_triangles = Vec::with_capacity(tris.len() / 3);
+        for t in tris.as_chunks::<3>().0 {
+            let idx =
+                |k: usize| u32::try_from(t[k]).with_context(|| w("negative FaceTriData index"));
+            face_triangles.push([idx(0)?, idx(1)?, idx(2)?]);
+        }
+        let bx = require(c.elem_box.as_ref(), &w("ElemBox"))?;
+        convex.push(ConvexShape {
+            vertices: require(c.vertex_data.as_ref(), &w("VertexData"))?,
+            planes: require(c.face_plane_data.as_ref(), &w("FacePlaneData"))?
+                .iter()
+                .map(|p| [p.x, p.y, p.z, p.w])
+                .collect(),
+            face_triangles,
+            edge_directions: require(c.edge_directions.as_ref(), &w("EdgeDirections"))?,
+            face_normal_directions: require(
+                c.face_normal_directions.as_ref(),
+                &w("FaceNormalDirections"),
+            )?,
+            bounds_min: bx.min,
+            bounds_max: bx.max,
+        });
+    }
+    let mut boxes = Vec::with_capacity(geom.boxes().len());
+    for (i, e) in geom.boxes().iter().enumerate() {
+        let w = |m: &str| format!("box {i}: {m}");
+        boxes.push(BoxShape {
+            transform: require(e.tm.as_ref(), &w("TM"))?,
+            size: [
+                require(e.x.as_ref(), &w("X"))?,
+                require(e.y.as_ref(), &w("Y"))?,
+                require(e.z.as_ref(), &w("Z"))?,
+            ],
+            no_rb_collision: require(e.no_rb_collision.as_ref(), &w("bNoRBCollision"))?,
+            per_poly_shape: require(e.per_poly_shape.as_ref(), &w("bPerPolyShape"))?,
+        });
+    }
+    let mut spheres = Vec::with_capacity(geom.spheres().len());
+    for (i, e) in geom.spheres().iter().enumerate() {
+        let w = |m: &str| format!("sphere {i}: {m}");
+        spheres.push(SphereShape {
+            transform: require(e.tm.as_ref(), &w("TM"))?,
+            radius: require(e.radius.as_ref(), &w("Radius"))?,
+            no_rb_collision: require(e.no_rb_collision.as_ref(), &w("bNoRBCollision"))?,
+            per_poly_shape: require(e.per_poly_shape.as_ref(), &w("bPerPolyShape"))?,
+        });
+    }
+    let mut sphyls = Vec::with_capacity(geom.sphyls().len());
+    for (i, e) in geom.sphyls().iter().enumerate() {
+        let w = |m: &str| format!("sphyl {i}: {m}");
+        sphyls.push(SphylShape {
+            transform: require(e.tm.as_ref(), &w("TM"))?,
+            radius: require(e.radius.as_ref(), &w("Radius"))?,
+            length: require(e.length.as_ref(), &w("Length"))?,
+            no_rb_collision: require(e.no_rb_collision.as_ref(), &w("bNoRBCollision"))?,
+            per_poly_shape: require(e.per_poly_shape.as_ref(), &w("bPerPolyShape"))?,
+        });
+    }
+    Ok(SimpleCollisionDoc {
+        format: SIMPLE_COLLISION_FORMAT.to_owned(),
+        version: SIMPLE_COLLISION_VERSION,
+        notice: NOTICE.to_owned(),
+        space: SIMPLE_COLLISION_SPACE.to_owned(),
+        mesh: mesh_path.to_owned(),
+        body_setup: body_path.to_owned(),
+        body_properties,
+        convex,
+        boxes,
+        spheres,
+        sphyls,
+    })
+}
+
+/// Check the text that will be written against the document it was made
+/// from: it must parse back to the same values and serialize to the same
+/// text again (so every float survives bit for bit, the sign of zero
+/// included), and hold valid triangles.
+pub fn validate_simple_collision(text: &str, doc: &SimpleCollisionDoc) -> Vec<String> {
+    let mut issues = Vec::new();
+    match serde_json::from_str::<SimpleCollisionDoc>(text) {
+        Ok(back) => {
+            // Value equality treats 0.0 and -0.0 alike; the text does not.
+            let canonical = serde_json::to_string(doc).unwrap_or_default();
+            let again = serde_json::to_string(&back).unwrap_or_default();
+            if back != *doc || again != canonical || text.trim_end_matches('\n') != canonical {
+                issues.push("the written shapes do not read back as decoded".to_owned());
+            }
+        }
+        Err(e) => issues.push(format!("the written shapes do not parse: {e}")),
+    }
+    if doc.format != SIMPLE_COLLISION_FORMAT || doc.version != SIMPLE_COLLISION_VERSION {
+        issues.push("wrong format or version".to_owned());
+    }
+    for (i, c) in doc.convex.iter().enumerate() {
+        let n = c.vertices.len();
+        if c.face_triangles
+            .iter()
+            .flatten()
+            .any(|&v| usize::try_from(v).map_or(true, |v| v >= n))
+        {
+            issues.push(format!(
+                "convex {i}: a triangle index is outside the {n} vertices"
+            ));
+        }
+    }
+    issues
+}
+
+/// The simple collision of one mesh: its manifest entry, the shapes file of
+/// a mesh with a body setup, and what the validation found.
+struct SimpleCollision {
+    entry: SimpleCollisionEntry,
+    file: Option<(PathBuf, Vec<u8>)>,
+    issues: Vec<String>,
+}
+
+/// `<stem>.collision.json`.
+fn collision_rel_path(stem: &Path) -> PathBuf {
+    let name = stem
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mesh".to_owned());
+    stem.with_file_name(format!("{name}.collision.json"))
+}
+
+/// The shapes document of `mesh`'s body setup (`None` without one).
+fn mesh_shapes(lp: &LoadedPackage, mesh: &StaticMesh) -> Result<Option<SimpleCollisionDoc>> {
+    let body_ref = mesh.native.body_setup;
+    if body_ref.is_null() {
+        return Ok(None);
+    }
+    let index = body_ref
+        .export_index()
+        .context("the body setup is not an export of the mesh's package")?;
+    let body = decode_body_setup(&lp.package, index).context("decoding the body setup")?;
+    let body_path = lp
+        .ref_path(body_ref)
+        .ok()
+        .flatten()
+        .context("the body setup has no object path")?;
+    simple_collision_doc(&mesh.object.path, &body_path, &body, &|o| {
+        lp.ref_path(o).ok().flatten()
+    })
+    .map(Some)
+}
+
+/// Convert the simple collision of `mesh`; the shapes file goes next to the
+/// mesh's glTF files under `stem`.
+fn convert_simple_collision(
+    lp: &LoadedPackage,
+    mesh: &StaticMesh,
+    stem: &Path,
+) -> Result<SimpleCollision> {
+    let flags = mesh.simple_collision_flags();
+    let doc = mesh_shapes(lp, mesh)?;
+    let mut entry = SimpleCollisionEntry {
+        use_simple_box_collision: flags.box_,
+        use_simple_line_collision: flags.line,
+        use_simple_rigid_body_collision: flags.rigid_body,
+        has_body_setup: doc.is_some(),
+        shapes: None,
+        convex: 0,
+        boxes: 0,
+        spheres: 0,
+        sphyls: 0,
+    };
+    let Some(doc) = doc else {
+        return Ok(SimpleCollision {
+            entry,
+            file: None,
+            issues: Vec::new(),
+        });
+    };
+    // Compact on purpose: the documents are arrays of numbers.
+    let mut text = serde_json::to_string(&doc)?;
+    text.push('\n');
+    let issues = validate_simple_collision(&text, &doc);
+    let rel = collision_rel_path(stem);
+    entry.shapes = Some(rel_string(&rel));
+    entry.convex = doc.convex.len();
+    entry.boxes = doc.boxes.len();
+    entry.spheres = doc.spheres.len();
+    entry.sphyls = doc.sphyls.len();
+    Ok(SimpleCollision {
+        entry,
+        file: Some((rel, text.into_bytes())),
+        issues,
+    })
 }
 
 /// The manifest written to `<out>/meshes/manifest.json`.
@@ -1010,9 +1395,10 @@ fn fnv1a64(parts: &[&[u8]]) -> u64 {
 }
 
 /// Hash of a mesh's decoded source content: every LOD's positions, tangent
-/// bytes, UVs, colors, indices and sections (with material paths), and the
-/// collision triangles. Package indices are replaced by resolved paths, so
-/// identical meshes cooked into different packages hash alike.
+/// bytes, UVs, colors, indices and sections (with material paths), the
+/// collision triangles, the simple-collision switches and the body setup's
+/// shapes. Package indices are replaced by resolved paths, so identical
+/// meshes cooked into different packages hash alike.
 fn content_hash(lp: &LoadedPackage, mesh: &StaticMesh) -> String {
     let n = &mesh.native;
     let mut data: Vec<u8> = Vec::new();
@@ -1054,7 +1440,22 @@ fn content_hash(lp: &LoadedPackage, mesh: &StaticMesh) -> String {
             .for_each(|v| data.extend_from_slice(&v.to_le_bytes()));
         data.extend_from_slice(&t.material_index.to_le_bytes());
     }
-    format!("{:016x}", fnv1a64(&[&data]))
+    // Simple collision: the switches and the body setup's shapes (as the
+    // document that is written; it holds object paths, not package indices).
+    let flags = mesh.simple_collision_flags();
+    let shapes = match mesh_shapes(lp, mesh) {
+        Ok(None) => Vec::new(),
+        Ok(Some(doc)) => serde_json::to_vec(&doc).unwrap_or_else(|_| b"!unserializable".to_vec()),
+        // The conversion reports the error; two failing copies compare equal.
+        Err(_) => b"!undecodable".to_vec(),
+    };
+    let switches = [
+        u8::from(flags.line),
+        u8::from(flags.box_),
+        u8::from(flags.rigid_body),
+        u8::from(!n.body_setup.is_null()),
+    ];
+    format!("{:016x}", fnv1a64(&[&data, &switches, &shapes]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,6 +1530,14 @@ fn convert_mesh(
         files.push((gltf_rel, text.into_bytes()));
         files.push((bin_rel, asset.bin));
     }
+    let simple = convert_simple_collision(lp, mesh, stem).context("simple collision")?;
+    issues.extend(
+        simple
+            .issues
+            .iter()
+            .map(|m| format!("simple collision: {m}")),
+    );
+    files.extend(simple.file);
     let hash = content_hash(lp, mesh);
     let entry = MeshEntry {
         package: lp.name.clone(),
@@ -1142,6 +1551,7 @@ fn convert_mesh(
         light_map_resolution: mesh.light_map_resolution(),
         body_setup: lp.ref_path(n.body_setup).ok().flatten(),
         collision_triangles: n.kdop.triangles.len(),
+        simple_collision: simple.entry,
         bounds_ue: BoundsEntry {
             origin: n.bounds.origin,
             box_extent: n.bounds.box_extent,
@@ -1172,6 +1582,18 @@ struct RunStats {
     tangents_fixed: u64,
     winding_agree: u64,
     winding_disagree: u64,
+    /// Meshes with a body setup (a shapes file).
+    bodies: usize,
+    convex: usize,
+    boxes: usize,
+    spheres: usize,
+    sphyls: usize,
+    /// Meshes whose box / line switch is off.
+    box_off: usize,
+    line_off: usize,
+    /// Meshes without a body setup whose box switch is on: swept traces
+    /// find nothing to hit on them.
+    no_body_box_on: usize,
 }
 
 pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {
@@ -1382,6 +1804,15 @@ pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {
 }
 
 fn account(stats: &mut RunStats, c: &Converted) {
+    let sc = &c.entry.simple_collision;
+    stats.bodies += usize::from(sc.has_body_setup);
+    stats.convex += sc.convex;
+    stats.boxes += sc.boxes;
+    stats.spheres += sc.spheres;
+    stats.sphyls += sc.sphyls;
+    stats.box_off += usize::from(!sc.use_simple_box_collision);
+    stats.line_off += usize::from(!sc.use_simple_line_collision);
+    stats.no_body_box_on += usize::from(!sc.has_body_setup && sc.use_simple_box_collision);
     for l in &c.entry.lods {
         stats.lods += 1;
         stats.vertices += u64::try_from(l.stats.vertices).unwrap_or(0);
@@ -1433,6 +1864,12 @@ fn print_summary(s: &RunStats, args: &Args, manifest_len: usize) {
         "normals replaced (zero in source): {}; tangents replaced: {}; winding vs normals: \
          {} agree, {} disagree; manifest entries: {manifest_len}",
         s.normals_fixed, s.tangents_fixed, s.winding_agree, s.winding_disagree
+    );
+    println!(
+        "simple collision: {} meshes with a body setup ({} convex elements, {} boxes, {} spheres, \
+         {} capsules); box switch off on {}, line switch off on {}; no body setup and box \
+         switch on: {}",
+        s.bodies, s.convex, s.boxes, s.spheres, s.sphyls, s.box_off, s.line_off, s.no_body_box_on
     );
 }
 
@@ -1509,10 +1946,31 @@ fn prepare_out_dir(out: &Path, input: Option<&Path>) -> Result<PathBuf> {
     Ok(root)
 }
 
+/// The existing manifest of an output folder (empty when there is none). A
+/// manifest of another format version is refused instead of being merged:
+/// its entries lack fields this version writes and its content hashes are
+/// not comparable.
 fn read_manifest(path: &Path) -> Result<Manifest> {
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("{} is not a mesh manifest", path.display())),
+        Ok(bytes) => {
+            #[derive(Deserialize)]
+            struct Version {
+                #[serde(default)]
+                version: u32,
+            }
+            let found: Version = serde_json::from_slice(&bytes)
+                .with_context(|| format!("{} is not a mesh manifest", path.display()))?;
+            if found.version != MANIFEST_VERSION {
+                bail!(
+                    "{} has manifest version {}, expected {MANIFEST_VERSION} (convert into a \
+                     fresh directory, or let `asamu-import all` rebuild the stage)",
+                    path.display(),
+                    found.version
+                );
+            }
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("{} is not a mesh manifest", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Manifest::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
@@ -1614,16 +2072,23 @@ impl Claims {
                         .or_insert_with(|| key.clone());
                 }
             }
+            if let Some(f) = &e.simple_collision.shapes {
+                c.0.entry(f.to_ascii_lowercase())
+                    .or_insert_with(|| key.clone());
+            }
         }
         c
     }
 
+    /// Every file a mesh under `stem` may write: the LOD files and the
+    /// shapes file (whether or not the mesh turns out to have a body setup).
     fn planned(stem: &Path, lods: usize) -> Vec<String> {
         (0..lods)
             .flat_map(|li| {
                 let (g, b) = lod_rel_paths(stem, li);
                 [rel_string(&g), rel_string(&b)]
             })
+            .chain([rel_string(&collision_rel_path(stem))])
             .map(|f| f.to_ascii_lowercase())
             .collect()
     }
@@ -2330,6 +2795,17 @@ mod tests {
                 light_map_resolution: None,
                 body_setup: None,
                 collision_triangles: 0,
+                simple_collision: SimpleCollisionEntry {
+                    use_simple_box_collision: true,
+                    use_simple_line_collision: true,
+                    use_simple_rigid_body_collision: true,
+                    has_body_setup: true,
+                    shapes: Some(rel_string(&collision_rel_path(&s1))),
+                    convex: 1,
+                    boxes: 0,
+                    spheres: 0,
+                    sphyls: 0,
+                },
                 bounds_ue: BoundsEntry {
                     origin: [0.0; 3],
                     box_extent: [0.0; 3],
@@ -2410,6 +2886,479 @@ mod tests {
         let abs = tmp.path().join("abs.gltf");
         assert!(write_file(&root, &abs, b"x", &input, false).is_err());
         assert!(!abs.exists());
+    }
+
+    // ---------------------------------------------------------------- simple collision
+
+    use asamu_ue3::bodysetup::{
+        AggGeom, BoxElem, ConvexElem, ElemBox, Plane, ScalarProperty, SphereElem, SphylElem,
+        permute_vertex_data,
+    };
+    use asamu_ue3::types::FName;
+
+    /// A body written here: a square pyramid (base at z = 0.5, apex at
+    /// z = 2.5), a box, a sphere and a capsule, with two scalar properties.
+    fn pyramid_body() -> BodySetup {
+        let verts = vec![
+            [-1.0, -1.0, 0.5],
+            [1.0, -1.0, 0.5],
+            [1.0, 1.0, 0.5],
+            [-1.0, 1.0, 0.5],
+            [0.0, 0.0, 2.5],
+        ];
+        let plane = |x, y, z, w| Plane { x, y, z, w };
+        let convex = ConvexElem {
+            permuted_vertex_data: Some(permute_vertex_data(&verts)),
+            vertex_data: Some(verts),
+            face_tri_data: Some(vec![0, 1, 2, 0, 2, 3, 1, 4, 2, 2, 4, 3, 3, 4, 0, 0, 4, 1]),
+            edge_directions: Some(vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+            face_normal_directions: Some(vec![[0.0, 0.0, -1.0]]),
+            face_plane_data: Some(vec![
+                plane(0.0, 0.0, -1.0, -0.5),
+                plane(0.894_427_2, 0.0, 0.447_213_6, 1.118_034),
+            ]),
+            elem_box: Some(ElemBox {
+                min: [-1.0, -1.0, 0.5],
+                max: [1.0, 1.0, 2.5],
+                is_valid: 1,
+            }),
+        };
+        let tm = |origin: [f32; 3]| {
+            Some([
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [origin[0], origin[1], origin[2], 1.0],
+            ])
+        };
+        let scalar = |name: &str, value| {
+            BodyProperty::Scalar(ScalarProperty {
+                name: name.to_owned(),
+                raw_name: FName::default(),
+                value,
+            })
+        };
+        BodySetup {
+            net_index: 0,
+            properties: vec![
+                scalar("bNoCollision", ScalarValue::Bool(true)),
+                scalar("PhysMaterial", ScalarValue::Object(PackageIndex(-3))),
+                scalar("PreCachedPhysDataVersion", ScalarValue::Int(7)),
+                BodyProperty::AggGeom(AggGeom {
+                    sphere_elems: Some(vec![SphereElem {
+                        tm: tm([10.0, 20.0, 30.0]),
+                        radius: Some(4.0),
+                        no_rb_collision: Some(false),
+                        per_poly_shape: Some(true),
+                    }]),
+                    box_elems: Some(vec![BoxElem {
+                        tm: tm([1.0, 2.0, 3.0]),
+                        x: Some(2.0),
+                        y: Some(4.0),
+                        z: Some(6.0),
+                        no_rb_collision: Some(true),
+                        per_poly_shape: Some(false),
+                    }]),
+                    sphyl_elems: Some(vec![SphylElem {
+                        tm: tm([0.0; 3]),
+                        radius: Some(1.5),
+                        length: Some(8.0),
+                        no_rb_collision: Some(false),
+                        per_poly_shape: Some(false),
+                    }]),
+                    convex_elems: Some(vec![convex]),
+                    skip_close_and_parallel_checks: None,
+                }),
+            ],
+            native_start: 0,
+            pre_cached_phys_data: Some(Vec::new()),
+        }
+    }
+
+    fn pyramid_doc(body: &BodySetup) -> Result<SimpleCollisionDoc> {
+        simple_collision_doc(
+            "Pkg.Meshes.Pyramid",
+            "Pkg.Meshes.Pyramid.Body",
+            body,
+            &|o| (o.0 == -3).then(|| "Pkg.Phys.Stone".to_owned()),
+        )
+    }
+
+    fn geom_mut(body: &mut BodySetup) -> &mut AggGeom {
+        body.properties
+            .iter_mut()
+            .find_map(|p| match p {
+                BodyProperty::AggGeom(g) => Some(g),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn simple_collision_document_keeps_ue3_space_and_values() {
+        let doc = pyramid_doc(&pyramid_body()).unwrap();
+        assert_eq!(doc.format, "asamu-simple-collision");
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.mesh, "Pkg.Meshes.Pyramid");
+        assert_eq!(doc.body_setup, "Pkg.Meshes.Pyramid.Body");
+        assert!(doc.space.contains("UE3 axes") && doc.space.contains("(y, z, -x) * scale"));
+        assert_eq!(doc.body_properties.len(), 3);
+        assert_eq!(doc.body_properties["bNoCollision"], json!(true));
+        assert_eq!(doc.body_properties["PhysMaterial"], json!("Pkg.Phys.Stone"));
+        assert_eq!(doc.body_properties["PreCachedPhysDataVersion"], json!(7));
+        // UE3 coordinates as stored: nothing is swapped, mirrored or scaled.
+        let c = &doc.convex[0];
+        assert_eq!(c.vertices[1], [1.0, -1.0, 0.5]);
+        assert_eq!(c.vertices[4], [0.0, 0.0, 2.5]);
+        assert_eq!(c.planes[0], [0.0, 0.0, -1.0, -0.5]);
+        assert_eq!(c.planes[1], [0.894_427_2, 0.0, 0.447_213_6, 1.118_034]);
+        assert_eq!(c.face_triangles.len(), 6);
+        assert_eq!(c.face_triangles[2], [1, 4, 2]);
+        assert_eq!(c.edge_directions, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert_eq!(c.face_normal_directions, [[0.0, 0.0, -1.0]]);
+        assert_eq!(
+            (c.bounds_min, c.bounds_max),
+            ([-1.0, -1.0, 0.5], [1.0, 1.0, 2.5])
+        );
+        assert_eq!(doc.boxes[0].size, [2.0, 4.0, 6.0]);
+        assert_eq!(doc.boxes[0].transform[3], [1.0, 2.0, 3.0, 1.0]);
+        assert!(doc.boxes[0].no_rb_collision && !doc.boxes[0].per_poly_shape);
+        assert_eq!(doc.spheres[0].radius, 4.0);
+        assert_eq!(doc.spheres[0].transform[3], [10.0, 20.0, 30.0, 1.0]);
+        assert!(doc.spheres[0].per_poly_shape);
+        assert_eq!((doc.sphyls[0].radius, doc.sphyls[0].length), (1.5, 8.0));
+        // An unresolvable object reference is null, not an invented path.
+        let unresolved = simple_collision_doc("M", "B", &pyramid_body(), &|_| None).unwrap();
+        assert_eq!(unresolved.body_properties["PhysMaterial"], Value::Null);
+
+        // The text that is written reads back exactly and deterministically.
+        let text = serde_json::to_string(&doc).unwrap();
+        assert_eq!(validate_simple_collision(&text, &doc), Vec::<String>::new());
+        assert_eq!(
+            text,
+            serde_json::to_string(&pyramid_doc(&pyramid_body()).unwrap()).unwrap()
+        );
+        assert!(!text.contains('\n') && !text.contains("  "));
+        // A changed value, a broken document and a bad index are reported.
+        let mut other = doc.clone();
+        other.convex[0].vertices[0][0] = -1.5;
+        assert_eq!(validate_simple_collision(&text, &other).len(), 1);
+        assert_eq!(
+            validate_simple_collision(&text[..text.len() - 2], &doc).len(),
+            1
+        );
+        let mut bad = doc.clone();
+        bad.convex[0].face_triangles[0] = [0, 1, 5];
+        let bad_text = serde_json::to_string(&bad).unwrap();
+        assert!(
+            validate_simple_collision(&bad_text, &bad)
+                .iter()
+                .any(|m| m.contains("outside the 5 vertices"))
+        );
+    }
+
+    #[test]
+    fn simple_collision_floats_survive_the_text_bit_for_bit() {
+        // Awkward values: shortest decimal forms, subnormals, the largest and
+        // smallest magnitudes, negative zero, and neighbours of 2^24.
+        let awkward = [
+            0.1f32,
+            -0.3,
+            1.0 / 3.0,
+            120.8339,
+            -6.513_884_5,
+            f32::MIN_POSITIVE,
+            1.0e-45,
+            -1.0e-39,
+            f32::MAX,
+            f32::MIN,
+            f32::EPSILON,
+            -0.0,
+            0.0,
+            16_777_216.0,
+            16_777_218.0,
+            8_388_607.5,
+            3.402_823_3e38,
+            1.175_494_2e-38,
+        ];
+        let mut body = pyramid_body();
+        {
+            let c = &mut geom_mut(&mut body).convex_elems.as_mut().unwrap()[0];
+            // Keep the body consistent: directions carry the values.
+            c.edge_directions = Some(awkward.chunks(3).map(|v| [v[0], v[1], v[2]]).collect());
+        }
+        let doc = pyramid_doc(&body).unwrap();
+        let text = serde_json::to_string(&doc).unwrap();
+        assert_eq!(validate_simple_collision(&text, &doc), Vec::<String>::new());
+        let back: SimpleCollisionDoc = serde_json::from_str(&text).unwrap();
+        let bits = |d: &SimpleCollisionDoc| -> Vec<u32> {
+            d.convex[0]
+                .edge_directions
+                .iter()
+                .flatten()
+                .map(|f| f.to_bits())
+                .collect()
+        };
+        assert_eq!(bits(&back), awkward.map(f32::to_bits));
+        // A sign-of-zero change alone is caught by the validation.
+        let flipped = text.replacen("-0.0],[0.0,1677", "0.0],[0.0,1677", 1);
+        assert_ne!(flipped, text);
+        assert_eq!(validate_simple_collision(&flipped, &doc).len(), 1);
+    }
+
+    #[test]
+    fn inconsistent_bodies_are_refused() {
+        let refuse = |edit: &dyn Fn(&mut BodySetup), needle: &str| {
+            let mut body = pyramid_body();
+            edit(&mut body);
+            let err = format!("{:#}", pyramid_doc(&body).unwrap_err());
+            assert!(err.contains(needle), "expected {needle:?} in {err:?}");
+        };
+        fn first(b: &mut BodySetup) -> &mut ConvexElem {
+            &mut geom_mut(b).convex_elems.as_mut().unwrap()[0]
+        }
+        // Values JSON cannot hold.
+        refuse(
+            &|b| first(b).vertex_data.as_mut().unwrap()[0][0] = f32::NAN,
+            "not finite",
+        );
+        refuse(
+            &|b| geom_mut(b).sphere_elems.as_mut().unwrap()[0].radius = Some(f32::INFINITY),
+            "Radius is inf",
+        );
+        // Members that are not stored: the struct default is not invented.
+        refuse(&|b| first(b).face_plane_data = None, "a member is absent");
+        refuse(
+            &|b| geom_mut(b).box_elems.as_mut().unwrap()[0].tm = None,
+            "TM is absent",
+        );
+        refuse(
+            &|b| geom_mut(b).sphyl_elems.as_mut().unwrap()[0].length = None,
+            "Length is absent",
+        );
+        refuse(
+            &|b| geom_mut(b).box_elems.as_mut().unwrap()[0].per_poly_shape = None,
+            "bPerPolyShape is not stored",
+        );
+        // Triangles that do not index the vertices.
+        refuse(
+            &|b| first(b).face_tri_data.as_mut().unwrap()[0] = 9,
+            "index 9 outside",
+        );
+        refuse(
+            &|b| first(b).face_tri_data.as_mut().unwrap()[0] = -1,
+            "index -1",
+        );
+        // Stale derived data.
+        refuse(
+            &|b| first(b).elem_box.as_mut().unwrap().max[0] = 2.0,
+            "ElemBox",
+        );
+        // No aggregate at all.
+        refuse(
+            &|b| {
+                b.properties
+                    .retain(|p| !matches!(p, BodyProperty::AggGeom(_)))
+            },
+            "no AggGeom",
+        );
+        // A non-finite scalar property.
+        refuse(
+            &|b| {
+                b.properties.push(BodyProperty::Scalar(ScalarProperty {
+                    name: "MassScale".to_owned(),
+                    raw_name: FName::default(),
+                    value: ScalarValue::Float(f32::NAN),
+                }));
+            },
+            "MassScale is NaN",
+        );
+    }
+
+    #[test]
+    fn shapes_file_is_claimed_next_to_the_mesh() {
+        let stem = relative_stem("Pkg", "Pkg.Meshes.Door");
+        let rel = collision_rel_path(&stem);
+        assert_eq!(rel_string(&rel), "Pkg/Pkg/Meshes/Door.collision.json");
+        let planned = Claims::planned(&stem, 2);
+        assert_eq!(
+            planned,
+            [
+                "pkg/pkg/meshes/door.gltf",
+                "pkg/pkg/meshes/door.bin",
+                "pkg/pkg/meshes/door_lod1.gltf",
+                "pkg/pkg/meshes/door_lod1.bin",
+                "pkg/pkg/meshes/door.collision.json",
+            ]
+        );
+        // A shapes file listed by a manifest blocks another key from the stem.
+        let mut c = Claims::default();
+        c.claim("Pkg.Meshes.Door", &[(rel, vec![])]);
+        assert_eq!(c.choose("Pkg.Meshes.Door", stem.clone(), 1).unwrap(), stem);
+        assert_ne!(c.choose("Pkg.Meshes.DOOR", stem.clone(), 1).unwrap(), stem);
+    }
+
+    #[test]
+    fn manifests_of_another_version_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("manifest.json");
+        // No manifest: an empty one.
+        assert!(read_manifest(&path).unwrap().meshes.is_empty());
+        // The current version is read.
+        let current = Manifest {
+            version: MANIFEST_VERSION,
+            ..Manifest::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(read_manifest(&path).unwrap().version, 2);
+        // Version 1 (no `simple_collision`, another content hash) is not merged.
+        for old in [
+            r#"{"version": 1, "notice": "", "coordinates": "", "scale": 1.0, "meshes": {}}"#,
+            r#"{"notice": "", "coordinates": "", "scale": 1.0, "meshes": {}}"#,
+            r#"{"version": 3, "notice": "", "coordinates": "", "scale": 1.0, "meshes": {}}"#,
+        ] {
+            std::fs::write(&path, old).unwrap();
+            let err = format!("{:#}", read_manifest(&path).unwrap_err());
+            assert!(err.contains("expected 2"), "{err}");
+        }
+        std::fs::write(&path, "not json").unwrap();
+        assert!(read_manifest(&path).is_err());
+    }
+
+    /// Gated on the original game data: the simple collision of every static
+    /// mesh of the install, de-duplicated by object path as the importer
+    /// does. Skips cleanly when the install is absent.
+    #[test]
+    fn real_simple_collision_counts() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let root = std::env::var_os("ASAMU_ORIGINAL_DIR").map_or_else(
+            || {
+                PathBuf::from(home).join(
+                    "Library/Application Support/Steam/steamapps/common/A Story About My Uncle",
+                )
+            },
+            PathBuf::from,
+        );
+        let cooked = root.join("A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac");
+        if !cooked.is_dir() {
+            eprintln!("SKIP: original game data not found");
+            return;
+        }
+        let dirs = vec![cooked.clone(), cooked.join("Maps")];
+        let files = package_files(&dirs, &[]);
+        let mut exports = 0usize;
+        let mut first: BTreeMap<String, (SimpleCollisionEntry, String)> = BTreeMap::new();
+        let mut differing = 0usize;
+        let mut bytes = 0usize;
+        let mut properties: BTreeMap<String, usize> = BTreeMap::new();
+        let mut no_collision_bodies = 0usize;
+        for file in &files {
+            let set = PackageSet::new(&dirs);
+            let lp = set.open_file(file).unwrap();
+            for i in 0..lp.package.exports.len() {
+                if !is_static_mesh(&lp.package, i) {
+                    continue;
+                }
+                exports += 1;
+                let m = decode_static_mesh(&lp.package, Some(&lp.name), i, &set).unwrap();
+                // Every copy of a path gets the same stem here, so equal
+                // content gives equal entries and equal text.
+                let stem = relative_stem("P", &m.object.path);
+                let sc = convert_simple_collision(&lp, &m, &stem).unwrap();
+                assert!(sc.issues.is_empty(), "{}: {:?}", m.object.path, sc.issues);
+                assert_eq!(sc.entry.has_body_setup, sc.file.is_some());
+                assert_eq!(sc.entry.has_body_setup, sc.entry.shapes.is_some());
+                let text = sc
+                    .file
+                    .map(|(_, b)| String::from_utf8(b).unwrap())
+                    .unwrap_or_default();
+                match first.get(&m.object.path) {
+                    Some((entry, t)) => {
+                        if *entry != sc.entry || *t != text {
+                            differing += 1;
+                        }
+                    }
+                    None => {
+                        bytes += text.len();
+                        if let Ok(doc) = serde_json::from_str::<SimpleCollisionDoc>(&text) {
+                            for k in doc.body_properties.keys() {
+                                *properties.entry(k.clone()).or_insert(0) += 1;
+                            }
+                            if doc.body_properties.get("bNoCollision") == Some(&json!(true)) {
+                                no_collision_bodies += 1;
+                            }
+                        }
+                        first.insert(m.object.path.clone(), (sc.entry, text));
+                    }
+                }
+            }
+        }
+        let count = |f: &dyn Fn(&SimpleCollisionEntry) -> bool| {
+            first.values().filter(|(e, _)| f(e)).count()
+        };
+        let sum = |f: &dyn Fn(&SimpleCollisionEntry) -> usize| -> usize {
+            first.values().map(|(e, _)| f(e)).sum()
+        };
+        eprintln!(
+            "exports {exports} paths {} differing {differing} bodies {} convex {} boxes {} \
+             spheres {} sphyls {} box off {} line off {} rb off {} no body+box on {} \
+             body+box on {} shapes text {bytes} B properties {properties:?}",
+            first.len(),
+            count(&|e| e.has_body_setup),
+            sum(&|e| e.convex),
+            sum(&|e| e.boxes),
+            sum(&|e| e.spheres),
+            sum(&|e| e.sphyls),
+            count(&|e| !e.use_simple_box_collision),
+            count(&|e| !e.use_simple_line_collision),
+            count(&|e| !e.use_simple_rigid_body_collision),
+            count(&|e| !e.has_body_setup && e.use_simple_box_collision),
+            count(&|e| e.has_body_setup && e.use_simple_box_collision),
+        );
+        // 1,512 exports are 882 distinct paths; every copy of a path has the
+        // same switches and the same shapes.
+        assert_eq!((exports, first.len(), differing), (1512, 882, 0));
+        // PARITY_FINDINGS.md V5.
+        assert_eq!(count(&|e| e.has_body_setup), 316);
+        assert_eq!(
+            count(&|e| !e.has_body_setup && e.use_simple_box_collision),
+            515
+        );
+        assert_eq!(count(&|e| !e.use_simple_box_collision), 70);
+        assert_eq!(
+            count(&|e| !e.use_simple_box_collision && e.has_body_setup),
+            19
+        );
+        assert_eq!(
+            count(&|e| e.has_body_setup && e.use_simple_box_collision),
+            297
+        );
+        assert_eq!(count(&|e| !e.use_simple_line_collision), 65);
+        assert_eq!(count(&|e| !e.use_simple_rigid_body_collision), 57);
+        // A body always has shapes: convex elements, or (one mesh) a sphere.
+        assert_eq!(
+            count(&|e| e.has_body_setup && e.convex + e.boxes + e.spheres + e.sphyls == 0),
+            0
+        );
+        assert_eq!(count(&|e| e.convex > 0), 315);
+        assert_eq!(count(&|e| e.spheres > 0), 1);
+        assert_eq!((sum(&|e| e.boxes), sum(&|e| e.sphyls)), (0, 0));
+        assert_eq!((sum(&|e| e.convex), sum(&|e| e.spheres)), (2439, 1));
+        // Scalar properties stored on the mesh bodies.
+        let stored: Vec<(&str, usize)> = properties.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        assert_eq!(
+            stored,
+            [
+                ("PhysMaterial", 9),
+                ("PreCachedPhysDataVersion", 316),
+                ("bNoCollision", 1),
+            ]
+        );
+        assert_eq!(no_collision_bodies, 1);
+        // The shapes documents of the 316 bodies, as written.
+        assert_eq!(bytes, 4_119_188);
     }
 
     /// Gated on the original game data: converts a few packages in memory and
