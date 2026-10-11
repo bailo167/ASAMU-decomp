@@ -408,6 +408,11 @@ case "$cmd" in
   -h | --help | help) usage 0 ;;
 esac
 check_root
+# Every command talks to the other machine, except `sync --dry-run`.
+case "$cmd" in
+  sync) ;; # checks the host itself, after its options
+  *) check_host ;;
+esac
 
 case "$cmd" in
   sync)
@@ -415,7 +420,6 @@ case "$cmd" in
     ;;
   cargo)
     [ $# -ge 2 ] || die "$EX_USAGE" "usage: cargo NAME ARGS..."
-    check_host
     name="$1"
     shift
     check_name "$name"
@@ -425,7 +429,6 @@ case "$cmd" in
     ;;
   exec)
     [ $# -ge 2 ] || die "$EX_USAGE" "usage: exec NAME PROGRAM [ARGS...]"
-    check_host
     name="$1"
     program="$2"
     shift 2
@@ -436,12 +439,10 @@ case "$cmd" in
     ps_run "${ENTER}WhRun $(ps_text "$program") $(ps_array "$@")"
     ;;
   gate)
-    check_host
     cmd_gate "$@"
     ;;
   ps)
     [ $# -le 1 ] || die "$EX_USAGE" "usage: ps [NAME]  (the script is read from standard input)"
-    check_host
     if [ $# -eq 1 ]; then
       check_name "$1"
       enter "$1"
@@ -455,7 +456,6 @@ case "$cmd" in
     ;;
   fetch)
     [ $# -eq 2 ] || die "$EX_USAGE" "usage: fetch REMOTE LOCAL"
-    check_host
     remote="$1"
     local_file="$2"
     flat="${remote//\//}"
@@ -478,20 +478,17 @@ case "$cmd" in
     ;;
   clean)
     [ $# -eq 1 ] || die "$EX_USAGE" "usage: clean NAME"
-    check_host
     check_name "$1"
     probe
     ps_run "WhClean $(psq "$1")"
     ;;
   disk)
     [ $# -eq 0 ] || die "$EX_USAGE" "usage: disk"
-    check_host
     probe
     ps_run "WhDisk"
     ;;
   info)
     [ $# -eq 0 ] || die "$EX_USAGE" "usage: info"
-    check_host
     probe
     ps_run "WhInfo"
     ;;

@@ -427,13 +427,19 @@ done
 wh "$R" clean h1
 is "no ASAMU_WIN_ROOT: the default root" "$RC/$(command_of 2 'D:\asamu' 2>&1)" "0/WhClean 'h1'"
 
-for host in '-oProxyCommand=touch x' '-v' 'a b' 'a;b' 'host:path' '.x' '@x' "$(printf 'h\303\266st')" 'a$b'; do
-  ASAMU_WIN_HOST="$host" wh "$R" info
-  if [ "$RC" = 2 ] && [ "$(calls)" = 0 ]; then ok "bad host $(printf '%q' "$host") refused"; else bad "bad host $(printf '%q' "$host") refused" "exit $RC, $(calls) ssh calls"; fi
+for host in '-oProxyCommand=touch x' '-oProxyCommand=x' '-v' '-' 'a b' 'a;b' 'host:path' '.x' '@x' "$(printf 'h\303\266st')" 'a$b' 'a/b' 'a\b' "a'b" 'a"b' '$(id)' 'a,b' 'a%b' "$(printf 'a\nb')"; do
+  for sub in info disk "clean h1" "sync h1" "cargo h1 build" "exec h1 prog" "gate h1" ps "fetch logs/x never-written.tmp"; do
+    # shellcheck disable=SC2086
+    ASAMU_WIN_HOST="$host" wh "$R" $sub
+    if [ "$RC" = 2 ] && [ "$(calls)" = 0 ] && [ "$(calls scp)" = 0 ]; then ok "bad host $(printf '%q' "$host") refused by ${sub%% *}"; else bad "bad host $(printf '%q' "$host") refused by ${sub%% *}" "exit $RC, $(calls) ssh calls"; fi
+  done
 done
-ASAMU_WIN_HOST='' wh "$R" info
-is "no host: exit code 2" "$RC" 2
-has "no host: says what to set" "$T/err" "ASAMU_WIN_HOST"
+for sub in info disk "clean h1" "sync h1" "cargo h1 build" "exec h1 prog" "gate h1" ps "fetch logs/x never-written.tmp"; do
+  # shellcheck disable=SC2086
+  ASAMU_WIN_HOST='' wh "$R" $sub
+  is "no host, ${sub%% *}: exit code 2, nothing contacted" "$RC/$(calls)/$(calls scp)" "2/0/0"
+  has "no host, ${sub%% *}: says what to set" "$T/err" "set ASAMU_WIN_HOST"
+done
 ASAMU_WIN_HOST='user@win-box_2.example' wh "$R" info
 is "user@host accepted" "$RC" 0
 
