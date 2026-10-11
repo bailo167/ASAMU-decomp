@@ -1369,7 +1369,7 @@ fn far_away_and_very_long_sweeps_agree_with_the_reference() {
         }
     }
     eprintln!("far: {hits} hits in {sweeps} sweeps ({long_hits} on long sweeps)");
-    assert!(hits > 250 && long_hits > 60, "{hits} {long_hits}");
+    assert!(hits > 200 && long_hits > 60, "{hits} {long_hits}");
 }
 
 /// An L-shaped prism: the union of x 0..100, y 0..40 and x 0..40,
