@@ -91,13 +91,13 @@ fn close(a: f64, b: f64) -> bool {
 }
 
 /// On a plane of gradient `(a, b)` the box rests with its centre
-/// `44 + 21·(|a| + |b|)` above the plane point under its centre: the lowest
-/// point of the box is the bottom corner at `(∓21, ∓21, −44)` on the
-/// downhill side, where the plane is `21·|a| + 21·|b|` below its height
-/// under the centre. The radius-21 cylinder's lowest point is the rim point
-/// straight downhill, where the plane is `21·√(a² + b²)` lower, so it rests
-/// at `44 + 21·√(a² + b²)`: lower than the box on every slope that is not
-/// along an axis. Both normals are the plane's, `(−a, −b, 1)` normalised.
+/// `44 + 21·(|a| + |b|)` above the plane point under its centre: the box
+/// touches with the bottom corner at `(±21, ±21, −44)` on the uphill side
+/// (the signs of `a` and `b`), where the plane is `21·|a| + 21·|b|` above
+/// its height under the centre. The radius-21 cylinder touches with the rim
+/// point straight uphill, where the plane is `21·√(a² + b²)` higher, so it
+/// rests at `44 + 21·√(a² + b²)`: lower than the box on every slope that is
+/// not along an axis. Both normals are the plane's, `(−a, −b, 1)` normalised.
 #[test]
 fn a_box_rests_higher_on_a_slope_than_a_cylinder() {
     for (a, b) in [
