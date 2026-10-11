@@ -161,8 +161,9 @@ Checked again on 2026-10-11, with the script as it is now:
   the real code on standard error, a missing program as 127.
 - Any command costs 1.2 to 1.3 s before its own work starts; `disk` took 21 s for 264 GB in 13 work trees and
   14 target folders.
-- **The gate** on this workspace with a target folder that already held a build: fmt 2.6 s, clippy 25.1 s,
-  test 178.2 s, build 73.9 s, 279.8 s in all. The test step ran 137 test programs and doc-test sets (2,236
+- **The gate** on this workspace with a target folder that held a build of an older state: fmt 2.6 s, clippy
+  25.1 s, test 178.2 s, build 73.9 s, 279.8 s in all (again right after it, with nothing to rebuild: 2.1 s,
+  4.1 s, 55.9 s and 1.4 s). The test step ran 137 test programs and doc-test sets (2,236
   tests passed, 5 ignored) and failed, which the gate reported with exit code 1, the end of the log and the
   name of the one test that failed: `asamu-locate`'s `windows_backslash_paths_in_vdf_are_unescaped`, which
   finds the real Steam folder of that machine where it expects none. The game installed there was hidden from
@@ -204,8 +205,8 @@ a read-only file, paths longer than 260 characters and junctions in the tree it 
 that a file in use is reported and the tree stays marked unfinished; that a `sync` whose list of names holds
 `../escape.txt`, an absolute path, a name with a trailing dot or 27 other such names is refused and writes
 nothing outside the work tree; and that 35 awkward arguments reach a program unchanged. 628 checks in 4 to 5
-seconds, run both ways on the real machine. Of 17 faults put into the PowerShell half on purpose 11 made it
-fail; the other 6 removed one of two fences that each refuse the same input (for example the form of a name
+seconds, run both ways on the real machine. Of 17 faults put into the PowerShell half on purpose 12 made it
+fail; the other 5 removed one of two fences that each refuse the same input (for example the form of a name
 is checked, and the path made from it is compared with its normal form), so the outcome did not change.
 What neither test covers is the SSH server itself and Windows' `tar`: that is what the measurements above are
 for.
