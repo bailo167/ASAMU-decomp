@@ -62,6 +62,12 @@
 //! `--level`: New Game / Continue / chapter select load the chapters, with
 //! saves in the user data directory); `--level`, `--walk`, `--screenshot`
 //! and `--no-menu` skip it.
+//!
+//! The Sandbox (`--sandbox`, or the main menu's button; the `sandbox` module,
+//! compiled with the Cargo feature of that name, on by default;
+//! `docs/SANDBOX.md`) is an experimental lab on top of all of the above. It
+//! is ours, not the original's behaviour, and idle unless a session is
+//! started: nothing in this file runs differently because it is compiled in.
 
 mod audio;
 mod capture;
@@ -74,6 +80,8 @@ mod lightmaps;
 mod npc;
 mod particles;
 mod post;
+#[cfg(feature = "sandbox")]
+mod sandbox;
 mod timetrial;
 mod ui;
 mod vfx;
@@ -205,6 +213,11 @@ const USAGE: &str = "usage: asamu [options]\n\
     --debug-info            start with the developer read-out shown (F1 toggles it; the graybox\n                          \
     always starts with it)\n\
     \n\
+    sandbox (experimental, not verified against the original; saves stay in memory):\n  \
+    --sandbox               start in the Sandbox: live tuning, time control, save states\n  \
+    --arena ID              with --sandbox: start straight in a built-in hand-made arena\n  \
+    --sandbox-profile NAME  with --sandbox: start with this tuning profile\n\
+    \n\
     unattended runs:\n  \
     --no-menu               graybox: skip the main menu (click to play)\n  \
     --screenshot PATH       save a screenshot once the level has loaded (keep it local)\n  \
@@ -226,6 +239,18 @@ struct CameraOverride {
     position: [f32; 3],
     yaw_degrees: f32,
     pitch_degrees: f32,
+}
+
+/// The Sandbox options of the command line. Parsed in every build; a build
+/// without the `sandbox` feature refuses them (see [`parse_cli`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SandboxArgs {
+    /// `--sandbox`: start in the Sandbox (experimental; saves stay in memory).
+    enabled: bool,
+    /// `--arena ID`: start straight in a built-in hand-made arena.
+    arena: Option<String>,
+    /// `--sandbox-profile NAME`: the tuning profile to start with.
+    profile: Option<String>,
 }
 
 /// Parsed command line.
@@ -252,6 +277,7 @@ struct Cli {
     exit_after: Option<f32>,
     walk: f32,
     no_menu: bool,
+    sandbox: SandboxArgs,
 }
 
 impl Default for Cli {
@@ -278,6 +304,7 @@ impl Default for Cli {
             exit_after: None,
             walk: 0.0,
             no_menu: false,
+            sandbox: SandboxArgs::default(),
         }
     }
 }
@@ -389,9 +416,24 @@ fn parse_cli(
                 cli.walk = v;
             }
             "--no-menu" => cli.no_menu = true,
+            "--sandbox" => cli.sandbox.enabled = true,
+            "--arena" => cli.sandbox.arena = Some(value("--arena")?),
+            "--sandbox-profile" => cli.sandbox.profile = Some(value("--sandbox-profile")?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?} (try --help)")),
         }
+    }
+    // The Sandbox options: checked by the Sandbox itself when it is compiled
+    // in, refused otherwise.
+    #[cfg(feature = "sandbox")]
+    sandbox::cli::check(&cli)?;
+    #[cfg(not(feature = "sandbox"))]
+    if cli.sandbox.enabled || cli.sandbox.arena.is_some() || cli.sandbox.profile.is_some() {
+        return Err(
+            "this build has no Sandbox (built without the `sandbox` feature): \
+             --sandbox, --arena and --sandbox-profile are not available"
+                .to_owned(),
+        );
     }
     Ok(Some(cli))
 }
@@ -480,6 +522,12 @@ pub(crate) struct PlayerCamera;
 /// A rendered mover (index into `Level::movers`).
 #[derive(Component)]
 struct MoverVisual(usize);
+
+/// An entity `spawn_level` made for the graybox level (a box or a mover).
+/// Nothing reads it in Classic; the Sandbox hides these while it shows an
+/// arena of its own.
+#[derive(Component)]
+pub(crate) struct LevelVisual;
 
 fn main() -> AppExit {
     let movement_env = std::env::var("ASAMU_MOVEMENT").ok();
@@ -575,6 +623,9 @@ fn add_default_plugins(app: &mut App, title: &str, cli: &Cli) {
         gamepad::GamepadPlugin,
         water::WaterPlugin,
     ));
+    // The Sandbox (experimental; idle unless a session is started).
+    #[cfg(feature = "sandbox")]
+    app.add_plugins(sandbox::SandboxPlugin::from_cli(cli));
 }
 
 fn run_graybox(cli: &Cli) -> AppExit {
@@ -817,7 +868,8 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         converted: Some(dir.clone()),
         levels,
         show_menu: menu,
-        saves: menu,
+        // A `--sandbox` process never opens the saves on disk.
+        saves: menu && !cli.sandbox.enabled,
     };
     println!(
         "ASAMU-decomp: converted level {level} from {} (local data derived from your own install)",
@@ -1007,6 +1059,7 @@ fn spawn_level(
         |min: sim_glam::Vec3, max: sim_glam::Vec3, material: Handle<StandardMaterial>| {
             let size = bevy_vec(ue_extents_to_bevy(max - min, SCALE));
             commands.spawn((
+                LevelVisual,
                 Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
                 MeshMaterial3d(material),
                 Transform::from_translation(to_render((min + max) * 0.5)),
@@ -1057,6 +1110,7 @@ fn spawn_level(
     for (index, m) in level.movers.iter().enumerate() {
         let size = bevy_vec(ue_extents_to_bevy(m.max - m.min, SCALE));
         commands.spawn((
+            LevelVisual,
             MoverVisual(index),
             Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
             MeshMaterial3d(mover_material.clone()),

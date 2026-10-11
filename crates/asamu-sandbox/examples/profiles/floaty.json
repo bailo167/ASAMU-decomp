@@ -1,0 +1,14 @@
+{
+  "format": "asamu-sandbox-profile",
+  "version": 1,
+  "name": "floaty",
+  "description": "example values, ours, not the original's",
+  "base": "asamu_original",
+  "overrides": {
+    "movement.custom_gravity_scaling": 0.5,
+    "pawn.zoom_enabled": false
+  },
+  "rules": { "grapples": "unlimited", "rocket_boots": "on", "auto_refill": false },
+  "time_scale": null,
+  "extensions": {}
+}
