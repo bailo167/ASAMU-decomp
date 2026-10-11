@@ -200,7 +200,7 @@ values above U+10FFFF) replaced by U+FFFD, so every JSON reader accepts the file
 | `fov_camera`, `fov_controller` | camera POV FOV, controller `FOVAngle` |
 | `keys`, `pressed_jump`, `axes` | `PressedKeys` names, `bPressedJump`, the `PlayerInput` axes |
 | `ground_speed`, `air_speed`, `jump_z`, `air_control` | pawn movement values (script changes them: sprint, story mode, grapple) |
-| `eye_height` | pawn `EyeHeight` (0x378, CONFIRMED offset): the camera height above the centre before bob; not in v1 samples |
+| `eye_height` | pawn `EyeHeight` (0x378, CONFIRMED offset): the camera height above the centre before bob; not in v1 samples, kept per tick in the `state:` note (3.5) |
 | `gun` | `grappling`, `released`, `can_grapple`, `anchor` (the helper actor's location: the anchor only while it rides a moving target, 3.3), `grapple_location` (`vGrappleLocation`: the anchor), `distance` (`vDistance`), `times_grappled`, `max_grapples` |
 | `pawn_flags`, `boots` | `ASAMUPawn` flags; boots `enabled`, `finished` |
 
@@ -216,15 +216,31 @@ writes the format of `crates/asamu-player/src/trace.rs` ([PARITY.md](PARITY.md#t
 | sample `k ≥ 1`: buttons | keys of `R_(k−1)` mapped through the recorded bindings: `jump_held` (`Jump`), `grapple_held` (`StartFire`), `sprint_held` (`StartSprinting`), `power_jump_held` (`PowerJumpKeyDown`); `jump_pressed` = jump key rising edge against `R_(k−2)` or a rising `bPressedJump` (catches a press and release inside one frame; at `k = 1` there is no `R_(−1)`, so only a set `bPressedJump` counts); `use_pressed` = rising edge of `use`. Aliases are expanded up to depth 8 and at most 256 command parts per key (a hostile table cannot stall the conversion; real tables use a few). A gamepad's buttons are keys like any other (`XboxTypeS_A`, ...) |
 | sample `k ≥ 1`: `move_forward`, `move_right` | **keyboard:** summed signs of the held keys' `Axis aBaseY` / `Axis aStrafe` commands (clamped to ±1). **Gamepad:** the stick's direction, derived from the pawn's `Acceleration` of `R_k` in the axes of `R_(k−1)`'s pawn rotation (3.4). Chosen per run (`--move-input auto`): the keys if any record of the run holds a key bound to a move axis, else the acceleration if the run has any |
 | look deltas | wrapped change of the controller rotation `R_(k−1) → R_k`, × 2π/65536 — exact and independent of the mouse scaling we have not ported (PARITY deviation 13) |
-| state | `R_k`: `position`, `velocity`; `yaw`/`pitch` = signed 16-bit rotator units × 2π/65536; `fov` = camera POV FOV, else `FOVAngle`; `grapple_state` attached ⇔ `bIsGrappling`, anchor = the gun's `vGrappleLocation` (see below); without gun data (weapon not a `GrappleGun`) no anchor is known, so the sample is idle even in `Physics` 4, and such samples are counted in a `check:` note; `rope_length` null; `grounded` ⇔ `Physics` 1 |
+| state | `R_k`: `position`, `velocity`; `yaw`/`pitch` = signed 16-bit rotator units × 2π/65536; `fov` = camera POV FOV, else `FOVAngle` (**the cached view FOV, which does not show the zoom**: see "The FOV column" below); `grapple_state` attached ⇔ `bIsGrappling`, anchor = the gun's `vGrappleLocation` (see below); without gun data (weapon not a `GrappleGun`) no anchor is known, so the sample is idle even in `Physics` 4, and such samples are counted in a `check:` note; `rope_length` null; `grounded` ⇔ `Physics` 1 |
 | `time` | Σ `DeltaSeconds` of `R_1..R_k` |
 | `tick_rate` | `1 / DeltaSeconds` when every frame of the run had the same length (rounded to an integer within 0.001 Hz), else `null` |
-| `notes` | recorder, sample point, launch options, scenario, frame range and segment; `input:` (bindings); `move input:` (where the move axes come from, how many samples got a direction and how many got 0 for which reason, 3.4); `anchor:` and `check:` lines (counts: axes vs keys, acceleration without a move key, grapple flag vs `PHYS_Flying`, `PHYS_Flying` without gun data, helper away from the anchor, `vDistance` vs the distance to the anchor, FOV fallbacks); `state: {...}` (the recorded script state of every tick, 3.5); `init: {...}` (the older form: tick 0 only) |
+| `notes` | recorder, sample point, launch options, scenario, frame range and segment; `input:` (bindings); `move input:` (where the move axes come from, how many samples got a direction and how many got 0 for which reason, 3.4); `anchor:` and `check:` lines (counts: axes vs keys, acceleration without a move key, grapple flag vs `PHYS_Flying`, `PHYS_Flying` without gun data, helper away from the anchor, `vDistance` vs the distance to the anchor, FOV fallbacks, an eye height left out of the state note); `fov: cached view FOV …` (on how many samples the FOV column is the camera's cached view FOV); `event:` lines (teleports, level-script state changes, attaches of the grapple: 3.6); `state: {...}` (the recorded script state of every tick, 3.5); `init: {...}` (the older form: tick 0 only) |
 
 A run ends at a frame gap, a paused frame, a frame without a player, a change of map, pawn object or class, and
 where `WorldInfo.TimeSeconds` goes back (the level was loaded again); each run of at least two records is one
-trace (`<stem>.trace.jsonl`, or `<stem>.seg<i>.trace.jsonl`). Without recorded bindings the converter falls back
-to the signs of `aBaseY`/`aStrafe` (of `R_k`) and `bPressedJump`, and says so in the notes.
+trace (`<stem>.trace.jsonl`, or `<stem>.seg<i>.trace.jsonl`). A respawn after a death ends no run (same map,
+same pawn object, consecutive frames): it is marked as an event instead (3.6). Without recorded bindings the
+converter falls back to the signs of `aBaseY`/`aStrafe` (of `R_k`) and `bPressedJump`, and says so in the notes.
+
+**The FOV column** ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N1). `fov_camera` is the camera's cached view FOV
+(`CameraCache.POV.FOV`). The camera writes its default FOV into that field on every view update, while the zoom
+locks the FOV in other fields of the camera, which recorder 0.1.0 does not read: the field is 90.0 on all 45,237
+records of 2026-10-10, through zoom-button holds (CONFIRMED that it cannot show the zoom; whether the original
+zoomed in those frames is UNKNOWN until a recording has the lock fields). The converter therefore writes
+`fov: cached view FOV (the camera's CameraCache.POV.FOV) on N of M samples: …`, and `asamu-trace compare` leaves
+the FOV out of the **verdict** of a trace whose note covers **every** sample (`on N of N samples`;
+`--fov-verdict auto`, the default; `count` and `exclude` state it). A trace whose note covers only part of its
+samples (the rest is the controller's `FOVAngle`, of which nothing says that it cannot show the zoom), or whose
+note cannot be read, keeps its FOV in the verdict unless `exclude` is given; all 14 traces of 2026-10-10 are
+covered in full. A converter that reads the camera's locked FOV must not write the note. Nothing else changes:
+the FOV's tolerance, its statistics and its first exceedance are reported as before, and the summary says
+whether the FOV counted and why. (A comparison in which only an excluded FOV differs has the verdict `Exact`:
+exact in every field that counts. The text and the report show the FOV's numbers next to it.)
 
 **The anchor** (corrected 2026-10-10). The converter used to write the location of the gun's helper actor
 (raw `anchor`). The first recordings show that this is the anchor only for some grapples: the gun's own
@@ -270,9 +286,13 @@ acceleration but no move key.
 
 `state:` (one notes line, `tools/asamu-trace/src/state.rs`) lists, for every tick, the fields of the raw record
 that the samples do not carry, as changes: `physics`, `base`, `ground_speed`, `air_speed`, `jump_z`,
-`air_control`, the pawn flags (`sprinting`, `has_jumped`, `power_jumped`, `has_released_jump`, `is_falling`),
-the gun's `grappling`, `released`, `can_grapple`, `times_grappled`, `max_grapples`, and the boots'
-`boots_enabled`, `boots_finished`. `EyeHeight` is left out (it changes on most frames).
+`air_control`, `eye_height`, the pawn flags (`sprinting`, `has_jumped`, `power_jumped`, `has_released_jump`,
+`is_falling`), the gun's `grappling`, `released`, `can_grapple`, `times_grappled`, `max_grapples`, and the boots'
+`boots_enabled`, `boots_finished`. The eye height changes on most frames of a moving pawn (26,283 of the 45,237
+samples of 2026-10-10), which makes the line long (the meta line of the longest of those runs has 277 KB); a trace's meta
+line may have 1 MiB, so a run whose eye height changes on more than 16,000 ticks is written without it and says
+so in a `check:` note (a limit of the format, not of the game). Traces converted before the field was kept do
+not have it.
 
 `asamu-trace replay` starts from any tick `T` (`--from-tick`): position, velocity, view and walking/falling
 from sample `T`, and from the recording, never from a guess:
@@ -283,25 +303,150 @@ from sample `T`, and from the recording, never from a guess:
 | sprint applied | `bSprinting` |
 | story mode | `GroundSpeed` when it is the story speed 264 (on) or the walking or sprint speed 440/880 (off): the pawn's own script writes no other value (ABILITIES.md A-WK-3). Any other value comes from a console `SetSpeed` (AG-Workshop, AG-Epilogue) and shows nothing: the replay leaves story mode as it is, prints a warning, and `--story-mode on|off` states it (for AG-Workshop: on, [LEVELS.md](reverse-engineering/LEVELS.md); in the recording the jump button never lifts the pawn) |
 | grapple capacity, used count, fire latch; rocket boots enabled | the gun's and boots' recorded values at `T` |
+| eye height | the recorded `EyeHeight` at `T` (it matters to a grapple pressed from the ground: the fire trace starts at the eye, and at walking presses the recorded eye height was 28.0 to 44.6, not the standing 38) |
+| the pawn has a base | a walking start whose recorded `base` is not null. Our first floor check then leaves the pawn where it stands if its floor is 1.9 to 2.4 uu below it, as the native check leaves a based pawn (NATIVE_PHYSICS.md 3.3); without a base it re-seats the pawn at 2.15 in any case |
 | button levels before `T` (for press and release edges in the first tick) | sample `T`'s own input; at the first sample they are unknown and taken as released |
 | FOV | sample `T` |
 
 Not recorded, so they start as our simulation starts them: "sprint after landing", the pawn's and the power
 jump's state code (jump-release damping, a charging power jump, a running zoom), zoom availability, the gun's
-attachment and timers, the boots' boost, the eye height's smoothing, the floor the pawn is based on. All of
+attachment and timers, the boots' boost, the walk bob, the floor normal. All of
 these are at rest when the pawn stands still with nothing held, so **a replay of an original recording starts
 only there**: at a sample that is walking, has zero velocity, no attached grapple, no move input and no jump,
-grapple or power-jump button (a held sprint button is fine), and whose previous sample is the same. A start
+grapple or power-jump button (a held sprint button is fine), whose previous sample is the same, and in whose
+tick the pawn was not teleported. A start
 anywhere else (in the air, moving, attached) is **refused**, with the standing-still ticks before and after it
 in the error; `--start snap` moves the start forward to the next such tick, `--start force` starts there all the
 same with a warning in the notes (a forced start while attached does not recreate the attachment). Traces of
 our own runtime start anywhere, as before. A trace converted before the `state:` note existed has `init:` for
 its first sample only.
 
+**What the replay says about its start** ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N2). The recorded position is
+the original's, on the original's collision; ours has other shapes and rest heights, and that alone can decide a
+replay before any rule of movement is exercised. Whenever the start state is written, the replay's notes carry:
+
+| Note | Meaning |
+|---|---|
+| `start: our floor is D uu below the pawn at the recorded position …: <surface>; <base>` | the distance our own floor check will measure, what it hits (the actor's object name on a converted level, read from the level's scene file; world geometry otherwise) and how that compares with the recorded base actor: the same name (names are not unique across streamed levels), another actor, world geometry on both sides (the original's base is then its `WorldInfo`), or not comparable |
+| `start: no floor of ours within 28 uu below …` | the floor check will find nothing: our pawn starts to fall |
+| `warning: the start position overlaps our collision …` | the pawn's shape at the recorded position is inside our geometry; the note says on what, and how far above the recorded height a pawn lowered onto that place comes to rest. Our pawn usually cannot move from there (four of the first recordings' "pawn does not move" starts were this) |
+| `start: in the first tick our pawn moves A uu vertically and the original B uu while both walk` | the first tick's vertical move of both. A **warning** instead when the two differ by more than 0.5 uu (the width of the native hover band): the two stand on different floor heights from the start, and every vertical number of the replay carries that offset |
+| `warning: our pawn did not move in N tick(s) …` | it never left an overlapping start while the original travelled |
+
 `asamu-trace starts TRACE` lists the standing-still stretches with the recorded state at each (speed, story
 mode, air control, grapple budget, floor actor) and what happens between them (moves, sprint, jumps, power-jump
 button, grapple button, attach, release by the button or with it held, leaving the ground, landing; `--events`
 for every event with its tick): that is how a segment is picked.
+
+### 3.6 Events a replay cannot follow, and attaches no sample shows
+
+A recording contains things that a replay of its inputs cannot reproduce, and one thing its samples do not
+show. The converter marks them in `event:` notes; `asamu-trace starts --events` lists them among the player's
+own events; readers compute them from the samples and the `state:` note (`tools/asamu-trace/src/segments.rs`),
+so they are also found in traces converted before the notes existed. The schema stays v1.
+
+| Event | Rule | In the recordings of 2026-10-10 |
+|---|---|---|
+| teleport | the pawn moved more than 10,000 uu/s × the frame length in one tick. 10,000 is `ASAMUPawn.fTerminalVelocity` (class default), the 3-D speed clamp of the falling physics: no fall covers more | 5 ticks, each a respawn after a death (10,035 to 34,860 uu in one tick; the largest displacement per time anywhere else is 6,776 uu/s, in the fall before one of them): DC1 seg0 997 and 5746, PLAY2 seg1 5946, PLAY2 seg5 2393 and 6779. CONFIRMED on these 45,237 samples. Limit of the rule: a script move shorter than that (167 uu in a frame of 1/60 s) passes as a move, so a respawn that close to the place of death would not be found (the samples alone cannot show whether there was one; the analysts counted 5 deaths, 5 of 5 found) |
+| story mode on / off | the recorded `GroundSpeed` becomes the story speed 264, or goes from it to the walking or sprint speed 440 / 880 (between 440 and 880 is the pawn's own sprint: no event) | 6: DC1 seg0 7214, DC1 seg3 5019, PLAY2 seg0 1475, PLAY2 seg1 785 and 8250, PLAY2 seg4 2470 |
+| `GroundSpeed` set | any other change of the recorded `GroundSpeed`: a console `SetSpeed` (ABILITIES.md A-WK-3) | none (AG-Workshop holds 132 from its first record) |
+| grapple capacity changed | `iMaxGrapples` changes | 1: PLAY2 seg4 2535 (2 → 3) |
+| rocket boots enabled / disabled | the boots' `bEnabled` changes | none |
+| grapple attached and released within the frame | the gun's used-grapple counter `iTimesGrappled` rose, but the attached flag did not rise in that sample: the attach, its pull and a release all ran inside one frame. Every attach raises the counter (GRAPPLE.md G-AT-1), so the attaches of a recording are **counted from the counter** | 15 of 134 attaches (DC1 seg0 3655; PLAY2 seg1 2176; PLAY2 seg7 1436, 1449, 1462, 1517; PLAY2 seg8 13, 40, 128, 156, 184, 212, 238, 265, 278) |
+
+**Validity of a replay** (`replay --level-events stop|inject|ignore`; original recordings only, since our own
+simulation reproduces its own respawns). A teleport and the level-script changes (the four rows from "story
+mode" to "rocket boots") come from outside the player's simulation: a death and the level's Kismet, neither of
+which a per-sample replay runs.
+
+- `stop` (the default): the replay **ends before the first such tick** and says so (`validity: stopped before
+  tick T (…): … N of M tick(s) replayed`). The trace it writes is the valid part; nothing after an event is
+  compared any more.
+- `inject`: the recorded change is taken over at that tick, under an `injected:` note, and the replay goes on.
+  A level-script change is written into our state before our tick (story mode entered or left, the console
+  speed, the capacity, the boots); the record after the frame shows the change, so the frame ran with it, but
+  whether the script acted before or after the pawn's physics of that frame is not recorded: TENTATIVE (one
+  instance agrees with "before": at DC1 seg3 tick 5019 the original leaves story mode and walks 299.0 uu/s at
+  the end of that same frame, 333.2 the frame after; ours with the change written before the tick 299.1 and
+  333.4). A teleport replaces our position, velocity, view and physics mode after our tick.
+- `ignore`: the tick is simulated like any other, as replays did before; the notes carry a warning that names
+  the tick from which the comparison is not valid.
+
+The replay also counts both sides' attaches the same way (`attaches:` note: the attached flag rose or the
+counter rose) and compares, after every tick, our `GroundSpeed`, `AirControl`, sprint flag, used grapples,
+capacity and eye height with the recorded ones (`state check:` notes), because canonical samples do not carry
+them ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N7, N10).
+
+### 3.7 One-step replays and what a comparison reports
+
+**Free-running** (the default): the replay starts from the recording at one tick and runs on with our rules.
+Its errors accumulate: a pawn that stands 1 uu lower from the first tick has a position error of at least 1 uu
+on every later tick, whatever our rules do there.
+
+**One step at a time** (`replay --one-step`): every tick restarts from the recording's previous sample, so
+sample `k` of our trace is one tick of our rules applied to the original's state `k − 1`. The errors are those
+of one tick; they must never be read against, or gated with, a free-running tolerance (the comparison's text,
+its summary JSON and the report mark the mode).
+
+| | |
+|---|---|
+| Resynchronised before each tick, from sample `k − 1` and the `state:` note at `k − 1` | position, velocity, yaw, pitch; the physics mode (walking, falling, or attached at the recorded anchor: an attachment we do not have is created on world geometry, one the original does not have is released); `GroundSpeed` with the story mode it shows, `AirControl`, `JumpZ`, `AirSpeed`, the sprint flag; the gun's used count, capacity, fire latch and released flag; rocket boots enabled; the eye height |
+| **Not** resynchronised: no record shows them, so they continue from our own previous tick | the pawn's and the power jump's state code and timers (jump-release damping, a charging power jump, a running zoom); "sprint after landing"; the move-input lock; the gun's weapon state and timers; the boots' boost; the walk bob; the FOV (the recorded one is the cached view FOV); the floor normal and the "has a base" flag while the physics mode agrees (set from the recorded base when the mode has to be changed); the level's objects and Kismet; the placeholder rope grapple of `--placeholder` |
+| Left alone | button levels: both sides get the same inputs |
+| Options | `--story-mode` states the story mode at the start only; on later ticks the recorded `GroundSpeed` decides wherever it shows it (264, 440, 880), and where it does not (132 in AG-Workshop) the stated mode stays. With `--no-init` the recorded script state is not written on any tick: position, velocity, view and physics mode only |
+| Left out | a tick with a teleport or a level-script state change (3.6): its sample is missing from our trace and the next tick starts from the recording after it (unless `--level-events ignore`). On a hand-made level replayed with fixed ticks the level's clock (its movers) falls one tick behind per tick left out |
+
+When nothing differs, the resynchronisation writes back what is already there: a one-step replay of a recording
+made by our own simulation is that recording bit for bit, on every tick (tested with fixed and with variable
+frame lengths, through walking, sprinting, jumps and a grapple flight). The replay's `one-step:` notes say how
+many ticks it ran and how often it had to change more than values (the physics mode, an attachment created or
+released, the anchor moved).
+
+That the mode also **reports** a difference truthfully is tested with "originals" that differ from our
+simulation in a known way (`tools/asamu-trace/tests/one_step_truth.rs`; the expected numbers come from the
+rules, not from a replay):
+
+- an original that falls under another gravity (a test-only copy of the parameters) is off by
+  `2·(g − g')·dt` in vertical velocity and `(g − g')·dt²` in height on every falling tick, with `dt` that tick's
+  own frame length (NATIVE_PHYSICS.md 4.3 and 4.6), and by nothing sideways; free-running, the same difference
+  piles up. Forced to ticks of another length, most ticks miss the prediction, and `compare` says that the frame
+  lengths differ;
+- a `JumpZ` that a level script changes for one record only is used by the tick that starts from that record
+  and by no other (so the recorded state is neither written a tick late nor a tick early);
+- a button held in the start sample gives the first tick its release edge; without it, the `state check:` note
+  names the tick;
+- a recording whose inputs are paired with the states one tick late is wrong at the ticks where the input
+  changes, and only there.
+
+**Ticks that start inside our collision.** The recording's positions are the original's, on the original's
+collision. Where ours has geometry the original does not have there, the resynchronised pawn starts the tick
+stuck in or pushed out of it, which is a collision difference and not one tick of our movement rules. Every
+such tick is counted and listed (`one-step: warning: N of M tick(s) start inside our collision … Tick(s) …`; the
+library returns all of them), by the same test as the start position's (the pawn's shape at the recorded
+position against our collision as it was when the replay started). On the recordings of 2026-10-10: 185 of the
+3,000 ticks of the Workshop walk (from tick 1798), and 5 of 150 in the flight through the blocking volume that
+is switched off in the original (P5), where the largest one-step horizontal error is 18.2 uu with those ticks
+and 6.1 uu without. The test does not separate every collision difference: a walking tick that starts above or
+below our floor is moved onto it by our floor check (up to the check's reach in one tick), and a move may meet a
+step of ours where the original has a ramp. The largest one-step errors of the Workshop walk (11.7 uu and
+678 uu/s horizontally, 22.3 uu vertically, on the stairs) are of that kind and are not overlap ticks. Until the
+collision agrees (P1 to P5), one-step numbers of walking ticks are numbers about the collision too.
+
+**What `compare` reports**, for either mode ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N8):
+
+- per field as before (count, max and its tick, mean, RMS, first tick over the tolerance), and under the
+  position and the velocity their **horizontal** part (length of the X/Y difference) and **vertical** part
+  (|ΔZ|, with the range of the signed difference `b − a`). The first tick at which a part alone exceeds its
+  field's tolerance is listed too (`position_horizontal`, `position_vertical`, `velocity_horizontal`,
+  `velocity_vertical` in the summary's `first_exceedance`); the verdict is decided by the 3-D number as before;
+- yaw and pitch also in **rotator units** (65536 per turn; the original keeps its view angles as integers of
+  that unit, so 1 unit is its smallest step, and the tolerance line shows the angle tolerance in both: 0.001 rad
+  is 10.43 units);
+- whether the FOV counted for the verdict (3.3, "The FOV column");
+- the mode (`mode: one-step …`) and the replay's own notes (validity, what a one-step replay resynchronised, the
+  start notes, the state checks, warnings), which the summary JSON carries as `harness_notes` and
+  `asamu-trace report` lists under its table. The report's table has the horizontal and vertical cells, the
+  angles in degrees and rotator units, and a "Mode" column.
 
 ## 4. Recording on this Mac (Route A): step by step
 
@@ -441,16 +586,33 @@ cargo run -p asamu-trace -- replay $T/<run>.trace.jsonl --out $T/<run>.replay.js
     --tol-position 1 --tol-velocity 10 --tol-angle 0.001 --tol-fov 0.1 --tol-anchor 1
 cargo run -p asamu-trace -- compare $T/<run>.trace.jsonl $T/<run>.replay.jsonl --tol-position 1 --fail-on-divergence
 cargo run -p asamu-trace -- replay $T/<run>.trace.jsonl --out $T/<run>.from300.jsonl --from-tick 300 --ticks 60 --compare
+# One tick of our rules at a time, every tick restarted from the recording (3.7):
+cargo run -p asamu-trace -- replay $T/<run>.trace.jsonl --out $T/<run>.onestep.jsonl --converted "$ASAMU_CONVERTED_DIR" \
+    --from-tick 300 --ticks 60 --one-step --compare --json $T/<run>.onestep.summary.json
 cargo run -p asamu-trace -- report $T/*.summary.json --out $T/parity.md      # paste into docs/PARITY.md
 ```
 
 `--from-tick`/`--ticks` restart from the original's state at a standing-still tick (segment replays, 3.5) to
-separate local error from accumulated drift. With `--kismet` the map's Kismet always starts from level start (also for a segment
+separate local error from accumulated drift; `--one-step` goes all the way and restarts every tick (3.7). A
+replay of an original recording ends before the first respawn teleport or level-script state change inside it
+and says so (`validity:` note; `--level-events inject` takes the recorded change and runs on under an
+`injected:` note, `ignore` runs through with a warning: 3.6). Read the replay's `start:` notes and warnings
+before its numbers: a start that overlaps our collision, or a first tick that moves our pawn onto another floor
+height, decides the vertical columns by itself (3.5). With `--kismet` the map's Kismet always starts from level start (also for a segment
 replay; the replay's notes say so), its level-start actions may override the recorded start state, and
-a map without a Kismet export replays without Kismet (also stated in the notes). Tolerances must be finite and
+a map without a Kismet export replays without Kismet (also stated in the notes).
+
+`compare` (also behind `replay --compare`) gives every position and velocity error as a 3-D number, a
+horizontal and a vertical part, and the angles in radians and rotator units (3.7). The FOV of a recording whose
+FOV column is the camera's cached view FOV on every sample does not count for the verdict (`--fov-verdict auto`,
+the default; `count` or `exclude` to state it), because that field cannot show the zoom (3.3); its numbers are
+still listed and no tolerance is changed for it. A one-step replay lists the ticks that start inside our
+collision (`one-step: warning:`); read its numbers with and without them (3.7). Tolerances must be finite and
 non-negative (use a large value such as `1e30` to ignore a field; an infinity cannot be stored in the summary
 JSON). The tolerances above are a starting point for analysis, not properties of the game; state the ones used
-next to any published number. Every divergence becomes a hypothesis, then evidence (RE or a
+next to any published number, and never use one tolerance for a free-running and a one-step comparison (a
+one-step error is one tick's; [PARITY_FINDINGS.md](PARITY_FINDINGS.md) section 5 has the measured noise of
+each). Every divergence becomes a hypothesis, then evidence (RE or a
 targeted trace), then a fix, with the "measured" column of PARITY.md updated.
 
 ## 5. Scenarios
@@ -499,20 +661,24 @@ recorder on the game machine is one Python script that only **reads** the game's
 installed, nothing written to the process. The raw format, `asamu-trace validate`/`convert` and everything
 after them are the ones of section 3.
 
-**Status (2026-10-10).** Built, tested, reviewed a second time (6.8) and deployed; **not yet run against the
-game**, which was not running on the game machine at any check (the last one after the review). Verified without
-it: the logic on a fake 32-bit image with exact interleavings (6.6), the real Windows API path against a stand-in
-process on the game machine (300 of 300 frames at 62 frames per second, none torn), and the whole remote flow
-from the Mac. The feasibility gate W-F1..W-F6 (6.5) is what the first session with the game has to show.
+**Status (2026-10-10).** Recorder 0.1.0 made the first three recordings of the original (6.9; the feasibility
+gate is in 6.5). Recorder **0.2.0** adds what those recordings showed to be missing (6.10: the camera's
+field-of-view lock, the level of the base actor, the floor normal, the view bob, the collision cylinder, the
+weapon's state and timers), a log of every dropped frame with its reason, and markers. It is tested on the fake
+32-bit image and against the stand-in process on the game machine (6.6) and deployed there; **the optional
+fields have not been read from the game yet** (it was not running at any check): the first `check` of the next
+session shows them.
 
 ### 6.1 Components
 
 | Path | What it is |
 |---|---|
-| `tools/trace-recorder/asamu_win.py` | Windows front end: `check`, `start`, `status`, `stop`. Stock CPython 3.8+ with `ctypes` (3.13 on the game machine); imports on macOS/Linux for the tests. Opens the game once, with `PROCESS_VM_READ \| PROCESS_QUERY_INFORMATION` only, and reads with `ReadProcessMemory`; that handle is the only one to the game (W1). |
+| `tools/trace-recorder/asamu_win.py` | Windows front end: `check`, `start`, `mark`, `status`, `stop`, and `v1view` (any OS: a copy of a recording without its optional fields). Stock CPython 3.8+ with `ctypes` (3.13 on the game machine); imports on macOS/Linux for the tests. Opens the game once, with `PROCESS_VM_READ \| PROCESS_QUERY_INFORMATION` only, and reads with `ReadProcessMemory`; that handle is the only one to the game (W1). |
 | `tools/trace-recorder/asamu_recorder_core.py` | The same core as the Mac recorder: layout lookups, object walk, sentinels, raw format, converter. Pointer size, array, string and name-entry shapes come from the layout file. |
 | `tools/trace-recorder/layout_win_x86.json` | The Win32 layout: 4-byte pointers, RVAs of the globals, 64 field offsets, sentinels ([DEFAULTS.md](reverse-engineering/DEFAULTS.md) §9, [WINDOWS_BINARY.md](reverse-engineering/WINDOWS_BINARY.md)). |
-| `tools/trace-recorder/win_remote.sh` | Mac-side helper: `deploy`, `selftest`, `game`, `check`, `start`, `status`, `stop`, `fetch` (finished recordings only), each one SSH call with `powershell -EncodedCommand`. |
+| `docs/reverse-engineering/data/win32/recorder_optional_win32.json` | The optional fields (6.10): 25 offsets in eight groups (a ninth, `base_level`, needs none), two native structures, three sentinels. Generated with the layout; `deploy` copies it to `data\win32` of the working folder. Without it the recorder writes version-1 records plus `base_level`. |
+| `tools/trace-recorder/win_remote.sh` | Mac-side helper: `deploy`, `selftest`, `game`, `check`, `start`, `session`, `mark`, `status`, `stop`, `fetch` (finished recordings only), `layoutcheck`, each one SSH call with `powershell -EncodedCommand`. |
+| `tools/ghidra-scripts/win32/win32_live_check.py`, `win32_props_check.py` | The two live layout checkers (read-only like the recorder; [WINDOWS_BINARY.md](reverse-engineering/WINDOWS_BINARY.md) §8). `win_remote.sh layoutcheck` runs them against the running game and keeps their whole output under `research/local/win/live-checks/`. |
 | `tools/trace-recorder/test_win_glue.py` | Tests on a fake 32-bit image (any OS) and, with `--live-fake` on Windows, against a stand-in process through the real API. |
 
 ### 6.2 Evidence (Windows build, Steam build 1822049, read only)
@@ -525,7 +691,7 @@ from the Mac. The feasibility gate W-F1..W-F6 (6.5) is what the first session wi
 | W4 | **Key and button messages are only queued by the window procedure.** The viewport's message handler (RVA 0x0144FFB0) sends `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` (0x100, 0x101, 0x104, 0x105), `WM_CHAR`/`WM_SYSCHAR`, the mouse button messages 0x201–0x209 and 0x20B–0x20D, and focus/close to the function at RVA 0x0144A4A0 and returns; that function reads five key states with `GetKeyState` (virtual keys 0xA2, 0xA3, 0xA0, 0xA1, 0x12) and appends a 36-byte element to the array at client+0x1D0. `UWindowsClient::Tick` (RVA 0x014536D0) begins by calling RVA 0x01451E80, which hands each queued element to RVA 0x014508D0 and empties the array; then it ticks the viewports and calls RVA 0x0144B9E0. | CONFIRMED (disassembly: the queue, its five `GetKeyState` calls, the replay loop, the call order); the names `DeferMessage` / `ProcessDeferredMessages` / `ProcessInput` are stock UE3's (STRONG); that RVA 0x0144B9E0 reads mouse movement and pads was not traced (STRONG) |
 | W5 | Hence **all input reaches the game inside `Client->Tick`**: nothing between the `GFrameCounter` increment and the next `Client->Tick` changes `PressedKeys` or runs a key command, and `PressedKeys` then stays as it is through the whole `UWorld::Tick`. | STRONG (W3 + W4; a script that resets the input during a tick would change it, not examined) |
 | W6 | The time update (RVA 0x014A6820): with a variable step `GDeltaTime` is stored after the frame-limit wait, as the last thing (RVA 0x014A6B17); with a fixed step `GDeltaTime = GFixedDeltaTime` (RVA 0x014A68A8) and `GCurrentTime` advances (RVA 0x014A68C2) without any wait. | CONFIRMED (disassembly) |
-| W7 | Field offsets: the Win32 layout rules reproduce 1,652 of 1,652 native class sizes and 76 of 76 offsets shown by instructions; 29 of the recorder's 64 fields are shown by an instruction, the script-only classes are rule-derived. | CONFIRMED rules, STRONG script-class offsets (DEFAULTS.md §9); W-F3 upgrades them |
+| W7 | Field offsets: the Win32 layout rules reproduce 1,652 of 1,652 native class sizes and 77 of 77 offsets shown by instructions (66 of 66 on the independent route); 29 of the recorder's 64 fields are shown by an instruction, the script-only classes are rule-derived. Of the 25 optional offsets (6.10) 11 are shown by an instruction, 3 are rows of a native class, 11 are rule-derived. | CONFIRMED rules, STRONG script-class offsets (DEFAULTS.md §9); W-F3 upgrades them |
 | W8 | **The `RealTimeSeconds` store is not the first thing `UWorld::Tick` does.** Between the function's entry (RVA 0x00635450) and the store (RVA 0x00635841) it makes 22 calls, among them an indirect call (RVA 0x00635574) in its loop over `GEngine`'s local players (+0x4B4) and one `UWorld::IsPaused` call; the Mac function has the same shape (21 calls before its store at 0x100910B71: a virtual call on each local player's controller, `FParticleDataManager::Clear`, the demo and net-client hooks, `UActorComponent::BeginDeferredReattach`). `TickActors` comes after the store in both. So "no actor has ticked" holds from the counter increment to the store, but "nothing has run" holds only up to the next frame's time update: it is the late marker (6.3), not the `RealTimeSeconds` rule, that keeps a sample clear of the input dispatch and of this code. | CONFIRMED (call lists of both functions up to the store; what the Windows calls are was not resolved beyond `GetWorldInfo` and `IsPaused`); that none of them changes a field the recorder reads is UNKNOWN |
 
 Reproduce W4, W6 and W8 (`$EXE` = a local copy of `Binaries/Win32/ASAMU-Win32-Shipping.exe`; image base
@@ -590,6 +756,19 @@ What is dropped, and counted in `status.json` and `<recording>.stats.json`:
 | `input_retries` | failed reads of a frame's keys at its tick start | read again while the tick lasts; a record that never gets its keys counts under `no_input` |
 
 A failed read inside the window is retried once; a sentinel mismatch counts only on a sample read in a window.
+
+**Every dropped frame is logged with its reason** (`stats.drops` of `status.json` and of the stats file; recorder
+0.2.0). An entry has the frame number the record has or would have had (`frame`, `last`, `count`: consecutive
+frames of one reason share an entry, and a stretch without a player, a menu, is one entry), a `reason` (`missed`,
+`skipped`, `unconfirmed`, `torn`, `late`, or `no-input` for a record written without its input) and a `detail`:
+which marker moved during a torn read; why a sample could not be confirmed (the counter advanced by more than
+one, the frame's input could not be read, the `WorldInfo` changed, or a resync with what `RealTimeSeconds` did:
+"did not move forward" or "changed a second time in one frame", with both values); for `skipped` the sampler's
+word (`no-player`, `paused`, ...). The log holds 2,000 entries (`drops_omitted` counts what did not fit). A test
+checks on every scripted interleaving that each frame missing from a recording is in the log and that no logged
+frame has a record (6.6). The first recordings had no such log: their eight single-frame gaps inside a map
+(frames 33306 and 33345 of DC1; 43298, 53931, 54499, 74164, 81480 and 83006 of PLAY2, whose stats count 10
+`resyncs`) cannot be attributed after the fact.
 
 **What a level change does.** A new `WorldInfo` at a new address makes the next sample unconfirmed. A level
 loaded again can leave the new `WorldInfo` and pawn at the old addresses, with the same map name (not observed
@@ -664,7 +843,8 @@ authentication, Python 3 with the `py` launcher; nothing else is needed there).
 ```sh
 export ASAMU_WIN_HOST=<ssh host of the game machine>
 R=tools/trace-recorder/win_remote.sh
-$R deploy              # copies 4 files (+ globals.json) to %USERPROFILE%\asamu-trace, compares SHA-256
+$R deploy              # copies 4 files (+ globals.json and the optional layout into data\win32) to
+                       # %USERPROFILE%\asamu-trace, compares SHA-256
 $R selftest --live     # the tests there, then the real API path against a stand-in process (no game needed)
 ```
 
@@ -677,7 +857,11 @@ to go anywhere but `target/`.
    build match, `handle: access 0x1410 granted`, `FName::Names[0]='None'`, the map, `ASAMUPlayerController` /
    `ASAMUPawn`, `layout sentinels: ok`, a rising `GFrameCounter` with the frame rate, and a probe with (almost)
    no `torn`, `late`, `missed` or `resyncs` (its last line also says on how many frames `dt_arg` was read and
-   how many repeat the frame before, 6.3). In the main menu it says `player: not sampled (no-player)`.
+   how many repeat the frame before, 6.3). In the main menu it says `player: not sampled (no-player)`. In a
+   level it also prints the optional fields (6.10): the base actor's level, the floor normal, the cylinder, the
+   three field-of-view values, the camera's view, the bob, the gun's state and timers, and a last line
+   `optional fields on: …; not in the layout: none; off: none`. A group named under `off` failed its check and
+   is not recorded; that does not fail `check` and does not stop a recording.
 3. `$R start <scenario> <frames>`, for example `$R start A1 400`. The recorder runs detached on the game machine
    and waits for a player. **Owner:** wait about a second without input, perform the scenario (section 5), stand
    still for a second.
@@ -686,17 +870,40 @@ to go anywhere but `target/`.
    at once (`--wait-game S` makes the recorder wait for it instead).
 5. `$R fetch --validate` copies finished recordings to `research/local/traces/win/` (a raw file without its
    `.stats.json` is still being written and is left for the next fetch) and runs `asamu-trace validate` and
-   `convert` on them. Then replay and compare as in 4.6. A trace with `tick_rate: null` is stepped with each
-   sample's own length; the replay's notes state what that mode simulates on a converted level (the player and
-   the level objects only, no Kismet: `--kismet` is refused in that mode).
+   `convert` on them; for a recording with optional fields it first writes the version-1 view into `v1/` next
+   to it and validates and converts that (6.10). Then replay and compare as in 4.6. A trace with
+   `tick_rate: null` is stepped with each sample's own length; the replay's notes state what that mode
+   simulates on a converted level (the player and the level objects only, no Kismet: `--kismet` is refused in
+   that mode).
+
+**One recording for a whole session, with markers** (keyboard and mouse; section 6 of
+[PARITY_FINDINGS.md](PARITY_FINDINGS.md) lists the scenarios). The owner plays; whoever sits at the Mac marks
+where each scenario begins:
+
+```sh
+$R session KM1 keyboard and mouse    # before or after the game is started; no frame limit
+$R mark workshop-zoom-hold           # just before each scenario; any words
+$R status                            # counters, and every marker with its frame
+$R stop && $R fetch --validate
+```
+
+`session` is `start --detach` without a frame limit: the recorder waits for the game (up to
+`ASAMU_WIN_SESSION_S` seconds, default 5400, which is also the longest recording), sits out menus and loading
+screens, and writes the note into the header. `mark` writes a request file into the control folder of the
+game machine; the recorder's file thread picks it up within a quarter of a second and gives it the number of
+the last recorded frame. The marker is in `status.json`, in the stats file (`markers`: name, frame, record
+count, UTC time) and in `recorder.log`; the raw file is not touched, and nothing is sent to the game (a test
+checks that the command opens no process). A marker is as exact as the moment the command was typed: it says
+where to look, not on which frame a key went down.
 
 Further arguments of `$R start` go to `asamu_win.py start`: `--seconds S`, `--wait-game S` (start the recorder
 first, the game later), `--timeout S` (give up after this long, default 1800), `--note TEXT`,
 `"--launch-options=-WINDOWED"` (recorded only; write it with `=`), `--keep-late`, `--cpu-saver`, `--convert`,
-`--ignore-sentinels` (never for real data), `--out DIR`, `--ctl DIR`. Files on the game machine:
+`--ignore-sentinels` (never for real data), `--raw-v1` (no optional fields), `--optional-layout FILE`,
+`--out DIR`, `--ctl DIR`. Files on the game machine:
 `%USERPROFILE%\asamu-trace\traces\<UTC time>-<scenario>.raw.jsonl` and `.stats.json`, and in `traces\ctl`
-`status.json`, `recorder.log` and the `STOP` file. The recorder can also be run by hand there:
-`py -3 asamu_win.py check`.
+`status.json`, `recorder.log`, the `STOP` file and the `MARK-*` requests. The recorder can also be run by hand
+there: `py -3 asamu_win.py check`.
 
 Safety on the game machine (section 9 applies): the game's files and process are never written. The one handle
 to the game has read + query access (W1); no debugger is attached, no thread is suspended, no privilege is
@@ -711,12 +918,13 @@ system setting is changed; the only process it starts is itself, and the only pr
 
 | # | Check | How | Expected | Status 2026-10-10 |
 |---|---|---|---|---|
-| W-F1 | Read-only access from the SSH session to the game in the desktop session; module base; build match | `$R check`, first lines | pid, base, time stamp and image size match; `handle: access 0x1410 granted` | Not run on the game. Stand-ins pass: the base of a 32-bit `SysWOW64` process by both routes of W1, access mask 0x1410, a read-only handle across sessions, `ReadProcessMemory` on the stand-in |
-| W-F2 | Globals (W2) | `$R check` | `FName::Names[0]='None'`, `GFrameCounter` rising at the frame rate, `GIsBenchmarking=False`, plausible `GDeltaTime` | Not run |
-| W-F3 | Live object walk and layout (W7, E19, E20) | in a level: `$R check` | map, `ASAMUPlayerController` / `ASAMUPawn`, plausible location, bindings read, `layout sentinels: ok` | Not run |
-| W-F4 | Sampling quality and frame lengths | `$R start idle --seconds 5` standing still; `$R fetch --validate` | records ≈ 5 × frame rate, `torn + late + missed + resyncs` ≈ 0, `bindings_confirmed: true` in the stats file, `DeltaSeconds = clamp(tick argument × TimeDilation)` on every frame | Not run. Stand-in at 62 frames per second: 312 of 313 frames recorded in 5 s (the first is the start-up `unconfirmed`), 0 torn, 0 late, 0 missed, 0 resyncs, bindings confirmed, burst 49 µs mean, 92 µs at the 99th percentile, 95 µs max; `DeltaSeconds` cross-check 311 of 311 |
-| W-F5 | Input timing (W5) | record: stand 1 s, press and hold W | the first sample with `move_forward = 1` is the first whose velocity changes; note any `check:` line of the converted trace | Not run. On the fake image: exact |
-| W-F6 | Grapple state | record one grapple attach and release | `grapple_state` attached exactly while `Physics` is 4, or one sample apart at the press (6.3) | Not run |
+| W-F1 | Read-only access from the SSH session to the game in the desktop session; module base; build match | `$R check`, first lines | pid, base, time stamp and image size match; `handle: access 0x1410 granted` | **Passed on the game** (2026-10-10: STATUS.md records that the build and module checks passed, and the three recordings of 6.9 were made; the `check` output was not kept). Stand-ins: the base of a 32-bit `SysWOW64` process by both routes of W1, access mask 0x1410, a read-only handle across sessions, `ReadProcessMemory` on the stand-in |
+| W-F2 | Globals (W2) | `$R check` | `FName::Names[0]='None'`, `GFrameCounter` rising at the frame rate, `GIsBenchmarking=False`, plausible `GDeltaTime` | **Passed** as far as the recordings show: `benchmarking: false` in all three headers, frame numbers rising by one at 59.65 to 60.0 frames per second, `DeltaSeconds` = the clamped tick argument on every frame (17,307 checked, STATUS.md) |
+| W-F3 | Live object walk and layout (W7, E19, E20) | in a level: `$R check` | map, `ASAMUPlayerController` / `ASAMUPawn`, plausible location, bindings read, `layout sentinels: ok` | **Passed**: three recordings in four maps with `ASAMUPlayerController` / `ASAMUPawn`, 64 bindings, no sentinel mismatch (`skipped` holds only `no-player` and `paused`); the live property check matched every loaded property offset (WINDOWS_BINARY.md §8) |
+| W-F4 | Sampling quality and frame lengths | `$R start idle --seconds 5` standing still; `$R fetch --validate` | records ≈ 5 × frame rate, `torn + late + missed + resyncs` ≈ 0, `bindings_confirmed: true` in the stats file, `DeltaSeconds = clamp(tick argument × TimeDilation)` on every frame | **Passed** (stats files of the three recordings): WS1 3,001 records, 0 torn, 0 late, 0 missed, 0 resyncs, 0 gaps; DC1 14,311 records, 1 torn, 1 late, 3 resyncs, 3 gaps (one at a level change); PLAY2 27,925 records, 0 torn, 0 late, 10 resyncs, 8 gaps (one of 15,597 frames: the stats count 15,872 paused frames skipped; one at a level change); `bindings_confirmed: true` in all three; burst 69 to 75 µs mean with 15 reads (median), window 15.0 to 15.7 ms mean. The single-frame gaps of DC1 and PLAY2 were not attributed (6.3: the drop log is new). Stand-in at 62 frames per second: 312 of 313 frames recorded in 5 s, 0 torn, 0 late, 0 missed |
+| W-F5 | Input timing (W5) | record: stand 1 s, press and hold W | the first sample with `move_forward = 1` is the first whose velocity changes; note any `check:` line of the converted trace | **Passed** ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) §3: controller move and pawn physics in the same frame on 91 of 91 walk starts, measured with a gamepad from the acceleration). With keys it is exact on the fake image; a keyboard recording is still to come |
+| W-F6 | Grapple state | record one grapple attach and release | `grapple_state` attached exactly while `Physics` is 4, or one sample apart at the press (6.3) | **Passed** (PARITY_FINDINGS.md §3: 0 of 45,237 records with `grappling` and `Physics` 4 disagreeing) |
+| W-F7 | Optional fields (6.10; recorder 0.2.0) | in a level: `$R check`, then the first `$R session` | `optional fields on:` all twelve members, `off: none`; in the stats file `optional.off` and `optional.left_out` empty; `fov_locked` true while the zoom key is held | Not run on the game. On the fake image and the stand-in process: every member exact on every record (6.6) |
 
 If W-F1 fails with access denied, run `py -3 asamu_win.py check` in a terminal of the desktop session and
 compare. If W-F3 fails on the sentinels, see 2.2 (recompute with `--target win32`). If W-F4 shows more than a
@@ -736,7 +944,18 @@ few torn or late samples, turn V-Sync on; if that is not enough, use the debugge
 | Read-only handle from the SSH session (session 0) to a process of the desktop session | one `OpenProcess` with the recorder's access mask, no memory read | granted |
 | Per-sample replay = fixed-tick replay when all frames have the same length | `cargo test -p asamu-trace` (`equal_frame_lengths_replay_exactly_like_fixed_ticks_at_any_rate`, `equal_lengths_replay_like_the_fixed_tick`); with `ASAMU_CONVERTED_DIR` also `--test real_data` | identical samples at 24, 30, 50, 60, 62, 75, 120, 144 and 240 Hz on the graybox, from level start and from a tick in the middle, and for a converted fixed-step recording; identical at 30, 60 and 144 Hz on converted AG-Workshop, AG-Darkcave, AG-ParadiseCave, AG-IceCave, AG-StarHaven, AG-BeautifulCity and AG-Epilogue (150 ticks each, no run dies; `TheCore` does not load: no player start) |
 
-Not verified (needs the running game): everything in 6.5.
+**Recorder 0.2.0 (2026-10-10, after the first recordings).**
+
+| Check | Command | Result |
+|---|---|---|
+| The same front-end tests, plus: the optional fields on an image that has what they lead to (a camera with a field-of-view lock and a cached view, a floor normal, the bob fields, a cylinder component, a state frame with two states, two timers, a second actor of the floor actor's name in another level), each member compared with the engine's own log on every record; sentinel and class checks that fail, values that cannot be right, unreadable memory (a group goes, the record stays); the optional layout file against the core's lookups, against the rule-derived layout and against the instructions of the recorder layout; files that must be refused; the dropped-frame log against the frames missing from the recording on every scripted interleaving (torn 256 cases, late, missed, naps, menu, pause, new map, reload 20 cases, unreadable keys) and on 16 seeded random ones (random windows and delays, a reader that is not scheduled now and then: 217 torn, 16 late, 218 missed frames, 270 records without input, every optional member still exact); markers set by `mark` while a recording runs; `--raw-v1` and `v1view`; the source scan also as an allow-list (the two system libraries, every function taken from them, every access right named, where the game is opened, nothing of the kind in the shared core) | `python3 -I tools/trace-recorder/test_win_glue.py`; also run by `cargo test -p asamu-trace --test python_crosscheck` | ok, 20 tests, 101,420 checks; Python 3.9, 3.13 and 3.14 on the Mac, 3.13 on the game machine (101,373 there: it has no rule-derived layout to compare with) |
+| Old recordings and old layouts | the three recordings of 6.9 through `core.v1_record` and `asamu-trace validate`; a layout without the optional part; the Mac layout | 45,237 of 45,237 records are their own version-1 view; all three validate; without the optional part a recording has `base_level` only and its header says which groups are missing; the Mac recorder's records are unchanged (`test_lldb_glue.py` ok) |
+| A recording with optional fields through the Rust tools | `asamu-trace validate` on a 70-record recording of the fake image and on its `v1view` | the recording itself is refused (`unknown field optional_fields`: the raw reader of `asamu-trace` accepts no member it does not know); its view validates, `DeltaSeconds` cross-check 69 of 69, and both Python conversions give the same samples |
+| `asamu-trace check-recorder` with the regenerated layout | `cargo run -p asamu-trace -- check-recorder` (a local copy of the Windows executable present) | 1,635 checks, 0 failed (1,573 before): the 14 new evidence entries are checked against the rule-derived rows, the executable's bytes and the functions their anchors name |
+| Real API path on the game machine with the optional fields | `$R deploy`, `$R selftest --live` (four runs) | ok: 300 of 300 records, all twelve optional members exact on each; 0 torn in three runs, 2 torn and 1 gap in one; burst 68 to 73 µs mean with 23.7 reads (16 to 17 reads and 50 µs without them), window 14.0 to 14.2 ms; a marker set through `mark` was taken by the detached recorder and is in its stats file and log; uncapped at about 500 frames per second 1 to 6 records per run, exact. Verification, four more runs: three ok (300 of 300, 0 torn, 0 late, burst 66 to 72 µs); one made while a compiler job of another task ran on that machine lost 20 of 321 frames (19 torn, 1 late: the stand-in was not scheduled in time), each of them in the drop log and no record wrong, and failed the test's limit of 6 lost frames. The limit is a quiet-machine figure: record on a machine that does nothing else |
+
+Not verified (needs the running game): W-F7, and how long the burst is on the game itself with the optional
+reads (the first recordings measured 69 to 75 µs with 15 reads in a window of 15 ms).
 
 ### 6.7 Fallback and rejected routes
 
@@ -828,8 +1047,82 @@ start state).
 - The eye height at the start tick (recorded per frame, not applied): the aim's origin can be off by the eye
   height's smoothing after a landing or on stairs.
 - The camera's FOV as recorded stayed at 90 on every record, also while the zoom button was held in
-  AG-Workshop: either the zoom was unavailable there or the recorded field does not show it (UNKNOWN).
+  AG-Workshop: the recorded field cannot show a zoom (PARITY_FINDINGS.md N1). Recorder 0.2.0 reads the lock
+  (6.10); whether the original zoomed on those presses is still UNKNOWN.
 - `pressed_jump` is read early in the frame (6.3); jump presses come from the button's edge.
+
+### 6.10 Optional fields (recorder 0.2.0)
+
+What the first recordings could not show ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N1, N5, N9) is read by
+recorder 0.2.0 as **optional members** of the raw record. They are in the same burst as everything else, so a
+record's optional members are the same finished frame's. The raw version stays 1; a record or a header without
+them is a plain version-1 one.
+
+| Member of `player` | Value | Read from (Win32 offsets) | Evidence | Check |
+|---|---|---|---|---|
+| `base_level` | name of the outermost object of the pawn's `Base` actor: the package of the level it lies in (`AG-BeautifulCity`, `freds_place`); null without a base | `Object.Outer` 0x28 followed to the end, `Object.Name` 0x2C | native_code (main layout) | — |
+| `fov_default`, `fov_locked`, `fov_lock` | the camera's `DefaultFOV`, `bLockedFOV`, `LockedFOV` | 0x1D8; 0x1DC bit 0; 0x1E0 | 0x1D8 native_code (`ACamera::AssignViewTarget`); the other two native_layout, bracketed by 0x1D8 and `DefaultAspectRatio` 0x1E8 (native_code, same function) | sentinel `DefaultAspectRatio` = 1.33333 |
+| `camera_pov` `{location, rotation}` | `CameraCache.POV.Location` and `.Rotation`: the camera's cached view, which the grapple's aim direction is taken from ([GRAPPLE.md](reverse-engineering/GRAPPLE.md), fire trace); `fov_camera` is the third member of the same structure | 0x384, 0x390 | layout_rule (struct members; `fov_camera` at 0x39C read 90.0 on 45,237 records) | sentinel `FreeCamDistance` (0x438) = 256 |
+| `floor` | the pawn's `Floor`: the normal the walking physics keeps (zero until the pawn has walked) | 0x2CC | native_code (`APawn::processLanded` stores it) | per record: all zero, or length 1 within 0.001 |
+| `base_eye_height` | the pawn's `BaseEyeHeight` (the native eye-height update reads it and writes `eye_height`) | 0x2C4 | native_code (`AUDKPawn::UpdateEyeHeight`) | a number |
+| `walk_bob`; `bob` `{bob, land, jump, applied, time, just_landed, land_recovery}` | `UTPawn.WalkBob` (the aim's origin is `Location` + `EyeHeight` + `WalkBob`); `Bob`, `LandBob`, `JumpBob`, `AppliedBob`, `BobTime`, `bJustLanded`, `bLandRecovery` | 0x6CC; 0x6B8, 0x6BC, 0x6C0, 0x6C4, 0x6C8; 0x628 bits 10 and 11 | layout_rule (script-only class) | sentinel `DoubleJumpEyeHeight` (0x6AC) = 43; only for a pawn of class `ASAMUPawn` |
+| `cylinder` `{radius, half_height, translation, collision_component}` | the pawn's `CylinderComponent`: `CollisionRadius`, `CollisionHeight`, `Translation`, and whether it is the actor's `CollisionComponent` | pawn 0x38C, then 0x1DC, 0x1D8, 0x1A0; actor 0x18C | native_code, all five (`APawn::physFalling`, `APawn::processLanded`) | the component's class is `CylinderComponent`; radius and height above 0 |
+| `gun.state` | name of the weapon's script state (`Active`, `WeaponFiring`, `WeaponEquipping`, ...); null without a state | `Object.StateFrame` 0x14, the state node at +0x28 of that frame, its `Name` | native_code (`UObject::execGetStateName` does exactly this) | the node's class is `State` |
+| `gun.timers` `[{name, rate, count, loop, paused}]` | the weapon's `Timers`. The refire check is the entry named `RefireCheckTimer` (the stock weapon sets a timer of that name when it fires; its period is `FireInterval`, 0.1 s here, GRAPPLE.md); `count` is the time it has run | `Actor.Timers` 0x0A4; 28-byte elements: flags +0 (bit 0 loop, bit 1 paused), name +4, rate +0xC, count +0x10 | native_code (`AActor::GetTimerCount`, `IsTimerActive`, `PauseTimer`; the loop bit: `SetTimer`) | at most 32 entries, every name resolves, numbers only |
+
+Offsets and evidence are in `recorder_optional_win32.json` (generated; the instructions are in
+`layout_win_x86.json` under `native_evidence` and `asamu-trace check-recorder` checks them against the
+executable); [WINDOWS_BINARY.md](reverse-engineering/WINDOWS_BINARY.md) §13 has the reading. They are **not**
+fields of `layout_win_x86.json`: `check-recorder` requires that file's field list to equal the Mac layout's, and
+the Mac layout has none of them (its recorder writes version-1 records as before).
+
+**How a recording says what it has.** The header gets `optional_fields`, the sorted names of the members being
+written (`player.fov_locked`, `player.gun.timers`, ...), and `optional_layout`, the id of the file the offsets
+came from; a version-1 header has neither. A converter can tell from `optional_fields` which field-of-view
+members exist. The rule it should then apply is the camera's own: the effective field of view is `fov_lock`
+while `fov_locked` is true, else `fov_camera` (PARITY_FINDINGS.md V19; that the lock is what the zoom sets on
+this build is still to be seen on the game). No converter reads the optional members yet.
+
+**A group is read whole or not at all.**
+
+- A group whose offsets the layout file lacks is named in a header note and not read.
+- A group whose sentinel or class check fails on an object is off for that object (a header note and
+  `optional.off` in the stats say why). A check made on a sample that was not confirmed is forgotten and made
+  again.
+- A value that cannot be right (not a number, a floor normal that is no unit vector, a timer without a name,
+  memory that cannot be read) leaves the group out of that one record; `optional.left_out` counts the records
+  and keeps the last reason.
+- None of this costs a record or a version-1 field, and none of it is fatal: only the 10 sentinels of the main
+  layout stop a recording.
+
+**Reading a recording with optional fields.** The raw reader of `asamu-trace` refuses a member it does not
+know, so `validate`, `convert` and everything after them need the version-1 view until that reader has the
+optional members (`tools/asamu-trace/src/raw.rs`: `optional_fields` and `optional_layout` in the header, the
+members of the table above in the player and gun structures, all defaulting to absent):
+
+```sh
+python3 -I tools/trace-recorder/asamu_win.py v1view research/local/traces/win/<file>.raw.jsonl
+cargo run -p asamu-trace -- validate research/local/traces/win/v1/<file>.raw.jsonl
+```
+
+The view keeps the file name, lies in `v1/` next to the recording, has exactly the version-1 members and a
+header note that says which optional fields were removed; it is never written over a file. `fetch --validate`
+does this by itself. A version-1 recording is its own view (45,237 of 45,237 records of the first three), and
+`--raw-v1` records that way from the start. The Python converter (`asamu_recorder_core.py convert`) reads both.
+
+**Two fields that were examined and not added.**
+
+- `pawn_flags.power_jumped` and `pawn_flags.has_released_jump` were false on all 45,237 records. Their offsets
+  are right, and the flags are never set in this build: both are bits 1 and 2 of the same word (0x874) as
+  `has_jumped` (bit 0), `sprinting` (bit 4) and `is_falling` (bit 8), which behave as the game does (and the
+  live check of 2026-10-10 matched every loaded bool mask, WINDOWS_BINARY.md §8); and in the
+  whole cooked data the two properties are named by two functions only, the pawn's landing handler and its
+  story-state override, and both only clear them (984 functions and states of the `asamu` package scanned; the
+  names are in the name table of 1 of 42 packages; neither executable holds them). CONFIRMED. `has_jumped` is
+  set by the jump function and never cleared, which is the latch the recordings show. The two members stay in
+  the record because version 1 requires them.
+- A distance to the floor or to the base: the pawn stores none (no property of `Actor`, `Pawn`, `GamePawn`,
+  `UDKPawn`, `UTPawn` or `ASAMUPawn`). The floor check's result is local to the walking physics.
 
 ## 7. Other routes (coarse cross-checks only)
 
