@@ -144,16 +144,21 @@ $badRoots = @('', 'D:\', 'C:\', 'c:\', 'D:\\', 'D:', 'C:', 'D:.', 'D:..', 'D:asa
     'D:\asamu\', 'D:\asamu\..', 'D:\asamu\..\x', 'D:\..', 'D:\.', 'D:\.\asamu', 'D:\asamu.', 'D:\asamu.\x', 'D:\a b', 'D:\asamu ', ' D:\asamu', 'D:\a"b', "D:\a'b",
     'D:\a&b', 'D:\a;b', 'D:\a%b', 'D:\a^b', 'D:\a$b', 'D:\a,b', 'D:\a(b)', 'D:/asamu', 'D:\asamu/x', 'DD:\asamu', '1:\asamu', 'D:\asamu\\x', 'D:\asamu:x', 'D::\asamu',
     'D:\nul', 'D:\asamu\COM1', 'D:\aux.d\x', 'D:\con\asamu', "D:\asamu`n", "D:\asamu`nx", "D:\asamu`r", ('D:\' + [char]0xE4))
+# Some of these roots are a real folder written differently (a root that ends
+# with a dot is the folder without it). Should a check ever fail, `clean` must
+# find nothing to remove there: the name is one that no work tree has. `sync`
+# is not tried with them at all, because it would create folders.
+$nobody = 'zz-test-win-host-remote-no-such-tree'
 foreach ($bad in $badRoots) {
     $root = $bad
     foreach ($kind in @('work', 'target', 'logs')) {
-        TRefused ('WhPath refuses the root ' + ($bad | ConvertTo-Json) + ' (' + $kind + ')') 2 { WhPath $kind 'h1' }
+        TRefused ('WhPath refuses the root ' + ($bad | ConvertTo-Json) + ' (' + $kind + ')') 2 { WhPath $kind $nobody }
     }
-    TRefused ('clean refuses the root ' + ($bad | ConvertTo-Json)) 2 { WhClean 'h1' }
-    TRefused ('sync refuses the root ' + ($bad | ConvertTo-Json)) 2 { WhSyncPrepare 'h1' }
+    TRefused ('clean refuses the root ' + ($bad | ConvertTo-Json)) 2 { WhClean $nobody }
 }
 $root = $null
-TRefused 'WhPath refuses a root that is not set' 2 { WhPath 'work' 'h1' }
+TRefused 'WhPath refuses a root that is not set' 2 { WhPath 'work' $nobody }
+TRefused 'clean refuses a root that is not set' 2 { WhClean $nobody }
 $root = $scratch + '\r1'
 foreach ($name in @('..', 'a\b', 'h1\..\..\x', "h1`n", 'nul', '', 'a b', "a'b")) {
     TRefused ('clean refuses the name ' + ($name | ConvertTo-Json)) 2 { WhClean $name }
@@ -306,7 +311,7 @@ try {
 
 # Lists that try to put a file outside the work tree, or under a name Windows reads differently.
 $outside = TTree $scratch
-$escapes = @('../escape.txt', '..\escape.txt', 'a/../../escape.txt', '..', 'a/..', '/escape.txt', '\escape.txt', 'C:/escape.txt', 'C:escape.txt', 'a//b.txt', 'a/./b.txt', './b.txt',
+$escapes = @('../escape.txt', '..\escape.txt', 'sub\file.txt', 'sub/deeper\file.txt', 'a/../../escape.txt', '..', 'a/..', '/escape.txt', '\escape.txt', 'C:/escape.txt', 'C:escape.txt', 'a//b.txt', 'a/./b.txt', './b.txt',
     'ends-with-dot.', 'ends-with-space ', 'folder./x.txt', 'folder /x.txt', 'stream.txt:hidden', 'a?b', 'a*b', 'a"b', 'a<b', 'a>b', 'a|b', "a`tb", "a`rb",
     '.win_host_incomplete/000001', '.WIN_HOST_INCOMPLETE/x', '.win_host_incomplete')
 foreach ($escape in $escapes) {
