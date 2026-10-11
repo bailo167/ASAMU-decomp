@@ -20,15 +20,15 @@
 #                            no shell syntax)
 #   gate NAME [STEP...]      the project's gate there: fmt (cargo fmt --all --check), clippy
 #                            (cargo clippy --workspace --all-targets --locked -- -D warnings), test
-#                            (cargo test --workspace --locked), build (cargo build --workspace
-#                            --locked). One summary line per step, the whole output of each step in
-#                            <root>\logs\NAME\<step>.log, exit code 1 if a step failed. All steps
-#                            run even after a failure; naming steps runs only those.
+#                            (cargo test --workspace --locked --no-fail-fast), build (cargo build
+#                            --workspace --locked). One summary line per step, the whole output of
+#                            each step in <root>\logs\NAME\<step>.log, exit code 1 if a step
+#                            failed. All steps run even after a failure; naming steps runs only those.
 #   ps [NAME]                run a PowerShell script read from standard input (in the work tree,
 #                            as $work, when NAME is given; $root is the root folder)
 #   fetch REMOTE LOCAL       copy one file back (REMOTE is relative to <root>, with / separators)
-#   clean NAME               remove <root>\work\NAME and <root>\target-NAME, nothing else, and say
-#                            how much that freed
+#   clean NAME               remove <root>\work\NAME and <root>\target-NAME, nothing else (the logs
+#                            stay), and say how much that freed
 #   disk                     free space, and the size of every work tree and target folder
 #   info                     toolchain, free space and the work trees that exist
 #
@@ -39,28 +39,34 @@
 #
 # Environment:
 #   ASAMU_WIN_HOST   SSH host name or alias (required; key authentication, no prompts)
-#   ASAMU_WIN_ROOT   folder there for work trees and build output (default D:\asamu)
+#   ASAMU_WIN_ROOT   folder there for work trees and build output (default D:\asamu when the
+#                    variable is not set; an empty value is refused, like a drive's top folder)
 #   ASAMU_WIN_ENV    extra environment for cargo/exec/gate/ps NAME, as PowerShell text,
 #                    e.g. '$env:ASAMU_CONVERTED_DIR="D:\asamu\converted"'
 #
 # Exit codes: 0 success; for cargo, exec and ps the code of what was run (a
 # program's code outside 0..254 is reported as 254); 1 a gate step failed, or
-# a ps script stopped with an error; 2 bad usage, name or root; 3 the checkout
-# cannot be mirrored as it is (symbolic links, names Windows cannot hold,
-# nothing to send): nothing was changed; 4 the other machine refused or failed
-# (no such work tree, incomplete sync, folder in use); 127 exec: program not
-# found there; 255 the machine could not be reached over SSH, or the
-# connection was lost (what was running there may still be running).
+# a ps script stopped with an error; 2 bad usage, name, root or host; 3 the
+# checkout cannot be mirrored as it is (symbolic links, names Windows cannot
+# hold, nothing to send): nothing was changed; 4 the other machine refused or
+# failed (no such work tree, incomplete sync, folder in use, not a Windows
+# machine); 127 exec: program not found there; 255 the machine could not be
+# reached over SSH (one line with ssh's reason), or the connection was lost
+# (what was running there may still be running). Only a `ps` script that
+# itself ends with `exit 255` can be mistaken for a lost connection.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 HOST="${ASAMU_WIN_HOST:-}"
-ROOT="${ASAMU_WIN_ROOT:-D:\\asamu}"
+# An empty ASAMU_WIN_ROOT is not "the default": a variable that was meant to
+# hold another root and came out empty must not send `clean` to D:\asamu.
+ROOT="${ASAMU_WIN_ROOT-D:\\asamu}"
 REMOTE_LIB="$HERE/win_host_remote.ps1"
 PACKER="$HERE/win_host_pack.py"
 # No prompts, no terminal; a dead connection is noticed after two minutes.
-SSH_OPTS=(-T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
+# Options in the -o form only, so that the list serves scp as well.
+SSH_OPTS=(-o BatchMode=yes -o RequestTTY=no -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=8)
 
 EX_USAGE=2
 EX_REFUSED=3
@@ -82,34 +88,47 @@ usage() {
   exit "${1:-$EX_USAGE}"
 }
 
-# die CODE MESSAGE
+# die CODE MESSAGE, or die MESSAGE for a usage error.
 die() {
-  echo "win_host: $2" >&2
+  if [ $# -eq 1 ]; then set -- "$EX_USAGE" "$1"; fi
+  printf 'win_host: %s\n' "$2" >&2
   exit "$1"
+}
+
+# A Windows device name (CON, NUL, COM1, ...), with or without an extension,
+# in any case: such a file or folder name opens the device instead.
+is_device_name() {
+  local lower
+  lower="$(printf '%s' "$1" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
+  case "${lower%%.*}" in
+    con | prn | aux | nul | com[0123456789] | lpt[0123456789]) return 0 ;;
+  esac
+  return 1
 }
 
 # A work-tree name becomes a folder name on the other machine and part of
 # command lines there. The character lists are spelled out (no ranges) so that
 # the check does not depend on the locale.
 check_name() {
-  local n="$1" lower
+  local n="$1"
   if [ -z "$n" ] || [ "${#n}" -gt 64 ] || [ -n "${n//[$LETTERS$DIGITS._-]/}" ]; then
     die "$EX_USAGE" "bad work tree name $(printf '%q' "$n"): use 1 to 64 letters, digits, . _ -"
   fi
   case "$n" in
     [._-]* | *. | *..*) die "$EX_USAGE" "bad work tree name '$n': it must start with a letter or digit, not end with a dot and not contain '..'" ;;
   esac
-  lower="$(printf '%s' "$n" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
-  case "${lower%%.*}" in
-    con | prn | aux | nul | com[0123456789] | lpt[0123456789]) die "$EX_USAGE" "bad work tree name '$n': Windows reserves that name for a device" ;;
-  esac
+  if is_device_name "$n"; then
+    die "$EX_USAGE" "bad work tree name '$n': Windows reserves that name for a device"
+  fi
 }
 
 # The root folder: a drive letter and one or more folder names of safe
 # characters, e.g. D:\asamu. It is put into command lines on the other machine
-# unquoted, and everything this script deletes there is below it.
+# unquoted, and everything this script deletes there is below it. A drive's
+# top folder (D:\) is not a root: this script's folders do not belong there.
 check_root() {
-  local drive="${ROOT%%:*}" rest="${ROOT#?:}"
+  local drive="${ROOT%%:*}" rest="${ROOT#?:}" part parts
+  [ -n "$ROOT" ] || die "$EX_USAGE" "ASAMU_WIN_ROOT is set and empty: unset it for the default (D:\\asamu) or give a folder on a drive"
   if [ "${#ROOT}" -gt 100 ] || [ "${#drive}" -ne 1 ] || [ -n "${drive//[$LETTERS]/}" ] ||
     [ "$rest" = "$ROOT" ] || [ -n "${rest//[$LETTERS$DIGITS._\\-]/}" ]; then
     die "$EX_USAGE" "bad ASAMU_WIN_ROOT $(printf '%q' "$ROOT"): give a folder on a drive, like D:\\asamu, made of letters, digits, . _ -"
@@ -121,6 +140,17 @@ check_root() {
   case "$rest\\" in
     *'\\'* | *'.\'*) die "$EX_USAGE" "bad ASAMU_WIN_ROOT '$ROOT': it must name a folder (not a drive), without empty names or names that end with a dot" ;;
   esac
+  parts="${rest#?}"
+  while [ -n "$parts" ]; do
+    part="${parts%%\\*}"
+    if is_device_name "$part"; then
+      die "$EX_USAGE" "bad ASAMU_WIN_ROOT '$ROOT': Windows reserves the name '$part' for a device"
+    fi
+    case "$parts" in
+      *'\'*) parts="${parts#*\\}" ;;
+      *) parts="" ;;
+    esac
+  done
 }
 
 # The host is an argument of ssh and scp: it must not look like an option or a path.
@@ -220,8 +250,9 @@ stderr_filter() {
 BOOTSTRAP='$ProgressPreference = "SilentlyContinue"; $ErrorActionPreference = "Stop"; try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }; $n = [Console]::In.ReadLine(); $b = New-Object System.Text.StringBuilder; while ($true) { $l = [Console]::In.ReadLine(); if ($null -eq $l -or $l -eq ".") { break }; [void]$b.Append($l) }; if ($l -ne "." -or [string]$b.Length -ne $n) { [Console]::Error.WriteLine("win_host: the script arrived incomplete on the other machine (" + $b.Length + " of " + $n + " characters): nothing was run"); exit 4 }; $function:WinHost = [scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b.ToString()))); try { WinHost } catch { [Console]::Error.WriteLine("win_host: error on the other machine: " + $_.Exception.Message); if ($_.InvocationInfo) { [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage) }; exit 1 }; exit 0'
 
 # Run PowerShell text ($1) on the other machine after the shared functions of
-# win_host_remote.ps1. Standard output and error are streamed; the exit code is
-# left in RC.
+# win_host_remote.ps1. Standard output and error are streamed. The exit code
+# there is the return value, and is left in RC: under `set -e` a plain
+# `ps_run ...` ends this script with that code when it is not 0.
 RC=0
 ps_run() {
   local boot text payload
@@ -246,6 +277,14 @@ ps_run() {
   } 3>&1
   set -e
   [ "$RC" -ne "$EX_UNREACHABLE" ] || lost
+  return "$RC"
+}
+
+# One argument as a PowerShell single-quoted string. For names that were
+# checked already (the quoting is a second fence); other text travels with
+# ps_text.
+psq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
 
 # Text as a PowerShell expression that cannot be misread: base64 of its UTF-8
@@ -268,7 +307,7 @@ ps_array() {
 # in ENTER (a variable, because $(...) would drop the line break at its end).
 ENTER=""
 enter() {
-  ENTER="\$work = WhEnter '$1'$NL${ASAMU_WIN_ENV:-}$NL"
+  ENTER="\$work = WhEnter $(psq "$1")$NL${ASAMU_WIN_ENV:-}$NL"
 }
 
 # The files of this checkout that sync sends: names in $TMP/manifest, and
@@ -327,8 +366,7 @@ cmd_sync() {
   check_host
   collect
   probe
-  ps_run "WhSyncPrepare '$name'"
-  [ "$RC" -eq 0 ] || exit "$RC"
+  ps_run "WhSyncPrepare $(psq "$name")"
   # Windows' own tar (bsdtar); the path needs no quoting, see check_root and check_name.
   set +e
   python3 "$PACKER" tar "$REPO" "$TMP/manifest" |
@@ -339,8 +377,7 @@ cmd_sync() {
   if [ "${status[0]}" -ne 0 ] || [ "${status[1]}" -ne 0 ]; then
     die "$EX_REMOTE" "sending the files failed (packing: exit ${status[0]}, unpacking on $HOST: exit ${status[1]}); work tree $name is incomplete, run sync again"
   fi
-  ps_run "WhSyncVerify '$name' $COUNT $BYTES '$DIGEST'"
-  [ "$RC" -eq 0 ] || exit "$RC"
+  ps_run "WhSyncVerify $(psq "$name") $COUNT $BYTES $(psq "$DIGEST")"
 }
 
 cmd_gate() {
@@ -358,11 +395,10 @@ cmd_gate() {
   probe
   enter "$name"
   # ${steps[*]-}: an empty array is "unset" to bash 3.2 under `set -u`.
-  ps_run "${ENTER}WhGate '$name' @($(
+  ps_run "${ENTER}WhGate $(psq "$name") @($(
     IFS=,
     printf '%s' "${steps[*]-}"
   ))"
-  exit "$RC"
 }
 
 [ $# -ge 1 ] || usage
@@ -386,7 +422,6 @@ case "$cmd" in
     probe
     enter "$name"
     ps_run "${ENTER}WhRun 'cargo' $(ps_array "$@")"
-    exit "$RC"
     ;;
   exec)
     [ $# -ge 2 ] || die "$EX_USAGE" "usage: exec NAME PROGRAM [ARGS...]"
@@ -399,7 +434,6 @@ case "$cmd" in
     probe
     enter "$name"
     ps_run "${ENTER}WhRun $(ps_text "$program") $(ps_array "$@")"
-    exit "$RC"
     ;;
   gate)
     check_host
@@ -418,7 +452,6 @@ case "$cmd" in
     # line numbers in its error messages are its own. Like PowerShell itself:
     # without an `exit`, the code is 1 when the last statement failed.
     ps_run "$ENTER. ([scriptblock]::Create($(ps_text "$script$NL"'if (-not $?) { exit 1 }')))"
-    exit "$RC"
     ;;
   fetch)
     [ $# -eq 2 ] || die "$EX_USAGE" "usage: fetch REMOTE LOCAL"
@@ -440,7 +473,7 @@ case "$cmd" in
     need scp fetch
     probe
     rc=0
-    scp -q -o BatchMode=yes -o ConnectTimeout=10 "$HOST:$(printf '%s' "$ROOT" | tr '\\' '/')/$remote" "$local_file" || rc=$?
+    scp -q "${SSH_OPTS[@]}" "$HOST:$(printf '%s' "$ROOT" | tr '\\' '/')/$remote" "$local_file" || rc=$?
     [ "$rc" -eq 0 ] || die "$EX_REMOTE" "could not fetch $ROOT\\$(printf '%s' "$remote" | tr '/' '\\') from $HOST (scp exit $rc)"
     ;;
   clean)
@@ -448,22 +481,19 @@ case "$cmd" in
     check_host
     check_name "$1"
     probe
-    ps_run "WhClean '$1'"
-    exit "$RC"
+    ps_run "WhClean $(psq "$1")"
     ;;
   disk)
     [ $# -eq 0 ] || die "$EX_USAGE" "usage: disk"
     check_host
     probe
     ps_run "WhDisk"
-    exit "$RC"
     ;;
   info)
     [ $# -eq 0 ] || die "$EX_USAGE" "usage: info"
     check_host
     probe
     ps_run "WhInfo"
-    exit "$RC"
     ;;
   *)
     echo "win_host: unknown command $(printf '%q' "$cmd")" >&2

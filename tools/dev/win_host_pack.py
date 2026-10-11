@@ -8,7 +8,9 @@
         line, sorted) and prints "<files> <bytes> <SHA-256 of MANIFEST>". Exit
         code 3, with one line per problem on standard error, when the checkout
         cannot be mirrored as it is: nothing is ever skipped or renamed
-        silently.
+        silently. A name is sent in the upper and lower case it has on disk,
+        which on a file system that ignores case is not always the one git
+        lists (see on_disk).
 
     win_host_pack.py tar REPO MANIFEST
         Writes a tar stream (pax format) to standard output: the manifest as
@@ -28,6 +30,7 @@ import os
 import stat
 import sys
 import tarfile
+import unicodedata
 
 EXIT_REFUSED = 3
 
@@ -72,15 +75,67 @@ def name_problem(name):
     return None
 
 
+def on_disk(repo, name, listings):
+    """`name` with every part spelled in the case the file system has it in.
+
+    On a file system that ignores case (the usual one on macOS and Windows) git
+    goes on listing a tracked file under its old name after `mv Readme.txt
+    README.txt`, and the file opens under either. The mirror must get the name
+    that is on disk. Where case matters every part is found as it is and the
+    name comes back unchanged; so does a part that differs from the folder's
+    entry only in how accented characters are composed (git lists those
+    precomposed).
+    """
+    folder = repo
+    real = []
+    for part in name.split("/"):
+        entries = listings.get(folder)
+        if entries is None:
+            try:
+                entries = set(os.listdir(folder))
+            except OSError:
+                entries = set()
+            listings[folder] = entries
+        if part not in entries:
+            wanted = unicodedata.normalize("NFC", part)
+            composed = {entry: unicodedata.normalize("NFC", entry) for entry in entries}
+            if wanted not in composed.values():
+                other_case = [entry for entry, text in composed.items() if text.casefold() == wanted.casefold()]
+                if len(other_case) == 1:
+                    part = other_case[0]
+        real.append(part)
+        folder = os.path.join(folder, part)
+    return "/".join(real)
+
+
+def case_clashes(names):
+    """Pairs of paths (files, or folders on the way to them) that differ only in case.
+
+    Windows file names are not case sensitive: such paths would land on each
+    other there. They can only be on disk where case matters.
+    """
+    seen = {}
+    clashes = []
+    for name in names:
+        parts = name.split("/")
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            other = seen.setdefault(prefix.casefold(), prefix)
+            if other != prefix:
+                clashes.append((other, prefix))
+                seen[prefix.casefold()] = prefix
+    return clashes
+
+
 def collect(repo, list_path):
     """Returns (names, total_bytes, problems, notes)."""
     with open(list_path, "rb") as handle:
         raw = [entry for entry in handle.read().split(b"\0") if entry]
-    names = []
+    sizes = {}
     problems = []
     notes = []
-    total = 0
     link_dirs = {}
+    listings = {}
 
     def through_link(name):
         """The first folder on the way to `name` that is a symbolic link, or None."""
@@ -137,21 +192,16 @@ def collect(repo, list_path):
         if name.casefold().startswith(MARKER):
             problems.append("%s: names that start with %s are used by win_host.sh itself" % (shown(name), MARKER))
             continue
-        names.append(name)
-        total += info.st_size
+        real = on_disk(repo, name, listings)
+        if real != name:
+            notes.append("sending %s under the name it has on disk (git lists it as %s)" % (shown(real), shown(name)))
+        sizes[real] = info.st_size
 
-    # Windows file names are not case sensitive: two paths that differ only in
-    # case (files or the folders on the way) would land on each other.
-    seen = {}
-    for name in names:
-        parts = name.split("/")
-        for depth in range(1, len(parts) + 1):
-            prefix = "/".join(parts[:depth])
-            other = seen.setdefault(prefix.casefold(), prefix)
-            if other != prefix:
-                problems.append("%s and %s differ only in case, which Windows cannot keep apart" % (shown(other), shown(prefix)))
-                seen[prefix.casefold()] = prefix
-    return names, total, sorted(set(problems)), notes
+    names = sorted(sizes)
+    total = sum(sizes.values())
+    for one, other in case_clashes(names):
+        problems.append("%s and %s differ only in case, which Windows cannot keep apart" % (shown(one), shown(other)))
+    return names, total, sorted(set(problems)), sorted(set(notes))
 
 
 def check(repo, list_path, manifest_path):

@@ -8,7 +8,8 @@
 # Rules this file keeps:
 #   - every folder it creates, writes to or deletes comes from WhPath, which
 #     returns only <root>\work\<NAME>, <root>\target-<NAME> or <root>\logs\<NAME>;
-#   - it never deletes or walks through a link (junction or symbolic link);
+#   - it never deletes or walks through a link (junction or symbolic link),
+#     the root folder included;
 #   - a failure of its own is one plain line on standard error and exit code 4
 #     (2 for a bad name or root).
 
@@ -41,18 +42,24 @@ function WhText([string]$base64) {
 # target or logs. The name and the root were checked by win_host.sh already;
 # they are checked again here because this is the side that deletes.
 function WhPath([string]$kind, [string]$name) {
-    if ($root -cnotmatch '^[A-Za-z]:(\\[A-Za-z0-9._-]+)+$' -or [IO.Path]::GetFullPath($root) -ne $root) {
+    # \z, not $: $ also matches before a line break at the end. GetFullPath
+    # changes what Windows would read differently from how it is written
+    # (a name that ends with a dot, a device name such as NUL, "..").
+    if ($root -isnot [string] -or $root -cnotmatch '\A[A-Za-z]:(\\[A-Za-z0-9._-]+)+\z' -or [IO.Path]::GetFullPath($root) -cne $root) {
         WhFail ('bad root folder: ' + $root) 2
     }
-    $reserved = '^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)'
-    if ($name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' -or $name.Contains('..') -or $name.EndsWith('.') -or $name -match $reserved) {
+    $reserved = '\A(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|\z)'
+    foreach ($part in $root.Substring(3).Split([char]92)) {
+        if ($part -match $reserved -or $part.EndsWith('.')) { WhFail ('bad root folder: ' + $root) 2 }
+    }
+    if ($name -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z' -or $name.Contains('..') -or $name.EndsWith('.') -or $name -match $reserved) {
         WhFail ('bad work tree name: ' + $name) 2
     }
     if ($kind -eq 'work') { $path = $root + '\work\' + $name }
     elseif ($kind -eq 'target') { $path = $root + '\target-' + $name }
     elseif ($kind -eq 'logs') { $path = $root + '\logs\' + $name }
     else { WhFail ('internal error: unknown kind of folder ' + $kind) }
-    if ([IO.Path]::GetFullPath($path) -ne $path) { WhFail ('bad work tree name: ' + $name) 2 }
+    if ([IO.Path]::GetFullPath($path) -cne $path) { WhFail ('bad work tree name: ' + $name) 2 }
     return $path
 }
 
@@ -95,9 +102,14 @@ function WhSize([int64]$bytes) {
 
 # Why a folder from WhPath must not be removed ('' when it may be, or does not exist).
 function WhNotRemovable([string]$path) {
-    $parent = Split-Path -Parent $path
-    if ((Test-Path -LiteralPath $parent) -and (WhIsLink $parent)) {
-        return ($parent + ' is a link (junction or symbolic link): refusing to work through it')
+    # Every folder on the way: the root, and <root>\work or <root>\logs.
+    $folder = Split-Path -Parent $path
+    while ($folder.Length -ge $root.Length) {
+        if ((Test-Path -LiteralPath $folder) -and (WhIsLink $folder)) {
+            return ($folder + ' is a link (junction or symbolic link): refusing to work through it')
+        }
+        if ($folder.Length -eq $root.Length) { break }
+        $folder = Split-Path -Parent $folder
     }
     if (-not (Test-Path -LiteralPath $path)) { return '' }
     if (-not (Test-Path -LiteralPath $path -PathType Container)) {
@@ -311,7 +323,7 @@ function WhGate([string]$name, [string[]]$only) {
     $steps = @(
         @('fmt', 'fmt --all --check'),
         @('clippy', 'clippy --workspace --all-targets --locked -- -D warnings'),
-        @('test', 'test --workspace --locked'),
+        @('test', 'test --workspace --locked --no-fail-fast'),
         @('build', 'build --workspace --locked')
     )
     $report = New-Object System.Collections.ArrayList
@@ -346,6 +358,12 @@ function WhGate([string]$name, [string[]]$only) {
         if ($code -ne 0) {
             [Console]::Error.WriteLine('--- ' + $id + ' failed; the last lines of ' + $log + ':')
             foreach ($text in @(Get-Content -LiteralPath $log -Tail 30 -Encoding UTF8)) { [Console]::Error.WriteLine($text) }
+            if ($id -eq 'test') {
+                # The end of the log names the test programs that failed; these are the tests.
+                $tests = @(Select-String -LiteralPath $log -Pattern '^test .+ \.\.\. FAILED\s*$' -Encoding UTF8 | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique)
+                [Console]::Error.WriteLine('--- ' + $tests.Count + ' failed tests' + $(if ($tests.Count -gt 40) { ' (the first 40):' } else { ':' }))
+                foreach ($text in @($tests | Select-Object -First 40)) { [Console]::Error.WriteLine($text) }
+            }
             [Console]::Error.WriteLine('---')
         }
     }
@@ -385,7 +403,7 @@ function WhClean([string]$name) {
         WhSay ('win_host: removed ' + $path + ' (' + (WhSize $before[0]) + ', ' + $before[1] + ' files)')
     }
     WhSay ('win_host: freed ' + (WhSize $freed))
-    if ($problems -gt 0) { exit 4 }
+    if ($problems -gt 0) { WhFail ('clean ' + $name + ': ' + $problems + ' of the 2 folders could not be removed') }
 }
 
 function WhFreeSpace {
