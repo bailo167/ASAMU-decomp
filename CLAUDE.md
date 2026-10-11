@@ -162,7 +162,12 @@ Never mark a stub implemented. Never mark something verified because it compiles
 
 - `asamu-core` shared math/types/config · `asamu-player` movement/grapple/camera (deterministic,
   render-free) · `asamu-world` levels/triggers/checkpoints/platforms · `asamu-assets` runtime assets ·
-  `asamu-ue3` original data parsing · `asamu-game` high-level state · `apps/asamu` the Bevy executable.
+  `asamu-ue3` original data parsing · `asamu-game` high-level state · `apps/asamu` the Bevy executable ·
+  `asamu-sandbox` the experimental Sandbox model (ours, never evidence of parity; `docs/SANDBOX.md`).
+- **Classic comes first.** The faithful game (original parameters, tick order, saves, the parity tooling) must
+  behave bit-identically whether or not experimental code such as the Sandbox is compiled in. Experiments wrap
+  the simulation from outside; they never edit `Game::tick`, the loaders or the input path, and
+  `crates/asamu-sandbox/tests/{classic_guard,boundary}.rs` must keep passing.
 - Gameplay logic never knows about Steam paths or UE3 serialization.
 - Physics/gameplay must be testable without rendering; prefer pure step functions with fixed timesteps.
 - Cross-platform is a requirement: Windows x86_64, Linux x86_64, macOS arm64 (+ x86_64 where practical).

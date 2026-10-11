@@ -93,6 +93,7 @@ pub mod npc;
 pub mod save;
 pub mod smoke;
 pub mod timetrial;
+mod tooling;
 pub mod world;
 
 use asamu_core::{ClockError, DEFAULT_TICK_RATE_HZ, FixedClock};
@@ -128,6 +129,7 @@ pub use kismet_host::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+pub use tooling::SetParamsError;
 pub use world::{GameWorld, SceneCollision};
 
 /// Top-level game state (skeleton).

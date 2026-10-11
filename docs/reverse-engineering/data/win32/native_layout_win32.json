@@ -1679,6 +1679,131 @@
       "first_own_field": "0x2BC",
       "super": "Engine.Weapon"
     },
+    "UTGame.UTPawn": {
+      "align": 4,
+      "end": "0x874",
+      "fields": [
+        ["0x628","bFixedView","Bool",4,0,1],
+        ["0x628","bSpawnDone","Bool",4,1,1],
+        ["0x628","bSpawnIn","Bool",4,2,1],
+        ["0x628","bShieldAbsorb","Bool",4,3,1],
+        ["0x628","bDodging","Bool",4,4,1],
+        ["0x628","bStopOnDoubleLanding","Bool",4,5,1],
+        ["0x628","bIsInvulnerable","Bool",4,6,1],
+        ["0x628","bJustDroppedOrb","Bool",4,7,1],
+        ["0x628","bForcedFeignDeath","Bool",4,8,1],
+        ["0x628","bWeaponBob","Bool",4,9,1],
+        ["0x628","bJustLanded","Bool",4,10,1],
+        ["0x628","bLandRecovery","Bool",4,11,1],
+        ["0x628","bHasHoverboard","Bool",4,12,1],
+        ["0x628","bStopDeathCamera","Bool",4,13,1],
+        ["0x628","bWinnerCam","Bool",4,14,1],
+        ["0x628","bGibbed","Bool",4,15,1],
+        ["0x628","bHeadGibbed","Bool",4,16,1],
+        ["0x628","bArmsAttached","Bool",4,17,1],
+        ["0x628","bWeaponAttachmentVisible","Bool",4,18,1],
+        ["0x628","bHideOnListenServer","Bool",4,19,1],
+        ["0x628","bPostRenderTraceSucceeded","Bool",4,20,1],
+        ["0x628","bReceivedValidTeam","Bool",4,21,1],
+        ["0x628","bKillsAffectHead","Bool",4,22,1],
+        ["0x628","bKilledByBio","Bool",4,23,1],
+        ["0x62C","CurrentWeaponAttachmentClass","Class",4,null,1],
+        ["0x630","UnfeignFailedCount","Int",4,null,1],
+        ["0x634","LightEnvironment","Component",4,null,1],
+        ["0x638","FeignDeathBlend","Object",4,null,1],
+        ["0x63C","FullBodyAnimSlot","Object",4,null,1],
+        ["0x640","TopHalfAnimSlot","Object",4,null,1],
+        ["0x644","DeathHipLinSpring","Float",4,null,1],
+        ["0x648","DeathHipLinDamp","Float",4,null,1],
+        ["0x64C","DeathHipAngSpring","Float",4,null,1],
+        ["0x650","DeathHipAngDamp","Float",4,null,1],
+        ["0x654","StartDeathAnimTime","Float",4,null,1],
+        ["0x658","DeathAnimDamageType","Class",4,null,1],
+        ["0x65C","TimeLastTookDeathAnimDamage","Float",4,null,1],
+        ["0x660","FixedViewLoc","Struct",12,null,1],
+        ["0x66C","FixedViewRot","Struct",12,null,1],
+        ["0x678","CameraScale","Float",4,null,1],
+        ["0x67C","CurrentCameraScale","Float",4,null,1],
+        ["0x680","CameraScaleMin","Float",4,null,1],
+        ["0x684","CameraScaleMax","Float",4,null,1],
+        ["0x688","OldCameraPosition","Struct",12,null,1],
+        ["0x694","CameraZOffset","Float",4,null,1],
+        ["0x698","HeroCameraScale","Float",4,null,1],
+        ["0x69C","HeroCameraPitch","Int",4,null,1],
+        ["0x6A0","DodgeSpeed","Float",4,null,1],
+        ["0x6A4","DodgeSpeedZ","Float",4,null,1],
+        ["0x6A8","CurrentDir","Byte",1,null,1],
+        ["0x6AC","DoubleJumpEyeHeight","Float",4,null,1],
+        ["0x6B0","DoubleJumpThreshold","Float",4,null,1],
+        ["0x6B4","DefaultAirControl","Float",4,null,1],
+        ["0x6B8","Bob","Float",4,null,1],
+        ["0x6BC","LandBob","Float",4,null,1],
+        ["0x6C0","JumpBob","Float",4,null,1],
+        ["0x6C4","AppliedBob","Float",4,null,1],
+        ["0x6C8","BobTime","Float",4,null,1],
+        ["0x6CC","WalkBob","Struct",12,null,1],
+        ["0x6D8","FeignDeathBodyAtRestSpeed","Float",4,null,1],
+        ["0x6DC","FeignDeathStartTime","Float",4,null,1],
+        ["0x6E0","FeignDeathRecoveryStartTime","Float",4,null,1],
+        ["0x6E4","SuperHealthMax","Int",4,null,1],
+        ["0x6E8","SoundGroupClass","Class",4,null,1],
+        ["0x6EC","CurrCharClassInfo","Class",4,null,1],
+        ["0x6F0","TakeHitPhysicsFixedBones","Array",12,null,1],
+        ["0x6FC","NoDriveBodies","Array",12,null,1],
+        ["0x708","FallingDamageWaveForm","Object",4,null,1],
+        ["0x70C","AccumulateDamage","Float",4,null,1],
+        ["0x710","AccumulationTime","Float",4,null,1],
+        ["0x714","LastHoverboardTime","Float",4,null,1],
+        ["0x718","MinHoverboardInterval","Float",4,null,1],
+        ["0x71C","DrivingNode","Object",4,null,1],
+        ["0x720","VehicleNode","Object",4,null,1],
+        ["0x724","HoverboardingNode","Object",4,null,1],
+        ["0x728","ShieldBeltArmor","Float",4,null,1],
+        ["0x72C","VestArmor","Float",4,null,1],
+        ["0x730","ThighpadArmor","Float",4,null,1],
+        ["0x734","CurrentWeaponAttachment","Object",4,null,1],
+        ["0x738","WeaponSocket","Name",8,null,1],
+        ["0x740","WeaponSocket2","Name",8,null,1],
+        ["0x748","PawnEffectSockets","Name",16,null,2],
+        ["0x758","HeadOffset","Float",4,null,1],
+        ["0x75C","HeadRadius","Float",4,null,1],
+        ["0x760","HeadHeight","Float",4,null,1],
+        ["0x764","HeadBone","Name",8,null,1],
+        ["0x76C","HeadshotNeckAttachment","Component",4,null,1],
+        ["0x770","TransInEffects","Class",8,null,2],
+        ["0x778","TranslocateColor","Struct",32,null,2],
+        ["0x798","TransCameraAnim","Object",12,null,3],
+        ["0x7A4","ArmorHitSound","Object",4,null,1],
+        ["0x7A8","SpawnSound","Object",4,null,1],
+        ["0x7AC","TeleportSound","Object",4,null,1],
+        ["0x7B0","SpawnProtectionColor","Struct",16,null,1],
+        ["0x7C0","TeamBeaconPlayerInfoMaxDist","Float",4,null,1],
+        ["0x7C4","SpeakingBeaconTexture","Object",4,null,1],
+        ["0x7C8","MapSize","Float",4,null,1],
+        ["0x7CC","IconCoords","Struct",16,null,1],
+        ["0x7DC","LastPainSound","Float",4,null,1],
+        ["0x7E0","RagdollLifespan","Float",4,null,1],
+        ["0x7E4","AttachedProj","Object",4,null,1],
+        ["0x7E8","MaxFootstepDistSq","Float",4,null,1],
+        ["0x7EC","MaxJumpSoundDistSq","Float",4,null,1],
+        ["0x7F0","HoverboardClass","Class",4,null,1],
+        ["0x7F4","LastDrivenWeaponPawn","Struct",12,null,1],
+        ["0x800","ClientSideWeaponPawn","Object",4,null,1],
+        ["0x804","ShieldBeltMaterialInstance","Object",4,null,1],
+        ["0x808","ShieldBeltTeamMaterialInstances","Object",16,null,4],
+        ["0x818","JumpBootCharge","Int",4,null,1],
+        ["0x81C","DefaultMeshScale","Float",4,null,1],
+        ["0x820","TauntNames","Name",48,null,6],
+        ["0x850","DesiredMeshScale","Float",4,null,1],
+        ["0x854","CamOffset","Struct",12,null,1],
+        ["0x860","BioBurnAway","Component",4,null,1],
+        ["0x864","BioBurnAwayTime","Float",4,null,1],
+        ["0x868","BioEffectName","Name",8,null,1],
+        ["0x870","DeathTime","Float",4,null,1]
+      ],
+      "first_own_field": "0x628",
+      "super": "UDKBase.UDKPawn"
+    },
     "asamu.ASAMUPawn": {
       "align": 4,
       "end": "0x92C",
@@ -2464,6 +2589,51 @@
       "0x0091776D",
       "loads",
       []
+    ],
+    [
+      "Core.Object",
+      "StateFrame",
+      "0x014",
+      "UObject::execGetStateName",
+      "0x0018D125",
+      "loads",
+      []
+    ],
+    [
+      "Engine.Actor",
+      "Timers",
+      "0x0A4",
+      "AActor::GetTimerCount",
+      "0x0075B6D2",
+      "loads",
+      []
+    ],
+    [
+      "Engine.Camera",
+      "DefaultFOV",
+      "0x1D8",
+      "ACamera::AssignViewTarget",
+      "0x004BD9DD",
+      "loads",
+      []
+    ],
+    [
+      "Engine.Camera",
+      "DefaultAspectRatio",
+      "0x1E8",
+      "ACamera::AssignViewTarget",
+      "0x004BD9D2",
+      "loads",
+      []
+    ],
+    [
+      "Engine.Camera",
+      "PCOwner",
+      "0x1CC",
+      "ACamera::AssignViewTarget",
+      "0x004BD9EA",
+      "loads",
+      []
     ]
   ],
   "independent_offsets_note": "A second route to the offsets that shares nothing with native_offsets: functions identified by a UTF-16 literal only they use, by the native function name table or by a direct call from such a function (never by a vtable slot shift). UGameEngine::Init rows are the engine's own checks of compiled member offsets (an immediate compared with the offset the engine linked for the property it found by class and member name). name_literals are literals of the executable used next to the instruction.",
@@ -2475,6 +2645,22 @@
         ["Engine.Camera","CameraCache","0x380"],
         ["Engine.Camera.TCameraCache","POV","0x004"],
         ["Core.Object.TPOV","FOV","0x018"]
+      ]
+    },
+    "Engine.Camera.CameraCache.POV.Location": {
+      "offset": "0x384",
+      "steps": [
+        ["Engine.Camera","CameraCache","0x380"],
+        ["Engine.Camera.TCameraCache","POV","0x004"],
+        ["Core.Object.TPOV","Location","0x000"]
+      ]
+    },
+    "Engine.Camera.CameraCache.POV.Rotation": {
+      "offset": "0x390",
+      "steps": [
+        ["Engine.Camera","CameraCache","0x380"],
+        ["Engine.Camera.TCameraCache","POV","0x004"],
+        ["Core.Object.TPOV","Rotation","0x00C"]
       ]
     }
   },
@@ -2539,7 +2725,19 @@
     ["DrawUnitTimes","only user of the UTF-16 literal \"Game thread time\"","0x00556920","the only function that uses this literal, as on the Mac"],
     ["UAudioDevice::GetSortedActiveWaveInstances","only user of the UTF-16 literal \"Sound stopped due to duration: %g > %g : %s\"","0x004A0750","the only function that uses this log literal, as on the Mac"],
     ["Matinee editor: fixed-time-step setter","instruction sequence (native_evidence.json)","0x0121C470","editor code (not in the Mac build; our name): it saves the configuration key FixedTimeStepPlayback of section Matinee, then sets the benchmarking flag and the fixed step"],
-    ["FDynamicLightEnvironmentState::Tick","instruction sequence (native_evidence.json)","0x002B1140","paired with the Mac function by content: after testing bit 1 of a flags byte it takes the frame counter modulo 10 (64-bit) and compares it with a random number"]
+    ["FDynamicLightEnvironmentState::Tick","instruction sequence (native_evidence.json)","0x002B1140","paired with the Mac function by content: after testing bit 1 of a flags byte it takes the frame counter modulo 10 (64-bit) and compares it with a random number"],
+    ["UObject::execGetStateName","native function name table: UObjectexecGetStateName","0x0018D100","native function name table"],
+    ["AActor::execGetTimerCount","native function name table: AActorexecGetTimerCount","0x00516C00","native function name table"],
+    ["AActor::GetTimerCount","called directly by AActor::execGetTimerCount","0x0075B670","the only direct call of the exec thunk, as on the Mac; it walks the actor's timers and returns the count of the one whose function name and object match"],
+    ["AActor::execIsTimerActive","native function name table: AActorexecIsTimerActive","0x00516B50","native function name table"],
+    ["AActor::IsTimerActive","called directly by AActor::execIsTimerActive","0x0075B540","the only direct call of the exec thunk, as on the Mac; the same walk, then it tests the timer's rate"],
+    ["AActor::execPauseTimer","native function name table: AActorexecPauseTimer","0x00516A70","native function name table"],
+    ["AActor::PauseTimer","called directly by AActor::execPauseTimer","0x0075B410","the only direct call of the exec thunk, as on the Mac; the same walk, then it sets or clears the timer's paused bit"],
+    ["AActor::execSetTimer","native function name table: AActorexecSetTimer","0x00516810","native function name table"],
+    ["AActor::SetTimer","called directly by AActor::execSetTimer","0x0075ACF0","the only direct call of the exec thunk, as on the Mac; like the Mac function it writes its loop argument into bit 0 of the timer's first word and clears bit 1 of it"],
+    ["ACamera::execSetViewTarget","native function name table: ACameraexecSetViewTarget","0x00528ED0","native function name table"],
+    ["ACamera::SetViewTarget","called directly by ACamera::execSetViewTarget","0x004C8B10","the only direct call of the exec thunk, as on the Mac"],
+    ["ACamera::AssignViewTarget","called directly by ACamera::SetViewTarget","0x004BD9B0","called twice by ACamera::SetViewTarget, as on the Mac; like the Mac function it copies the default aspect ratio and the default field of view into the view target and then loads the owning controller"]
   ],
   "native_offset_columns": ["class","field","offset","bit","function","instruction_rva","instruction"],
   "native_offsets": [
@@ -2618,7 +2816,8 @@
     ["Engine.WorldInfo","Pauser","0x43C",null,"UWorld::IsPaused","0x00618DDA","compares"],
     ["Engine.WorldInfo","NetMode","0x47C",null,"UWorld::IsPaused","0x00618E01","compares"],
     ["Engine.WorldInfo","ControllerList","0x4C4",null,"AWorldInfo::execAllControllers","0x007597C0","loads"],
-    ["Engine.WorldInfo","PawnList","0x4C8",null,"AWorldInfo::execAllPawns","0x00759B21","loads"]
+    ["Engine.WorldInfo","PawnList","0x4C8",null,"AWorldInfo::execAllPawns","0x00759B21","loads"],
+    ["Engine.Pawn","CylinderComponent","0x38C",null,"APawn::physFalling","0x007279E4","loads"]
   ],
   "other_fields": {
     "Engine.MeshComponent": {
@@ -2746,6 +2945,19 @@
       ],
       "size": 12
     },
+    "Engine.Actor.TimerData": {
+      "align": 4,
+      "fields": [
+        ["0x000","bLoop","Bool",4,0,1],
+        ["0x000","bPaused","Bool",4,1,1],
+        ["0x004","FuncName","Name",8,null,1],
+        ["0x00C","Rate","Float",4,null,1],
+        ["0x010","Count","Float",4,null,1],
+        ["0x014","TimerTimeDilation","Float",4,null,1],
+        ["0x018","TimerObj","Object",4,null,1]
+      ],
+      "size": 28
+    },
     "Engine.Camera.TCameraCache": {
       "align": 4,
       "fields": [
@@ -2772,8 +2984,8 @@
   "validation": {
     "ablation_columns": ["rule","instead","class_sizes_wrong","native_offsets_wrong","independent_offsets_wrong","declared_fields_moved"],
     "ablations": [
-      ["ptr64","pointers take 8 bytes, aligned 8",1652,76,61,15855],
-      ["no-bool-merge","every bool property gets its own 32-bit word",1193,65,40,13138],
+      ["ptr64","pointers take 8 bytes, aligned 8",1652,77,66,15855],
+      ["no-bool-merge","every bool property gets its own 32-bit word",1193,66,43,13138],
       ["padded-class-base","a class starts at its parent's full sizeof (rounded up to 16 for a 16-aligned parent)",93,2,2,1518],
       ["pack4-class-base","a class starts at its parent's end rounded up to min(alignment, 4): the Visual C++ non-virtual size",0,0,0,0],
       ["no-simd-align","Matrix, Plane, Quat, Vector4, SHVector and SHVectorRGB are aligned like their members (4)",150,3,3,1500],
@@ -2784,7 +2996,7 @@
       ["no-align16-shvector","only SHVector loses its 16-byte alignment",0,0,0,0],
       ["no-align16-shvectorrgb","only SHVectorRGB loses its own 16-byte alignment (its SHVector members keep theirs)",0,0,0,0],
       ["no-color-align","Color is aligned like its members (1)",16,1,0,150],
-      ["wide-align-8","QWord and Double are aligned to 8 (as without #pragma pack(4))",882,52,26,5291]
+      ["wide-align-8","QWord and Double are aligned to 8 (as without #pragma pack(4))",882,53,29,5291]
     ],
     "class_size_difference_columns": ["class","cpp_name","script_layout_size","native_sizeof"],
     "class_size_differences": [],
@@ -2808,15 +3020,15 @@
     "declared_fields_in_all_script_classes": 15856,
     "independent_offsets": {
       "compiled_member_offsets": 16,
-      "match": 61,
+      "match": 66,
       "mismatch": 0,
       "next_to_the_member_name": 48,
-      "total": 61
+      "total": 66
     },
     "native_offsets": {
-      "match": 76,
+      "match": 77,
       "mismatch": 0,
-      "total": 76
+      "total": 77
     }
   }
 }

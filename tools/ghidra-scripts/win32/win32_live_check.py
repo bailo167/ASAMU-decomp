@@ -11,6 +11,18 @@ attaches no debugger.
     python win32_live_check.py --data DIR --seconds 2
     python win32_live_check.py --selftest      (no game needed; any OS)
 
+The class object's size field is not always the C++ sizeof: for a class whose
+script is loaded the engine stores the end of the last property there, and the
+registered sizeof is that end rounded up to the class's alignment (4, 8 or 16;
+WINDOWS_BINARY.md 8). This checker has no script layout, so it accepts the
+sizeof itself or a smaller value that rounds up to it, counts both, and lists
+every class that is neither. win32_props_check.py checks the same field
+against the layout's property ends exactly.
+
+Every line, and every list in full, also goes to a log file (--log FILE;
+default logs/win32_live_check-<UTC time>.log next to the script, or
+research/local/win/live-checks/ in a repository checkout; --no-log for none).
+
 Stock CPython 3.9+ (ctypes only). The module imports on macOS and Linux so the
 self-test can run there; the Windows API is touched only when a process is
 opened.
@@ -29,6 +41,24 @@ import time
 EXE_NAME = "ASAMU-Win32-Shipping.exe"
 DATA_FILES = ("image.json", "globals.json", "class_sizes.json", "vtables.json", "native_evidence.json")
 MAX_NAME_CHARS = 1024
+ALIGNMENTS = (4, 8, 16)  # class alignments of this build (DEFAULTS.md 9.3, rules 5 and 6)
+SHOWN_NAMES = 12  # names of a long list on the console (the log has all of them)
+
+
+def align_up(value, alignment):
+    return (value + alignment - 1) // alignment * alignment
+
+
+def size_kind(value, sizeof):
+    """How a class object's size field relates to the registered sizeof:
+    "sizeof" (equal), the alignment by which the value rounds up to it (the
+    end of the last property of a linked class), or None (unexplained)."""
+    if value == sizeof:
+        return "sizeof"
+    for a in ALIGNMENTS:
+        if 0 < value < sizeof and align_up(value, a) == sizeof:
+            return a
+    return None
 
 
 class ReadError(Exception):
@@ -179,21 +209,41 @@ class Names:
 
 
 class Report:
-    def __init__(self, out=sys.stdout):
+    """Writes the checks to ``out``; ``log`` (a file object) gets every line
+    and every list in full."""
+
+    def __init__(self, out=sys.stdout, log=None):
         self.out = out
+        self.log = log
         self.passed = 0
         self.failed = 0
+
+    def _line(self, text, console=True):
+        if console:
+            self.out.write(text + "\n")
+        if self.log is not None:
+            self.log.write(text + "\n")
 
     def check(self, ok, text):
         if ok:
             self.passed += 1
         else:
             self.failed += 1
-        self.out.write("%s %s\n" % ("ok  " if ok else "FAIL", text))
+        self._line("%s %s" % ("ok  " if ok else "FAIL", text))
         return ok
 
     def info(self, text):
-        self.out.write("     %s\n" % text)
+        self._line("     %s" % text)
+
+    def names(self, title, names):
+        """A list of names: the first SHOWN_NAMES on the console, all of
+        them in the log."""
+        if not names:
+            return
+        shown = ", ".join(names[:SHOWN_NAMES]) + (" ... (%d more in the log)" % (len(names) - SHOWN_NAMES) if len(names) > SHOWN_NAMES else "")
+        self._line("     %s (%d): %s" % (title, len(names), shown))
+        if self.log is not None and len(names) > SHOWN_NAMES:
+            self.log.write("     %s, all %d: %s\n" % (title, len(names), ", ".join(names)))
 
 
 def best_offset(tally, total):
@@ -239,9 +289,11 @@ def run_checks(mem, model, report, seconds=1.0, sleep=time.sleep):
     cdo_tally = {}
     size_hits = {}
     cdo_hits = {}
+    unset = []
     for c in m.classes:
         ptr = mem.u32(base + c["private_static_class_rva"])
         if not ptr:
+            unset.append(c["cpp_name"])
             continue
         registered += 1
         blob = mem.try_raw(ptr, m.uclass_size)
@@ -253,27 +305,44 @@ def run_checks(mem, model, report, seconds=1.0, sleep=time.sleep):
         want_vt = base + c["vtable_rva"]
         for off in range(m.cls + 8, m.uclass_size - 3, 4):
             v = struct.unpack_from("<I", blob, off)[0]
-            if v == c["size"]:
+            kind = size_kind(v, c["size"])
+            if kind is not None:
+                # The sizeof, or a property end that rounds up to it.
                 size_tally[off] = size_tally.get(off, 0) + 1
-                size_hits.setdefault(c["cpp_name"], set()).add(off)
+                size_hits.setdefault(c["cpp_name"], {})[off] = (kind, v)
             elif v > 0x10000:
                 head = mem.try_raw(v, m.cls + 4)
                 if head and struct.unpack_from("<I", head, 0)[0] == want_vt and struct.unpack_from("<I", head, m.cls)[0] == ptr:
                     cdo_tally[off] = cdo_tally.get(off, 0) + 1
                     cdo_hits.setdefault(c["cpp_name"], set()).add(off)
-        size_hits.setdefault(c["cpp_name"], set())
+        size_hits.setdefault(c["cpp_name"], {})
         cdo_hits.setdefault(c["cpp_name"], set())
     report.check(registered > 1000, "%d of %d PrivateStaticClass pointers are set" % (registered, len(m.classes)))
+    report.names("not set (not registered yet; not checked)", unset)
     report.check(registered and named == registered, "%d of them point at a UClass whose name is the class name" % named)
-    for what, tally, hits in (
-        ("sizeof equals the class object's size field", size_tally, size_hits),
-        ("the default object carries the listed vtable", cdo_tally, cdo_hits),
-    ):
-        off, n = best_offset(tally, named)
-        report.check(named and n >= named * 0.98, "%s for %d of %d classes (UClass+0x%X)" % (what, n, named, off or 0))
-        missing = sorted(k for k, v in hits.items() if off not in v)
-        if missing:
-            report.info("not matching at that offset: %s%s" % (", ".join(missing[:12]), " ..." if len(missing) > 12 else ""))
+    # The size field: the sizeof, or the end of the last property (which the sizeof is, rounded up
+    # to the class alignment). Every class has to be one of the two.
+    off, n = best_offset(size_tally, named)
+    kinds = {"sizeof": 0}
+    kinds.update({a: 0 for a in ALIGNMENTS})
+    below = []
+    for name in sorted(size_hits):
+        hit = size_hits[name].get(off)
+        if hit is not None:
+            kinds[hit[0]] += 1
+            if hit[0] != "sizeof":
+                below.append("%s %#x<%#x" % (name, hit[1], m.by_cpp[name]["size"]))
+    unexplained = sorted(k for k, v in size_hits.items() if off not in v)
+    report.check(named and n == named,
+                 "the class object's size field (UClass+0x%X) is the sizeof or a property end that rounds up to it for %d of %d classes"
+                 % (off or 0, n, named))
+    report.info("  equal to the sizeof: %d; below it and rounding up to it by %s"
+                % (kinds["sizeof"], ", ".join("%d: %d" % (a, kinds[a]) for a in ALIGNMENTS)))
+    report.names("size field below the sizeof (class value<sizeof)", below)
+    report.names("size field neither the sizeof nor a property end that rounds up to it", unexplained)
+    off, n = best_offset(cdo_tally, named)
+    report.check(named and n >= named * 0.98, "the default object carries the listed vtable for %d of %d classes (UClass+0x%X)" % (n, named, off or 0))
+    report.names("default object not matching at that offset", sorted(k for k, v in cdo_hits.items() if off not in v))
 
     # engine and world
     engine = mem.u32(base + m.rva("GEngine"))
@@ -521,10 +590,21 @@ class FakeGame:
         for c in some + filler:
             self.class_ptr[c["cpp_name"]] = self.alloc(m.uclass_size)
         cls_class = self.class_ptr["UClass"]
-        for c in some + filler:
+        self.below = {}
+        for i, c in enumerate(some + filler):
             ptr = self.class_ptr[c["cpp_name"]]
             self.init_object(ptr, base + m.by_cpp["UClass"]["vtable_rva"], cls_class, c["name"])
-            self.p32(ptr + 0x60, c["size"])
+            # Every eleventh class is "linked from script": its size field is the end of its last
+            # property, 3 bytes (a trailing byte member) or 8 bytes (a 16-aligned class) below the
+            # sizeof, as far as the sizeof allows.
+            size = c["size"]
+            if i % 11 == 5 and size % 16 == 0 and size > 16:
+                size -= 8
+            elif i % 11 == 7 and size % 4 == 0 and size > 4:
+                size -= 3
+            if size != c["size"]:
+                self.below[c["cpp_name"]] = size
+            self.p32(ptr + 0x60, size)
             cdo = self.new_object(c["cpp_name"], "Default__" + c["name"])
             self.p32(ptr + 0x64, cdo)
             self.p32(base + c["private_static_class_rva"], ptr)
@@ -636,6 +716,27 @@ def selftest(model):
     if not ok or rep.passed < 15:
         sys.stdout.write("".join(sink.lines))
         raise SystemExit("selftest: the checks fail on the fake image")
+    # The fake holds classes whose size field is a property end below the sizeof (both kinds):
+    # accepted, counted and listed.
+    text = "".join(sink.lines)
+    by = {a: sum(1 for name, v in game.below.items() if size_kind(v, model.by_cpp[name]["size"]) == a) for a in ALIGNMENTS}
+    want = "below it and rounding up to it by %s" % ", ".join("%d: %d" % (a, by[a]) for a in ALIGNMENTS)
+    if len(game.below) < 50 or by[4] < 10 or by[16] < 10 or want not in text:
+        sys.stdout.write(text)
+        raise SystemExit("selftest: property ends below the sizeof were not counted as such (%r)" % (by,))
+    assert size_kind(469, 472) == 4 and size_kind(476, 480) == 8 and size_kind(712, 720) == 16 and size_kind(1940, 1952) == 16
+    assert size_kind(0x454, 0x454) == "sizeof"
+    assert size_kind(472, 469) is None and size_kind(704, 720) is None and size_kind(0, 16) is None and size_kind(476, 472) is None
+    # A size field that is neither is reported, with the class named.
+    bad = FakeGame(model)
+    victim = model.by_cpp["APawn"]
+    bad.p32(bad.class_ptr["APawn"] + 0x60, victim["size"] - 20)
+    sink4 = _Sink()
+    rep4 = Report(sink4)
+    run_checks(Memory(bad.read, bad.base), model, rep4, seconds=1.0, sleep=bad.tick)
+    if rep4.failed != 1 or "neither the sizeof nor a property end that rounds up to it (1): APawn" not in "".join(sink4.lines):
+        sys.stdout.write("".join(sink4.lines))
+        raise SystemExit("selftest: a wrong size field was not reported")
     # a wrong address must be noticed
     bad = FakeGame(model)
     bad.write(bad.base + model.rva("GFrameCounter"), struct.pack("<Q", 5))
@@ -659,11 +760,26 @@ def selftest(model):
 # ---------------------------------------------------------------- main
 
 
+def default_log_path():
+    """logs/ next to the script (the working folder on the game machine);
+    in a repository checkout the git-ignored research/local/win/live-checks."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(os.path.join(here, "..", "..", ".."))
+    if os.path.isfile(os.path.join(root, "Cargo.toml")) and os.path.isdir(os.path.join(root, "research")):
+        folder = os.path.join(root, "research", "local", "win", "live-checks")
+    else:
+        folder = os.path.join(here, "logs")
+    return os.path.join(folder, "win32_live_check-%s.log" % time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description="Read-only live check of the Win32 address tables")
     ap.add_argument("--data", help="directory with image.json, globals.json, class_sizes.json, vtables.json, native_evidence.json")
     ap.add_argument("--pid", type=int, help="process id (default: find %s)" % EXE_NAME)
     ap.add_argument("--seconds", type=float, default=1.0, help="interval for the frame counter check")
+    ap.add_argument("--log", help="file for the full output (default: see the module text)")
+    ap.add_argument("--no-log", action="store_true", help="write no log file")
+    ap.add_argument("--verbose", action="store_true", help="accepted for symmetry with win32_props_check.py (the log is always complete)")
     ap.add_argument("--selftest", action="store_true", help="run the checks on a fake memory image")
     args = ap.parse_args(argv)
     model = Model(load_data(find_data_dir(args.data)))
@@ -673,16 +789,26 @@ def main(argv):
     if mem is None:
         print("%s is not running" % EXE_NAME)
         return 2
+    log = None
+    log_path = None if args.no_log else (args.log or default_log_path())
     try:
-        print("module base 0x%08X (preferred %s)" % (mem.base, model.image["image_base"]))
-        rep = Report()
+        if log_path:
+            os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+            log = open(log_path, "w", encoding="utf-8", newline="\n")
+            log.write("win32_live_check %s UTC\n" % time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()))
+        rep = Report(log=log)
+        rep._line("module base 0x%08X (preferred %s)" % (mem.base, model.image["image_base"]))
         try:
             run_checks(mem, model, rep, seconds=args.seconds)
         except ReadError as e:
             rep.check(False, "memory read failed: %s" % e)
-        print("%d passed, %d failed" % (rep.passed, rep.failed))
+        rep._line("%d passed, %d failed" % (rep.passed, rep.failed))
+        if log_path:
+            print("full output: %s" % log_path)
         return 1 if rep.failed else 0
     finally:
+        if log is not None:
+            log.close()
         close()
 
 

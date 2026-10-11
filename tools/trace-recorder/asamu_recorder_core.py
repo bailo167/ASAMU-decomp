@@ -15,7 +15,10 @@ What it does
   ``docs/reverse-engineering/data/defaults/native_layout.json`` and, when the
   install is present, against the executable.
 * ``Sampler`` reads one frame of player state through a ``read(addr, size)``
-  callable and returns a *raw record* (format ``asamu-trace-raw`` v1).
+  callable and returns a *raw record* (format ``asamu-trace-raw`` v1). Asked
+  to (``optional=``; the Windows front end does), it adds the optional
+  members of docs/TRACE_CAPTURE.md 6.10, whose offsets ``Layout.extend``
+  takes from a second file; ``v1_record`` removes them again.
 * ``convert_raw`` turns a raw recording into canonical ``asamu-trace`` v1
   traces (``crates/asamu-player/src/trace.rs``), exactly as
   ``asamu-trace convert`` (Rust, the reference implementation) does.
@@ -53,6 +56,12 @@ MAX_BINDINGS = 4096
 MAX_NAME_CHARS = 1024
 MAX_STRING_CHARS = 4096
 MAX_OUTER_DEPTH = 16
+# Optional fields (docs/TRACE_CAPTURE.md 6.10): the schema of the file that
+# gives their offsets, the most timers read from one actor, and how far the
+# squared length of a floor normal may be from 1.
+OPTIONAL_SCHEMA = "asamu-decomp/recorder-layout-optional/v1"
+MAX_TIMERS = 32
+UNIT_LENGTH_SLACK = 2.0e-3
 # Most command parts visited when one key's binding is expanded (aliases
 # included); mirrors MAX_PARTS_PER_KEY in tools/asamu-trace/src/bindings.rs.
 MAX_PARTS_PER_KEY = 256
@@ -65,6 +74,22 @@ AXES_TABLE_STEP = 4
 MIN_AXES_DETERMINANT = 1.0e-3
 MOVE_INPUTS = ("auto", "keys", "acceleration")
 MOVE_FRAMES = ("original", "yaw")
+# Conversion constants shared with tools/asamu-trace (the reference; its tests
+# compare the two converters bit for bit).
+# A longer move in one tick is a teleport: ASAMUPawn.fTerminalVelocity (class
+# default), the 3-D speed clamp of the falling physics (segments.rs).
+TELEPORT_SPEED = 10000.0
+# The values the pawn's own script and story mode give GroundSpeed: fMoveSpeed,
+# x the sprint multiplier, x the story multiplier (class defaults; ABILITIES.md
+# A-WK-3). Any other value is a console SetSpeed.
+WALK_SPEED = 440.0
+SPRINT_SPEED = 880.0
+STORY_SPEED = 264.0
+# Most ticks an "event:" note lists, and most changes of EyeHeight a run may
+# have for the field to go into the "state:" note (limits of a notes line,
+# not game values; state.rs).
+MAX_LISTED = 20
+EYE_HEIGHT_MAX_CHANGES = 16000
 
 
 class LayoutError(Exception):
@@ -73,6 +98,16 @@ class LayoutError(Exception):
 
 class ReadError(Exception):
     """A memory read failed or returned fewer bytes than asked for."""
+
+
+class OptionalRejected(Exception):
+    """An optional value that cannot be what its field holds: the group is
+    left out of this record."""
+
+
+class OptionalOff(Exception):
+    """An optional group whose check failed on this object: left out of
+    every record of that object."""
 
 
 # --------------------------------------------------------------------- layout
@@ -96,6 +131,11 @@ class Layout:
             self._fields[key] = f
         self._structs = data["structs"]
         self._symbols = data["symbols"]
+        # The optional part (``extend``): empty unless a front end adds it.
+        self.optional_id = None
+        self._opt_fields = {}
+        self._opt_structs = {}
+        self._opt_sentinels = []
 
     @classmethod
     def load(cls, path=None):
@@ -103,6 +143,67 @@ class Layout:
             path = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_LAYOUT)
         with open(path, "r", encoding="utf-8") as fh:
             return cls(json.load(fh))
+
+    def extend(self, data):
+        """Adds the optional fields of a ``recorder-layout-optional`` file
+        (``recorder_optional_win32.json``). They are looked up with ``opt``,
+        ``opt_bit`` and ``opt_st``, which answer None for anything missing:
+        a layout without this part records plain version-1 fields."""
+        if data.get("schema") != OPTIONAL_SCHEMA:
+            raise LayoutError("unsupported optional layout schema %r" % data.get("schema"))
+        if data.get("extends") != self.id or int(data.get("pointer_size", 0)) != self.pointer_size:
+            raise LayoutError("optional layout %r does not extend layout %s" % (data.get("id"), self.id))
+        fields = {}
+        for f in data["fields"]:
+            key = (f["class"], f["name"])
+            if key in fields:
+                raise LayoutError("duplicate optional field %s.%s" % key)
+            int(f["offset"], 16)
+            if f.get("kind") == "Bool" and not 0 <= int(f.get("bit", -1)) < 32:
+                raise LayoutError("optional bool %s.%s has no bit" % key)
+            main = self._fields.get(key)
+            if main is not None and (main["offset"], main.get("bit")) != (f["offset"], f.get("bit")):
+                raise LayoutError("optional field %s.%s contradicts the layout" % key)
+            fields[key] = f
+        for s in data.get("sentinels", []):
+            if (s["class"], s["name"]) not in fields:
+                raise LayoutError("optional sentinel %s.%s is not a field" % (s["class"], s["name"]))
+            float(s["expected"])
+        self.optional_id = data["id"]
+        self._opt_fields = fields
+        self._opt_structs = data.get("structs", {})
+        self._opt_sentinels = list(data.get("sentinels", []))
+
+    def opt(self, cls_name, name):
+        """Offset of an optional field, or None."""
+        f = self._opt_fields.get((cls_name, name))
+        return None if f is None else int(f["offset"], 16)
+
+    def opt_bit(self, cls_name, name):
+        """(offset, bit) of an optional bool field, or None."""
+        f = self._opt_fields.get((cls_name, name))
+        if f is None or f.get("kind") != "Bool":
+            return None
+        return int(f["offset"], 16), int(f["bit"])
+
+    def opt_st(self, struct_name, member, part="members"):
+        """Member offset (or, with ``part="bits"``, bit number; with
+        ``part=None``, an attribute such as ``size``) of an optional
+        structure, or None."""
+        st = self._opt_structs.get(struct_name)
+        if st is None:
+            return None
+        v = st.get(member) if part is None else st.get(part, {}).get(member)
+        return None if v is None else int(v)
+
+    def optional_sentinels(self, group):
+        """[(offset, expected, "Class.Name")] of one group's sentinels."""
+        out = []
+        for s in self._opt_sentinels:
+            if s["group"] == group:
+                off = self.opt(s["class"], s["name"])
+                out.append((off, float(s["expected"]), "%s.%s" % (s["class"], s["name"])))
+        return out
 
     def field(self, cls_name, name):
         try:
@@ -255,6 +356,92 @@ class Offsets:
         self.sym_fixed_step = L.sym("GUseFixedTimeStep")["mangled"]
         self.sym_names = L.sym("FName::Names")["mangled"]
         self.sym_world_tick = L.sym("UWorld::Tick")["mangled"]
+
+
+class Optional:
+    """Offsets of the optional fields, one entry per group.
+
+    ``groups[name]`` holds a group's offsets; a group is missing from it
+    when the layout lacks one of them (``Layout.extend`` was not called, or
+    with an older file), so a group is read whole or not at all. Keep each
+    lookup a call of ``opt``, ``opt_bit`` or ``opt_st`` with literal string
+    arguments: ``test_win_glue.py`` finds them by pattern and checks each
+    against ``recorder_optional_win32.json``, as the Rust test does for
+    ``Offsets``.
+    """
+
+    # The members of a raw record each group adds, as the raw header's
+    # ``optional_fields`` names them.
+    MEMBERS = {
+        "base_level": ("player.base_level",),
+        "fov": ("player.fov_default", "player.fov_lock", "player.fov_locked"),
+        "camera_pov": ("player.camera_pov",),
+        "floor": ("player.floor",),
+        "eye": ("player.base_eye_height",),
+        "bob": ("player.bob", "player.walk_bob"),
+        "cylinder": ("player.cylinder",),
+        "weapon_state": ("player.gun.state",),
+        "timers": ("player.gun.timers",),
+    }
+
+    def __init__(self, L):
+        self.groups = {}
+
+        def group(_group, **offsets):
+            if all(v is not None for v in offsets.values()):
+                self.groups[_group] = offsets
+
+        # The outermost object of the pawn's base actor: Core.Object only.
+        group("base_level")
+        group(
+            "fov",
+            default=L.opt("Engine.Camera", "DefaultFOV"),
+            locked=L.opt_bit("Engine.Camera", "bLockedFOV"),
+            lock=L.opt("Engine.Camera", "LockedFOV"),
+        )
+        group(
+            "camera_pov",
+            location=L.opt("Engine.Camera", "CameraCache.POV.Location"),
+            rotation=L.opt("Engine.Camera", "CameraCache.POV.Rotation"),
+        )
+        group("floor", normal=L.opt("Engine.Pawn", "Floor"))
+        group("eye", base=L.opt("Engine.Pawn", "BaseEyeHeight"))
+        group(
+            "bob",
+            just_landed=L.opt_bit("UTGame.UTPawn", "bJustLanded"),
+            land_recovery=L.opt_bit("UTGame.UTPawn", "bLandRecovery"),
+            bob=L.opt("UTGame.UTPawn", "Bob"),
+            land=L.opt("UTGame.UTPawn", "LandBob"),
+            jump=L.opt("UTGame.UTPawn", "JumpBob"),
+            applied=L.opt("UTGame.UTPawn", "AppliedBob"),
+            time=L.opt("UTGame.UTPawn", "BobTime"),
+            walk=L.opt("UTGame.UTPawn", "WalkBob"),
+        )
+        group(
+            "cylinder",
+            collision=L.opt("Engine.Actor", "CollisionComponent"),
+            component=L.opt("Engine.Pawn", "CylinderComponent"),
+            translation=L.opt("Engine.PrimitiveComponent", "Translation"),
+            height=L.opt("Engine.CylinderComponent", "CollisionHeight"),
+            radius=L.opt("Engine.CylinderComponent", "CollisionRadius"),
+        )
+        group(
+            "weapon_state",
+            frame=L.opt("Core.Object", "StateFrame"),
+            node=L.opt_st("FStateFrame", "StateNode"),
+        )
+        group(
+            "timers",
+            array=L.opt("Engine.Actor", "Timers"),
+            size=L.opt_st("TimerData", "size", None),
+            flags=L.opt_st("TimerData", "flags"),
+            name=L.opt_st("TimerData", "FuncName"),
+            rate=L.opt_st("TimerData", "Rate"),
+            count=L.opt_st("TimerData", "Count"),
+            loop=L.opt_st("TimerData", "bLoop", "bits"),
+            paused=L.opt_st("TimerData", "bPaused", "bits"),
+        )
+        self.sentinels = {name: L.optional_sentinels(name) for name in self.groups}
 
 
 # --------------------------------------------------------------------- memory
@@ -435,7 +622,10 @@ class Sampler:
     ``symbols`` maps the layout's mangled symbol names to load addresses.
     """
 
-    def __init__(self, layout, read, symbols, ignore_sentinels=False):
+    def __init__(self, layout, read, symbols, ignore_sentinels=False, optional=None):
+        """``optional``: None or False for plain version-1 records; True for
+        every optional group the layout has; or the names of the groups
+        wanted (``Optional.MEMBERS``)."""
         self.L = layout
         self.o = Offsets(layout)
         self.mem = Mem(read, layout.pointer_size)
@@ -458,6 +648,26 @@ class Sampler:
         # pawn, world_info, input), for a front end that reads more from the
         # same objects. Process-local: never written to a record.
         self.objects = {}
+        # Optional fields: the groups being read, the groups this layout
+        # cannot give, what was left out and why.
+        self.opt_on = {}
+        self.opt_missing = []
+        self.opt_sentinels = {}
+        if optional:
+            have = Optional(layout)
+            wanted = sorted(Optional.MEMBERS) if optional is True else sorted(set(optional))
+            for name in wanted:
+                if name not in Optional.MEMBERS:
+                    raise LayoutError("unknown optional group %r" % name)
+                if name in have.groups:
+                    self.opt_on[name] = have.groups[name]
+                    self.opt_sentinels[name] = have.sentinels[name]
+                else:
+                    self.opt_missing.append(name)
+        self.opt_checked = {}  # (group, object address) -> the object passed the group's check
+        self.opt_off = {}  # group -> why its check failed (the latest object)
+        self.opt_rejected = {}  # group -> [records it was left out of, the latest reason]
+        self.opt_new = []  # checks made by the current sample (see optional_unconfirmed)
 
     # -- objects
     def obj_name(self, ptr):
@@ -634,6 +844,204 @@ class Sampler:
         off, bit = self.o.pressed_jump
         return bool((self.mem.u32(controller_ptr + off) >> bit) & 1)
 
+    # -- optional fields
+    def optional_fields(self):
+        """Names of the optional record members being written (sorted):
+        the members of every group that is on and has not failed its check."""
+        out = []
+        for name in self.opt_on:
+            if name not in self.opt_off:
+                out.extend(Optional.MEMBERS[name])
+        return sorted(out)
+
+    def optional_unconfirmed(self):
+        """Forgets the checks the last ``sample`` call made: for a reader of
+        a running process whose sample turned out not to be read while the
+        world stood still (a check made then proves nothing)."""
+        for key in self.opt_new:
+            if not self.opt_checked.pop(key, True):
+                self.opt_off.pop(key[0], None)
+        del self.opt_new[:]
+
+    def _opt_pass(self, group, ptr, ok, why):
+        self.opt_checked[(group, ptr)] = ok
+        self.opt_new.append((group, ptr))
+        if not ok:
+            self.opt_off[group] = why
+            raise OptionalOff(why)
+        self.opt_off.pop(group, None)
+
+    def _opt_sentinels(self, group, ptr):
+        """The group's sentinels on one object (once per object)."""
+        known = self.opt_checked.get((group, ptr))
+        if known is None:
+            bad = []
+            for off, expected, what in self.opt_sentinels[group]:
+                got = struct.unpack("<f", self.mem.raw(ptr + off, 4))[0]
+                want = struct.unpack("<f", struct.pack("<f", expected))[0]
+                if got != want:
+                    bad.append("%s = %r (expected %r)" % (what, got, want))
+            self._opt_pass(group, ptr, not bad, "; ".join(bad))
+        elif not known:
+            raise OptionalOff(self.opt_off.get(group, ""))
+
+    def _opt_class(self, group, ptr, want):
+        """The object a group leads to is of the class it should be (once
+        per object)."""
+        known = self.opt_checked.get((group, ptr))
+        if known is None:
+            got = self.class_name(ptr)
+            self._opt_pass(group, ptr, got == want, "found a %s where a %s should be" % (got, want))
+        elif not known:
+            raise OptionalOff(self.opt_off.get(group, ""))
+
+    def _opt_fov(self, g, player, cam):
+        if not cam:
+            return
+        self._opt_sentinels("fov", cam)
+        b = Block(self.mem, cam, *span((g["default"], 4), (g["locked"][0], 4), (g["lock"], 4)))
+        default, lock = b.f32(g["default"]), b.f32(g["lock"])
+        if not finite((default, lock)):
+            raise OptionalRejected("a field of view is not a number")
+        player["fov_default"] = default
+        player["fov_locked"] = b.flag(g["locked"])
+        player["fov_lock"] = lock
+
+    def _opt_camera_pov(self, g, player, cam):
+        if not cam:
+            return
+        self._opt_sentinels("camera_pov", cam)
+        b = Block(self.mem, cam, *span((g["location"], 12), (g["rotation"], 12)))
+        location = b.vec3(g["location"])
+        if not finite(location):
+            raise OptionalRejected("the camera location is not a number")
+        player["camera_pov"] = {"location": location, "rotation": b.rot(g["rotation"])}
+
+    def _opt_floor(self, g, player, pawn):
+        normal = list(struct.unpack("<3f", self.mem.raw(pawn + g["normal"], 12)))
+        if not finite(normal):
+            raise OptionalRejected("the floor normal is not a number")
+        length2 = sum(v * v for v in normal)
+        # A pawn that has not walked yet has no floor normal (all zero).
+        if any(normal) and abs(length2 - 1.0) > UNIT_LENGTH_SLACK:
+            raise OptionalRejected("the floor normal is not a unit vector")
+        player["floor"] = normal
+
+    def _opt_eye(self, g, player, pawn):
+        base = struct.unpack("<f", self.mem.raw(pawn + g["base"], 4))[0]
+        if not math.isfinite(base):
+            raise OptionalRejected("the base eye height is not a number")
+        player["base_eye_height"] = base
+
+    def _opt_bob(self, g, player, pawn):
+        self._opt_sentinels("bob", pawn)
+        scalars = ("bob", "land", "jump", "applied", "time")
+        b = Block(self.mem, pawn, *span(
+            (g["just_landed"][0], 4), (g["land_recovery"][0], 4), (g["walk"], 12),
+            *[(g[k], 4) for k in scalars]))
+        walk = b.vec3(g["walk"])
+        bob = {k: b.f32(g[k]) for k in scalars}
+        if not finite(walk) or not finite(bob.values()):
+            raise OptionalRejected("a bob value is not a number")
+        bob["just_landed"] = b.flag(g["just_landed"])
+        bob["land_recovery"] = b.flag(g["land_recovery"])
+        player["walk_bob"] = walk
+        player["bob"] = bob
+
+    def _opt_cylinder(self, g, player, pawn):
+        P = self.mem.ptr_size
+        pb = Block(self.mem, pawn, *span((g["collision"], P), (g["component"], P)))
+        comp = pb.ptr(g["component"])
+        if not comp:
+            raise OptionalRejected("the pawn has no cylinder component")
+        self._opt_class("cylinder", comp, "CylinderComponent")
+        b = Block(self.mem, comp, *span((g["translation"], 12), (g["height"], 4), (g["radius"], 4)))
+        radius, height, translation = b.f32(g["radius"]), b.f32(g["height"]), b.vec3(g["translation"])
+        if not finite([radius, height] + translation) or radius <= 0.0 or height <= 0.0:
+            raise OptionalRejected("not a cylinder (radius %r, height %r)" % (radius, height))
+        player["cylinder"] = {
+            "radius": radius,
+            "half_height": height,
+            "translation": translation,
+            "collision_component": pb.ptr(g["collision"]) == comp,
+        }
+
+    def _opt_weapon_state(self, g, gun, weapon):
+        state = None
+        frame = self.mem.ptr(weapon + g["frame"])
+        if frame:
+            node = self.mem.ptr(frame + g["node"])
+            if node:
+                self._opt_class("weapon_state", node, "State")
+                state = self.obj_name(node)
+        gun["state"] = state
+
+    def _opt_timers(self, g, gun, weapon):
+        data, count = self.tarray(weapon + g["array"])
+        if count < 0 or count > MAX_TIMERS or (count > 0 and not data):
+            raise OptionalRejected("not a timer list (count %d)" % count)
+        raw = self.mem.raw(data, count * g["size"]) if count > 0 else b""
+        timers = []
+        for i in range(max(count, 0)):
+            at = i * g["size"]
+            word = struct.unpack_from("<I", raw, at + g["flags"])[0]
+            idx, num = struct.unpack_from("<ii", raw, at + g["name"])
+            rate = struct.unpack_from("<f", raw, at + g["rate"])[0]
+            elapsed = struct.unpack_from("<f", raw, at + g["count"])[0]
+            name = self.names.name(idx, num)
+            if name is None or not finite((rate, elapsed)):
+                raise OptionalRejected("timer %d is not a timer" % i)
+            timers.append({
+                "name": name,
+                "rate": rate,
+                "count": elapsed,
+                "loop": bool((word >> g["loop"]) & 1),
+                "paused": bool((word >> g["paused"]) & 1),
+            })
+        gun["timers"] = timers
+
+    def sample_optional(self, player, pawn, pawn_class, cam, weapon, base_ptr):
+        """Adds the optional members to ``player`` (a record's player part).
+        A group that cannot be read, or whose value cannot be right, is left
+        out of this record and counted in ``opt_rejected``; one whose check
+        fails on an object is left out for that object (``opt_off``)."""
+        on = self.opt_on
+        del self.opt_new[:]
+        gun = player.get("gun")
+
+        def run(name, fn, *args):
+            if name not in on:
+                return
+            try:
+                fn(on[name], *args)
+            except OptionalOff:
+                pass
+            except OptionalRejected as e:
+                self._opt_reject(name, str(e))
+            except (ReadError, struct.error):
+                self._opt_reject(name, "a read failed")
+
+        if "base_level" in on:
+            try:
+                player["base_level"] = self.outermost_name(base_ptr) if base_ptr else None
+            except (ReadError, struct.error):
+                self._opt_reject("base_level", "a read failed")
+        run("fov", self._opt_fov, player, cam)
+        run("camera_pov", self._opt_camera_pov, player, cam)
+        run("floor", self._opt_floor, player, pawn)
+        run("eye", self._opt_eye, player, pawn)
+        if pawn_class == "ASAMUPawn":
+            run("bob", self._opt_bob, player, pawn)
+        run("cylinder", self._opt_cylinder, player, pawn)
+        if gun is not None and weapon:
+            run("weapon_state", self._opt_weapon_state, gun, weapon)
+            run("timers", self._opt_timers, gun, weapon)
+
+    def _opt_reject(self, name, why):
+        entry = self.opt_rejected.setdefault(name, [0, why])
+        entry[0] += 1
+        entry[1] = why
+
     def sample(self, frame, dt_arg=None, world_ptr=None):
         """One raw record, or None when there is nothing to record this frame.
 
@@ -789,6 +1197,8 @@ class Sampler:
         }
         if not record_is_finite(record):
             return None, "non-finite"
+        if self.opt_on:
+            self.sample_optional(record["player"], pawn, pawn_class, cam, weapon, base_ptr)
         return record, None
 
 
@@ -806,8 +1216,19 @@ def record_is_finite(rec):
 
 
 def make_header(layout, bindings, scenario=None, launch_options=None, timing=None, notes=None,
-                recorder=RECORDER, sample_point=SAMPLE_POINT):
+                recorder=RECORDER, sample_point=SAMPLE_POINT, optional_fields=None):
+    """The first line of a raw recording. ``optional_fields``: the optional
+    record members the recording has (``Sampler.optional_fields``); None or
+    empty for a plain version-1 header."""
     timing = timing or {}
+    header = _header_v1(layout, bindings, scenario, launch_options, timing, notes, recorder, sample_point)
+    if optional_fields:
+        header["optional_fields"] = sorted(optional_fields)
+        header["optional_layout"] = layout.optional_id
+    return header
+
+
+def _header_v1(layout, bindings, scenario, launch_options, timing, notes, recorder, sample_point):
     return {
         "format": RAW_FORMAT,
         "version": RAW_VERSION,
@@ -826,6 +1247,61 @@ def make_header(layout, bindings, scenario=None, launch_options=None, timing=Non
 
 def dumps(obj):
     return json.dumps(obj, separators=(",", ":"), allow_nan=False)
+
+
+# The members of a version-1 raw file (tools/asamu-trace/src/raw.rs, whose
+# reader refuses a member it does not know). Everything else a recorder
+# writes is an optional field (docs/TRACE_CAPTURE.md 6.10).
+V1_HEADER = (
+    "format", "version", "recorder", "layout", "game_build", "sample_point", "scenario",
+    "launch_options", "benchmarking", "fixed_delta_time", "bindings", "notes",
+)
+V1_RECORD = ("frame", "dt_arg", "world", "player")
+V1_PLAYER = (
+    "controller_class", "pawn_class", "pawn_id", "location", "velocity", "acceleration",
+    "pawn_rotation", "view_rotation", "physics", "base", "fov_camera", "fov_controller", "keys",
+    "pressed_jump", "axes", "ground_speed", "air_speed", "jump_z", "air_control", "eye_height",
+    "gun", "pawn_flags", "boots",
+)
+V1_GUN = (
+    "grappling", "released", "can_grapple", "anchor", "grapple_location", "distance",
+    "times_grappled", "max_grapples",
+)
+
+
+def v1_header(header):
+    """The header without its optional members, with a note that says so."""
+    out = {k: v for k, v in header.items() if k in V1_HEADER}
+    removed = header.get("optional_fields")
+    if removed:
+        out["notes"] = list(out.get("notes") or []) + [
+            "version-1 view: %d optional fields were removed (%s)" % (len(removed), ", ".join(removed))
+        ]
+    return out
+
+
+def v1_record(rec):
+    """The record without its optional members (the record is not changed)."""
+    out = {k: v for k, v in rec.items() if k in V1_RECORD}
+    player = out.get("player")
+    if isinstance(player, dict):
+        player = {k: v for k, v in player.items() if k in V1_PLAYER}
+        if isinstance(player.get("gun"), dict):
+            player["gun"] = {k: v for k, v in player["gun"].items() if k in V1_GUN}
+        out["player"] = player
+    return out
+
+
+def write_v1_view(raw_path, out_path):
+    """Writes ``raw_path`` without its optional fields to ``out_path`` (never
+    over an existing file): what a reader of plain version-1 files accepts.
+    Returns the number of records."""
+    header, records = read_raw(raw_path)
+    with open(out_path, "x", encoding="utf-8", newline="\n") as fh:
+        fh.write(dumps(v1_header(header)) + "\n")
+        for rec in records:
+            fh.write(dumps(v1_record(rec)) + "\n")
+    return len(records)
 
 
 # ----------------------------------------------------------------- conversion
@@ -1145,12 +1621,22 @@ def _init_note(rec):
     return "init: " + json.dumps(init, sort_keys=True, separators=(",", ":"))
 
 
-def _tick_fields(rec):
+def _eye_height(rec):
+    e = rec["player"].get("eye_height")
+    return f32(e) if e is not None else None
+
+
+def eye_height_changes(run):
+    """Ticks of the run whose EyeHeight differs from the tick before."""
+    return sum(1 for k in range(1, len(run)) if _eye_height(run[k]) != _eye_height(run[k - 1]))
+
+
+def _tick_fields(rec, with_eye_height):
     p = rec["player"]
     gun = p.get("gun")
     flags = p.get("pawn_flags")
     boots = p.get("boots")
-    return {
+    fields = {
         "air_control": f32(p["air_control"]),
         "air_speed": f32(p["air_speed"]),
         "base": p.get("base"),
@@ -1170,15 +1656,20 @@ def _tick_fields(rec):
         "sprinting": flags["sprinting"] if flags else None,
         "times_grappled": gun["times_grappled"] if gun else None,
     }
+    if with_eye_height:
+        fields["eye_height"] = _eye_height(rec)
+    return fields
 
 
 def _state_note(run):
     """The ``state:`` notes line (tools/asamu-trace/src/state.rs): the script
-    state of every tick as a list of [tick, {changed fields}]."""
+    state of every tick as a list of [tick, {changed fields}]. EyeHeight is
+    in it unless it changes on more than EYE_HEIGHT_MAX_CHANGES ticks."""
+    with_eye_height = eye_height_changes(run) <= EYE_HEIGHT_MAX_CHANGES
     changes = []
     last = None
     for k, rec in enumerate(run):
-        cur = _tick_fields(rec)
+        cur = _tick_fields(rec, with_eye_height)
         if last is None:
             diff = cur
         else:
@@ -1189,6 +1680,92 @@ def _state_note(run):
     return "state: " + json.dumps(
         {"changes": changes, "v": 1}, sort_keys=True, separators=(",", ":"), allow_nan=False
     )
+
+
+def _is_teleport(before, s):
+    """True if the pawn was teleported in the tick of sample ``s`` (the sample
+    after ``before``): it moved more than TELEPORT_SPEED x the frame length
+    (segments.rs, is_teleport; the same arithmetic)."""
+    a, b = s["position"], before["position"]
+    dx = float(a[0]) - float(b[0])
+    dy = float(a[1]) - float(b[1])
+    dz = float(a[2]) - float(b[2])
+    limit = TELEPORT_SPEED * (s["time"] - before["time"])
+    return math.sqrt(dx * dx + dy * dy + dz * dz) > (limit if limit > 0.0 else 0.0)
+
+
+def _ground_speed_change(old, new):
+    """What a change of the recorded GroundSpeed is: None between the walking
+    and the sprint speed (the pawn's own sprint), else an event name."""
+    def own(g):
+        return g == WALK_SPEED or g == SPRINT_SPEED
+
+    if old == new or (own(old) and own(new)):
+        return None
+    if new == STORY_SPEED:
+        return "story mode on"
+    if old == STORY_SPEED and own(new):
+        return "story mode off"
+    return "GroundSpeed set (a console speed)"
+
+
+def _bounded_list(items):
+    text = ", ".join(items[:MAX_LISTED])
+    if len(items) > MAX_LISTED:
+        text += " and %d more" % (len(items) - MAX_LISTED)
+    return text
+
+
+def _event_notes(run, samples):
+    """The ``event:`` notes of a run (segments.rs, event_notes): teleports,
+    level-script state changes, and the grapple's attaches counted from the
+    used-grapple counter."""
+    teleports = []
+    level = []
+    attaches = 0
+    within = []
+    for k in range(1, len(samples)):
+        attached = samples[k]["grapple_state"] == "attached"
+        rose = attached and samples[k - 1]["grapple_state"] != "attached"
+        if rose:
+            attaches += 1
+        if _is_teleport(samples[k - 1], samples[k]):
+            teleports.append("%d" % k)
+        bp, ap = run[k - 1]["player"], run[k]["player"]
+        change = _ground_speed_change(f32(bp["ground_speed"]), f32(ap["ground_speed"]))
+        if change is not None:
+            level.append("%d %s" % (k, change))
+        bg, ag = bp.get("gun"), ap.get("gun")
+        if bg and ag and bg["max_grapples"] != ag["max_grapples"]:
+            level.append("%d grapple capacity changed" % k)
+        bb, ab = bp.get("boots"), ap.get("boots")
+        if bb and ab and bool(bb["enabled"]) != bool(ab["enabled"]):
+            level.append("%d rocket boots %s" % (k, "enabled" if ab["enabled"] else "disabled"))
+        if bg and ag and ag["times_grappled"] > bg["times_grappled"] and not rose:
+            attaches += 1
+            within.append("%d" % k)
+    notes = []
+    if teleports:
+        notes.append(
+            "event: %d teleport(s) (the pawn moved more than %d uu/s x the frame length in one "
+            "tick: a respawn or another script move): tick(s) %s"
+            % (len(teleports), TELEPORT_SPEED, _bounded_list(teleports))
+        )
+    if level:
+        notes.append(
+            "event: %d level-script state change(s) (story mode, a console speed, the grapple "
+            "capacity or the rocket boots: changes the pawn's own rules do not make): %s"
+            % (len(level), _bounded_list(level))
+        )
+    if within:
+        notes.append(
+            "event: %d grapple attach(es), %d of them inside one frame (the used-grapple "
+            "counter iTimesGrappled rose, no sample is attached): tick(s) %s"
+            % (attaches, len(within), _bounded_list(within))
+        )
+    elif attaches:
+        notes.append("event: %d grapple attach(es), each with an attached sample" % attaches)
+    return notes
 
 
 def _move_notes(notes, source, why_count, frame, c, magnitudes, total):
@@ -1452,6 +2029,19 @@ def convert_raw(header, records, level=None, move_input="auto", move_frame="orig
                 "fov: controller FOVAngle used on %d samples (camera POV FOV unavailable)"
                 % counters["fov_controller"]
             )
+        cached = len(run) - counters["fov_controller"]
+        if cached > 0:
+            notes.append(
+                "fov: cached view FOV (the camera's CameraCache.POV.FOV) on %d of %d samples: "
+                "a locked camera FOV (the zoom) does not show in it" % (cached, len(run))
+            )
+        eye_changes = eye_height_changes(run)
+        if eye_changes > EYE_HEIGHT_MAX_CHANGES:
+            notes.append(
+                "check: EyeHeight left out of the state: note (%d changes; at most %d fit a "
+                "notes line)" % (eye_changes, EYE_HEIGHT_MAX_CHANGES)
+            )
+        notes.extend(_event_notes(run, samples))
         notes.extend(header.get("notes") or [])
         notes.append(_state_note(run))
         notes.append(_init_note(run[0]))
@@ -1857,7 +2447,8 @@ def _selftest_move_input(header, template):
     assert notes[-1].startswith("init: ") and notes[-2].startswith("state: "), notes[-2:]
     timeline = json.loads(notes[-2][len("state: "):])
     assert timeline["v"] == 1 and timeline["changes"][0][0] == 0, timeline
-    assert len(timeline["changes"][0][1]) == 18, timeline["changes"][0]
+    assert len(timeline["changes"][0][1]) == 19, timeline["changes"][0]
+    assert timeline["changes"][0][1]["eye_height"] == 38.0, timeline["changes"][0]
     flying = [c for c in timeline["changes"] if c[1].get("physics") == PHYS_FLYING]
     assert [c[0] for c in flying] == [3, 9] and flying[0][1]["grappling"] is True, timeline
 
@@ -1895,6 +2486,101 @@ def _selftest_move_input(header, template):
             pass
         else:
             raise AssertionError("an unknown move input must be refused")
+
+
+def _selftest_events(header, template):
+    """Teleports, level-script state changes, attaches counted from the
+    used-grapple counter, the cached-FOV note and the eye height in the state
+    timeline: the cases of the unit tests of convert.rs and segments.rs, with
+    the same expected notes."""
+    import copy
+
+    def rec(i, x, ground_speed=440.0, times=0, max_grapples=2, boots=True, grappling=False,
+            eye=38.0):
+        r = copy.deepcopy(template)
+        r["frame"] = 300 + i
+        r["world"]["time_seconds"] = 20.0 + i / 60.0
+        p = r["player"]
+        p.update(keys=[], pressed_jump=False, physics=PHYS_FLYING if grappling else 1, axes=None,
+                 acceleration=[0.0, 0.0, 0.0], location=[x, 0.0, 100.0],
+                 velocity=[0.0, 0.0, 0.0], ground_speed=ground_speed, eye_height=eye)
+        p["gun"] = dict(p["gun"], grappling=grappling, times_grappled=times,
+                        max_grapples=max_grapples, grapple_location=[x + 300.0, 0.0, 100.0],
+                        distance=300.0, anchor=None)
+        p["boots"] = dict(p["boots"], enabled=boots)
+        return r
+
+    # One tick is 1/60 s: 10000 uu/s allow 166.67 uu. Tick 2 moves 166 uu (no
+    # teleport), tick 3 moves 167 uu (a teleport), tick 9 moves 20000 uu.
+    run = [
+        rec(0, 0.0),
+        rec(1, 0.0, ground_speed=880.0),                 # the pawn's own sprint
+        rec(2, 166.0, ground_speed=264.0),               # story mode on
+        rec(3, 333.0, ground_speed=264.0, times=1),      # attach inside the frame
+        rec(4, 333.0, ground_speed=440.0, times=2, grappling=True),  # story off; a visible attach
+        rec(5, 333.0, ground_speed=132.0, times=0, eye=30.5),        # a console speed; a refill
+        rec(6, 333.0, ground_speed=132.0, max_grapples=3, eye=30.5),
+        rec(7, 333.0, ground_speed=132.0, max_grapples=3, boots=False, eye=30.5),
+        rec(8, 333.0, ground_speed=132.0, max_grapples=3, boots=True),
+        rec(9, 20333.0, ground_speed=132.0, max_grapples=3),
+    ]
+    (meta, samples), = convert_raw(header, run)
+    notes = meta["notes"]
+    for want in (
+        "event: 2 teleport(s) (the pawn moved more than 10000 uu/s x the frame length in one "
+        "tick: a respawn or another script move): tick(s) 3, 9",
+        "event: 6 level-script state change(s) (story mode, a console speed, the grapple "
+        "capacity or the rocket boots: changes the pawn's own rules do not make): 2 story mode "
+        "on, 4 story mode off, 5 GroundSpeed set (a console speed), 6 grapple capacity changed, "
+        "7 rocket boots disabled, 8 rocket boots enabled",
+        "event: 2 grapple attach(es), 1 of them inside one frame (the used-grapple counter "
+        "iTimesGrappled rose, no sample is attached): tick(s) 3",
+        "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 10 of 10 samples: a locked "
+        "camera FOV (the zoom) does not show in it",
+    ):
+        assert want in notes, (want, notes)
+    timeline = json.loads(notes[-2][len("state: "):])
+    eyes = [(c[0], c[1]["eye_height"]) for c in timeline["changes"] if "eye_height" in c[1]]
+    assert eyes == [(0, 38.0), (5, 30.5), (8, 38.0)], eyes
+    # Without the camera's FOV the column is the controller's: no such note.
+    plain = copy.deepcopy(run[:3])
+    for r in plain:
+        r["player"]["fov_camera"] = None
+        r["player"]["location"] = [0.0, 0.0, 100.0]
+        r["player"]["ground_speed"] = 440.0
+        r["player"]["eye_height"] = None
+    (meta, samples), = convert_raw(header, plain)
+    assert not any(n.startswith(("fov: cached", "event: ")) for n in meta["notes"]), meta["notes"]
+    timeline = json.loads(meta["notes"][-2][len("state: "):])
+    assert timeline["changes"][0][1]["eye_height"] is None, timeline
+    # A visible attach only, and more ticks than a note lists.
+    many = [rec(i, 400.0 * i, grappling=(i == 1)) for i in range(30)]
+    many[1]["player"]["gun"]["times_grappled"] = 1
+    for r in many[2:]:
+        r["player"]["gun"]["times_grappled"] = 1
+    (meta, samples), = convert_raw(header, many)
+    assert "event: 1 grapple attach(es), each with an attached sample" in meta["notes"], meta["notes"]
+    assert any(
+        n.startswith("event: 29 teleport(s)") and n.endswith("19, 20 and 9 more") for n in meta["notes"]
+    ), meta["notes"]
+    # An eye height that changes on too many ticks stays out of the timeline.
+    assert eye_height_changes(many) == 0
+    long = [rec(i, 0.0, eye=30.0 + (i % 2)) for i in range(EYE_HEIGHT_MAX_CHANGES + 2)]
+    (meta, samples), = convert_raw(header, long)
+    assert (
+        "check: EyeHeight left out of the state: note (%d changes; at most %d fit a notes line)"
+        % (EYE_HEIGHT_MAX_CHANGES + 1, EYE_HEIGHT_MAX_CHANGES)
+    ) in meta["notes"]
+    timeline = json.loads(meta["notes"][-2][len("state: "):])
+    assert len(timeline["changes"]) == 1 and "eye_height" not in timeline["changes"][0][1], timeline
+    # A tick in which no time passes: any move is a teleport, none is not.
+    still = {"position": [1.0, 2.0, 3.0], "time": 5.0}
+    assert not _is_teleport(still, {"position": [1.0, 2.0, 3.0], "time": 5.0})
+    assert _is_teleport(still, {"position": [1.0, 2.0, 3.5], "time": 5.0})
+    assert _is_teleport(still, {"position": [1.0, 2.0, 3.5], "time": 4.0})
+    # 1/64 s (exact in binary) allows 156.25 uu.
+    assert not _is_teleport(still, {"position": [1.0, 2.0, 159.0], "time": 5.015625})
+    assert _is_teleport(still, {"position": [1.0, 2.0, 159.5], "time": 5.015625})
 
 
 def _selftest(layout_path=None):
@@ -1942,6 +2628,7 @@ def _selftest(layout_path=None):
     steady = [dict(r, world=dict(r["world"], time_seconds=50.0)) for r in lines]
     assert [len(s) for _, s in convert_raw(header, steady)] == [5]
     _selftest_move_input(header, lines[0])
+    _selftest_events(header, lines[0])
     # Sentinel mismatch is detected.
     g.m.f(g.gun + g.o.gun_max_distance, 1234.0)
     sampler2 = Sampler(g.L, g.m.read, g.symbols)
