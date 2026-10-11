@@ -49,7 +49,7 @@ The importer:
 | Stage | What it writes | Size (Mac build) |
 |---|---|---|
 | `textures` | DDS textures + manifest | 7,702 files, 1.29 GB |
-| `meshes` | glTF static meshes with collision + manifest | 1,765 files, 66 MB |
+| `meshes` | glTF static meshes with collision, simple-collision shapes + manifest | 2,081 files, 71 MB |
 | `materials` | approximate material descriptions | 1 file, 2.5 MB |
 | `levels` | scene descriptions and BSP geometry of all 12 maps | 37 files, 76 MB |
 | `audio` | Ogg sounds, sound cues, subtitles, ambient sounds | 774 files, 59 MB |
@@ -61,7 +61,7 @@ The importer:
 | `decals` | level decals as projected meshes, with their masks | 50 files, 77 MB |
 | `localization` | menu text, subtitles and credits in every language of your install | 16 files, 1.4 MB |
 
-Together that is 13,091 files and 2.3 GB. A full import takes under a minute on a recent Apple-silicon Mac
+Together that is 13,407 files and 2.3 GB. A full import takes under a minute on a recent Apple-silicon Mac
 (44 s measured for all twelve stages, including 1.5 s to hash the 1.1 GB of game files); a heavily loaded
 machine has taken about two minutes. It prints one line per stage and a summary at the end. A converter that is not part of your build is
 listed as `unavailable`.
@@ -184,24 +184,27 @@ build 1822049:
 | Your install | Steam depot | Cooked folder | Checked |
 |---|---|---|---|
 | macOS | 278362 | `CookedMac` | located, inventoried, all twelve stages converted |
-| Windows | 278361 | `CookedPC` | located, inventoried, all twelve stages converted (2026-10-10) |
+| Windows | 278361 | `CookedPC` | located, inventoried, all twelve stages converted (2026-10-10 and 2026-10-11) |
 | Linux | not examined | not examined | nothing |
 
 **Windows.** `asamu-import all` finds a Windows Steam install by itself, checks its 45 input files against the
 published inventory of the Windows depot (`all 45 input files match win-depot278361-build1822049`), and converts
-all twelve stages: 13,091 files, 2.3 GB, the same counts as on macOS. The two depots ship the same 45 data files
-(identical sizes and SHA-256), so the converted data is the same too: ten stages came out byte for byte identical
-to a macOS conversion, and `levels` and `lightmaps` differed only in the last digits of a few numbers, because the
-two systems' math libraries round differently. That is fixed (those two stages no longer use the system's math
-library), but the macOS conversion has not been repeated since, so "identical on both systems" is measured for
-ten stages and expected for the other two.
+all twelve stages: 13,407 files, 2.3 GB, the counts of a macOS conversion. The two depots ship the same 45 data files
+(identical sizes and SHA-256), so the converted data is the same too. Compared file by file with a macOS
+conversion: nine stages are byte for byte identical; in `meshes` every file the macOS conversion has is
+identical except the manifest (that conversion is older than the simple-collision output, so it lacks the 316
+shape files and the manifest's new records); and `levels` and `lightmaps` differed only in the last digits of a
+few numbers (and five light map texels by one step), because the two systems' math libraries round differently.
+That is fixed (the conversions no longer use the system's math library for those values), but the macOS
+conversion has not been repeated since: a new one is expected to match the Windows one in every stage, which
+means its `levels` and `lightmaps` output will change by those last digits.
 
 What was measured on Windows 11 (details in `docs/reverse-engineering/INVENTORY.md`, "Converting on Windows"):
 
-- a full import took 60 to 67 s on a 24-core laptop that was busy with other work, and several minutes when it
-  was heavily loaded; how long an idle machine takes was not measured;
-- importing again with nothing to do takes less than 0.2 s, and two forced imports in a row wrote byte-identical
-  run manifests;
+- a full import took 60 to 67 s on a 24-core laptop that was busy with other work, and two to nine minutes
+  when it was heavily loaded; how long an idle machine takes was not measured;
+- importing again with nothing to do takes less than 0.2 s, and two forced imports in a row, and two imports
+  into different folders, wrote byte-identical run manifests;
 - **close the game runtime (`asamu`) before importing again.** Windows does not let a folder be replaced while
   any program has one of its files open. The stage then fails after a few seconds with a message that says so,
   the converted data you had stays complete, and the next import (with the program closed) finishes the job.

@@ -102,7 +102,7 @@ the CI workflow (platforms).
 | Static meshes decoded and re-encoded byte for byte | 1,512 |
 | Placed actors in the 12 maps | 30,284 |
 | Symbols in the unstripped macOS executable | about 135,000 |
-| Importer output for the verified build | 13,091 files, 2.3 GB (2.1 GiB) |
+| Importer output for the verified build | 13,407 files, 2.3 GB (2.1 GiB) |
 | Platforms built in CI (library and tool tests run on each) | Windows x86_64, Linux x86_64, macOS arm64 (+ macOS x86_64 compile check) |
 | Licence | MIT or Apache-2.0 (code only; the game belongs to its owners) |
 

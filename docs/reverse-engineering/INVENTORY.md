@@ -639,11 +639,19 @@ with two size differences (their sets are in the JSON).
 2026-10-10, and its results compared with a conversion of the macOS depot made on the analysis Mac
 (`aarch64-apple-darwin`). Everything here is a measurement of the importer, not of the game.
 
+The measurements were repeated on 2026-10-11 with the importer that also writes simple collision
+(`MESHES.md`, mesh manifest version 2): a conversion from nothing, the comparison with the macOS
+conversion file by file (path, size and SHA-256 of all 13,407 and 13,091 files, hashed with another
+SHA-256 implementation than the importer's), and the experiments named below. The macOS conversion
+on record is older than both the simple-collision output and the portable math, so it is the
+reference for what the macOS importer wrote *before* those changes.
+
 ### Result
 
 `asamu-import all` finds the install through Steam, reports
 `all 45 input files match win-depot278361-build1822049 (size and SHA-256)`, and all twelve stages
-finish `ok`: 13,091 files, 2,282,441,395 bytes. The input fingerprint in the run manifest
+finish `ok`: 13,407 files, 2,286,853,777 bytes (13,091 files and 2,282,441,395 bytes before the
+simple-collision output). The input fingerprint in the run manifest
 (`install.inputs.sha256`, over the 45 paths, sizes and hashes) is
 `604eea70f27bfa8397c6ded72b834dbfb3fef63fb4b7ed4730d449de6309c521` on both systems.
 
@@ -653,7 +661,7 @@ stage wrote, so equal digests mean byte-identical output trees.
 | Stage | Files | Bytes | Same digest as the macOS conversion |
 |---|---:|---:|---|
 | `textures` | 7,702 | 1,287,215,285 | yes |
-| `meshes` | 1,765 | 66,113,039 | yes |
+| `meshes` | 2,081 | 70,525,421 | not comparable: the macOS conversion has no simple collision, see below |
 | `materials` | 1 | 2,538,921 | yes |
 | `levels` | 37 | 76,104,460 | no: 3 of 37 files, see below |
 | `audio` | 774 | 58,757,448 | yes |
@@ -665,8 +673,19 @@ stage wrote, so equal digests mean byte-identical output trees.
 | `decals` | 50 | 77,016,867 | yes |
 | `localization` | 16 | 1,438,383 | yes |
 
-Ten stages are byte-identical across the two systems. `localization` is identical although the
-Windows depot has three more engine languages, because the stage reads `ASAMU/Localization` only.
+Nine stages are byte-identical across the two systems, file for file. `localization` is identical
+although the Windows depot has three more engine languages, because the stage reads
+`ASAMU/Localization` only.
+
+`meshes`: the 882 `.gltf` and 882 `.bin` files are byte-identical to the macOS conversion's. The
+other 317 files are the simple-collision output, which the macOS conversion on record does not
+have: 316 `.collision.json` files (4,119,188 bytes) and `manifest.json`, which differs from the
+macOS one in its version (2 against 1), the 882 `simple_collision` records and the 882
+`content_hash` values (the hash now covers the collision switches and shapes) and in nothing else.
+Before the simple-collision output the stage had the macOS digest (1,765 files, 66,113,039 bytes,
+`9dbdd7105c7b30e9…`, measured 2026-10-10), and the counts and sizes after it are the ones
+`MESHES.md` records for a macOS conversion (2,081 files, 70,525,421 bytes, a manifest of 1,675,457
+bytes); no macOS digest of the new output is on record.
 
 ### The two stages that differed, and why
 
@@ -680,45 +699,84 @@ game data (which is the same bytes).
   products of table sines that cancel mathematically. The rotator table is `sin(i · 2π / 16384)` evaluated in double precision, and for
   847 of its 16,384 entries the macOS library and the Windows C runtime return doubles that differ
   in the last bit (neither is the correctly rounded value for all entries: 633 and 512 entries
-  differ from it, counted against 70-digit decimal arithmetic). Rounded to single precision the two
+  differ from it, counted against 70-digit decimal arithmetic; counted again on 2026-10-11 from
+  tables read out of both C libraries: 847, 633 and 512). Rounded to single precision the two
   tables are identical, which is why only cancelling terms show the difference.
-- **`lightmaps`**: 8 of the 12 map indexes and two atlas textures differ. In the two indexes
-  compared value by value, 3 and 4 `max_irradiance` / `mean_irradiance` numbers differ, by at most
-  1.5 × 10⁻⁷ (relative). The light map decode raises `(c + 0.055) / 1.055` to the power 2.4 in single precision for each of the 256 byte values;
+- **`lightmaps`**: 8 of the 12 map indexes and two atlas textures differ. In the eight indexes, 26
+  `max_irradiance` / `mean_irradiance` numbers differ in all (1 to 5 per map), by at most
+  1.5 × 10⁻⁷ (relative), and nothing else. In the two atlases (`AG-BeautifulCity/atlas_72.dds`,
+  `AG-StarHaven/atlas_100.dds`) 1 and 4 texels differ, each by one step of one 9-bit channel of the
+  `R9G9B9E5` value (what a last-bit difference gives when a value lies at a rounding boundary of
+  the encoder; TENTATIVE as the mechanism, the counts are measured). The light map decode raises `(c + 0.055) / 1.055` to the power 2.4 in single precision for each of the 256 byte values;
   the macOS `powf` returns a different last bit than the Windows one for two of them (bytes 71 and
   180). The Windows results are the correctly rounded ones for all 256.
 
 Proof that nothing else is involved: a test build that returned the macOS library's 16,384 sines and
 256 decoded bytes (tables recorded on the Mac) instead of computing them, run on the Windows
 machine, produced the macOS conversion's digests for both stages exactly
-(`ce92daaa24494d51…` and `7a4b4d04c263c8e8…`).
+(`ce92daaa24494d51…` and `7a4b4d04c263c8e8…`). The experiment was repeated on 2026-10-11 with
+tables recorded anew from the Mac's C library, with the same result.
 
 **Fix (in this repository):** the decoders now take these functions from
-`asamu_ue3::portable_math` (the pure-Rust `libm` crate, and for the power a double-precision
-evaluation rounded once), which computes the same bits on every system; tests pin whole tables by
-hash, two of the hashes computed independently with 70-digit decimal arithmetic. The importer's own
-remaining uses (the `R9G9B9E5` exponent, which used `log2`; the PNG preview and the decal mask
-power; the skeletal rotator sines) were moved to exact or portable forms as well. On Windows these
-changes left all twelve digests exactly as they were, so the digests every system should now
-produce are the ones in the table above: `levels`
+`asamu_ue3::portable_math` (the pure-Rust `libm` crate, and for the single-precision functions a
+double-precision evaluation rounded once), which computes the same bits on every system: the sine,
+cosine and power of `libm` 0.2.16 use IEEE arithmetic and exactly rounded operations only (read in
+its source; its architecture-specific paths are exactly rounded operations such as the square
+root, and 32-bit x86 without SSE, which is not a target here). What was moved:
+
+| Function | Was | Reaches |
+|---|---|---|
+| `asamu_ue3::level::rotator_sin_cos` (the rotator sine table) | `f64::sin` | `levels`, and through `decal::rotator_axes` the decal frames |
+| `asamu_ue3::lightmap::srgb_to_linear` | `f32::powf` | `lightmaps` |
+| `asamu_ue3::material::color_to_linear`, and the folding of constant Power, Sine and Cosine material expressions | `f32::powf`, `f32::sin`, `f32::cos` | `materials` and what reads material parameters |
+| `asamu_ue3::decal::DecalFrame::from_axes` (the decal's own rotation) | `f64::sin`, `f64::cos` | `decals` |
+| `asamu-import` `decals::srgb_to_linear` (mask values) | `f32::powf` | `decals` |
+| `asamu-import` `skeletal::rotator_to_quat` | `f64::sin_cos` | `skeletal` |
+| `asamu-import` `lightmaps::rgb9e5` (the shared exponent) | `f64::log2`, now the exponent field of the number | `lightmaps` |
+| `asamu-import` `lightmaps::linear_to_srgb_byte` | `f32::powf` | PNG previews (`--png`) only |
+
+Tests pin whole tables by hash. The hashes of the three power tables are those of the correctly
+rounded results, computed independently with decimal arithmetic; the sine and cosine hashes were
+reproduced on macOS arm64 by a transcription of the algorithm into another language, and the
+Windows x86_64 build returns the same bits. Measured on the Mac's C library: its `powf` returns the
+neighbouring value for the bytes 71 and 180 at the exponent 2.4 and for 79 and 198 at 2.2; the
+Windows C runtime's `powf` is correctly rounded for all 256 bytes at both exponents.
+
+On Windows these changes are invisible in the output: a build with every one of these calls put
+back on the Windows C runtime (the preview function excepted, which a default run does not use)
+wrote the same digests for `materials`, `levels`, `matinee`, `skeletal`, `kismet`, `lightmaps`,
+`particles` and `decals` (measured 2026-10-11). So the digests every system should now produce are
+the ones in the table above: `levels`
 `ddb720291028e5c8fcf8d87ee62fe75d0e2bb86c87f623915d4f2e78adf9004f`, `lightmaps`
 `0a867328d4bd4f7c5eb358c6fd86bb7fa640e613383aecc425fa15d6c02561bf`.
 
-Not yet measured: a macOS (or Linux) run of the fixed importer. It is expected to give the table's
-digests for all twelve stages (STRONG: the two functions are now platform-independent by
-construction, and the experiment above shows they were the only platform-dependent inputs of the
-two stages); until someone runs it, the macOS conversion on record still has the old two digests.
-Other transcendental calls remain in decoders whose output was nevertheless identical on the two
-systems for the shipped data (`asamu-ue3`: `matinee.rs` `atan2`/`acos`/`sin` in single precision,
-`material.rs` `powf`/`sin`/`cos`, `decal.rs` `sin`/`cos`); a third C library could differ there.
+What this means for a macOS conversion, which has not been repeated with the fixed importer:
+
+- `levels` and `lightmaps` **will change** there, to the Windows digests: 88 matrix elements in 3
+  scene files, and 26 numbers and 5 texels in 10 light map files, as listed above (STRONG: the
+  functions are platform-independent by construction and pinned by tests, and the experiment above
+  shows they were the only platform-dependent inputs of the two stages).
+- The nine stages that are byte-identical on the two systems are expected to stay as they are
+  (STRONG for the same reason, and because the Windows output did not change either); for `meshes`
+  that holds for the files the macOS conversion on record has.
+- Until someone runs it, the macOS conversion on record still has the old two digests.
+
+One decoder still calls the platform's C library where its results reach converted data:
+`asamu_ue3::matinee` (the single-precision rotator table, `atan2`, `acos` and `sin` of the
+rotation conversions and the quaternion interpolation). It reproduces the engine's own evaluation
+and has a second implementation in `asamu-kismet` that must agree with it, so it was left alone;
+its output (`matinee`, and the transforms `kismet` embeds) is identical on macOS arm64 and Windows
+x86_64 for the shipped data, and a third C library (Linux has not been measured) could differ there.
 
 ### Determinism, reruns and the folder swap (Windows, NTFS)
 
 - Two `all --force` runs in a row wrote byte-identical run manifests (same SHA-256 of
   `asamu-import-run.json`, which holds all twelve stage digests), and so did every other full run of
   the same build.
-- A rerun with nothing to do takes 0.13 to 0.18 s (seven measurements), reports every stage
-  `up to date`, and leaves the manifest unchanged.
+- A rerun with nothing to do takes 0.13 to 0.18 s (seven measurements; 0.11 to 0.16 s in three more
+  on 2026-10-11), reports every stage `up to date`, and leaves the manifest unchanged.
+- Two conversions from nothing into two different folders wrote byte-identical run manifests
+  (2026-10-11).
 - The swap of a finished stage folder into place (two folder renames) worked in every run while no
   program had the files open, with no `.staging` or `.replaced` folder left behind.
 - **Windows refuses to rename a folder while any program has a file inside it open**, whatever
@@ -735,7 +793,10 @@ systems for the shipped data (`asamu-ue3`: `matinee.rs` `atan2`/`acos`/`sin` in 
   `02d8227b20f8fed3…`). `levels` was marked as reading nothing but packages, but it also reads the
   install's engine configuration files (they name the default post-process chain), which the cache
   does not hold; through the cache it left that chain out without a word. The stage reads the
-  install now. This was not specific to Windows: it would have happened on any system.
+  install now. This was not specific to Windows: it would have happened on any system. Repeated on
+  2026-10-11: a conversion from nothing with the option wrote the same twelve digests as one
+  without it, and a build with `levels` marked as reading only packages again wrote the smaller
+  folder with that digest.
 - `--png` (PNG previews): `textures` 15,403 files, 3,703,000,306 bytes; `lightmaps` 5,267 files,
   1,073,300,906 bytes; both `ok`. No macOS run with this option is on record to compare with.
 - `--lang DEU`: `audio` 774 files, 58,761,691 bytes, the same digest with and without the package
@@ -751,4 +812,6 @@ textures 8.5 s (5.1), meshes 4.0 (2.9), materials 4.6 (3.8), levels 4.2 (3.0), a
 matinee 2.4 (2.0), skeletal 2.9 (2.3), kismet 4.7 (3.3), lightmaps 15.8 (9.3), particles 6.8 (5.0),
 decals 2.3 (2.1), localization 0.1 (0.2). A 60 s run used 54 s of user and 28 s of kernel CPU time
 and peaked at 1.6 GB of memory; real-time virus scanning was on (it was not changed). How long an
-otherwise idle machine takes is UNKNOWN.
+otherwise idle machine takes is UNKNOWN. The three conversions of 2026-10-11 (with the
+simple-collision output, the machine again busy with other builds) took 111.6, 136.7 and 178.4 s,
+and a fourth with `--package-cache` (which builds the cache first) 66.2 s.
