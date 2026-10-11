@@ -14,8 +14,8 @@
 //! 2026-10-10 (45,237 records); the tests print their own.
 //!
 //! Where the expectations come from: the recorded values themselves. The
-//! only numbers of ours are the two bounds on float rounding, derived at
-//! [`AXIS_TOLERANCE`] and [`ON_AXIS`].
+//! only numbers of ours are the bounds on float rounding, derived at
+//! [`AXIS_TOLERANCE`], [`LEAN_AXIS_TOLERANCE`] and [`ON_AXIS`].
 
 use std::path::PathBuf;
 
@@ -325,4 +325,93 @@ fn recorded_accelerations_lie_on_the_table_axes_of_the_floored_previous_yaw() {
     );
     assert!(samples > 0, "no on-axis sample in the recordings");
     assert_eq!(misses, 0, "of {samples} samples");
+}
+
+/// [`AXIS_TOLERANCE`] with one more single-precision scaling: under a lean
+/// roll the right axis the original builds is `(−cos r · sin y, cos r ·
+/// cos y, −sin r)`, the flat axis scaled by the roll's cosine before the
+/// three scalings counted there. 4 · 2⁻²⁴ = 2.4e-7 rad.
+const LEAN_AXIS_TOLERANCE: f64 = 4.0 / 16_777_216.0;
+
+/// P7, A-WK-1: the pawn leans while it moves (a roll of up to 2,046 units in
+/// these samples), and the simulation has no pawn roll. That costs nothing
+/// while the stick is on an axis: with the pawn's pitch read as 0 the
+/// original's forward axis is `(cos y, sin y, 0)` whatever the roll, and its
+/// right axis, once the script has dropped the Z part and normalised, points
+/// along `(−sin y, cos y)`. So every such sample must lie on the yaw-only
+/// table axes [`sim::rotator_axes_flat`] gives for the previous record's
+/// yaw. That is four times the sample of the test above, which keeps to
+/// rotations without a roll.
+///
+/// Samples: as above, but with any roll (pitch below 4 units as before: a
+/// pitch kept from a flight turns the right axis under a roll, which the
+/// simulation does not model).
+///
+/// The three recordings: 9,977 samples (6,797 walking, 3,180 falling; 7,628
+/// with a roll of 4 units or more), all within [`LEAN_AXIS_TOLERANCE`]
+/// (largest angle 9.6e-8 rad). Of the 1,406 whose previous yaw is negative
+/// and no multiple of 4, none fits the yaw truncated towards zero; of the
+/// 7,887 whose previous yaw is no multiple of 4, none fits the exact angle.
+#[test]
+fn a_lean_roll_leaves_on_axis_accelerations_on_the_table_axes_of_the_yaw() {
+    let Some(runs) = recorded_runs() else {
+        return skipped();
+    };
+    let (mut samples, mut walking, mut leaning, mut largest_roll) =
+        (0_usize, 0_usize, 0_usize, 0_i32);
+    let (mut misses, mut largest) = (0_usize, 0.0_f64);
+    let (mut odd, mut exact_fits) = (0_usize, 0_usize);
+    let (mut negative_odd, mut truncated_fits) = (0_usize, 0_usize);
+    for pair in runs.iter().flat_map(|run| run.windows(2)) {
+        let (before, now) = (&pair[0], &pair[1]);
+        let [pitch, yaw, roll] = before.pawn_rotation;
+        let a = now.acceleration;
+        if !(now.physics == PHYS_WALKING || now.physics == PHYS_FALLING)
+            || now.attached
+            || (a[0].hypot(a[1]) - 2048.0).abs() >= 0.01
+            || (pitch & 0xFFFC) != 0
+        {
+            continue;
+        }
+        let (sin, cos) = exact(yaw & 0xFFFC);
+        if angle_to_axes(a, sin, cos) >= ON_AXIS {
+            continue;
+        }
+        samples += 1;
+        walking += usize::from(now.physics == PHYS_WALKING);
+        leaning += usize::from((roll & 0xFFFC) != 0);
+        largest_roll = largest_roll.max(normalize_rotator_axis(roll).abs());
+
+        let (sin, cos) = table(yaw);
+        let angle = angle_to_axes(a, sin, cos);
+        largest = largest.max(angle);
+        misses += usize::from(angle > LEAN_AXIS_TOLERANCE);
+
+        if yaw % 4 != 0 {
+            odd += 1;
+            let (sin, cos) = exact(yaw);
+            exact_fits += usize::from(angle_to_axes(a, sin, cos) <= LEAN_AXIS_TOLERANCE);
+            if yaw < 0 {
+                negative_odd += 1;
+                // Rust's integer division truncates towards zero.
+                let (sin, cos) = table((yaw / 4) * 4);
+                truncated_fits += usize::from(angle_to_axes(a, sin, cos) <= LEAN_AXIS_TOLERANCE);
+            }
+        }
+    }
+    println!(
+        "move axes under a lean roll: {samples} on-axis samples ({walking} walking, {} falling; \
+         {leaning} with a roll, the largest {largest_roll} units); beyond {:.3e} rad of the table \
+         axes of the floored previous yaw: {misses} (largest angle {largest:.3e} rad)",
+        samples - walking,
+        LEAN_AXIS_TOLERANCE
+    );
+    println!(
+        "  previous yaw no multiple of 4: {odd} (the exact angle fits {exact_fits}); of them \
+         negative: {negative_odd} (the yaw truncated towards zero fits {truncated_fits})"
+    );
+    assert!(samples > 0, "no on-axis sample in the recordings");
+    assert_eq!(misses, 0, "of {samples} samples");
+    assert_eq!(exact_fits, 0, "of {odd} samples");
+    assert_eq!(truncated_fits, 0, "of {negative_odd} samples");
 }

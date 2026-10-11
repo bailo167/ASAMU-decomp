@@ -310,6 +310,70 @@ fn the_axes_are_those_of_the_yaw_before_the_ticks_look_update() {
     assert!((slope - f64::from(f32::from_bits(ENTRY_8192))).abs() < 1.0e-12);
 }
 
+/// The walk bob (the sideways sway of the view while walking) after `ticks`
+/// ticks of walking forward from rest, facing `yaw_units`.
+fn walk_bob_after(yaw_units: i32, ticks: u32) -> Vec3 {
+    let params = original();
+    let world = flat_world();
+    let mut s = standing(&params, &world, yaw_units);
+    let forward = InputFrame {
+        move_forward: 1.0,
+        ..InputFrame::default()
+    };
+    for _ in 0..ticks {
+        tick(&mut s, &forward, &params, &world);
+    }
+    s.script.walk_bob
+}
+
+#[test]
+fn the_walk_bob_sways_along_the_table_axis_of_the_floored_yaw() {
+    // The bob's sideways part is the pawn's right axis from `GetAxes`
+    // (A-CM-4, A-CM-8): Y = (−sin, cos) of the yaw floored to 4 units, table
+    // values. Yaw −32777 reads the entries of −32780.
+    let (sin, cos) = (
+        f64::from(f32::from_bits(ENTRY_8189)),
+        f64::from(f32::from_bits(ENTRY_12285)),
+    );
+    let bob = walk_bob_after(-32_777, 20);
+    let sideways = f64::from(bob.x).hypot(f64::from(bob.y));
+    assert!(sideways > 0.5, "the pawn sways: {bob}");
+    // Parallel to (−sin, cos): the cross product vanishes to the rounding of
+    // the two components (each a product of three f32 factors).
+    let cross = f64::from(bob.x) * cos + f64::from(bob.y) * sin;
+    assert!(
+        cross.abs() < 4.0e-7 * sideways,
+        "{bob} is not along the table axis"
+    );
+    // The right axis of the exact angle −32777 is 3 units (2.9e-4 rad) away
+    // from that: against it the same cross product is a thousand times
+    // larger than the bound above.
+    let exact = f64::from(-32_777) * core::f64::consts::TAU / 65_536.0;
+    let off = f64::from(bob.x) * exact.cos() + f64::from(bob.y) * exact.sin();
+    assert!(off.abs() > 2.0e-4 * sideways, "{off}");
+
+    // Bit for bit the bob of the floored yaw, for units 1 to 3 above a
+    // multiple of 4 and for negative yaws (floor towards −∞) …
+    for (yaw, floored) in [
+        (4_001, 4_000),
+        (4_003, 4_000),
+        (-1, -4),
+        (-32_777, -32_780),
+        (-12_345, -12_348),
+    ] {
+        assert_eq!(
+            walk_bob_after(yaw, 20),
+            walk_bob_after(floored, 20),
+            "yaw {yaw} sways like {floored}"
+        );
+    }
+    // … and not that of the next multiple up, which a truncation towards
+    // zero would read for a negative yaw.
+    assert_ne!(walk_bob_after(-1, 20), walk_bob_after(0, 20));
+    assert_ne!(walk_bob_after(-32_777, 20), walk_bob_after(-32_776, 20));
+    assert_ne!(walk_bob_after(4_003, 20), walk_bob_after(4_004, 20));
+}
+
 #[test]
 fn whole_unit_deltas_survive_the_radian_interface() {
     // Every whole number of units, written as radians the way the trace
