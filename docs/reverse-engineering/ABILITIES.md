@@ -98,8 +98,12 @@ the jump check runs (§3).
   samples, in the same record's on 7,907]. The pawn's yaw then equals the view yaw, because the look update
   turns the pawn to the view in the same call (A-CM-9) [measured: equal modulo a turn on 45,237 of 45,237
   records].
-- The pawn's roll (it leans while moving, up to 0.56°) and the pitch it keeps from a flight for the first
-  walking move after a release (up to 4.8°) take part in the axes [STRONG, docs/TRACE_CAPTURE.md 3.4].
+- The pawn's roll (it leans while moving: up to 2,046 units, 11.2°, in the recordings; `MaxLeanRoll` is 2048)
+  and the pitch it keeps from a flight for the first walking move after a release take part in the axes; they
+  turn the move direction by up to 0.56° and 4.8° [STRONG, docs/TRACE_CAPTURE.md 3.4]. With the stick on an
+  axis and the pitch 0 the roll changes nothing: the forward axis has no roll in it, and the right axis keeps
+  its direction once its Z part is dropped [measured: 9,977 of 9,977 such accelerations, 7,628 of them under
+  a roll, lie on the yaw-only table axes; gated test `crates/asamu-player/tests/parity_recordings.rs`].
 → Rust: `accel = AccelRate · normalize_or_zero(fwd·X + strafe·Y)` with the table axes of the yaw before the
 look update (`pawn::controller_move`, `sim::rotator_axes_flat`). Not ported: the lean roll and the kept
 pitch (the simulation has no pawn roll or pitch yet).
@@ -512,14 +516,22 @@ layer. Not ported: pitch and roll in the move axes (A-WK-1) and the table in the
 - Measured: whole-unit deltas reproduce the recorded yaw and pitch on 45,223 of 45,223 ticks, and
   `sim::apply_look`, fed each recorded change as the trace converter encodes it and carried from the first
   record of a run to its last (14 runs, the longest 10,631 ticks), reproduces both bit for bit on all 45,223
-  (`crates/asamu-player/tests/parity_recordings.rs`). The recorded pitch is always the masked value
-  (0…65 535), as the limit leaves it.
+  (`crates/asamu-player/tests/parity_recordings.rs`). The recorded pitch is the masked value (0…65 535), as
+  the limit leaves it, on 45,236 of 45,237 records; the other one is the record of a respawn, which sets the
+  rotation without a look update (pitch −17), and the next record holds 65 519.
 - A whole replay can still lose the view after a grapple release: the tick after a release has no look
   update (G-RL-7), so when our simulation releases on a tick where the original did not (its grapple ended
-  on another tick, or never attached), the delta of that tick is skipped. Free-running replays of the 14
-  recorded runs (45,237 ticks): yaw and pitch bit-equal on every tick of 12 runs; in the other two (PLAY2
-  runs 0 and 5) up to the first such tick. That is a consequence of the grapple differences
-  (docs/PARITY_FINDINGS.md P1 to P5), not of the look update.
+  on another tick, or never attached, or attached and let go within one tick), the delta of that tick is
+  skipped. Free-running replays of the 14 recorded runs (`asamu-trace replay --start force --compare` on the
+  converted levels; recounted 2026-10-11, the numbers move with every collision change): stopped at the first
+  level event (the default; 20,220 ticks replayed), yaw and pitch are bit-equal on every tick of 12 runs and
+  in the other two (PLAY2 runs 0 and 5) up to the first such tick (892 and 1069); carried through the level
+  events (`--level-events inject`, 45,237 ticks) on every tick of 10 runs, the other four (PLAY2 runs 0, 1, 4
+  and 5) up to ticks 892, 1222, 3289 and 1069. Every tick on which the view change differs is such a tick or
+  a respawn that sets the rotation (12 ticks in all). That is a consequence of the grapple differences
+  (docs/PARITY_FINDINGS.md P1 to P5), not of the look update: restarted every tick from the recorded previous
+  sample (`--one-step --level-events inject`), the whole tick leaves yaw and pitch equal to the recording on
+  all 45,225 compared ticks of the 14 runs.
 → Rust: `sim::apply_look`. The public view angles stay radians; each holds the exact radian image of a
 unit, the update decodes it, works in integers and stores the image of the result, so nothing accumulates
 (before: 1.1e-5 rad of drift per 10,632 ticks). A look delta within one `f32` ulp of a whole number of
@@ -752,3 +764,14 @@ Method as in GRAPPLE.md §0/§19. Outcome per item:
   test on the raw recordings (`parity_recordings.rs`) and the counts here are its output; the floor against
   a truncation towards zero is counted on negative angles (1,112 samples; 13 anchors, GRAPPLE.md G-TG-1);
   the `sinf` count for macOS corrected to the x86_64 library (4 entries, not 220).
+- 2026-10-11 (second independent verification, own scripts on the raw recordings and own reading of the
+  macOS routines): the native rules of A-CM-8 and the truncating conversion of A-CM-9 read again and found as
+  described; the counts of A-WK-1, A-WK-3, A-CM-2, A-CM-8, A-CM-9 and GRAPPLE.md G-TG-1 reproduced, with the
+  findings' 10,051 on-axis samples counted as 10,049 between consecutive records of one level (all on the
+  floored axes). A second gated test widens the floor-against-truncation count to samples under a lean roll
+  (9,977 samples; 1,406 with a negative yaw that is no multiple of 4, none on the axes of the yaw truncated
+  towards zero). One-step replays through the whole tick reproduce yaw and pitch on all 45,225 compared
+  ticks. **Corrected:** A-WK-1 gave the effect of the lean on the move direction (0.56°) as the size of the
+  lean, which reaches 11.2°; A-CM-9 said the recorded pitch is always masked, which one record of a respawn
+  is not; A-CM-9's count of free-running replays (12 of 14 runs over 45,237 ticks) holds for replays stopped
+  at the first level event (20,220 ticks), carried through them it is 10 of 14.
