@@ -26,6 +26,18 @@ pub fn cos(x: f64) -> f64 {
     libm::cos(x)
 }
 
+/// Sine of `x` (radians) in single precision, the same bits everywhere:
+/// the double-precision sine rounded once.
+pub fn sinf(x: f32) -> f32 {
+    sin(f64::from(x)) as f32
+}
+
+/// Cosine of `x` (radians) in single precision, the same bits everywhere:
+/// the double-precision cosine rounded once.
+pub fn cosf(x: f32) -> f32 {
+    cos(f64::from(x)) as f32
+}
+
 /// `x` to the power `y` in single precision, the same bits everywhere.
 ///
 /// Evaluated in double precision and rounded once, which gives the correctly
@@ -113,6 +125,56 @@ mod tests {
         );
         assert_eq!(crate::lightmap::srgb_to_linear(0), 0.0);
         assert_eq!(crate::lightmap::srgb_to_linear(255), 1.0);
+    }
+
+    /// Single-precision sine and cosine, and the sine and cosine of whole
+    /// degrees the decal frame takes. The hashes were computed independently
+    /// (a transcription of the same algorithm into another language, run on
+    /// macOS arm64; the 4,096 single-precision sines also equal the correctly
+    /// rounded values from 80-digit decimal arithmetic).
+    #[test]
+    fn single_precision_sine_and_cosine_have_the_same_bits_on_every_platform() {
+        assert_eq!(sinf(0.0).to_bits(), 0);
+        assert_eq!(cosf(0.0), 1.0);
+        let args = || (0..=4096u16).map(|k| f32::from(k) / 64.0);
+        assert_eq!(
+            fnv1a64(args().map(sinf).flat_map(f32::to_le_bytes)),
+            0x224D_88F9_170D_05B6
+        );
+        assert_eq!(
+            fnv1a64(args().map(cosf).flat_map(f32::to_le_bytes)),
+            0x0427_39BF_56D7_A7EF
+        );
+        let degrees = || (0..360u16).map(|d| f64::from(d).to_radians());
+        assert_eq!(
+            fnv1a64(degrees().flat_map(|a| (sin(a) as f32).to_le_bytes())),
+            0xF321_C192_9CC6_C896
+        );
+        assert_eq!(
+            fnv1a64(degrees().flat_map(|a| (cos(a) as f32).to_le_bytes())),
+            0x5BF4_FBCF_C4FE_8704
+        );
+        assert_eq!(sin(30f64.to_radians()) as f32, 0.5);
+        assert_eq!(cos(60f64.to_radians()) as f32, 0.5);
+        assert_eq!((cos(90f64.to_radians()) as f32).to_bits(), 0x248D_3132);
+    }
+
+    /// The colour decode of the material decoder (`(c / 255) ^ 2.2`) for
+    /// every byte: the hash of the correctly rounded results, computed
+    /// independently with 80-digit decimal arithmetic. The macOS `powf`
+    /// returns the neighbouring value for the bytes 79 and 198 (measured), so
+    /// with the platform's power this test fails there.
+    #[test]
+    fn material_colours_have_the_same_bits_on_every_platform() {
+        let channel = |b: u8| crate::material::color_to_linear([0, 0, b, 255])[0];
+        assert_eq!(
+            fnv1a64((0..=255u8).map(channel).flat_map(f32::to_le_bytes)),
+            0x5250_950F_A270_F768
+        );
+        assert_eq!(channel(79).to_bits(), 0x3D9B_7F28);
+        assert_eq!(channel(198).to_bits(), 0x3F12_BA8A);
+        assert_eq!(channel(0), 0.0);
+        assert_eq!(channel(255), 1.0);
     }
 
     #[test]
