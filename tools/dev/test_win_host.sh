@@ -9,10 +9,16 @@
 # input (work tree names such as `..`, file names with spaces, quotes, leading
 # dashes and non-ASCII characters, symbolic links, an empty checkout).
 #
-# What it cannot check is the PowerShell half (win_host_remote.ps1) and the
-# real SSH server: docs/BUILDING.md lists what was run on a real machine.
+# Every call the fakes saw, in all of these cases, is checked once more at the
+# end against the few forms a command line or script of win_host.sh may have
+# (the "audit"): no input, however hostile, may add a form of its own.
 #
-# Needs bash, git, python3 and the usual POSIX tools; runs on Linux and macOS.
+# What it cannot check is the PowerShell half (win_host_remote.ps1) and the
+# real SSH server: tools/dev/test_win_host_remote.ps1 tests that half on a
+# Windows machine, and docs/BUILDING.md lists what was run on a real one.
+#
+# Needs bash, git, python3 and the usual POSIX tools; runs on Linux and macOS
+# (CI runs it on both).
 #
 #   tools/dev/test_win_host.sh          exit code 0 when every check passes
 #   KEEP=1 tools/dev/test_win_host.sh   keep the scratch folder and print where it is
@@ -34,7 +40,8 @@ trap cleanup EXIT
 
 LOG="$T/log"
 BIN="$T/bin"
-mkdir -p "$LOG" "$BIN"
+AUDIT="$T/audit"
+mkdir -p "$LOG" "$BIN" "$AUDIT"
 # The caller's settings must not leak into the script under test.
 unset ASAMU_WIN_HOST ASAMU_WIN_ROOT ASAMU_WIN_ENV GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 export FAKE_LOG="$LOG"
@@ -50,8 +57,10 @@ printf '%s\0' "$@" > "$FAKE_LOG/ssh.$n.args"
 cat > "$FAKE_LOG/ssh.$n.stdin"
 remote="${*: -1}"
 if [ "${FAKE_MODE:-ok}" = unreachable ]; then
-  echo "debug1: this line is not the reason" >&2
-  echo "ssh: connect to host winbox port 22: Operation timed out" >&2
+  if [ -n "${FAKE_REASON-unset}" ]; then
+    echo "debug1: this line is not the reason" >&2
+    printf '%s\r\n\n' "${FAKE_REASON-ssh: connect to host winbox port 22: Operation timed out}" >&2
+  fi
   exit 255
 fi
 if [ "$remote" = 'echo asamu-win-host %OS%' ]; then
@@ -137,11 +146,97 @@ def command(log, n, lib, root):
 
 TEXT = re.compile(r"\(WhText '([A-Za-z0-9+/=]*)'\)")
 
+# --- the audit: the only forms a call of ssh or scp may have -------------------
+
+NAME = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+ROOT = r"[A-Za-z]:(?:\\[A-Za-z0-9._-]+)+"
+HOST = r"[A-Za-z0-9_][A-Za-z0-9._@-]*"
+OPTIONS = ["-o", "BatchMode=yes", "-o", "RequestTTY=no", "-o", "ConnectTimeout=10",
+           "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8"]
+T = r"\(WhText '[A-Za-z0-9+/=]*'\)"
+STEP = r"'(?:fmt|clippy|test|build)'"
+PLAIN = [
+    r"WhInfo",
+    r"WhDisk",
+    r"WhClean '%s'" % NAME,
+    r"WhSyncPrepare '%s'" % NAME,
+    r"WhSyncVerify '%s' [0-9]+ [0-9]+ '[0-9a-f]{64}'" % NAME,
+    r"\. \(\[scriptblock\]::Create\(%s\)\)" % T,
+]
+ENTERED = [
+    r"WhRun 'cargo' @\(%s(?:, %s)*\)" % (T, T),
+    r"WhRun %s @\((?:%s(?:, %s)*)?\)" % (T, T, T),
+    r"WhGate '%s' @\((?:%s(?:,%s)*)?\)" % (NAME, STEP, STEP),
+    r"\. \(\[scriptblock\]::Create\(%s\)\)" % T,
+]
+
+
+def audit_call(folder, n, lib, env):
+    """Why call N of ssh in this folder is not of an expected form, or None."""
+    words = args(folder, n)
+    if words[:-2] != OPTIONS or not re.fullmatch(HOST, words[-2]):
+        return "options or host %r" % (words[:-1],)
+    remote = words[-1]
+    if remote == "echo asamu-win-host %OS%":
+        return None
+    if re.fullmatch(r"%%SystemRoot%%\\System32\\tar\.exe -xf - -C %s\\work\\%s" % (ROOT, NAME), remote):
+        return None
+    if not remote.startswith(PS):
+        return "command line %r" % remote
+    text = script(folder, n)
+    first, _, rest = text.partition("\n")
+    if not re.fullmatch(r"\$root = '%s'" % ROOT, first):
+        return "root line %r" % first
+    if not rest.startswith(lib + "\n") or not rest.endswith("\n"):
+        return "the shared functions are not what follows the root line"
+    command = rest[len(lib) + 1:-1]
+    if any(re.fullmatch(form, command) for form in PLAIN):
+        return None
+    head = re.match(r"\$work = WhEnter '%s'\n" % NAME, command)
+    if head and command[head.end():].startswith(env + "\n"):
+        command = command[head.end() + len(env) + 1:]
+        if any(re.fullmatch(form, command) for form in ENTERED):
+            return None
+    return "script command %r" % command
+
+
+def audit(top, lib_path):
+    """Checks every recorded call below TOP; prints one line per call that is not as expected."""
+    with open(lib_path, "rb") as handle:
+        lib = handle.read().decode("utf-8")
+    seen = 0
+    for run in sorted(os.listdir(top)):
+        folder = os.path.join(top, run)
+        with open(os.path.join(folder, "env"), "rb") as handle:
+            env = handle.read().decode("utf-8")
+        for entry in sorted(os.listdir(folder)):
+            tool, _, tail = entry.partition(".")
+            if not tail.endswith(".args"):
+                continue
+            n = tail[:-len(".args")]
+            seen += 1
+            try:
+                if tool == "ssh":
+                    why = audit_call(folder, n, lib, env)
+                else:
+                    words = args(folder, n, "scp")
+                    remote = r"%s:%s(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)+" % (HOST, ROOT.replace("\\\\", "/"))
+                    good = (words[:-2] == ["-q"] + OPTIONS and re.fullmatch(remote, words[-2])
+                            and "/../" not in words[-2] and words[-1].startswith(("/", "./")))
+                    why = None if good else "scp %r" % (words,)
+            except (AssertionError, ValueError, UnicodeDecodeError) as error:
+                why = "cannot be read back: %s" % error
+            if why:
+                sys.stdout.write("%s call %s of run %s: %s\n" % (tool, n, run, why))
+    sys.stderr.write("%d\n" % seen)
+
 
 def main(argv):
     what, log, n = argv[1], argv[2], argv[3]
     out = sys.stdout
-    if what == "args":
+    if what == "audit":
+        audit(log, n)
+    elif what == "args":
         out.write("".join(a + "\n" for a in args(log, n, argv[4] if len(argv) > 4 else "ssh")))
     elif what == "bootstrap":
         out.write(bootstrap(log, n) + "\n")
@@ -236,7 +331,14 @@ wh() {
   mkdir -p "$LOG"
   "$repo/tools/dev/win_host.sh" "$@" > "$T/out" 2> "$T/err" < "$STDIN"
   RC=$?
+  # For the audit at the end: what the fakes saw, and the ASAMU_WIN_ENV of this run.
+  RUNS=$((RUNS + 1))
+  if [ "$(calls)" != 0 ] || [ "$(calls scp)" != 0 ]; then
+    cp -R "$LOG" "$AUDIT/$RUNS"
+    printf '%s' "${ASAMU_WIN_ENV:-}" > "$AUDIT/$RUNS/env"
+  fi
 }
+RUNS=0
 
 # A scratch checkout holding a copy of the script under test.
 make_repo() {
@@ -248,7 +350,8 @@ make_repo() {
 # The command part of call N of the last run (texts replaced by <T>, the texts in $T/texts).
 command_of() { inspect command "$LOG" "$1" "$HERE/win_host_remote.ps1" "${2:-D:\\asamu}" "$T/texts"; }
 
-SSH_HEAD="-T${NL}-o${NL}BatchMode=yes${NL}-o${NL}ConnectTimeout=10${NL}-o${NL}ServerAliveInterval=15${NL}-o${NL}ServerAliveCountMax=8${NL}winbox"
+SSH_OPTIONS="-o${NL}BatchMode=yes${NL}-o${NL}RequestTTY=no${NL}-o${NL}ConnectTimeout=10${NL}-o${NL}ServerAliveInterval=15${NL}-o${NL}ServerAliveCountMax=8"
+SSH_HEAD="$SSH_OPTIONS${NL}winbox"
 PROBE='echo asamu-win-host %OS%'
 export ASAMU_WIN_HOST=winbox
 
@@ -275,7 +378,13 @@ is "unknown command: nothing contacted" "$(calls)" 0
 LONG64="$(printf 'a%.0s' 1 2 3 4 5 6 7 8)"
 LONG64="$LONG64$LONG64$LONG64$LONG64$LONG64$LONG64$LONG64$LONG64"
 # An empty NAME argument is a bad name too, not "use the default".
-for name in '..' '.' '...' 'a..b' 'a/b' 'a\b' '../x' '-x' '--help' '-' 'a b' 'a;b' 'a&b' 'a|b' '$(id)' '`id`' "a'b" 'a"b' 'a%b' 'h1.' '.hidden' '_x' 'con' 'NUL' 'aux.txt' 'com1' 'LPT9' "$(printf 'n\303\244me')" "$(printf 'a\nb')" '' "a$LONG64"; do
+# Names that would leave <root>\work, name another folder there, or be read as
+# syntax by cmd.exe or PowerShell on the way.
+for name in '..' '.' '...' 'a..b' 'a/b' 'a\b' '../x' '..\x' 'h1\..\..\x' 'h1/../../x' '\x' '/x' 'C:' 'C:x' 'C:\x' 'h1:stream' \
+  '-x' '--help' '-' 'a b' ' h1' 'h1 ' 'a;b' 'a&b' 'a|b' 'a>b' 'a<b' 'a^b' 'a,b' 'a=b' 'a(b)' 'a!b' 'a*' 'a?' 'a~1' 'a+b' 'a@b' 'a#b' \
+  '$(id)' '`id`' '$x' '${x}' "a'b" "'" "h1'; Remove-Item -Recurse D:\\asamu; '" 'a"b' 'a%b' '%SystemRoot%' '%CD%' \
+  'h1.' '.hidden' '_x' 'con' 'NUL' 'aux.txt' 'com1' 'LPT9' 'Con.h1' 'prn.a.b' \
+  "$(printf 'n\303\244me')" "$(printf '\357\274\216\357\274\216')" "$(printf 'a\nb')" "$(printf 'h1\r')" "$(printf 'h1\tx')" "$(printf 'h1\nWhClean h2')" '' "a$LONG64"; do
   shown="$(printf '%q' "$name")"
   for sub in sync cargo exec gate clean ps; do
     case "$sub" in
@@ -291,17 +400,32 @@ for name in h1 H1 a 0 a.b a-b a_b wf_fddd8ce3-3cf-1 "$LONG64"; do
   is "good name $name accepted" "$RC" 0
 done
 
-for root in 'D:\' 'D:' 'D:asamu' 'asamu' '\asamu' '\\server\share\x' 'D:\asamu\' 'D:\asamu\..' 'D:\asamu\..\x' 'D:\.\asamu' 'D:\asamu.' 'D:\a b' 'D:\a"b' "D:\\a'b" 'D:\a&b' 'D:\a;b' 'D:/asamu' 'DD:\asamu' '1:\asamu' 'D:\asamu\\x' ''; do
-  [ -n "$root" ] || continue # an empty ASAMU_WIN_ROOT means the default
-  for sub in info "clean h1" "sync h1" "cargo h1 build"; do
+# Roots that are a drive's top folder, not a folder on a drive, or not plain:
+# everything `clean` and `sync` delete is below the root. An empty value is
+# not "the default".
+for root in '' 'D:\' 'C:\' 'c:\' 'D:\\' 'D:' 'C:' 'D:.' 'D:..' 'D:asamu' 'asamu' '\' '\asamu' '/' '.' '..' '\\server\share\x' '\\?\D:\asamu' '\\.\D:\asamu' \
+  'D:\asamu\' 'D:\asamu\..' 'D:\asamu\..\x' 'D:\..' 'D:\.' 'D:\.\asamu' 'D:\asamu.' 'D:\asamu.\x' 'D:\a b' 'D:\asamu ' ' D:\asamu' 'D:\a"b' "D:\\a'b" \
+  'D:\a&b' 'D:\a;b' 'D:\a%b' 'D:\a^b' 'D:\a$b' 'D:\a,b' 'D:\a(b)' 'D:/asamu' 'D:\asamu/x' 'DD:\asamu' '1:\asamu' 'D:\asamu\\x' 'D:\asamu:x' 'D::\asamu' \
+  'D:\nul' 'D:\asamu\COM1' 'D:\aux.d\x' 'D:\con\asamu' "$(printf 'D:\\asamu\nx')" "$(printf 'D:\\asamu\r')" "$(printf 'D:\\\303\244')" "D:\\$LONG64$LONG64"; do
+  for sub in info disk "clean h1" "sync h1" "cargo h1 build" "gate h1" "fetch logs/x never-written.tmp"; do
     # shellcheck disable=SC2086
     ASAMU_WIN_ROOT="$root" wh "$R" $sub
     if [ "$RC" = 2 ] && [ "$(calls)" = 0 ]; then ok "bad root $(printf '%q' "$root") refused by ${sub%% *}"; else bad "bad root $(printf '%q' "$root") refused by ${sub%% *}" "exit $RC, $(calls) ssh calls"; fi
   done
 done
+ASAMU_WIN_ROOT='' wh "$R" clean h1
+has "empty root: says so" "$T/err" "ASAMU_WIN_ROOT is set and empty"
+ASAMU_WIN_ROOT='D:\' wh "$R" clean h1
+has "a drive as root: says so" "$T/err" "it must name a folder (not a drive)"
 ASAMU_WIN_ROOT='E:\build\asamu-2' wh "$R" clean h1
 is "another root accepted" "$RC" 0
 check "another root: it is the root of the script sent" test "$(command_of 2 'E:\build\asamu-2')" = "WhClean 'h1'"
+for root in 'c:\x' 'Z:\a\b\c.d\e_f\g-h' 'D:\.cache' 'D:\console' 'D:\com10'; do
+  ASAMU_WIN_ROOT="$root" wh "$R" clean h1
+  is "root $root accepted" "$RC/$(command_of 2 "$root" 2>&1)" "0/WhClean 'h1'"
+done
+wh "$R" clean h1
+is "no ASAMU_WIN_ROOT: the default root" "$RC/$(command_of 2 'D:\asamu' 2>&1)" "0/WhClean 'h1'"
 
 for host in '-oProxyCommand=touch x' '-v' 'a b' 'a;b' 'host:path' '.x' '@x' "$(printf 'h\303\266st')" 'a$b'; do
   ASAMU_WIN_HOST="$host" wh "$R" info
@@ -404,7 +528,7 @@ has "ps: a script too large to arrive reliably: says so" "$T/err" "too large to 
 
 wh "$R" fetch logs/h1/test.log "$T/got.log"
 is "fetch: exit code" "$RC" 0
-is "fetch: scp arguments" "$(inspect args "$LOG" 1 scp)" "-q${NL}-o${NL}BatchMode=yes${NL}-o${NL}ConnectTimeout=10${NL}winbox:D:/asamu/logs/h1/test.log${NL}$T/got.log"
+is "fetch: scp arguments" "$(inspect args "$LOG" 1 scp)" "-q${NL}$SSH_OPTIONS${NL}winbox:D:/asamu/logs/h1/test.log${NL}$T/got.log"
 (cd "$T" && wh "$R" fetch logs/h1/test.log -oProxyCommand=x)
 is "fetch: a relative LOCAL can be neither an option nor host:path" "$(inspect args "$LOG" 1 scp | tail -n 1)" "./-oProxyCommand=x"
 rm -f "$T/-oProxyCommand=x"
@@ -424,6 +548,12 @@ for sub in info disk "clean h1" "sync h1" "cargo h1 build" "exec h1 prog" "gate 
   is "unreachable, ${sub%% *}: one line, with ssh's reason" "$(cat "$T/err")" "win_host: cannot reach 'winbox' over SSH: ssh: connect to host winbox port 22: Operation timed out"
   is "unreachable, ${sub%% *}: gave up after the probe" "$(calls)/$(calls scp)" "1/0"
 done
+for reason in 'ssh: Could not resolve hostname winbox: nodename nor servname provided, or not known' 'bailey@winbox: Permission denied (publickey,password,keyboard-interactive).' 'kex_exchange_identification: Connection closed by remote host'; do
+  FAKE_MODE=unreachable FAKE_REASON="$reason" wh "$R" clean h1
+  is "unreachable, another reason: one line, exit code 255" "$RC/$(cat "$T/err")" "255/win_host: cannot reach 'winbox' over SSH: $reason"
+done
+FAKE_MODE=unreachable FAKE_REASON='' wh "$R" info
+is "unreachable, ssh says nothing: still one line" "$RC/$(cat "$T/err")" "255/win_host: cannot reach 'winbox' over SSH: ssh gave no reason"
 FAKE_MODE=notwindows wh "$R" info
 is "not Windows with cmd.exe: exit code 4" "$RC" 4
 is "not Windows with cmd.exe: gave up after the probe" "$(calls)" 1
@@ -458,6 +588,18 @@ mk "$CJK/$CJK.txt"
 mk "$UML.txt"
 mk "@args.txt"
 mk "tab-free name (1) [x] {y} #z %OS% \$HOME !.txt"
+# Legal on Windows, and syntax to cmd.exe or PowerShell: they must travel as data only.
+mk "& calc.exe &.txt"
+mk "\$(calc).txt"
+mk "'; Remove-Item -Recurse x; '.txt"
+mk "\`whoami\`.txt"
+mk "a^b.txt"
+mk ";x.txt"
+mk "%SystemRoot%/%CD%.txt"
+mk "semi;colon,comma=eq+plus~tilde.txt"
+mk "@(1,2)/\$env_PATH.txt"
+mk "$(printf 'emoji-\360\237\246\200.txt')"
+mk "crlf.txt" "$(printf 'one\r\ntwo\r\nlone\rend')"
 mk "empty.txt" ""
 mk ".gitignore" "ignored.txt${NL}ignored-dir/${NL}"
 mk "untracked.txt"
@@ -520,6 +662,49 @@ FAKE_FAIL_AT=4 FAKE_FAIL_RC=4 wh "$S" sync h1
 is "sync: a failed verification is exit code 4" "$RC" 4
 FAKE_FAIL_AT=3 FAKE_FAIL_RC=255 wh "$S" sync h1
 is "sync: connection lost while sending is exit code 255" "$RC" 255
+
+# A rename that changes only upper and lower case. Where the file system
+# ignores case git goes on listing the old name; the name on disk is what must
+# be sent. (Where case matters git lists the new name itself.)
+printf 'renamed' > "$S/CaseName.txt"
+mkdir -p "$S/CaseDir/Sub" && printf 'in a renamed folder' > "$S/CaseDir/Sub/file.txt"
+git -C "$S" add CaseName.txt CaseDir
+mv "$S/CaseName.txt" "$S/casename.tmp" && mv "$S/casename.tmp" "$S/CASENAME.txt"
+mv "$S/CaseDir" "$S/casedir.tmp" && mv "$S/casedir.tmp" "$S/casedir"
+printf '%s\n' "CASENAME.txt" "casedir/Sub/file.txt" >> "$T/names"
+wh "$S" sync h1
+is "case-only rename: exit code" "$RC" 0
+check "case-only rename: the names on disk are sent, the old ones are not" inspect tar "$LOG" 3 "$S" "$T/names"
+wh "$S" sync --dry-run h1
+is "case-only rename: the dry run lists the names on disk" "$(grep -i -e '^casename' -e '^casedir' "$T/out" | LC_ALL=C sort | tr '\n' ' ')" "CASENAME.txt casedir/Sub/file.txt "
+if git -C "$S" ls-files | grep -qxF "CaseName.txt" && [ -e "$S/CaseName.txt" ]; then
+  has "case-only rename: says that the name differs from git's" "$T/err" "sending 'CASENAME.txt' under the name it has on disk (git lists it as 'CaseName.txt')"
+else
+  echo "skip  case-only rename: says that the name differs from git's (this file system is case sensitive: git lists the new name)"
+fi
+
+# The packer on its own, with lists git would not produce or that this file
+# system could not hold: it must refuse all of them (exit code 3), on every system.
+pack_check() { # pack_check DESCRIPTION WORD: the list in $T/list must be refused with WORD in the message
+  rm -f "$T/manifest.out"
+  python3 -B "$S/tools/dev/win_host_pack.py" check "$S" "$T/list" "$T/manifest.out" > "$T/out" 2> "$T/err"
+  RC=$?
+  if [ "$RC" = 3 ] && [ ! -s "$T/out" ] && [ ! -e "$T/manifest.out" ] && grep -qF -- "$2" "$T/err"; then ok "packer refuses $1"; else bad "packer refuses $1" "exit $RC, output '$(cat "$T/out")', message:${NL}$(cat "$T/err")"; fi
+}
+printf 'plain.txt\0bad-\377-utf8.txt\0' > "$T/list"
+pack_check 'a name that is not UTF-8' 'not valid UTF-8'
+for entry in '../outside.txt' 'dir/../../outside.txt' '/etc/hosts' 'dir//deep.txt' '..' 'dir/..'; do
+  printf 'plain.txt\0%s\0' "$entry" > "$T/list"
+  pack_check "the path $entry" 'not a path inside the checkout'
+done
+printf 'plain.txt\0' > "$T/list"
+python3 -B "$S/tools/dev/win_host_pack.py" check "$S" "$T/list" "$T/manifest.out" > "$T/out" 2> "$T/err"
+is "packer accepts a plain list" "$?/$(cut -d' ' -f1 "$T/out")/$(cat "$T/manifest.out")" "0/1/plain.txt"
+is "packer: paths that differ only in case are found (files, and folders on the way)" "$(python3 -B -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import win_host_pack
+print(win_host_pack.case_clashes(["a/b.txt", "A/c.txt", "x", "X", "y/z", "y/Z", "q", "src/lib.rs", "src/main.rs"]))' "$S/tools/dev")" "[('a', 'A'), ('x', 'X'), ('y/z', 'y/Z')]"
 
 # Files that cannot be mirrored: refused before anything is contacted.
 refuse() { # refuse DESCRIPTION WORD-IN-MESSAGE: the checkout in $S must be refused
@@ -629,6 +814,15 @@ mv "$S/tools/dev/win_host_pack.py" "$T/pack.away"
 wh "$S" sync h1
 is "missing helper file: refused before anything is contacted" "$RC/$(calls)" "2/0"
 mv "$T/pack.away" "$S/tools/dev/win_host_pack.py"
+
+# --- 5. the audit ----------------------------------------------------------------
+
+audited="$(inspect audit "$AUDIT" "$HERE/win_host_remote.ps1" 2>&1 > "$T/violations")"
+is "audit: every call of ssh and scp in this run had one of the expected forms ($audited calls)" "$(cat "$T/violations")" ""
+case "$audited" in
+  '' | *[!0123456789]* | ? | ??) bad "audit: looked at the calls" "saw '$audited'" ;;
+  *) ok "audit: looked at the calls" ;;
+esac
 
 echo
 echo "test_win_host: $passed passed, $failed failed"
