@@ -1832,18 +1832,30 @@ def test_markers():
             # command's own line and the recorder's.)
             results.append(win.main(["mark", "--out", d.out] + list(name)))
 
-        timers = [threading.Timer(0.5, mark, ("zoom", "hold 1")), threading.Timer(1.1, mark, ("wall\x07 45",)),
-                  threading.Timer(1.9, lambda: open(os.path.join(d.ctl, "STOP"), "w").close())]
+        def session():
+            # One after the other, never by the clock alone: each `mark`
+            # returns once the recorder has taken its marker, and the
+            # recording is stopped only after both (three independent timers
+            # let a slow machine stop the recording before the second marker
+            # was taken).
+            deadline = time.time() + 30
+            while win.running_recorder(d.ctl) is None and time.time() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.3)
+            mark("zoom", "hold 1")
+            time.sleep(0.3)
+            mark("wall\x07 45")
+            time.sleep(0.3)
+            open(os.path.join(d.ctl, "STOP"), "w").close()
+
+        driver = threading.Thread(target=session)
         out = io.StringIO()
         try:
-            for t in timers:
-                t.start()
+            driver.start()
             with contextlib.redirect_stdout(out):
                 rec, header, records = run_recording(d, vg, img, "--scenario", "KM1", "--note", "input: keyboard and mouse")
         finally:
-            for t in timers:
-                t.cancel()
-                t.join()
+            driver.join()
         ok(rec.done == "STOP file found" and len(records) > 50, rec.done)
         ok(results == [0, 0], results)
         ok([m["name"] for m in rec.markers] == ["zoom hold 1", "wall  45"], rec.markers)
