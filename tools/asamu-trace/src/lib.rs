@@ -19,21 +19,30 @@
 //!   checks the two agree.
 //! - [`move_input`]: the move axes of a gamepad recording, from the pawn's
 //!   recorded acceleration (with the evidence for the mapping).
-//! - [`state`]: the script state the recorder read on every frame, kept in
-//!   the trace's notes so that a replay can start from any tick.
+//! - [`state`]: the script state the recorder read on every frame (with
+//!   the eye height), kept in the trace's notes so that a replay can start
+//!   from any tick.
 //! - [`segments`]: where a replay of a recording may start (standing still,
-//!   nothing held) and what the player did in between.
+//!   nothing held), what the player did in between, and the events a replay
+//!   of the inputs cannot follow (respawn teleports, level-script state
+//!   changes) or a sample cannot show (an attach released inside its
+//!   frame).
 //! - [`replay`]: drives [`asamu_game::Game`] (graybox or a converted level,
 //!   optionally with Kismet) with a trace's initial state and inputs: with
 //!   fixed ticks for a fixed-rate trace, with each sample's own frame length
-//!   for a variable-rate one.
+//!   for a variable-rate one. Free-running from the start tick, or one step
+//!   at a time (every tick restarted from the recording's previous sample);
+//!   it ends before the first event it cannot follow and says what does not
+//!   fit at the start.
 //! - [`timestep`]: the frame lengths of a trace (`time[k] − time[k−1]`) and
 //!   what the simulation does with them.
 //! - [`stepper`]: a tick with a caller-supplied `dt`, rebuilt from the
 //!   public simulation API (`Game::tick` takes its step from a fixed clock).
 //! - [`compare`]: [`asamu_player::trace::compare_with`] plus per-field first
-//!   exceedances, a check that both traces stepped with the same frame
-//!   lengths, and a verdict.
+//!   exceedances, the horizontal and vertical parts of the position and
+//!   velocity error, angles in rotator units, a check that both traces
+//!   stepped with the same frame lengths, and a verdict (without the FOV of
+//!   a recording whose FOV column cannot show the zoom).
 //! - [`report`]: markdown tables from comparison summaries.
 //! - [`macho`] and [`layout`]: static self-checks of the recorder's symbols
 //!   and offsets against the repository's layout data and, when present, the

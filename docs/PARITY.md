@@ -46,6 +46,10 @@ The runtime has two parameter sets (`crates/asamu-player/src/params.rs`):
   placeholder rope grapple and the raw-physics tests. It has no pawn, gun or boots group, so it runs without the
   script layer.
 
+A Sandbox session ([SANDBOX.md](SANDBOX.md)) runs a copy of the original set with overrides: each overridden
+value carries `placeholder` provenance with a `sandbox override` note, and nothing a session shows or records is
+parity evidence.
+
 Rules and literal constants of the original script code are named constants in `asamu_player::pawn`,
 `asamu_player::grapple_gun` and `asamu_player::rocket_boots` with provenance `script_code` (class and
 function/state of the original UnrealScript that holds them; values from `docs/reverse-engineering/ABILITIES.md`

@@ -132,6 +132,11 @@ Developer keys (not in the original): F1 shows a read-out of the simulation's st
 F2 story mode, F3 grapple count, F4 rocket boots, F6 attractor pad, F9 start/stop recording a movement trace,
 F10 show the level objects' volumes.
 
+Sandbox (experimental, not in the original): `./asamu --sandbox` opens a lab for experimenting with the movement
+and game systems (live parameter tuning, time control, save states, two hand-made arenas such as
+`--arena movement-lab`). It is not the original's behaviour, it keeps saves in memory and it never touches your
+saves, progress or time-trial records. `docs/SANDBOX.md` in the repository describes it.
+
 Other options: `--fly` (free camera, no collision), `--all-sublevels`, `--light-scale F`, `--no-shadows`,
 `--no-fog`, `--normal-maps`, `--debug-info` (start with the F1 read-out shown), `--help` for the full list.
 
