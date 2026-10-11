@@ -291,6 +291,13 @@ A walking or flying velocity is replaced by the displacement-derived one at the 
 these orders only reach a later frame through a position, and in the recordings they never do. They are
 recorded here because a reimplementation has to pick an order, and the native one is known.
 
+One limit of the recordings applies to this whole section: their longest frame is 0.0246 s (walking
+0.0234, falling 0.0246, flying 0.0206), so no recorded call has a second sub-step (1.4, above 0.05 s) or
+a second braking piece (2.3, above 0.03 s). Which time a site uses when the two differ (the call's `dt`
+for walking and flying, the sub-step for falling) and the sum over several braking pieces therefore
+rest on the native code alone; the walking one is the routine's first argument in the Win32 build
+(0xB27006 divides by it).
+
 True divisions that are **not** this pattern, and stay divisions in a reimplementation: the low-speed
 air help `(10 − s2) / dt` (4.2; 0x100ADFD02), the slope-slide distance `g·dt / (2·max(F, 0.5))` (3.5;
 0x100ADA8CA) and the walked fraction `moved / |Delta|` when a walking pawn starts to fall (1.4;
