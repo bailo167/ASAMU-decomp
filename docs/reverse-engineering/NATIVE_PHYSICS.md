@@ -1084,6 +1084,16 @@ by running the routine's own instructions in a local interpreter on random input
 returned flag, time and normal bit for bit with the rule as written here: 6,000 cases for the triangle
 routine, 1,500 for the convex one, no difference. [CONFIRMED] unless labelled.
 
+That interpreter was not kept (nothing under the ignored research folders regenerates the two counts). A
+second, independent pass on 2026-10-11 read the same routines statically, without running them
+(`objdump -d --x86-asm-syntax=intel` over 0x1007889D0 to 0x10078C2A0, 0x100AA4840 to 0x100AA6710, 0x100AAD350
+to 0x100AAD4B0 and 0x100AB3D60 to 0x100AB3F80; constants from the file's bytes): the order of the thirteen
+axes from the operands of each inlined test, the strict comparisons that update the latest entry and the
+earliest exit, the sign of the axis against the motion, the selection of the result at the end of the
+triangle routine, and the convex per-axis test. It agrees with every rule below for a sweep that starts
+clear, with the start rules as far as it read them (the triangle routine's, and the two thresholds of the
+convex one), and adds the scale dependence of both rules (below). [CONFIRMED: two routes]
+
 **Triangles** (static meshes on the per-triangle path). The kDOP box check
 (`TkDOPNodeCompact<FStaticMeshCollisionDataProvider,…>::BoxCheck @ 0x100C5B650`) calls
 `FindSeparatingAxis @ 0x1007889D0` (the overload with nine vectors) per triangle, in the mesh's own
@@ -1117,6 +1127,45 @@ Z, X, Y), every entry of the element's `FaceNormalDirections`, then for every en
 of its vertices. An axis shorter than 1e-4 in squared length (f64 at 0x1016393A0) is skipped. The
 aggregate check tests convex elements first, then spheres, boxes and sphyls, taking a later one only
 with a strictly earlier time, and maps and normalises the normal as above.
+
+**Both rules depend on the scale of what is hit** (second pass, [CONFIRMED] by static reading). For
+triangles: the constructor of the box check (`TkDOPBoxCollisionCheck<…>` at 0x100C5B2A0) stores the box's
+three axes at +0xB4, +0xC0 and +0xCC as the inverse of the mesh's matrix gives them (a call of
+`FMatrix::Inverse` for each, no square root in the routine), and the box check passes those three addresses to the
+triangle routine (0x100C5BA41 to 0x100C5BB1A), with the extent in world units. They are as long as one
+over the mesh's scale, and the triangle routine's 1e-8 comparison is made with the cross products of
+those vectors as computed. For a mesh scaled uniformly by `s` the box's three face axes have the squared
+length `1 / s⁴` and are skipped when `s` is above 100, and an edge axis (squared length `sin²θ / s²`) is
+skipped when the edge is within `asin(1e-4·s)` of the box's edge: 0.0057° at scale 1, 0.57° at scale 100.
+For convex elements the same happens at scales ten times smaller, as follows. The aggregate
+check multiplies the body's scale into the rows of its matrix and inverts the product (`FMatrix::Inverse`,
+called at 0x100AA49A1); the start, the end and the box's axes go to the element in that space, the extent
+unchanged. The element's check takes the box's three edge directions from the rows of the inverse
+(0x100AA5C6D onwards), so they are as long as one over the scale, and hands every axis to the per-axis
+routine as computed, not normalised: the box's face axes are the cross products of two rows, the edge axes
+a stored (unit) edge direction crossed with one row. The first thing the per-axis routine does
+(0x100AAD350 to 0x100AAD38B) is the 1e-4 comparison with the squared length of that vector. So, for a body
+scaled uniformly by `s`:
+
+- the box's three face axes have the squared length `1 / s⁴` and are all skipped when `s` is above 10;
+- an edge axis has the squared length `sin²θ / s²` (θ: the angle between the edge and the world axis) and
+  is skipped when the edge is within `asin(0.01·s)` of that axis: 0.57° at scale 1, 5.7° at scale 10, and
+  every edge axis when `s` is above 100;
+- the element's own face directions are stored with unit length and are never skipped.
+
+A skipped axis cannot separate the two bodies, so the solid the original sweeps against is then larger
+than the element and contacts with its edges and corners come earlier: above scale 100 the box is stopped
+by the element's face planes pushed out by the box and by nothing else, with no bevel at an edge.
+[STRONG: it follows from the code; no recording has been compared with it yet.] A body whose faces are
+parallel to the world axes loses nothing: its own face directions are those axes.
+
+How much of the user's data this touches (counted from a local conversion on 2026-10-11: the scene files'
+component transforms and the mesh list's simple-body references): of 22,782 mesh components that block
+the pawn, 13,564 use a mesh with a simple-collision body; 2,485 of those are placed at a scale above 10 on
+at least one axis (2,157 on all three, 330 above 100), 39 different meshes. Of the 9,218 whose mesh has no
+simple body (triangles for the pawn too), 127 are placed at a scale above 100 on at least one axis (108 on
+all three; 4 above 1,000). Of the 906 blocking-volume actors none is scaled above 10 and none is turned
+other than by quarter turns about Z, so blocking volumes are not affected beyond the 0.57° rule.
 
 **Spheres and sphyls** (`FKSphereElem::LineCheck @ 0x100AA6710`, `FKSphylElem::LineCheck
 @ 0x100AA7510`) return "no hit" at once when any component of the extent is non-zero: they never
@@ -1176,9 +1225,25 @@ axes in the same order with the same tie rule, in `f64` and in world space, for 
 meshes and BSP surfaces alike) and for convex solids; exact first-contact times, the pull-back left
 to the caller. Our own kernel's rule, run beside the rule above on 20,000 sweeps that start clear,
 gave the same hit or miss every time and the same normal on all 9,797 hits (largest time difference
-8.2e-7, the original's single precision). Differences: BSP goes through the triangle test (its leaf
-hulls are not in the converted data); a start in contact follows this code base's tolerance rule
-instead of the two rules above (documented in the module); box elements use the convex rule.
+8.2e-7, the original's single precision); the script of that comparison was not kept either.
+Differences: BSP goes through the triangle test (its leaf hulls are not in the converted data); a
+start in contact follows this code base's tolerance rule instead of the two rules above (documented in
+the module); box elements use the convex rule; and ours works with unit vectors in world space and
+skips an edge axis only below 1e-8 (a parallel pair), for triangles and for convex solids, so it does
+**not** reproduce the scale-dependent skipping above: ours always tests the box's face axes and every
+edge axis that is not degenerate, which makes its contact never earlier than the original's and
+sometimes later. Nothing depends on it yet (the movement code still sweeps the cylinder, simple-collision
+bodies are not in the scene, and the volumes are not affected), but the scene must reproduce the
+skipping before the 127 and 2,485 large placements above are collided with the box.
+
+What is checked without the original (`crates/asamu-world/tests/collision_box_verify.rs`, run on
+2026-10-11): 16,000 random sweeps in seven families (every triangle shape, corners and edges passing at
+1e-9 to 1 uu, whole numbers with exact ties, 2e5 uu from the origin, sweeps of up to 1e7 uu, moves of a
+frame, degenerate triangles) against a reference that finds the first contact from the distance between
+the box and the triangle: 11,977 hits and 3,321 misses agree, 81 sweeps graze within 1e-7 uu, 621 slide
+level with the obstacle (no contact by our start rule); the largest time difference is 1.4e-7 uu of
+travel; all 166 exact ties between the box's face axes report the first in the order Z, X, Y. Changing
+the tie comparison or that order in the kernel fails these tests and no other.
 [TENTATIVE that nothing observable follows; a recording of a walk into the outer corner of a BSP
 wall at an angle, and one of a pawn pushed into geometry by a mover, would settle it.]
 
