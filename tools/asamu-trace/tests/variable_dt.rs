@@ -202,6 +202,70 @@ fn variable_recording_replays_exactly_with_its_own_frame_lengths() {
     assert!(render_text(&s).contains("warning: frame lengths differ"));
 }
 
+/// The one-step mode with frame lengths of their own: every tick starts
+/// from the recording's previous sample and runs with that tick's recorded
+/// frame length. For a recording made by our own simulation it is exact for
+/// every tick.
+#[test]
+fn one_step_replay_with_variable_frame_lengths_is_exact() {
+    let lengths = common::jittery_lengths(11, 300, 60.0);
+    let (raw, ours) = common::scripted_recording_variable(&lengths, 7_000);
+    let fake = common::fake_original(&raw, &ours);
+    assert_eq!(fake.meta.tick_rate, None);
+    let opts = ReplayOptions {
+        one_step: true,
+        ..ReplayOptions::default()
+    };
+    let r = replay(&fake, &opts).unwrap();
+    assert_eq!(r.stepping, Stepping::PerSample);
+    assert!(r.one_step);
+    // Sample for sample, every field and the times: our own run.
+    assert_eq!(r.trace.samples, ours.samples);
+    let var = r.variable.unwrap();
+    assert_eq!(var.lengths.steps, 300);
+    assert!(!var.lengths.uniform());
+    let s = compare_traces("fake", &fake, "one-step", &r.trace, &Default::default());
+    assert_eq!(s.verdict, Verdict::Exact);
+    assert!(s.one_step);
+    assert!(s.timing.unwrap().aligned());
+    let notes = &r.trace.meta.notes;
+    assert!(
+        notes.iter().any(|n| n.starts_with(
+            "one-step: each of 300 tick(s) starts from the input trace's previous sample"
+        )),
+        "{notes:#?}"
+    );
+    // The free-running replay of the same trace is the same run too: the
+    // two modes differ only where the simulation differs from the recording.
+    let free = replay(&fake, &ReplayOptions::default()).unwrap();
+    assert_eq!(free.trace.samples, r.trace.samples);
+    assert!(!free.one_step);
+    // Bend the recording in one tick (the pawn 4 uu further along x from
+    // tick 100 on): the free-running replay is off from there to the end,
+    // the one-step replay in that tick only.
+    let mut bent = fake.clone();
+    for x in &mut bent.samples[100..] {
+        x.position.x += 4.0;
+    }
+    let off = |r: &asamu_trace::replay::ReplayResult| -> Vec<u64> {
+        r.trace
+            .samples
+            .iter()
+            .zip(&bent.samples)
+            .filter(|(a, b)| (a.position - b.position).length() > 0.01)
+            .map(|(a, _)| a.tick)
+            .collect()
+    };
+    let free = replay(&bent, &ReplayOptions::default()).unwrap();
+    assert_eq!(off(&free), (100..=300).collect::<Vec<u64>>());
+    let stepped = replay(&bent, &opts).unwrap();
+    let ticks = off(&stepped);
+    assert_eq!(ticks.first(), Some(&100));
+    // (Where the moved pawn meets other geometry than ours did, a later
+    // tick may differ too; most do not.)
+    assert!(ticks.len() < 20, "{ticks:?}");
+}
+
 #[test]
 fn hitches_longer_than_our_step_bound_are_reported() {
     let mut lengths = common::jittery_lengths(5, 90, 60.0);

@@ -76,6 +76,17 @@ With your own copy imported, this works today:
 Known gameplay differences are listed in [docs/PARITY.md](docs/PARITY.md), and open integration and rendering
 gaps in [docs/INTEGRATION.md](docs/INTEGRATION.md) (section 10).
 
+## Sandbox (experimental)
+
+`asamu --sandbox` opens a lab on top of the recreation: change the movement and ability parameters while playing,
+freeze and single-step time, keep in-memory save states, teleport, watch speed, jump and swing read-outs, and try
+it all in two hand-made test arenas. It is our own tooling (`crates/asamu-sandbox` and an optional feature of the
+app), not the original's behaviour, and nothing it shows or records is evidence of parity. It keeps saves in
+memory, never touches the faithful game's saves, progress or time-trial records, and can be compiled out; a guard
+test suite checks that a game which met an unchanged Sandbox session is bit-identical to one that did not. This
+is a first version, covered by automated tests and unattended screenshots but not yet used by hand:
+[docs/SANDBOX.md](docs/SANDBOX.md).
+
 ## Quick start
 
 You need a [Rust toolchain](https://rustup.rs) and *A Story About My Uncle* installed through Steam.
@@ -190,8 +201,9 @@ All of these are the recreation, rendering data imported locally from an owned c
 | macOS (Apple silicon) | `aarch64-apple-darwin` | Built in CI on every push; library and tool tests run; the development machine |
 | macOS (Intel) | `x86_64-apple-darwin` | Compile-checked in CI |
 
-CI proves the code compiles on each system and that the library and tool tests which need no game data pass. The
-Bevy app's own tests, and every test that reads game data, run only on the development Mac. Playing on Windows
+CI proves the code compiles on each system and that the library and tool tests which need no game data pass; the
+app's Sandbox tests also run in CI on Linux. The app's other tests, and every test that reads game data, run only
+on the development machines. Playing on Windows
 and Linux has not been tested by hand yet.
 
 ## Progress
@@ -229,7 +241,8 @@ parity comparisons pass.
 | Importer | 7 | 7 | 5 | 0 | 100% | 71% |
 | Platforms | 5 | 5 | 0 | 0 | 100% | 0% |
 | Tests | 10 | 9 | 3 | 1 | 90% | 30% |
-| **Overall** | **143** | **142** | **62** | **1** | **99%** | **43%** |
+| Sandbox (not original) | 7 | 5 | 0 | 2 | 71% | 0% |
+| **Overall** | **150** | **147** | **62** | **3** | **98%** | **41%** |
 
 <!-- progress-table:end -->
 
@@ -247,6 +260,7 @@ Verified is reported separately. Status definitions are in [CLAUDE.md](CLAUDE.md
 | `crates/asamu-world` | Level scenes, collision, volumes, checkpoints, world objects |
 | `crates/asamu-kismet` | Kismet and Matinee interpreter |
 | `crates/asamu-game` | Frame order, level script host, NPCs, saves, time trial |
+| `crates/asamu-sandbox` | Sandbox model (experimental, ours): parameter overlay, session commands, time control, save states, test arenas |
 | `crates/asamu-assets` | Runtime view of converted data: scenes, materials, audio graphs, particles |
 | `crates/asamu-ue3` | Defensive reader for the game's UE3 package generation (importer and inspection tool only) |
 | `tools/asamu-import` | Converts an original install into user-local data (`asamu-import all`) |
@@ -262,6 +276,7 @@ Verified is reported separately. Status definitions are in [CLAUDE.md](CLAUDE.md
   [UI and saves](docs/UI_AND_SAVES.md)
 - **How faithful it is:** [Parity](docs/PARITY.md) · [Trace capture](docs/TRACE_CAPTURE.md)
 - **Where it stands:** [Status](docs/STATUS.md) · [Roadmap](docs/ROADMAP.md) · [Showcase copy](docs/SHOWCASE.md)
+- **Experiments:** [Sandbox](docs/SANDBOX.md) · [Parity findings](docs/PARITY_FINDINGS.md)
 - **Reverse engineering:** [Packages](docs/reverse-engineering/PACKAGE_ANALYSIS.md) ·
   [Script](docs/reverse-engineering/SCRIPT_ANALYSIS.md) ·
   [Native physics](docs/reverse-engineering/NATIVE_PHYSICS.md) · [Grapple](docs/reverse-engineering/GRAPPLE.md) ·

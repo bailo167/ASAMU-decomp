@@ -309,6 +309,7 @@ dependencies = [
  "asamu-core",
  "asamu-game",
  "asamu-player",
+ "asamu-sandbox",
  "bevy",
 ]
 
@@ -411,6 +412,20 @@ name = "asamu-player"
 version = "0.0.1"
 dependencies = [
  "asamu-core",
+ "glam 0.34.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "asamu-sandbox"
+version = "0.0.1"
+dependencies = [
+ "asamu-core",
+ "asamu-game",
+ "asamu-player",
+ "asamu-world",
  "glam 0.34.1",
  "serde",
  "serde_json",

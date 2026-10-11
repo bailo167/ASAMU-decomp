@@ -360,7 +360,102 @@ pub struct StaticMesh {
     pub native: StaticMeshNative,
 }
 
+/// Native default of `UseSimpleLineCollision` (`UStaticMesh`'s intrinsic
+/// property initialiser; see MESHES.md, "Simple collision").
+pub const DEFAULT_USE_SIMPLE_LINE_COLLISION: bool = true;
+/// Native default of `UseSimpleBoxCollision`.
+pub const DEFAULT_USE_SIMPLE_BOX_COLLISION: bool = true;
+/// Native default of `UseSimpleRigidBodyCollision`.
+pub const DEFAULT_USE_SIMPLE_RIGID_BODY_COLLISION: bool = true;
+
+/// The three simple-collision switches of a `StaticMesh`.
+///
+/// `StaticMesh` is an intrinsic class: its properties are registered and
+/// initialised by native code, there is no script class and no class default
+/// object in any package, and a tag is written only when the value differs
+/// from the native default. All three default to **true** (the constants
+/// above); the shipped packages only ever store `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SimpleCollisionFlags {
+    /// `UseSimpleLineCollision`: zero-extent (line) traces that are not
+    /// forced to the triangles use the simple collision shapes.
+    pub line: bool,
+    /// `UseSimpleBoxCollision`: non-zero-extent (swept box) traces use the
+    /// simple collision shapes.
+    pub box_: bool,
+    /// `UseSimpleRigidBodyCollision`: the physics body is built from the
+    /// simple collision shapes.
+    pub rigid_body: bool,
+}
+
+impl Default for SimpleCollisionFlags {
+    /// The native defaults.
+    fn default() -> Self {
+        SimpleCollisionFlags {
+            line: DEFAULT_USE_SIMPLE_LINE_COLLISION,
+            box_: DEFAULT_USE_SIMPLE_BOX_COLLISION,
+            rigid_body: DEFAULT_USE_SIMPLE_RIGID_BODY_COLLISION,
+        }
+    }
+}
+
 impl StaticMesh {
+    /// `UseSimpleLineCollision` as stored (`None`: not tagged, the native
+    /// default applies).
+    pub fn stored_use_simple_line_collision(&self) -> Option<bool> {
+        self.bool_property("UseSimpleLineCollision")
+    }
+
+    /// `UseSimpleBoxCollision` as stored (`None`: not tagged).
+    pub fn stored_use_simple_box_collision(&self) -> Option<bool> {
+        self.bool_property("UseSimpleBoxCollision")
+    }
+
+    /// `UseSimpleRigidBodyCollision` as stored (`None`: not tagged).
+    pub fn stored_use_simple_rigid_body_collision(&self) -> Option<bool> {
+        self.bool_property("UseSimpleRigidBodyCollision")
+    }
+
+    /// The effective simple-collision switches: the stored value, else the
+    /// native default.
+    pub fn simple_collision_flags(&self) -> SimpleCollisionFlags {
+        let d = SimpleCollisionFlags::default();
+        SimpleCollisionFlags {
+            line: self.stored_use_simple_line_collision().unwrap_or(d.line),
+            box_: self.stored_use_simple_box_collision().unwrap_or(d.box_),
+            rigid_body: self
+                .stored_use_simple_rigid_body_collision()
+                .unwrap_or(d.rigid_body),
+        }
+    }
+
+    /// The tagged `BodySetup` object property (package index), when present.
+    /// The same reference is stored again in the native data
+    /// ([`StaticMeshNative::body_setup`]).
+    pub fn tagged_body_setup(&self) -> Option<PackageIndex> {
+        self.object.properties.iter().find_map(|p| {
+            if p.name.eq_ignore_ascii_case("BodySetup")
+                && let crate::Value::Object(o) = &p.value
+            {
+                Some(PackageIndex(o.index))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn bool_property(&self, name: &str) -> Option<bool> {
+        self.object.properties.iter().find_map(|p| {
+            if p.name.eq_ignore_ascii_case(name)
+                && let crate::Value::Bool(v) = p.value
+            {
+                Some(v)
+            } else {
+                None
+            }
+        })
+    }
+
     /// `LightMapCoordinateIndex` tagged property, when present.
     pub fn light_map_coordinate_index(&self) -> Option<i32> {
         self.int_property("LightMapCoordinateIndex")

@@ -14,16 +14,22 @@ tested there with a fake memory image (``test_win_glue.py``).
 
     python asamu_win.py check
     python asamu_win.py start --scenario T1 --frames 600 [--seconds 20] [--detach]
+    python asamu_win.py mark NAME              (a named marker in the running recording's status and log)
     python asamu_win.py status
     python asamu_win.py stop
+    python asamu_win.py v1view FILE.raw.jsonl  (any OS: a copy without the optional fields)
 
 Files: ``layout_win_x86.json`` and ``asamu_recorder_core.py`` next to this
-script. Output: ``<out>/<UTC time>-<scenario>.raw.jsonl`` (format
-``asamu-trace-raw`` v1, the same as the Mac recorder writes, so
-``asamu-trace validate`` and ``convert`` read it unchanged) plus a
-``.stats.json`` with the sampling counters. Control folder (``--ctl``,
-default ``<out>/ctl``): ``status.json`` (rewritten about once a second),
-``STOP`` (create it to end a recording), ``recorder.log``.
+script, and optionally ``data/win32/recorder_optional_win32.json`` (the
+optional fields, docs/TRACE_CAPTURE.md 6.10). Output:
+``<out>/<UTC time>-<scenario>.raw.jsonl`` (format ``asamu-trace-raw`` v1, the
+same as the Mac recorder writes; records carry the optional fields as extra
+members unless ``--raw-v1`` is given, and ``v1view`` writes a copy without
+them for a reader of plain version-1 files) plus a ``.stats.json`` with the
+sampling counters, every dropped frame with its reason, and the markers.
+Control folder (``--ctl``, default ``<out>/ctl``): ``status.json`` (rewritten
+about once a second), ``STOP`` (create it to end a recording), ``MARK-*``
+(marker requests of ``mark``), ``recorder.log``.
 
 How a frame is sampled
 ----------------------
@@ -96,7 +102,7 @@ sys.path.insert(0, HERE)
 sys.dont_write_bytecode = True  # keep the folder free of __pycache__
 import asamu_recorder_core as core  # noqa: E402
 
-RECORDER = "asamu_win 0.1.0"
+RECORDER = "asamu_win 0.2.0"
 PLATFORM = "win-x86"
 SAMPLE_POINT = (
     "poll after the GFrameCounter increment (end of the frame, before the next frame's input "
@@ -105,6 +111,7 @@ SAMPLE_POINT = (
 LAYOUT_FILE = "layout_win_x86.json"
 EXE_NAME = "ASAMU-Win32-Shipping.exe"
 GLOBALS_FILE = "globals.json"
+OPTIONAL_FILE = "recorder_optional_win32.json"
 
 # Poll results.
 IDLE, FRAME, TICK, LOST = "idle", "frame", "tick", "lost"
@@ -114,6 +121,10 @@ MAX_BLOCK = 16384
 MAX_ERRORS = 600  # failed samples in a row before a recording gives up
 BINDINGS_TRIES = 60  # windows in which the key bindings are read again before the first look's table is kept
 ACTIVE_STATES = ("starting", "waiting-for-game", "waiting-for-player", "recording")
+MAX_DROPS = 2000  # entries of the dropped-frame log (runs of one reason share an entry)
+MAX_MARKERS = 500
+MARK_PREFIX = "MARK-"  # marker request files in the control folder
+MAX_MARKER_NAME = 64
 
 
 class WinError(Exception):
@@ -579,6 +590,42 @@ class Snapshot:
 # -------------------------------------------------------------------- session
 
 
+def data_files(layout_path, file_name):
+    """Where a data file of the build may lie: ``data/win32`` next to the
+    layout (the working folder on the game machine), the layout's own
+    folder, or the repository's data folder."""
+    d = os.path.dirname(os.path.abspath(layout_path or os.path.join(HERE, LAYOUT_FILE)))
+    return (
+        os.path.join(d, "data", "win32", file_name),
+        os.path.join(d, file_name),
+        os.path.join(d, "..", "..", "docs", "reverse-engineering", "data", "win32", file_name),
+    )
+
+
+def load_optional(layout, layout_path=None, explicit=None):
+    """Adds the optional fields to ``layout`` from ``explicit`` or from the
+    first ``recorder_optional_win32.json`` found (``data_files``). Returns a
+    line for the report; a missing file is not an error (the recording then
+    has the optional fields that need no offsets)."""
+    candidates = (explicit,) if explicit else data_files(layout_path, OPTIONAL_FILE)
+    for cand in candidates:
+        try:
+            with open(cand, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except OSError:
+            continue
+        except ValueError as e:
+            raise core.LayoutError("%s is not JSON (%s)" % (os.path.basename(cand), e))
+        try:
+            layout.extend(data)
+        except (KeyError, TypeError, ValueError) as e:
+            raise core.LayoutError("%s is malformed (%s: %s)" % (os.path.basename(cand), type(e).__name__, e))
+        return "optional fields: layout %s (%d fields)" % (layout.optional_id, len(data["fields"]))
+    if explicit:
+        raise core.LayoutError("optional layout %s cannot be read" % explicit)
+    return "optional fields: no %s found; only the fields that need no offsets are recorded" % OPTIONAL_FILE
+
+
 def find_extra_rva(layout, layout_path, name):
     """RVA of a global the layout file does not list (``GCurrentTime``), from
     the layout itself or from ``globals.json`` of the same build; None when
@@ -586,12 +633,7 @@ def find_extra_rva(layout, layout_path, name):
     spec = layout.data.get("symbols", {}).get(name)
     if spec and "rva" in spec:
         return int(spec["rva"], 16)
-    d = os.path.dirname(os.path.abspath(layout_path or os.path.join(HERE, LAYOUT_FILE)))
-    for cand in (
-        os.path.join(d, "data", "win32", GLOBALS_FILE),
-        os.path.join(d, GLOBALS_FILE),
-        os.path.join(d, "..", "..", "docs", "reverse-engineering", "data", "win32", GLOBALS_FILE),
-    ):
+    for cand in data_files(layout_path, GLOBALS_FILE):
         try:
             with open(cand, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -629,7 +671,9 @@ def check_image(target, layout):
 class Session:
     """One attached game: layout, addresses, snapshot reader and sampler."""
 
-    def __init__(self, target, layout, layout_path=None, ignore_sentinels=False):
+    def __init__(self, target, layout, layout_path=None, ignore_sentinels=False, optional=None):
+        """``optional``: the optional groups to record (``core.Sampler``):
+        None for plain version-1 records, True for all the layout has."""
         if layout.pointer_size != 4:
             raise core.LayoutError("layout %s is not a 32-bit layout" % layout.id)
         self.target = target
@@ -641,7 +685,8 @@ class Session:
             if "rva" in spec:
                 self.addrs[spec["mangled"]] = base + int(spec["rva"], 16)
         self.snap = Snapshot(target.read)
-        self.sampler = core.Sampler(layout, self.snap.read, self.addrs, ignore_sentinels=ignore_sentinels)
+        self.sampler = core.Sampler(
+            layout, self.snap.read, self.addrs, ignore_sentinels=ignore_sentinels, optional=optional)
         o = self.sampler.o
         self.a_counter = self.addrs[o.sym_frame_counter]
         self.a_delta_time = self.addrs.get(o.sym_delta_time)
@@ -765,9 +810,29 @@ class Stats:
         self.period_ms = Acc()  # counter change -> counter change
         self.plan_reads = Acc()
         self.last_error = None
+        self.drops = []  # every frame without a record (or without its input), with the reason
+        self.drops_omitted = 0  # frames not listed because the log was full
 
     def skip(self, why):
         self.skipped[why] = self.skipped.get(why, 0) + 1
+
+    def drop(self, frame, reason, detail=None, count=1):
+        """Logs ``count`` frames from ``frame`` on that got no record (reason
+        ``missed``, ``skipped``, ``unconfirmed``, ``torn``, ``late``) or a
+        record without its input (``no-input``). ``frame`` is the number the
+        record has or would have had. Consecutive frames of one reason share
+        an entry, and so does a stretch without a player (a menu), whose
+        frames are not all seen."""
+        last = self.drops[-1] if self.drops else None
+        if last is not None and last["reason"] == reason and last["detail"] == detail and (
+                frame == last["last"] + 1 or (reason == "skipped" and frame > last["last"])):
+            last["last"] = frame + count - 1
+            last["count"] += count
+            return
+        if len(self.drops) >= MAX_DROPS:
+            self.drops_omitted += count
+            return
+        self.drops.append({"frame": frame, "last": frame + count - 1, "count": count, "reason": reason, "detail": detail})
 
     def as_dict(self):
         period = self.period_ms.mean()
@@ -794,6 +859,8 @@ class Stats:
             "period_ms": self.period_ms.summary(),
             "reads_per_burst": self.plan_reads.summary(1),
             "last_error": self.last_error,
+            "drops": [dict(d) for d in list(self.drops)],
+            "drops_omitted": self.drops_omitted,
         }
 
     def line(self):
@@ -849,6 +916,8 @@ class Poller:
         self.tick_marker = None
         self.pending = None  # record of frame `cur` waiting for its input
         self.spoiled = False  # frame `cur`: RealTimeSeconds did not behave like one tick start
+        self.spoil_why = None  # ... and how (for the dropped-frame log)
+        self.no_tick_why = None  # why frame `cur`'s tick start was not taken, when it was seen
         self.bindings_seen = False  # the key bindings were read in a confirmed window
         self.bindings_tries = 0
         self.t_end = None
@@ -893,11 +962,11 @@ class Poller:
                     if self.tick_rts is None and not self.spoiled and rts_advanced(ref, r):
                         self._tick_start(r)
                     else:
-                        self._resync(r)
+                        self._resync(r, ref)
                     return TICK
         return IDLE
 
-    def _resync(self, r):
+    def _resync(self, r, ref=None):
         """``RealTimeSeconds`` went back, or changed a second time within one
         frame: the world was reset or replaced at this address (a level
         load), or what was taken for this frame's tick start was not it.
@@ -906,6 +975,11 @@ class Poller:
         ends its run without it, and the next frame starts clean."""
         if not self.spoiled:
             self.stats.resyncs += 1
+            if ref is None:
+                self.spoil_why = "RealTimeSeconds did not behave like one tick start"
+            else:
+                how = "changed a second time in one frame" if self.tick_rts is not None else "did not move forward"
+                self.spoil_why = "RealTimeSeconds %s (%.4f to %.4f)" % (how, bits_f32(ref), bits_f32(r))
         self.spoiled = True
         self.tick_rts = None
         self.tick_marker = None
@@ -916,20 +990,27 @@ class Poller:
         now = self.clock()
         st = self.stats
         st.frames += 1
-        if self.pending is not None:
-            # Its tick was never seen, so the next sample cannot be confirmed
-            # either: this record ends its run and its keys are not used.
-            self._emit(self.pending, False)
-            self.pending = None
         steps = c - self.cur
         tick_rts, tick_marker, old_wi = self.tick_rts, self.tick_marker, self.wi
+        # Why this frame's sample cannot be confirmed, if it cannot.
+        cause = self.no_tick_why if tick_rts is None else None
         if steps != 1:
             if steps > 1 and self.has_player:  # in a menu nothing is lost
                 st.missed += steps - 1
+                st.drop(self.cur + 1, "missed", "the counter advanced by %d between two polls" % steps, steps - 1)
             tick_rts = None
+            cause = "the counter advanced by %d between two polls" % steps
         if self.spoiled:
             tick_rts = None
+            cause = "resync: %s" % self.spoil_why
             self.spoiled = False
+        if self.pending is not None:
+            # Its tick was never seen, so the next sample cannot be confirmed
+            # either: this record ends its run and its keys are not used.
+            self._emit(self.pending, False, cause or "the tick start of its frame was not seen")
+            self.pending = None
+        self.spoil_why = None
+        self.no_tick_why = None
         self.cur = c
         self.tick_rts = None
         self.tick_marker = None
@@ -994,13 +1075,31 @@ class Poller:
                     why = "sentinel-unconfirmed"
                     forget_sentinel_failures(self.s)
             st.skip(why)
+            st.drop(c, "skipped", why)
             return
         if tick_rts is None or wi != old_wi:
             st.unconfirmed += 1
+            if cause is None:
+                if old_wi is None:
+                    cause = "no WorldInfo was known while the frame ran (the first sample of a level)"
+                elif wi != old_wi:
+                    cause = "the WorldInfo changed (a level was loaded)"
+                else:
+                    cause = "the tick start of the frame was not seen"
+            st.drop(c, "unconfirmed", cause)
+            self.s.optional_unconfirmed()
             return
         rts_rec = f32_bits(rec["world"]["real_time_seconds"])
         if not (m1[0] == c and m2[0] == c and m1[1] == tick_rts and m2[1] == tick_rts and rts_rec == tick_rts):
             st.torn += 1
+            if m1[0] != c or m2[0] != c:
+                detail = "the counter moved while the sample was read"
+            elif m1[1] != tick_rts or m2[1] != tick_rts:
+                detail = "RealTimeSeconds moved while the sample was read (the next tick had started)"
+            else:
+                detail = "the sample's RealTimeSeconds is not the one seen during the tick"
+            st.drop(c, "torn", detail)
+            self.s.optional_unconfirmed()
             if m2[0] == c and m2[1] != tick_rts and rts_advanced(tick_rts, m2[1]):
                 # The counter is unchanged and RealTimeSeconds has moved on:
                 # frame c is ticking right now. Taking its input here keeps
@@ -1013,6 +1112,9 @@ class Poller:
         if tick_marker is not None and (m1[2] != tick_marker or m2[2] != tick_marker):
             st.late += 1
             if not self.keep_late:
+                st.drop(c, "late", "%s changed before the sample was complete (the next frame's time update had run)"
+                        % self.marker_name)
+                self.s.optional_unconfirmed()
                 return
             st.late_kept += 1
         st.sampled += 1
@@ -1059,6 +1161,7 @@ class Poller:
             # a record with another frame's keys in its middle.
             st.last_error = "input read: %s" % e
             st.input_retries += 1
+            self.no_tick_why = "the frame's input could not be read at its tick start"
             return
         if self.a_dt:
             dt_bits = t.u64(self.a_dt)
@@ -1067,7 +1170,9 @@ class Poller:
         else:
             marker = t.u64(self.a_marker) if self.a_marker else None
         if t.u64(self.a_counter) != self.cur:
+            self.no_tick_why = "the frame ended while its input was read"
             return  # the frame ended while its input was read: not confirmed
+        self.no_tick_why = None
         self.tick_rts = r
         self.tick_marker = marker
         self.t_tick = now
@@ -1087,16 +1192,17 @@ class Poller:
                 rec["dt_arg"] = dt
         self._emit(rec, True)
 
-    def _emit(self, rec, with_input):
+    def _emit(self, rec, with_input, why=None):
         self.stats.written += 1
         if not with_input:
             self.stats.no_input += 1
+            self.stats.drop(rec["frame"], "no-input", "record written without its input: %s" % why)
         self.sink(rec)
 
     def flush(self):
         """Hands over a record still waiting for its input (end of a recording)."""
         if self.pending is not None:
-            self._emit(self.pending, False)
+            self._emit(self.pending, False, "the recording ended first")
             self.pending = None
 
 
@@ -1152,8 +1258,28 @@ def read_json(path):
     return None
 
 
+def marker_name(text):
+    """A marker name as it is stored: printable characters only, at most
+    MAX_MARKER_NAME of them."""
+    out = "".join(c if c.isprintable() else " " for c in str(text)).strip()
+    return out[:MAX_MARKER_NAME] or "marker"
+
+
+def optional_report(sampler):
+    """What the status and stats files say about the optional fields."""
+    if not sampler.opt_on and not sampler.opt_missing:
+        return None
+    return {
+        "layout": sampler.L.optional_id,
+        "fields": sampler.optional_fields(),
+        "not_in_layout": list(sampler.opt_missing),
+        "off": dict(sorted(sampler.opt_off.items())),
+        "left_out": {k: {"records": v[0], "last_reason": v[1]} for k, v in sorted(sampler.opt_rejected.items())},
+    }
+
+
 class Recording:
-    """One raw recording: file, limits, status and STOP handling.
+    """One raw recording: file, limits, status, markers and STOP handling.
 
     All file work happens on a helper thread (flush, ``status.json``, the
     STOP check), so the polling thread never waits for the disk.
@@ -1188,6 +1314,9 @@ class Recording:
         self.fh = None
         self.path = None
         self.outputs = []
+        self.markers = []  # named markers of `mark`, each with the frame it was set at
+        self.markers_omitted = 0
+        self.header_optional = None  # the optional fields the header announced
         self._thread = None
         self._thread_stop = threading.Event()
         self.stop_files = [os.path.join(ctl_dir, "STOP"), os.path.join(out_dir, "STOP")]
@@ -1213,16 +1342,27 @@ class Recording:
                 "warning: the key bindings were not read in a confirmed window (no window was long enough); "
                 "they are the ones the first look at the game found"
             )
+        sampler = self.sess.sampler
+        optional = sampler.optional_fields()
+        if optional:
+            notes.append(
+                "optional fields (members beyond raw version 1, listed in optional_fields; a record lacks "
+                "one whose value could not be read or checked): %s" % ", ".join(optional))
+        for name in sampler.opt_missing:
+            notes.append("optional group %s: not in the layout, not recorded" % name)
+        for name, why in sorted(sampler.opt_off.items()):
+            notes.append("optional group %s: check failed, not recorded (%s)" % (name, why))
         notes.extend(self.opts.note or [])
         return core.make_header(
             self.sess.layout,
-            self.sess.sampler.bindings,
+            sampler.bindings,
             scenario=self.opts.scenario,
             launch_options=self.opts.launch_options,
             timing=timing,
             notes=notes,
             recorder=RECORDER,
             sample_point=SAMPLE_POINT,
+            optional_fields=optional,
         )
 
     def _sink(self, rec):
@@ -1233,6 +1373,7 @@ class Recording:
             header = self.header()
             out.append(core.dumps(header))
             self.header_written = True
+            self.header_optional = header.get("optional_fields", [])
             self.header_bindings = header["bindings"]
             self.header_bindings_confirmed = self.poller.bindings_seen
             self.t_first = self.clock()
@@ -1281,6 +1422,10 @@ class Recording:
             "elapsed_s": round(wall, 3),
             "recorder_cpu_percent": round(100.0 * (time.process_time() - self.cpu0) / wall, 1),
             "stats": self.stats.as_dict(),
+            "optional": optional_report(self.sess.sampler),
+            "optional_in_header": self.header_optional,
+            "markers": [dict(m) for m in list(self.markers)],
+            "markers_omitted": self.markers_omitted,
             "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
@@ -1290,11 +1435,46 @@ class Recording:
         except OSError:
             pass
 
+    def take_marks(self):
+        """Turns the marker requests of ``mark`` (files in the control
+        folder) into markers: each gets the number of the last recorded
+        frame, so a scenario boundary can be found in the recording later.
+        Runs on the helper thread; nothing here touches the game."""
+        try:
+            names = sorted(n for n in os.listdir(self.ctl_dir) if n.startswith(MARK_PREFIX) and n.endswith(".json"))
+        except OSError:
+            return
+        for n in names:
+            path = os.path.join(self.ctl_dir, n)
+            req = read_json(path)
+            try:
+                os.remove(path)
+            except OSError:
+                continue  # still being written, or gone: the next pass sees it
+            if not isinstance(req, dict):
+                continue
+            mark = {
+                "name": marker_name(req.get("name", "")),
+                "id": str(req.get("id", ""))[:80],
+                "frame": self.last_frame,
+                "records": self.records,
+                "state": self.state,
+                "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            if len(self.markers) >= MAX_MARKERS:
+                self.markers_omitted += 1
+            else:
+                self.markers.append(mark)
+            print("asamu-win: marker %r at frame %s (%d records so far)" % (mark["name"], mark["frame"], mark["records"]))
+            sys.stdout.flush()
+            self.write_status()
+
     def _helper(self):
         n = 0
         while not self._thread_stop.wait(0.25):
             try:
                 self._flush()
+                self.take_marks()
                 if any(os.path.exists(p) for p in self.stop_files):
                     self.stop_flag = True
             except OSError as e:  # e.g. the disk is full
@@ -1442,14 +1622,20 @@ def load_layout(path=None):
 def attach(opts, ignore_sentinels=False):
     """(Session, None) for the running game, or (None, message)."""
     layout, layout_path = load_layout(opts.layout)
+    optional = note = None
+    if not getattr(opts, "raw_v1", False):
+        optional = True
+        note = load_optional(layout, layout_path, getattr(opts, "optional_layout", None))
     target = open_game(pid=opts.pid, base=opts.base)
     if target is None:
         return None, "%s is not running" % EXE_NAME
     try:
-        return Session(target, layout, layout_path, ignore_sentinels=ignore_sentinels), None
+        session = Session(target, layout, layout_path, ignore_sentinels=ignore_sentinels, optional=optional)
     except Exception:
         target.close()
         raise
+    session.optional_note = note
+    return session, None
 
 
 def describe(session, out, keep_failures=True):
@@ -1513,7 +1699,35 @@ def describe(session, out, keep_failures=True):
             "bindings read: %d; layout sentinels: ok (%s checked of %s)"
             % (len(sampler.bindings or []), ", ".join(seen) or "none", ", ".join(checked))
         )
+        describe_optional(session, p, out)
     return ok, rec
+
+
+def describe_optional(session, p, out):
+    """The optional fields of one sample (``check``): their values, and which
+    groups are on, missing from the layout, or off after a failed check. A
+    group that is off does not fail the check: the recording goes on
+    without it."""
+    sampler = session.sampler
+    note = getattr(session, "optional_note", None)
+    if note:
+        out.append(note)
+    if not sampler.opt_on and not sampler.opt_missing:
+        out.append("optional fields: none (plain version-1 records)")
+        return
+    gun = p.get("gun") or {}
+    out.append("base level %r; floor %r; cylinder %r" % (p.get("base_level"), p.get("floor"), p.get("cylinder")))
+    out.append("fov default %r locked %r lock %r; camera pov %r"
+               % (p.get("fov_default"), p.get("fov_locked"), p.get("fov_lock"), p.get("camera_pov")))
+    out.append("base eye height %r; walk bob %r; bob %r" % (p.get("base_eye_height"), p.get("walk_bob"), p.get("bob")))
+    out.append("gun state %r; timers %r" % (gun.get("state"), gun.get("timers")))
+    rep = optional_report(sampler)
+    out.append(
+        "optional fields on: %s; not in the layout: %s; off: %s; left out of this sample: %s"
+        % (", ".join(rep["fields"]) or "none", ", ".join(rep["not_in_layout"]) or "none",
+           "; ".join("%s (%s)" % kv for kv in rep["off"].items()) or "none",
+           "; ".join("%s (%s)" % (k, v["last_reason"]) for k, v in rep["left_out"].items()) or "none")
+    )
 
 
 def probe(session, frames, seconds, keep_late=False, clock=time.perf_counter, sleep=time.sleep):
@@ -1667,7 +1881,7 @@ def summary_line(st):
     s = st.get("stats")
     if s is None:  # a status written before any recording existed
         return "asamu-win: %s%s" % (st.get("state"), " (%s)" % st["message"] if st.get("message") else "")
-    return (
+    line = (
         "asamu-win: %s%s; %s records, %s gaps, file %s; torn %s, unconfirmed %s, late %s, missed %s, "
         "resyncs %s, errors %s, skipped %r; fps %s; recorder CPU %s%%"
         % (
@@ -1678,6 +1892,15 @@ def summary_line(st):
             s.get("skipped"), s.get("fps"), st.get("recorder_cpu_percent"),
         )
     )
+    opt = st.get("optional")
+    if opt:
+        line += "; optional fields %d" % len(opt.get("fields") or [])
+        if opt.get("off") or opt.get("not_in_layout"):
+            line += " (off: %s)" % ", ".join(sorted(list(opt.get("off") or {}) + list(opt.get("not_in_layout") or [])))
+    marks = st.get("markers")
+    if marks:
+        line += "; %d markers, last %r at frame %s" % (len(marks), marks[-1].get("name"), marks[-1].get("frame"))
+    return line
 
 
 def spawn_detached(argv, log_path):
@@ -1838,6 +2061,8 @@ def cmd_status(opts):
         print(json.dumps(st, indent=1, sort_keys=True))
     else:
         print(summary_line(st))
+        for m in st.get("markers") or []:
+            print("  marker %r: frame %s, record %s, %s" % (m.get("name"), m.get("frame"), m.get("records"), m.get("utc")))
     return 0
 
 
@@ -1865,6 +2090,59 @@ def cmd_stop(opts):
     return cmd_status(opts)
 
 
+def cmd_mark(opts):
+    """Sets a named marker in the running recording: a request file in the
+    control folder, which the recorder turns into an entry of its status and
+    stats files and a line of its log. Nothing is sent to the game."""
+    out_dir, ctl_dir = resolve_dirs(opts)
+    st = running_recorder(ctl_dir)
+    if st is None:
+        print("asamu-win: no recording is running; no marker set")
+        return 1
+    bad = guard_folders(out_dir, ctl_dir)
+    if bad:
+        print("mark refused: %s" % bad)
+        return 1
+    name = marker_name(" ".join(opts.name))
+    ident = "%s-%d-%09d" % (utc_stamp(), os.getpid(), time.time_ns() % 10 ** 9)
+    path = os.path.join(ctl_dir, "%s%s.json" % (MARK_PREFIX, ident))
+    write_json_atomic(path, {"name": name, "id": ident})
+    deadline = time.time() + opts.wait
+    while time.time() < deadline:
+        st = read_json(os.path.join(ctl_dir, "status.json")) or {}
+        for m in st.get("markers") or []:
+            if m.get("id") == ident:
+                print("asamu-win: marker %r at frame %s (%s records so far, file %s)"
+                      % (m.get("name"), m.get("frame"), m.get("records"), st.get("file")))
+                return 0
+        time.sleep(0.05)
+    print("asamu-win: the recorder did not take the marker %r within %g s" % (name, opts.wait))
+    return 1
+
+
+def cmd_v1view(opts):
+    """Writes a copy of each raw recording without the optional fields (for
+    a reader of plain version-1 files) into ``--out-dir``, default a folder
+    ``v1`` next to the recording; the copy keeps the file name. Works on
+    any machine."""
+    status = 0
+    for raw in opts.raw:
+        out_dir = os.path.abspath(opts.out_dir or os.path.join(os.path.dirname(os.path.abspath(raw)), "v1"))
+        out = os.path.join(out_dir, os.path.basename(raw))
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            n = core.write_v1_view(raw, out)
+        except FileExistsError:
+            print("exists, left as it is: %s" % out)
+            continue
+        except (OSError, ValueError, KeyError) as e:
+            print("v1view failed for %s: %s: %s" % (raw, type(e).__name__, e))
+            status = 1
+            continue
+        print("%s (%d records)" % (out, n))
+    return status
+
+
 def _int(text):
     return int(text, 0)
 
@@ -1881,6 +2159,10 @@ def parser():
                        help="keep samples read after the next frame's time update (default: drop and count them)")
         p.add_argument("--priority", choices=("normal", "above", "high"), default="above",
                        help="scheduling of the recorder's own process (default above normal)")
+        p.add_argument("--raw-v1", action="store_true",
+                       help="plain version-1 records: read and write no optional field")
+        p.add_argument("--optional-layout", default=None,
+                       help="optional-field layout (default: data/win32/%s next to the layout, if there)" % OPTIONAL_FILE)
 
     def dirs(p):
         p.add_argument("--out", default=None, help="output folder (default: traces next to this script)")
@@ -1916,6 +2198,15 @@ def parser():
         p.add_argument("--json", action="store_true", help="print the whole status as JSON")
         if name == "stop":
             p.add_argument("--wait", type=float, default=15.0, help="seconds to wait for the recorder to finish")
+
+    m = sub.add_parser("mark", help="set a named marker in the running recording (status, stats and log; not in the game)")
+    dirs(m)
+    m.add_argument("name", nargs="+", help="marker name, e.g. zoom-hold-1")
+    m.add_argument("--wait", type=float, default=5.0, help="seconds to wait for the recorder to take it")
+
+    v = sub.add_parser("v1view", help="copy raw recordings without their optional fields (any OS)")
+    v.add_argument("raw", nargs="+", help="raw recording(s)")
+    v.add_argument("--out-dir", default=None, help="folder for the copies (default: v1 next to each recording)")
     return ap
 
 
@@ -1931,6 +2222,10 @@ def main(argv=None):
         return cmd_status(opts)
     if opts.cmd == "stop":
         return cmd_stop(opts)
+    if opts.cmd == "mark":
+        return cmd_mark(opts)
+    if opts.cmd == "v1view":
+        return cmd_v1view(opts)
     ap.print_help()
     return 2
 

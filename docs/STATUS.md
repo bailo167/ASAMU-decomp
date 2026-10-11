@@ -2,6 +2,89 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-10 — Session 2 wrap-up: where to pick up
+
+The session was stopped early (usage allowance), with two batches of agent work unfinished. `main` is clean,
+pushed and green in CI; nothing unverified was merged.
+
+**On `main` now:** Sandbox v1, the parity findings, the simple-collision importer, the one-step comparison tool
+and the extended recorder, the gamepad wiring, the showcase documents, and `tools/dev/win_host.sh`.
+
+**Unfinished, saved as local branches in this checkout (not pushed, not verified; the last commit on some is a
+"wip" snapshot taken when the agents were stopped):**
+
+| Branch | Worktree under `.claude/worktrees/` | What it holds |
+|---|---|---|
+| `parity/collision` | `parity-collision` | First wave of the parity fixes (`docs/PARITY_FINDINGS.md` section 4): box sweep and primitive kinds in the collision world (WP-A), angle truncation, integer view angles and the `setspeed` entry point (WP-D), the velocity float form (WP-C1). Builders had committed; their verifiers had not finished. Branched before the simple-collision importer landed: merge `main` into it first. |
+| `worktree-wf_fddd8ce3-3cf-1` | `wf_fddd8ce3-3cf-1` | H1: hardening of `tools/dev/win_host.sh` (gate, clean, disk, self-test) |
+| `worktree-wf_fddd8ce3-3cf-2` | `wf_fddd8ce3-3cf-2` | H2: the whole test suite on Windows and fixes for Windows-only failures |
+| `worktree-wf_fddd8ce3-3cf-3` | `wf_fddd8ce3-3cf-3` | H3: the importer on the Windows build of the game (inventory, conversion) |
+| `worktree-wf_fddd8ce3-3cf-4` | `wf_fddd8ce3-3cf-4` | H4: a runner the owner starts once so the app can be shown on the Windows machine's screen |
+
+To resume any of them: read the branch's log and diff against `main`, re-run its checks, have it verified
+independently, then merge. Do not merge a "wip" commit as it is.
+
+**The Windows machine** (see `tools/dev/win_host.sh`; everything of ours is under `D:\asamu`): Rust 1.98.0
+installed, a clone of `main`, work trees and build output of the stopped agents (tens of GB, safe to delete with
+the helper), a copy of the Mac's converted data at `D:\asamu\converted-mac`, possibly a partial conversion from
+the Windows install at `D:\asamu\converted` (H3 was not finished: treat it as unverified), and the recordings
+under the user profile's `asamu-trace\traces`.
+
+**Known and not yet fixed**
+- `asamu-locate`'s test `windows_backslash_paths_in_vdf_are_unescaped` fails on a machine that really has Steam
+  at the default Windows path (the test is not hermetic). CI is unaffected.
+- `asamu-inventory`'s real-install test compares a Windows install with the macOS inventory and fails there.
+- `asamu-assets`' gated test `every_converted_level_builds_a_plan` fails on a fresh conversion (AG-BeautifulCity:
+  3,810 drawn components against an expected 3,799).
+- The Rust raw reader does not accept the recorder's new optional members yet.
+- Rendering defects seen in screenshots (flat cyan surfaces, black boxes near some checkpoints, black cut-outs in
+  some foliage); the Sandbox has not been used by hand; no gameplay clip for the README yet.
+
+**Next, in order:** finish and verify the first wave on `parity/collision`; then the second wave (hit pull-back,
+simple-collision bodies and switches in the scene, switchable blocking volumes, `setspeed` wiring, the spawn
+fall) and the gated real-recording tests; the keyboard-and-mouse recording session of
+`docs/PARITY_FINDINGS.md` section 6 on a quiet machine; then the Windows packages H1 to H4.
+
+## 2026-10-10 — Session 2 (continued): parity findings, Sandbox v1, a Windows build machine
+
+**Done**
+- **Parity findings** (`docs/PARITY_FINDINGS.md`): the recordings became replayable (movement input derived
+  from the recorded pawn acceleration for gamepad recordings; replays start from recorded state), and five
+  independent analyses compared them with our simulation. Most movement and grapple rules are confirmed by the
+  recordings, with counts. The differences are mostly collision: props without simple collision, simplified
+  collision bodies, the native hit pull-back, a box-shaped pawn sweep, dynamic blocking volumes that start
+  disabled; plus the Workshop's `setspeed` console command (132 uu/s in the original, 264 in ours) and three
+  float/angle details. Every comparison still has the verdict "diverged". The "66 uu/s" reading in the previous
+  entry is in no recording and is withdrawn.
+- **Sandbox v1** (`docs/SANDBOX.md`): an opt-in lab (`asamu --sandbox`, or the main-menu entry when saves are
+  in memory): live parameter overrides on the Classic set, rules (grapple budget, boots), time control, save
+  states, teleport, telemetry and visualisers, two hand-made arenas, profiles and sandbox-tagged recordings.
+  Own crate (`crates/asamu-sandbox`) and an app feature that compiles out. Three adversarial reviews: the
+  Classic guards fail under every deliberate leak tried (and two blind spots were closed), a `--sandbox` process
+  left save files untouched, and four robustness defects in the Sandbox's own code were fixed (a teleport that
+  could hang, writes through a planted symlink, a lax profile reader, unbounded notices). **Not used by hand
+  yet**: sessions were only driven by tests and unattended runs.
+- **Gamepad** found unconnected by the documentation fact-check, then wired into the simulation tick with a test.
+- **Documentation fact-check**: an adversarial review of every public document; corrections pushed.
+- **A Windows machine now builds and tests** (`tools/dev/win_host.sh`): the development Mac is out of disk, so
+  checkouts are mirrored to a Windows laptop over SSH and built there. Rust was the only install it needed.
+
+**True now**
+- Tracker: 150 items (seven Sandbox items, which can reach `implemented` at most). Nothing was upgraded to
+  verified.
+- In flight: the first whole-suite run on Windows, the importer on the Windows build of the game, a way to run
+  the app on that machine's screen, and the parity groundwork that does not touch the simulation (decoding
+  simplified collision bodies, a one-step comparison mode, more recorder fields).
+
+**Next**
+1. The collision and physics fixes of `docs/PARITY_FINDINGS.md` section 4 (pull-back, box sweep, simple
+   collision, switchable blocking volumes, `setspeed`), each with its regression test, then the gated
+   real-recording tests.
+2. A short keyboard-and-mouse recording session with the extended recorder (list in the findings, section 6).
+3. Use the Sandbox by hand; close its known gaps (`docs/SANDBOX.md`, last section).
+4. Owner decisions still open: a first tagged pre-release (and whether releases carry the Sandbox); the
+   developer keys F2/F3/F4/F6 can change abilities that a story save then stores.
+
 ## 2026-10-10 — Session 2: first recordings of the original, showcase pass, Phase 8 merged
 
 **Done**

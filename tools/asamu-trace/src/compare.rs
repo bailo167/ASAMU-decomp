@@ -7,6 +7,52 @@
 //! so [`crate::report`] can turn several comparisons into a markdown table.
 //! Tolerances are an analysis choice per study, not a property of the game.
 //!
+//! # Components ([`Components`])
+//!
+//! One 3-D number per tick hides which way a difference points: a pawn that
+//! stands 1 uu lower than the original and one that drifts 1 uu sideways
+//! read the same. So the position and the velocity error are also reported
+//! **horizontally** (length of the X/Y part) and **vertically** (|Z|, with
+//! the range of the signed difference `b − a`), and the yaw and pitch error
+//! also in **rotator units** (65536 per turn; the original keeps its view
+//! angles as integers of that unit, so "1 unit" is its smallest step and
+//! 0.001 rad is 10.4 of them). The components have no tolerance of their
+//! own: `first_exceedance` lists the first tick at which each component
+//! alone exceeds the tolerance of its field (`position_horizontal`,
+//! `position_vertical`, `velocity_horizontal`, `velocity_vertical`), which
+//! never changes the verdict (a component is never larger than its 3-D
+//! error).
+//!
+//! # FOV and the verdict ([`FovPolicy`])
+//!
+//! The FOV column of a converted recording is the camera's cached view FOV,
+//! which cannot show the zoom ([`crate::convert`], "Units and fields";
+//! PARITY_FINDINGS.md N1): comparing it with our FOV measures the recorder,
+//! not the simulation. [`FovPolicy::Auto`] (the default) therefore leaves
+//! the FOV out of the **verdict** when either trace's notes say so (a note
+//! starting with [`crate::convert::FOV_CACHED_NOTE_PREFIX`]) **for every
+//! sample of the trace** (`on N of N samples`) and counts it otherwise:
+//! also for a trace whose note covers only part of its samples (the rest is
+//! the controller's `FOVAngle`, of which nothing says that it cannot show
+//! the zoom) or cannot be read. Nothing but that note switches the FOV off
+//! by default: a recording whose FOV column records a locked FOV must not
+//! carry it. [`FovPolicy::Count`] and [`FovPolicy::Exclude`] state it. The
+//! switch does not touch the tolerance, the FOV statistics or the FOV's
+//! first exceedance, which are reported as before; the summary says whether
+//! the FOV counted and why ([`FovVerdict`]), and
+//! [`CompareSummary::verdict_divergence`] is the first divergence among the
+//! fields that count.
+//!
+//! # One-step replays
+//!
+//! A replay made with `--one-step` ([`crate::replay`]) restarts every tick
+//! from the reference trace's previous sample. Its errors are those of one
+//! tick of our rules, not accumulated drift, and must not be read (or
+//! gated) like a free-running comparison: the summary carries the flag
+//! ([`CompareSummary::one_step`]) and the replay's own notes
+//! ([`CompareSummary::harness_notes`]: validity, what was resynchronised,
+//! warnings), and the text and the report show both.
+//!
 //! # Time
 //!
 //! Traces are aligned by **tick index**, never by time: sample `k` of both
@@ -25,16 +71,42 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use asamu_core::rotator::ROTATOR_UNITS_PER_TURN;
 use asamu_player::Trace;
-use asamu_player::trace::{CompareTolerances, TraceDiff, TraceField, TraceSource, compare_with};
+use asamu_player::trace::{
+    CompareTolerances, Divergence, FieldStats, TraceDiff, TraceField, TraceSource, compare_with,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::convert::FOV_CACHED_NOTE_PREFIX;
 use crate::timestep::{StepStats, finite, same_length};
 
 /// Value of [`CompareSummary::format`].
 pub const SUMMARY_FORMAT: &str = "asamu-trace-compare";
 /// Version of the summary format.
 pub const SUMMARY_VERSION: u32 = 1;
+/// Start of the replay note that marks a one-step (resynchronised) replay.
+pub const ONE_STEP_NOTE_PREFIX: &str = "one-step:";
+/// Starts of the notes a replay writes about itself that a comparison of it
+/// repeats ([`CompareSummary::harness_notes`]).
+pub const HARNESS_NOTE_PREFIXES: [&str; 7] = [
+    ONE_STEP_NOTE_PREFIX,
+    "validity:",
+    "injected:",
+    "start:",
+    "state check:",
+    "attaches:",
+    "warning:",
+];
+
+/// Rotator units per radian.
+const UNITS_PER_RADIAN: f64 = ROTATOR_UNITS_PER_TURN as f64 / core::f64::consts::TAU;
+
+/// Radians as rotator units (65536 per turn), not rounded.
+#[must_use]
+pub fn radians_to_units(radians: f64) -> f64 {
+    radians * UNITS_PER_RADIAN
+}
 
 /// Identity of one compared trace.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,15 +195,126 @@ impl TimingSummary {
     }
 }
 
+/// Error statistics of one component over the matched ticks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AxisStats {
+    /// Matched ticks.
+    pub count: usize,
+    /// Largest error (absolute).
+    pub max: f64,
+    /// Tick of the largest error (the first, if several).
+    pub max_tick: Option<u64>,
+    /// Mean error (absolute).
+    pub mean: f64,
+    /// Root-mean-square error.
+    pub rms: f64,
+    /// Smallest signed difference `b − a` (vertical components only).
+    #[serde(default)]
+    pub signed_min: Option<f64>,
+    /// Largest signed difference `b − a` (vertical components only).
+    #[serde(default)]
+    pub signed_max: Option<f64>,
+}
+
+/// Accumulates an [`AxisStats`].
+#[derive(Clone, Copy, Debug, Default)]
+struct Accumulator {
+    stats: AxisStats,
+    sum: f64,
+    sum_sq: f64,
+}
+
+impl Accumulator {
+    fn add(&mut self, tick: u64, err: f64) {
+        let s = &mut self.stats;
+        s.count += 1;
+        self.sum += err;
+        self.sum_sq += err * err;
+        if s.max_tick.is_none() || err > s.max {
+            s.max = err;
+            s.max_tick = Some(tick);
+        }
+    }
+
+    /// Adds a signed difference: its absolute value is the error.
+    fn add_signed(&mut self, tick: u64, difference: f64) {
+        self.add(tick, difference.abs());
+        let s = &mut self.stats;
+        s.signed_min = Some(s.signed_min.map_or(difference, |m| m.min(difference)));
+        s.signed_max = Some(s.signed_max.map_or(difference, |m| m.max(difference)));
+    }
+
+    fn finish(mut self) -> AxisStats {
+        if self.stats.count > 0 {
+            let n = self.stats.count as f64;
+            self.stats.mean = finite(self.sum / n);
+            self.stats.rms = finite((self.sum_sq / n).sqrt());
+        }
+        self.stats
+    }
+}
+
+/// The position and velocity error split into its horizontal and vertical
+/// part, and the angle errors in rotator units (see the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Components {
+    /// Horizontal position error, UU (length of the X/Y difference).
+    pub position_horizontal: AxisStats,
+    /// Vertical position error, UU (|ΔZ|; signed range of `b.z − a.z`).
+    pub position_vertical: AxisStats,
+    /// Horizontal velocity error, UU/s.
+    pub velocity_horizontal: AxisStats,
+    /// Vertical velocity error, UU/s (signed range of `b.z − a.z`).
+    pub velocity_vertical: AxisStats,
+    /// Yaw error in rotator units (wrapped).
+    pub yaw_units: AxisStats,
+    /// Pitch error in rotator units.
+    pub pitch_units: AxisStats,
+}
+
+/// Whether the FOV counts for the verdict.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FovPolicy {
+    /// Left out when either trace's notes say its FOV column is the cached
+    /// view FOV ([`crate::convert::FOV_CACHED_NOTE_PREFIX`]) on every one
+    /// of its samples, counted otherwise.
+    #[default]
+    Auto,
+    /// Counted.
+    Count,
+    /// Left out.
+    Exclude,
+}
+
+/// Options of [`compare_traces_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompareOptions {
+    /// Whether the FOV counts for the verdict.
+    pub fov: FovPolicy,
+}
+
+/// What became of the FOV in a comparison's verdict.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FovVerdict {
+    /// The policy asked for.
+    pub policy: FovPolicy,
+    /// The FOV counted for the verdict.
+    pub counted: bool,
+    /// Why (for people).
+    pub reason: String,
+}
+
 /// Overall outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// Every matched tick agrees exactly and no tick is unmatched.
+    /// Every matched tick agrees exactly (in every field that counts: see
+    /// [`FovPolicy`]) and no tick is unmatched.
     Exact,
-    /// No field exceeded its tolerance on any matched tick.
+    /// No field that counts exceeded its tolerance on any matched tick.
     WithinTolerance,
-    /// Some field exceeded its tolerance.
+    /// Some field that counts exceeded its tolerance.
     Diverged,
     /// The traces share no tick.
     NoOverlap,
@@ -150,18 +333,52 @@ pub struct CompareSummary {
     pub b: TraceInfo,
     /// Tolerances used.
     pub tolerances: CompareTolerances,
-    /// Statistics from [`compare_with`].
+    /// Statistics from [`compare_with`] (its `first_divergence` is over all
+    /// fields, the FOV included; see [`Self::verdict_divergence`]).
     pub diff: TraceDiff,
     /// First exceedance per field (`position`, `velocity`, `yaw`, `pitch`,
     /// `fov`, `grapple_anchor`, `rope_length`, `grapple_state`, `grounded`,
-    /// `input`); fields that never exceeded are absent.
+    /// `input`) and per component of the position and the velocity
+    /// (`position_horizontal`, `position_vertical`, `velocity_horizontal`,
+    /// `velocity_vertical`, each against its field's tolerance); fields that
+    /// never exceeded are absent.
     pub first_exceedance: BTreeMap<String, Exceedance>,
-    /// Verdict.
+    /// Verdict (over the fields that count: see [`Self::fov`]).
     pub verdict: Verdict,
     /// Frame lengths of both traces and whether they agree (absent in
     /// summaries written before it existed).
     #[serde(default)]
     pub timing: Option<TimingSummary>,
+    /// Horizontal and vertical parts, rotator units (absent in summaries
+    /// written before they existed).
+    #[serde(default)]
+    pub components: Option<Components>,
+    /// Whether the FOV counted for the verdict (absent in older summaries,
+    /// in which it always did).
+    #[serde(default)]
+    pub fov: Option<FovVerdict>,
+    /// The first divergence among the fields that count for the verdict
+    /// (absent in older summaries: `diff.first_divergence` then).
+    #[serde(default)]
+    pub verdict_divergence: Option<Divergence>,
+    /// The trace under test is a one-step (resynchronised) replay.
+    #[serde(default)]
+    pub one_step: bool,
+    /// What the replay under test noted about itself (see
+    /// [`HARNESS_NOTE_PREFIXES`]).
+    #[serde(default)]
+    pub harness_notes: Vec<String>,
+}
+
+impl CompareSummary {
+    /// The first divergence that decides the verdict.
+    #[must_use]
+    pub fn deciding_divergence(&self) -> Option<Divergence> {
+        match &self.fov {
+            Some(_) => self.verdict_divergence,
+            None => self.diff.first_divergence,
+        }
+    }
 }
 
 fn field_name(f: TraceField) -> &'static str {
@@ -188,7 +405,93 @@ fn angle_err(a: f32, b: f32) -> f64 {
     d.min(core::f64::consts::TAU - d)
 }
 
-/// Compares `a` (reference) with `b` under `tol`.
+/// What a trace's notes say about its FOV column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachedFov {
+    /// No note: the column is not said to be the cached view FOV.
+    NotSaid,
+    /// The cached view FOV on every sample.
+    All,
+    /// The cached view FOV on `cached` of `total` samples only.
+    Part { cached: u64, total: u64 },
+    /// A note whose sample counts cannot be read.
+    Unreadable,
+}
+
+/// Reads the converter's cached-FOV note of `t`
+/// (`fov: cached view FOV … on N of M samples…`). With several such notes
+/// the least covering one decides.
+fn cached_fov(t: &Trace) -> CachedFov {
+    let mut said = CachedFov::NotSaid;
+    for note in &t.meta.notes {
+        let Some(rest) = note.strip_prefix(FOV_CACHED_NOTE_PREFIX) else {
+            continue;
+        };
+        let counts = rest.split_once(" on ").and_then(|(_, tail)| {
+            let (cached, tail) = tail.split_once(" of ")?;
+            let (total, _) = tail.split_once(" samples")?;
+            Some((cached.parse::<u64>().ok()?, total.parse::<u64>().ok()?))
+        });
+        let this = match counts {
+            Some((cached, total)) if total > 0 && cached == total => CachedFov::All,
+            Some((cached, total)) if cached < total => CachedFov::Part { cached, total },
+            _ => CachedFov::Unreadable,
+        };
+        said = match (said, this) {
+            (CachedFov::NotSaid | CachedFov::All, x) => x,
+            (kept, _) => kept,
+        };
+    }
+    said
+}
+
+/// Whether the FOV counts under `policy` for these two traces, and why.
+fn fov_verdict(policy: FovPolicy, a: &Trace, b: &Trace) -> FovVerdict {
+    let (counted, reason) = match policy {
+        FovPolicy::Count => (true, "asked for".to_owned()),
+        FovPolicy::Exclude => (false, "asked for".to_owned()),
+        FovPolicy::Auto => {
+            let said = [("a", cached_fov(a)), ("b", cached_fov(b))];
+            let partial = said.iter().find_map(|(name, c)| match c {
+                CachedFov::Part { cached, total } => Some(format!(
+                    "the notes of trace {name} say that its FOV column is the camera's cached \
+                     view FOV on {cached} of {total} samples only, so the FOV counts; \
+                     --fov-verdict exclude leaves it out"
+                )),
+                CachedFov::Unreadable => Some(format!(
+                    "trace {name} has a cached-view-FOV note whose sample counts cannot be \
+                     read, so the FOV counts; --fov-verdict exclude leaves it out"
+                )),
+                _ => None,
+            });
+            let all = said.iter().find(|(_, c)| *c == CachedFov::All);
+            match (partial, all) {
+                // A column that is only partly the cached FOV is not left
+                // out by default, whatever the other trace says.
+                (Some(reason), _) => (true, reason),
+                (None, Some((name, _))) => (
+                    false,
+                    format!(
+                        "the notes of trace {name} say that its FOV column is the camera's \
+                         cached view FOV, which does not show the zoom"
+                    ),
+                ),
+                (None, None) => (
+                    true,
+                    "neither trace's notes say that its FOV is the cached view FOV".to_owned(),
+                ),
+            }
+        }
+    };
+    FovVerdict {
+        policy,
+        counted,
+        reason,
+    }
+}
+
+/// Compares `a` (reference) with `b` under `tol`, with the default options
+/// ([`FovPolicy::Auto`]).
 #[must_use]
 pub fn compare_traces(
     a_name: &str,
@@ -197,12 +500,44 @@ pub fn compare_traces(
     b: &Trace,
     tol: &CompareTolerances,
 ) -> CompareSummary {
+    compare_traces_with(a_name, a, b_name, b, tol, &CompareOptions::default())
+}
+
+/// Compares `a` (reference) with `b` under `tol` and `opts`.
+#[must_use]
+pub fn compare_traces_with(
+    a_name: &str,
+    a: &Trace,
+    b_name: &str,
+    b: &Trace,
+    tol: &CompareTolerances,
+    opts: &CompareOptions,
+) -> CompareSummary {
     let diff = compare_with(a, b, tol);
+    let fov = fov_verdict(opts.fov, a, b);
     let mut first: BTreeMap<String, Exceedance> = BTreeMap::new();
+    // The first divergence among the fields that count, in the field order
+    // of `compare_with`.
+    let mut verdict_divergence: Option<Divergence> = None;
     let mut note = |field: TraceField, tick: u64, err: f64, limit: f64| {
         if err > limit.max(0.0) {
             first
                 .entry(field_name(field).to_owned())
+                .or_insert(Exceedance { tick, error: err });
+            if (field != TraceField::Fov || fov.counted) && verdict_divergence.is_none() {
+                verdict_divergence = Some(Divergence {
+                    tick,
+                    field,
+                    error: err,
+                });
+            }
+        }
+    };
+    let mut part_first: BTreeMap<&'static str, Exceedance> = BTreeMap::new();
+    let mut part = |name: &'static str, tick: u64, err: f64, limit: f64| {
+        if err > limit.max(0.0) {
+            part_first
+                .entry(name)
                 .or_insert(Exceedance { tick, error: err });
         }
     };
@@ -215,6 +550,14 @@ pub fn compare_traces(
         max_time_skew: 0.0,
         max_time_skew_tick: None,
     };
+    let (mut pos_h, mut pos_v, mut vel_h, mut vel_v, mut yaw_u, mut pitch_u) = (
+        Accumulator::default(),
+        Accumulator::default(),
+        Accumulator::default(),
+        Accumulator::default(),
+        Accumulator::default(),
+        Accumulator::default(),
+    );
     // Times of the first and of the previous matched tick, in both traces.
     let mut first_matched: Option<(f64, f64)> = None;
     let mut prev_matched: Option<(u64, f64, f64)> = None;
@@ -257,19 +600,38 @@ pub fn compare_traces(
             vec_err(sa.position, sb.position),
             tol.position,
         );
+        let d = sb.position.as_dvec3() - sa.position.as_dvec3();
+        pos_h.add(t, d.truncate().length());
+        pos_v.add_signed(t, d.z);
+        part(
+            "position_horizontal",
+            t,
+            d.truncate().length(),
+            tol.position,
+        );
+        part("position_vertical", t, d.z.abs(), tol.position);
         note(
             TraceField::Velocity,
             t,
             vec_err(sa.velocity, sb.velocity),
             tol.velocity,
         );
-        note(TraceField::Yaw, t, angle_err(sa.yaw, sb.yaw), tol.angle);
-        note(
-            TraceField::Pitch,
+        let d = sb.velocity.as_dvec3() - sa.velocity.as_dvec3();
+        vel_h.add(t, d.truncate().length());
+        vel_v.add_signed(t, d.z);
+        part(
+            "velocity_horizontal",
             t,
-            (f64::from(sa.pitch) - f64::from(sb.pitch)).abs(),
-            tol.angle,
+            d.truncate().length(),
+            tol.velocity,
         );
+        part("velocity_vertical", t, d.z.abs(), tol.velocity);
+        let yaw = angle_err(sa.yaw, sb.yaw);
+        note(TraceField::Yaw, t, yaw, tol.angle);
+        yaw_u.add(t, radians_to_units(yaw));
+        let pitch = (f64::from(sa.pitch) - f64::from(sb.pitch)).abs();
+        note(TraceField::Pitch, t, pitch, tol.angle);
+        pitch_u.add(t, radians_to_units(pitch));
         note(
             TraceField::Fov,
             t,
@@ -300,15 +662,40 @@ pub fn compare_traces(
         i += 1;
         j += 1;
     }
+    for (name, e) in part_first {
+        first.insert(name.to_owned(), e);
+    }
+    // Exactness over the fields that count: `TraceDiff::is_exact` minus the
+    // FOV when it does not.
+    let exact = diff.is_exact()
+        || (!fov.counted
+            && diff.only_in_a == 0
+            && diff.only_in_b == 0
+            && diff.position.max == 0.0
+            && diff.velocity.max == 0.0
+            && diff.yaw.max == 0.0
+            && diff.pitch.max == 0.0
+            && diff.grapple_anchor.max == 0.0
+            && diff.rope_length.max == 0.0
+            && diff.grapple_state_mismatches == 0
+            && diff.grounded_mismatches == 0
+            && diff.input_mismatches == 0);
     let verdict = if diff.matched == 0 && (!a.samples.is_empty() || !b.samples.is_empty()) {
         Verdict::NoOverlap
-    } else if diff.is_exact() {
+    } else if exact {
         Verdict::Exact
-    } else if diff.first_divergence.is_none() {
+    } else if verdict_divergence.is_none() {
         Verdict::WithinTolerance
     } else {
         Verdict::Diverged
     };
+    let harness_notes: Vec<String> = b
+        .meta
+        .notes
+        .iter()
+        .filter(|n| HARNESS_NOTE_PREFIXES.iter().any(|p| n.starts_with(p)))
+        .cloned()
+        .collect();
     CompareSummary {
         format: SUMMARY_FORMAT.to_owned(),
         version: SUMMARY_VERSION,
@@ -319,6 +706,20 @@ pub fn compare_traces(
         first_exceedance: first,
         verdict,
         timing: Some(timing),
+        components: Some(Components {
+            position_horizontal: pos_h.finish(),
+            position_vertical: pos_v.finish(),
+            velocity_horizontal: vel_h.finish(),
+            velocity_vertical: vel_v.finish(),
+            yaw_units: yaw_u.finish(),
+            pitch_units: pitch_u.finish(),
+        }),
+        fov: Some(fov),
+        verdict_divergence,
+        one_step: harness_notes
+            .iter()
+            .any(|n| n.starts_with(ONE_STEP_NOTE_PREFIX)),
+        harness_notes,
     }
 }
 
@@ -371,6 +772,30 @@ fn render_timing(o: &mut String, s: &CompareSummary) {
     }
 }
 
+/// One row of the statistics table of [`render_text`].
+fn stats_row(o: &mut String, name: &str, a: &AxisStats, first: Option<&Exceedance>, unit: &str) {
+    let first = first.map_or_else(|| "-".to_owned(), |e| e.tick.to_string());
+    let max_tick = a.max_tick.map_or_else(|| "-".to_owned(), |t| t.to_string());
+    let _ = writeln!(
+        o,
+        "{name:<21} {:>7} {:>14.6} {max_tick:>10} {:>14.6} {:>14.6} {first:>15}  {unit}",
+        a.count, a.max, a.mean, a.rms
+    );
+}
+
+/// A field's statistics as a table row's.
+fn field_row(f: &FieldStats) -> AxisStats {
+    AxisStats {
+        count: f.count,
+        max: f.max,
+        max_tick: f.max_tick,
+        mean: f.mean,
+        rms: f.rms,
+        signed_min: None,
+        signed_max: None,
+    }
+}
+
 /// A human-readable report of a summary.
 #[must_use]
 pub fn render_text(s: &CompareSummary) -> String {
@@ -386,6 +811,13 @@ pub fn render_text(s: &CompareSummary) -> String {
         "b: {} ({:?}, {} samples)",
         s.b.name, s.b.source, s.b.samples
     );
+    if s.one_step {
+        let _ = writeln!(
+            o,
+            "mode: one-step (b restarts every tick from a's previous sample: the errors are \
+             those of one tick, not accumulated drift)"
+        );
+    }
     let _ = writeln!(
         o,
         "matched ticks {}, only in a {}, only in b {}",
@@ -395,14 +827,36 @@ pub fn render_text(s: &CompareSummary) -> String {
     let t = &s.tolerances;
     let _ = writeln!(
         o,
-        "tolerances: position {} uu, velocity {} uu/s, angle {} rad, fov {} deg, anchor {} uu",
-        t.position, t.velocity, t.angle, t.fov, t.anchor
+        "tolerances: position {} uu, velocity {} uu/s, angle {} rad ({:.2} rotator units), fov {} \
+         deg, anchor {} uu",
+        t.position,
+        t.velocity,
+        t.angle,
+        radians_to_units(t.angle),
+        t.fov,
+        t.anchor
     );
+    if let Some(f) = s.fov.as_ref().filter(|f| !f.counted) {
+        let _ = writeln!(
+            o,
+            "fov: not counted in the verdict ({}); its numbers are listed all the same",
+            f.reason
+        );
+    }
     let _ = writeln!(
         o,
-        "{:<15} {:>7} {:>14} {:>10} {:>14} {:>14} {:>15}",
+        "{:<21} {:>7} {:>14} {:>10} {:>14} {:>14} {:>15}",
         "field", "count", "max", "max tick", "mean", "rms", "first exceeded"
     );
+    let c = s.components.as_ref();
+    let part = |o: &mut String, name: &str, key: &str, a: Option<&AxisStats>, unit: &str| {
+        let Some(a) = a else { return };
+        let unit = match (a.signed_min, a.signed_max) {
+            (Some(lo), Some(hi)) => format!("{unit}  (b - a: {lo:.6} .. {hi:.6})"),
+            _ => unit.to_owned(),
+        };
+        stats_row(o, name, a, s.first_exceedance.get(key), &unit);
+    };
     for (name, f, unit) in [
         ("position", &d.position, "uu"),
         ("velocity", &d.velocity, "uu/s"),
@@ -412,16 +866,62 @@ pub fn render_text(s: &CompareSummary) -> String {
         ("grapple_anchor", &d.grapple_anchor, "uu"),
         ("rope_length", &d.rope_length, "uu"),
     ] {
-        let first = s
-            .first_exceedance
-            .get(name)
-            .map_or_else(|| "-".to_owned(), |e| e.tick.to_string());
-        let max_tick = f.max_tick.map_or_else(|| "-".to_owned(), |t| t.to_string());
-        let _ = writeln!(
-            o,
-            "{:<15} {:>7} {:>14.6} {:>10} {:>14.6} {:>14.6} {:>15}  {unit}",
-            name, f.count, f.max, max_tick, f.mean, f.rms, first
+        stats_row(
+            &mut o,
+            name,
+            &field_row(f),
+            s.first_exceedance.get(name),
+            unit,
         );
+        match name {
+            "position" => {
+                part(
+                    &mut o,
+                    "  horizontal",
+                    "position_horizontal",
+                    c.map(|c| &c.position_horizontal),
+                    "uu",
+                );
+                part(
+                    &mut o,
+                    "  vertical",
+                    "position_vertical",
+                    c.map(|c| &c.position_vertical),
+                    "uu",
+                );
+            }
+            "velocity" => {
+                part(
+                    &mut o,
+                    "  horizontal",
+                    "velocity_horizontal",
+                    c.map(|c| &c.velocity_horizontal),
+                    "uu/s",
+                );
+                part(
+                    &mut o,
+                    "  vertical",
+                    "velocity_vertical",
+                    c.map(|c| &c.velocity_vertical),
+                    "uu/s",
+                );
+            }
+            "yaw" => part(
+                &mut o,
+                "  in rotator units",
+                "yaw",
+                c.map(|c| &c.yaw_units),
+                "units",
+            ),
+            "pitch" => part(
+                &mut o,
+                "  in rotator units",
+                "pitch",
+                c.map(|c| &c.pitch_units),
+                "units",
+            ),
+            _ => {}
+        }
     }
     for (name, n) in [
         ("grapple_state", d.grapple_state_mismatches),
@@ -432,9 +932,9 @@ pub fn render_text(s: &CompareSummary) -> String {
             .first_exceedance
             .get(name)
             .map_or_else(|| "-".to_owned(), |e| e.tick.to_string());
-        let _ = writeln!(o, "{name:<15} {n:>7} mismatching ticks; first {first}");
+        let _ = writeln!(o, "{name:<21} {n:>7} mismatching ticks; first {first}");
     }
-    match d.first_divergence {
+    match s.deciding_divergence() {
         Some(fd) => {
             let _ = writeln!(
                 o,
@@ -448,7 +948,21 @@ pub fn render_text(s: &CompareSummary) -> String {
             let _ = writeln!(o, "first divergence: none");
         }
     }
+    if let Some(fd) = d.first_divergence
+        && Some(fd) != s.deciding_divergence()
+    {
+        let _ = writeln!(
+            o,
+            "(not counted: tick {} field {} error {})",
+            fd.tick,
+            field_name(fd.field),
+            fd.error
+        );
+    }
     let _ = writeln!(o, "verdict: {:?}", s.verdict);
+    for n in &s.harness_notes {
+        let _ = writeln!(o, "b: {n}");
+    }
     o
 }
 
@@ -655,6 +1169,82 @@ mod tests {
                 let e = &s.first_exceedance[field_name(fd.field)];
                 assert_eq!((e.tick, e.error), (fd.tick, fd.error), "round {round}");
             }
+            // The FOV counts (no note says otherwise): the verdict's first
+            // divergence is `compare_with`'s.
+            assert!(s.fov.as_ref().unwrap().counted);
+            assert_eq!(
+                s.verdict_divergence, s.diff.first_divergence,
+                "round {round}"
+            );
+            // A component never exceeds before its field does, and never is
+            // larger than the field's error.
+            let c = s.components.unwrap();
+            for (part, field, stats, of) in [
+                (
+                    "position_horizontal",
+                    "position",
+                    c.position_horizontal,
+                    &s.diff.position,
+                ),
+                (
+                    "position_vertical",
+                    "position",
+                    c.position_vertical,
+                    &s.diff.position,
+                ),
+                (
+                    "velocity_horizontal",
+                    "velocity",
+                    c.velocity_horizontal,
+                    &s.diff.velocity,
+                ),
+                (
+                    "velocity_vertical",
+                    "velocity",
+                    c.velocity_vertical,
+                    &s.diff.velocity,
+                ),
+            ] {
+                assert_eq!(stats.count, of.count, "round {round} {part}");
+                assert!(stats.max <= of.max, "round {round} {part}");
+                if let Some(e) = s.first_exceedance.get(part) {
+                    assert!(
+                        s.first_exceedance[field].tick <= e.tick,
+                        "round {round} {part}"
+                    );
+                }
+            }
+            // The same comparison without the FOV: no earlier divergence,
+            // and never one in the FOV.
+            let without = compare_traces_with(
+                "a",
+                &a,
+                "b",
+                &b,
+                &tol,
+                &CompareOptions {
+                    fov: FovPolicy::Exclude,
+                },
+            );
+            assert_eq!(without.diff, s.diff, "round {round}");
+            assert_eq!(
+                without.first_exceedance, s.first_exceedance,
+                "round {round}"
+            );
+            match (without.verdict_divergence, s.verdict_divergence) {
+                (Some(w), Some(c)) => {
+                    assert!(
+                        w.tick >= c.tick && w.field != TraceField::Fov,
+                        "round {round}"
+                    );
+                    if c.field != TraceField::Fov {
+                        assert_eq!(w, c, "round {round}");
+                    }
+                }
+                (Some(_), None) => panic!("round {round}: a divergence only without the FOV"),
+                (None, Some(c)) => assert_eq!(c.field, TraceField::Fov, "round {round}"),
+                (None, None) => {}
+            }
             for (name, stats) in [
                 ("position", &s.diff.position),
                 ("velocity", &s.diff.velocity),
@@ -674,6 +1264,315 @@ mod tests {
             };
             assert!(consistent, "round {round}: {:?}", s.verdict);
         }
+    }
+
+    /// Horizontal and vertical parts and rotator units of constructed
+    /// errors.
+    #[test]
+    fn components_of_known_errors() {
+        let a = trace(5);
+        let mut b = a.clone();
+        // Tick 1: 3-4-12 → horizontal 5, vertical +12, 3-D 13.
+        b.samples[1].position += Vec3::new(3.0, -4.0, 12.0);
+        // Tick 2: 1 uu lower, nothing sideways (the standing-height offset).
+        b.samples[2].position.z -= 1.0;
+        // Tick 3: velocity (6, 8, -2.5).
+        b.samples[3].velocity = Vec3::new(6.0, 8.0, -2.5);
+        // Tick 4: one rotator unit of yaw, three of pitch.
+        let unit = core::f32::consts::TAU / 65536.0;
+        b.samples[4].yaw = unit;
+        b.samples[4].pitch = -3.0 * unit;
+        let tol = CompareTolerances {
+            position: 2.0,
+            velocity: 7.0,
+            angle: 0.001,
+            fov: 0.0,
+            anchor: 0.0,
+        };
+        let s = compare_traces("a", &a, "b", &b, &tol);
+        let c = s.components.unwrap();
+        assert_eq!(s.diff.position.max, 13.0);
+        assert_eq!(
+            (c.position_horizontal.max, c.position_horizontal.max_tick),
+            (5.0, Some(1))
+        );
+        assert_eq!(c.position_horizontal.count, 5);
+        assert_eq!(c.position_horizontal.mean, 1.0);
+        assert!((c.position_horizontal.rms - 5.0_f64.sqrt()).abs() < 1e-12);
+        assert_eq!(
+            (c.position_vertical.max, c.position_vertical.max_tick),
+            (12.0, Some(1))
+        );
+        assert_eq!(
+            (
+                c.position_vertical.signed_min,
+                c.position_vertical.signed_max
+            ),
+            (Some(-1.0), Some(12.0))
+        );
+        assert_eq!(c.position_vertical.mean, 13.0 / 5.0);
+        assert_eq!(c.position_horizontal.signed_min, None);
+        assert_eq!(c.velocity_horizontal.max, 10.0);
+        assert_eq!(c.velocity_vertical.max, 2.5);
+        assert_eq!(
+            (
+                c.velocity_vertical.signed_min,
+                c.velocity_vertical.signed_max
+            ),
+            (Some(-2.5), Some(0.0))
+        );
+        assert!((c.yaw_units.max - 1.0).abs() < 1e-6, "{}", c.yaw_units.max);
+        assert!((c.pitch_units.max - 3.0).abs() < 1e-6);
+        assert_eq!(c.yaw_units.max_tick, Some(4));
+        assert!((radians_to_units(core::f64::consts::PI) - 32768.0).abs() < 1e-9);
+        // The components against their field's tolerance: tick 2 is 1 uu
+        // off vertically (within 2), tick 1 exceeds in both parts; the
+        // velocity exceeds horizontally (10 > 7) but not vertically.
+        assert_eq!(s.first_exceedance["position"].tick, 1);
+        assert_eq!(s.first_exceedance["position_horizontal"].error, 5.0);
+        assert_eq!(s.first_exceedance["position_vertical"].error, 12.0);
+        assert_eq!(s.first_exceedance["velocity_horizontal"].tick, 3);
+        assert!(!s.first_exceedance.contains_key("velocity_vertical"));
+        // One unit of yaw is within 0.001 rad (10.4 units).
+        assert!(!s.first_exceedance.contains_key("yaw"));
+        let text = render_text(&s);
+        for want in [
+            "  horizontal ",
+            "  vertical ",
+            "(b - a: -1.000000 .. 12.000000)",
+            "  in rotator units ",
+            "angle 0.001 rad (10.43 rotator units)",
+        ] {
+            assert!(text.contains(want), "{want}\n{text}");
+        }
+        assert!(!text.contains("mode: one-step"), "{text}");
+        // The components survive the JSON; a summary written before they
+        // existed still reads and renders.
+        let json = serde_json::to_string(&s).unwrap();
+        let back: CompareSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.components, s.components);
+        assert_eq!(back.first_exceedance, s.first_exceedance);
+        assert_eq!(
+            (&back.fov, back.verdict_divergence, back.one_step),
+            (&s.fov, s.verdict_divergence, s.one_step)
+        );
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for key in [
+            "components",
+            "fov",
+            "verdict_divergence",
+            "one_step",
+            "harness_notes",
+        ] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let old: CompareSummary = serde_json::from_value(old).unwrap();
+        assert_eq!(old.components, None);
+        assert_eq!(old.deciding_divergence(), s.diff.first_divergence);
+        let text = render_text(&old);
+        assert!(!text.contains("  horizontal"), "{text}");
+        assert!(
+            text.contains("first divergence: tick 1 field position"),
+            "{text}"
+        );
+    }
+
+    /// The FOV leaves the verdict only when a trace's notes say that its FOV
+    /// column is the cached view FOV, or when asked; the tolerance and the
+    /// FOV's own numbers stay as they are.
+    #[test]
+    fn fov_and_the_verdict() {
+        let a = trace(8);
+        let mut zoomed = a.clone();
+        for s in &mut zoomed.samples[3..] {
+            s.fov = 50.0;
+        }
+        let tol = CompareTolerances {
+            fov: 0.1,
+            ..CompareTolerances::default()
+        };
+        let with = |a: &Trace, b: &Trace, fov| {
+            compare_traces_with("a", a, "b", b, &tol, &CompareOptions { fov })
+        };
+        // No note: the FOV counts.
+        let s = with(&a, &zoomed, FovPolicy::Auto);
+        assert_eq!(s.verdict, Verdict::Diverged);
+        let f = s.fov.clone().unwrap();
+        assert!(f.counted && f.policy == FovPolicy::Auto, "{f:?}");
+        assert_eq!(
+            s.verdict_divergence.map(|d| (d.tick, d.field)),
+            Some((3, TraceField::Fov))
+        );
+        assert!(!render_text(&s).contains("not counted"));
+        // The converter's note on the reference trace: left out by default.
+        let mut noted = a.clone();
+        noted.meta.notes.push(format!(
+            "{FOV_CACHED_NOTE_PREFIX} (the camera's CameraCache.POV.FOV) on 8 of 8 samples: a \
+             locked camera FOV (the zoom) does not show in it"
+        ));
+        let s = with(&noted, &zoomed, FovPolicy::Auto);
+        assert_eq!(s.verdict, Verdict::Exact, "nothing else differs");
+        let f = s.fov.clone().unwrap();
+        assert!(!f.counted && f.reason.contains("trace a"), "{f:?}");
+        assert_eq!(s.verdict_divergence, None);
+        // Reported all the same, with the tolerance as given.
+        assert_eq!(s.tolerances.fov, 0.1);
+        assert_eq!(s.diff.fov.max, 40.0);
+        assert_eq!(s.first_exceedance["fov"].tick, 3);
+        assert_eq!(
+            s.diff.first_divergence.map(|d| d.field),
+            Some(TraceField::Fov)
+        );
+        let text = render_text(&s);
+        assert!(
+            text.contains(
+                "fov: not counted in the verdict (the notes of trace a say that its FOV column \
+                 is the camera's cached view FOV, which does not show the zoom); its numbers are \
+                 listed all the same"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("first divergence: none"), "{text}");
+        assert!(
+            text.contains("(not counted: tick 3 field fov error 40)"),
+            "{text}"
+        );
+        assert!(text.contains("verdict: Exact"), "{text}");
+        // The note on the trace under test counts too.
+        let s = with(&zoomed, &noted, FovPolicy::Auto);
+        assert!(s.fov.unwrap().reason.contains("trace b"));
+        // Another difference still decides, at its own tick.
+        let mut moved = zoomed.clone();
+        moved.samples[6].position.x += 1.0;
+        let s = with(&noted, &moved, FovPolicy::Auto);
+        assert_eq!(s.verdict, Verdict::Diverged);
+        assert_eq!(
+            s.verdict_divergence.map(|d| (d.tick, d.field)),
+            Some((6, TraceField::Position))
+        );
+        // Stated either way, whatever the notes say.
+        let s = with(&noted, &zoomed, FovPolicy::Count);
+        assert_eq!(s.verdict, Verdict::Diverged);
+        assert!(s.fov.unwrap().counted);
+        let s = with(&a, &zoomed, FovPolicy::Exclude);
+        assert_eq!(s.verdict, Verdict::Exact);
+        assert_eq!(s.fov.unwrap().reason, "asked for");
+        // A note that covers only part of the samples (the rest is the
+        // controller's FOVAngle), or whose counts cannot be read, does not
+        // switch the FOV off: only "on N of N samples" does.
+        for (text, want) in [
+            (
+                " (the camera's CameraCache.POV.FOV) on 7 of 8 samples: x",
+                "on 7 of 8 samples only",
+            ),
+            (
+                " (the camera's CameraCache.POV.FOV) on 0 of 8 samples: x",
+                "on 0 of 8 samples only",
+            ),
+            (" on some samples", "cannot be read"),
+            (" on 9 of 8 samples", "cannot be read"),
+            (" on 0 of 0 samples", "cannot be read"),
+            (" on -1 of -1 samples", "cannot be read"),
+            ("", "cannot be read"),
+        ] {
+            let mut part = a.clone();
+            part.meta
+                .notes
+                .push(format!("{FOV_CACHED_NOTE_PREFIX}{text}"));
+            for (x, y) in [(&part, &zoomed), (&zoomed, &part)] {
+                let s = with(x, y, FovPolicy::Auto);
+                let f = s.fov.clone().unwrap();
+                assert!(f.counted && f.reason.contains(want), "{text:?}: {f:?}");
+                assert_eq!(s.verdict, Verdict::Diverged, "{text:?}");
+                assert_eq!(
+                    s.verdict_divergence.map(|d| d.field),
+                    Some(TraceField::Fov),
+                    "{text:?}"
+                );
+            }
+            // Not even when the other trace's note covers all of its
+            // samples, or a second note of the same trace does.
+            let s = with(
+                &part,
+                &{
+                    let mut z = zoomed.clone();
+                    z.meta.notes.extend(noted.meta.notes.iter().cloned());
+                    z
+                },
+                FovPolicy::Auto,
+            );
+            assert!(s.fov.unwrap().counted, "{text:?}");
+            let mut twice = part.clone();
+            twice.meta.notes.extend(noted.meta.notes.iter().cloned());
+            twice.meta.notes.rotate_right(1);
+            assert!(with(&twice, &zoomed, FovPolicy::Auto).fov.unwrap().counted);
+            // Stated, it is left out all the same.
+            let s = with(&part, &zoomed, FovPolicy::Exclude);
+            assert!(!s.fov.unwrap().counted);
+        }
+        // A note that only resembles the converter's does nothing.
+        let mut other = a.clone();
+        other
+            .meta
+            .notes
+            .push("fov: controller FOVAngle used on 8 samples".to_owned());
+        other
+            .meta
+            .notes
+            .push("note: fov: cached view FOV on 8 of 8 samples".to_owned());
+        let s = with(&other, &zoomed, FovPolicy::Auto);
+        assert!(s.fov.unwrap().reason.starts_with("neither trace's notes"));
+        assert_eq!(s.verdict, Verdict::Diverged);
+        // Within tolerance, not exact: a small other error and an excluded
+        // FOV.
+        let mut near = zoomed.clone();
+        near.samples[2].velocity.y += 0.5;
+        let loose = CompareTolerances {
+            velocity: 1.0,
+            fov: 0.1,
+            ..CompareTolerances::default()
+        };
+        let s = compare_traces("a", &noted, "b", &near, &loose);
+        assert_eq!(s.verdict, Verdict::WithinTolerance);
+    }
+
+    /// A replay's own notes travel with the comparison; a one-step replay is
+    /// marked.
+    #[test]
+    fn harness_notes_and_one_step() {
+        let a = trace(4);
+        let mut b = a.clone();
+        b.meta.notes.extend(
+            [
+                "asamu-trace replay of an original trace on graybox at 60 Hz",
+                "one-step: every tick starts from the input trace's previous sample",
+                "validity: stopped before tick 9 (teleport)",
+                "start state applied (tick 0): ground_speed 440",
+                "warning: something",
+            ]
+            .map(str::to_owned),
+        );
+        let s = compare_traces("a", &a, "b", &b, &CompareTolerances::default());
+        assert!(s.one_step);
+        assert_eq!(
+            s.harness_notes,
+            [
+                "one-step: every tick starts from the input trace's previous sample",
+                "validity: stopped before tick 9 (teleport)",
+                "warning: something",
+            ]
+        );
+        let text = render_text(&s);
+        assert!(
+            text.contains("mode: one-step (b restarts every tick"),
+            "{text}"
+        );
+        assert!(
+            text.contains("b: validity: stopped before tick 9 (teleport)"),
+            "{text}"
+        );
+        let s = compare_traces("a", &a, "a", &a, &CompareTolerances::default());
+        assert!(!s.one_step && s.harness_notes.is_empty());
     }
 
     /// `trace(n)` with the given frame lengths (time = their sum) and no

@@ -9,6 +9,7 @@ members = [
     "crates/asamu-assets",
     "crates/asamu-ue3",
     "crates/asamu-kismet",
+    "crates/asamu-sandbox",
     "tools/asamu-locate",
     "tools/asamu-inventory",
     "tools/asamu-inspect",
@@ -26,6 +27,7 @@ default-members = [
     "crates/asamu-assets",
     "crates/asamu-ue3",
     "crates/asamu-kismet",
+    "crates/asamu-sandbox",
     "tools/asamu-locate",
     "tools/asamu-inventory",
     "tools/asamu-inspect",
@@ -53,6 +55,7 @@ asamu-world = { path = "crates/asamu-world" }
 asamu-assets = { path = "crates/asamu-assets" }
 asamu-ue3 = { path = "crates/asamu-ue3" }
 asamu-kismet = { path = "crates/asamu-kismet" }
+asamu-sandbox = { path = "crates/asamu-sandbox" }
 asamu-locate = { path = "tools/asamu-locate" }
 
 # External (pinned)
