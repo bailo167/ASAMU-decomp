@@ -95,7 +95,12 @@
 //! such site of walking, falling and flying in both executables; on the
 //! recordings 27,443 of 27,443 walking, 7,798 of 7,885 falling and, through
 //! a model of the gun's pull, 9,467 of 9,481 flying pairs, the misses being
-//! contacts and script events). Vector normalisation
+//! contacts and script events). Inside the velocity update the operations
+//! are in the order of the native code, which both executables share and no
+//! recording can check (the differences never reach a recorded position):
+//! the turning friction is `(difference · dt) · friction` and a braking
+//! piece adds `(v · h) · (1 / dt)` ([`udk_calc_velocity_with`],
+//! [`apply_velocity_braking`]). Vector normalisation
 //! ([`safe_normal`]) is `v · (1 / sqrt(|v|²))` with a correctly rounded
 //! square root and division, which is what the macOS executable does; the
 //! Windows executable uses the processor's approximate reciprocal square
@@ -446,6 +451,20 @@ pub fn substep(remaining: f32) -> f32 {
 /// `1 − 2·friction·h` in pieces `h ≤ 0.03` s and returns the time-weighted
 /// average of the post-update velocities (pieces reversed relative to the
 /// start velocity are left out), snapped to zero on reversal or below 10 uu/s.
+///
+/// Float form: a piece adds `(v · h) · (1 / dt)`, the velocity times the
+/// piece first and then times one `f32` reciprocal of the whole time; it
+/// does not add `v · (h / dt)`. With a single piece (`dt ≤ 0.03`) the
+/// result is therefore `(v · dt) · (1 / dt)`, which is not always `v`.
+/// NativeCode, the same in both executables and in both copies of the
+/// routine: macOS `APawn::ApplyVelocityBraking` (reciprocal at 0x100ADC2E3,
+/// the two products at 0x100ADC317 and 0x100ADC320) and the copy
+/// inside `AUDKPawn::CalcVelocity`, which is the one the player runs
+/// (0x100F6BDA6; 0x100F6BE93 and 0x100F6BE9C); Win32 the copy inside the UDK
+/// routine (reciprocal at 0x18B7436, the products at 0x18B741C and
+/// 0x18B743A). No recording can tell the two forms
+/// apart: they give a different velocity on 338 of 1,084 recorded braking
+/// frames and the same position on every one.
 #[must_use]
 pub fn apply_velocity_braking(velocity: Vec3, dt: f32, friction: f32) -> Vec3 {
     let start = velocity;
@@ -453,6 +472,8 @@ pub fn apply_velocity_braking(velocity: Vec3, dt: f32, friction: f32) -> Vec3 {
     let mut average = Vec3::ZERO;
     let mut t = dt;
     let mut pieces = 0;
+    // Only used inside the loop, which runs for a positive `dt` only.
+    let reciprocal = 1.0 / dt;
     while t > 0.0 && pieces < MAX_BRAKING_PIECES {
         let h = t.min(BRAKING_SUBSTEP);
         let next = t - h;
@@ -463,7 +484,7 @@ pub fn apply_velocity_braking(velocity: Vec3, dt: f32, friction: f32) -> Vec3 {
         pieces += 1;
         v -= (v + v) * h * friction;
         if v.dot(start) > 0.0 {
-            average += v * (h / dt);
+            average += v * h * reciprocal;
         }
     }
     if average.dot(start) < 0.0 || average.length_squared() < BRAKE_STOP_SPEED_SQUARED {
@@ -520,9 +541,15 @@ pub fn udk_calc_velocity_with(
     let mut v = velocity;
     if !brake || acceleration != Vec3::ZERO {
         // Turning friction: pulls the velocity direction towards the input
-        // (with no input it scales the velocity by `1 − F·dt`).
+        // (with no input it scales the velocity by `1 − F·dt`). The
+        // difference is multiplied by the time first and by the friction
+        // second (NativeCode: macOS 0x100F6BE60 then 0x100F6BE6B, Win32
+        // 0x18B75B0 then 0x18B75BC). The order changes nothing while the
+        // friction is a power of two (GroundFriction 8); with the flying
+        // friction 0.15 it is one unit in the last place on 24 of 9,481
+        // recorded frames, none of which shows it in the position.
         let speed = v.length();
-        v -= (v - accel_dir * speed) * friction * dt;
+        v -= (v - accel_dir * speed) * dt * friction;
     } else {
         v = apply_velocity_braking(v, dt, friction);
     }

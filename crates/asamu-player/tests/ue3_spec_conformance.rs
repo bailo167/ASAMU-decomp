@@ -1434,6 +1434,121 @@ fn landing_velocity_is_the_displacement_times_the_f32_reciprocal_of_the_contact_
 }
 
 // ---------------------------------------------------------------------------
+// 2.1 and 2.3: the order of the multiplications inside the velocity update.
+//
+// Both executables multiply in the same order (NATIVE_PHYSICS.md 2.1, 2.3):
+// the turning friction is (difference · dt) · friction, and a braking piece
+// adds (v · h) · (1 / dt) to the average. No recording can tell these from
+// the other orders (the difference never reaches a recorded position), so
+// the expected values are written out from the native rule in f32, one
+// operation at a time, with the value another order would give beside them.
+// The tick is the one of the recorded pair above (f32 bits 0x3C85A486).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn turning_friction_multiplies_by_the_time_before_the_friction() {
+    use asamu_player::ue3_movement::udk_calc_velocity_with;
+    let dt = recorded_dt();
+    let params = PlayerParams::asamu_original();
+
+    // The flying call (GRAPPLE.md G-PH-3): no input, fluid friction, no
+    // braking, friction 0.5 × FluidFriction = 0.15000000596046448
+    // (0x3E19999A), cap 2000. With no input the difference is the velocity:
+    //   V ← V − (V·dt)·F, then V ← V·(1 − F·dt) with 1 − F·dt = 0x3F7F5FA1.
+    // The speed, 1981.6 uu/s, is below the cap.
+    //   component   V − (V·dt)·F   × (1 − F·dt)   with (V·F)·dt instead
+    //   792         0x444583F7     0x4445083B     0x4445083A
+    //   −889        0xC45DB4C5     0xC45D29E2     0xC45D29E3
+    //   1584        0x44C583F7     0x44C5083B     0x44C5083A
+    assert_eq!(params.movement.fluid_friction.value, 0.3);
+    let friction = 0.5 * params.movement.fluid_friction.value;
+    assert_eq!(friction.to_bits(), 0x3E19_999A);
+    let r = udk_calc_velocity_with(
+        Vec3::new(792.0, -889.0, 1584.0),
+        Vec3::ZERO,
+        2048.0,
+        dt,
+        2000.0,
+        friction,
+        true,
+        false,
+    );
+    assert_eq!(
+        r.velocity.to_array().map(f32::to_bits),
+        [0x4445_083B, 0xC45D_29E2, 0x44C5_083B],
+        "{:?}",
+        r.velocity
+    );
+    assert_eq!(r.acceleration, Vec3::ZERO);
+
+    // The walking call with an input: V = (110, 0, 0), input +Y, acceleration
+    // 2048, cap 1000, friction 6. The friction is a test input: the game's
+    // ground friction, 8, is a power of two, and multiplying by a power of
+    // two is exact, so there the order cannot matter.
+    //   |V| = 110, difference = V − input·|V| = (110, −110, 0)
+    //   X: 110 − (110·dt)·6 = 0x42C6773E (99.23289489746094);
+    //      110 − (110·6)·dt would be 0x42C6773D
+    //   Y: 0 − (−110·dt)·6 = 0x412C4614 (0x412C4615 in the other order),
+    //      + 2048·dt = 0x4230B60B (44.17777633666992)
+    assert_eq!(params.movement.ground_friction.value, 8.0);
+    let r = udk_calc_velocity_with(
+        Vec3::new(110.0, 0.0, 0.0),
+        Vec3::Y,
+        2048.0,
+        dt,
+        1000.0,
+        6.0,
+        false,
+        true,
+    );
+    assert_eq!(
+        r.velocity.to_array().map(f32::to_bits),
+        [0x42C6_773E, 0x4230_B60B, 0],
+        "{:?}",
+        r.velocity
+    );
+    assert_eq!(r.acceleration, Vec3::new(0.0, 2048.0, 0.0));
+}
+
+#[test]
+fn braking_average_adds_each_piece_times_the_f32_reciprocal_of_dt() {
+    use asamu_player::ue3_movement::apply_velocity_braking;
+    let params = PlayerParams::asamu_original();
+    let friction = params.movement.ground_friction.value;
+    assert_eq!(friction, 8.0);
+    let start = Vec3::new(250.0, -500.0, 0.0);
+
+    // One piece (dt ≤ 0.03):
+    //   V1 = V0 − ((V0 + V0)·dt)·8 = (0x4338BEAA, 0xC3B8BEAA)
+    //      = (184.74478149414062, −369.48956298828125)
+    //   average = (V1·dt)·(1/dt), 1/dt = 0x427530EF:
+    //      (0x4338BEA9, 0xC3B8BEA9) = (184.74476623535156, −369.4895324707031)
+    // V1·(dt/dt) would be V1 itself, the next float in both components.
+    let v = apply_velocity_braking(start, recorded_dt(), friction);
+    assert_eq!(
+        v.to_array().map(f32::to_bits),
+        [0x4338_BEA9, 0xC3B8_BEA9, 0],
+        "{v:?}"
+    );
+
+    // Two pieces: dt = 1/30 s (0x3D088889) is 0.03 s and then
+    // 0.003333335742354393 s (0x3B5A7418); 1/dt = 0x41EFFFFF.
+    //   V1 = V0 − ((V0 + V0)·0.03)·8 = (130, −260)
+    //   V2 = V1 − ((V1 + V1)·h2)·8   = (0x42F62222, 0xC3762222)
+    //   average = (V1·0.03)·(1/dt) + (V2·h2)·(1/dt)
+    //      = (0x43014E81, 0xC3814E81) = (129.30665588378906, −258.6133117675781)
+    // V1·(0.03/dt) + V2·(h2/dt) would be (0x43014E82, 0xC3814E82).
+    let dt = 1.0_f32 / 30.0;
+    assert_eq!(dt.to_bits(), 0x3D08_8889);
+    let v = apply_velocity_braking(start, dt, friction);
+    assert_eq!(
+        v.to_array().map(f32::to_bits),
+        [0x4301_4E81, 0xC381_4E81, 0],
+        "{v:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // physFlying (GRAPPLE.md G-PH-3): the mode the grapple uses.
 // ---------------------------------------------------------------------------
 
