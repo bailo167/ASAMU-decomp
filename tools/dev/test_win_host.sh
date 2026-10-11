@@ -454,6 +454,9 @@ check "info: bootstrap decodes, fits a command line" inspect bootstrap "$LOG" 2
 inspect bootstrap "$LOG" 2 > "$T/boot" 2> /dev/null
 has "info: the bootstrap reads up to the dot line, not to the end of input" "$T/boot" '$l -eq "."'
 hasnt "info: the bootstrap does not wait for the end of input" "$T/boot" 'ReadToEnd'
+has "info: the bootstrap ends a session whose script does not arrive" "$T/boot" 'Start-Sleep -Seconds 120; if (-not `$g.arrived) {'
+has "info: the bootstrap ends a session whose script does not arrive (the exit)" "$T/boot" '[Environment]::Exit(4)'
+has "info: the bootstrap notes that the script arrived before running it" "$T/boot" '$g.arrived = $true; $function:WinHost = '
 is "info: command" "$(command_of 2)" "WhInfo"
 wh "$R" disk
 is "disk: command" "$(command_of 2)" "WhDisk"
