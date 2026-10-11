@@ -23,7 +23,9 @@
 #   desk-install           put the desk runner and start-runner.cmd in <root>
 #   desk NAME PROG ARGS... run PROG in the desktop session, in work tree NAME: waits, streams the
 #                          output, the exit code is the program's (124 time limit, 125 runner not
-#                          running or job refused, 126 could not start, 130 cancelled). PROG is
+#                          running or job refused, 126 could not start, 130 cancelled; a code above
+#                          255 arrives as its low eight bits, and never as 0). Ctrl+C, or ending
+#                          this command in another way, ends the program there. PROG is
 #                          <root>\target-NAME\release\PROG.exe, or a path below <root>\target-NAME,
 #                          or an absolute path below <root>; the runner starts nothing else
 #   desk-status            is the desk runner alive (heartbeat age, jobs)
@@ -188,10 +190,30 @@ case "$cmd" in
         job_id="$(date -u +%Y%m%d-%H%M%S)-$$-$RANDOM"
         packed="$(python3 "$HERE/desk_runner.py" pack --id "$job_id" --program "$prog" --cwd "$ROOT\\work\\$name" \
           --timeout "${ASAMU_DESK_TIMEOUT:-900}" --env-list "${ASAMU_DESK_ENV:-}" -- "$@")"
-        # Interrupting this command must not leave the program running on the
-        # other machine's screen: ask the runner to end the job.
-        trap 'ps_run "$(desk_ps "cancel --root \$root $(psq "$job_id")")" >&2 || true; exit 130' INT TERM
-        ps_run "$(desk_ps "submit --root \$root --packed $(psq "$packed")")"
+        # Interrupting or ending this command must not leave the program
+        # running on the other machine's screen: ask the runner to end the job.
+        # The wait for the job runs in the background, because bash acts on a
+        # signal only when the command it waits for in the foreground is over:
+        # ended by a signal of its own (a time limit of the caller, a closed
+        # terminal), it would otherwise go on waiting until the job's limit.
+        desk_wait=""
+        desk_interrupted() {
+          trap '' INT TERM HUP
+          ps_run "$(desk_ps "cancel --root \$root $(psq "$job_id")")" >&2 || true
+          # The wait ends by itself once the runner has ended the job.
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$desk_wait" 2> /dev/null || break
+            sleep 1
+          done
+          kill "$desk_wait" 2> /dev/null || true
+          exit 130
+        }
+        trap desk_interrupted INT TERM HUP
+        ps_run "$(desk_ps "submit --root \$root --packed $(psq "$packed")")" &
+        desk_wait=$!
+        desk_code=0
+        wait "$desk_wait" || desk_code=$?
+        exit "$desk_code"
         ;;
     esac
     ;;
