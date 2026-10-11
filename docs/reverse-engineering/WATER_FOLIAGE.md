@@ -171,6 +171,14 @@ Independent of the importer's decoder and of the first pass:
   meshes and Kismet only, no textures: a plain plane; nothing committed).
 - **Not re-derived:** the native readings of §3.2 and §4 (`UpdateBounds`, the fluid vertex layout, the SpeedTree
   loader); they stand as the first pass labelled them.
+- **The plan's draw count** (2026-10-11, runtime test, ours). `asamu-assets`' gated test
+  `every_converted_level_builds_a_plan` recounts the drawn components of each map from the raw scene JSON. Until
+  this date its recount still counted an instanced component once, at the component's own matrix, and so disagreed
+  with the plan on the two maps of §1: AG-BeautifulCity 3,799 against the plan's 3,810, TheCore 244 against 4,674.
+  The plan's numbers are the right ones by §2.2 and §6: 3,798 ordinary components + 12 instances (not + 1
+  component), and 143 + 4,531 (not + 101). The recount now applies the rule itself, so each of the 4,543 instance
+  draws is also compared with its raw instance matrix; the test passes on a conversion of the Mac build and on one
+  of the Windows build (`ASAMU_CONVERTED_DIR=<converted> cargo test -p asamu-assets --test converted_real_data`).
 
 ## 8. Reproduction
 
