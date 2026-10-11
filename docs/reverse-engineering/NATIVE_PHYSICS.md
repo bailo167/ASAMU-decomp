@@ -204,7 +204,7 @@ player without root motion this is the path [STRONG]. Otherwise it defers to `AP
 Acceleration = AccelDir * AccelRate            // overwrites the script value; AccelDir is unit or zero
 if (!bBrake || Acceleration != 0):             // exact-zero test
     s = |Velocity|
-    Velocity -= (Velocity - AccelDir * s) * Friction * dt     // "turning friction"
+    Velocity -= ((Velocity - AccelDir * s) * dt) * Friction   // "turning friction": times dt, then times Friction
 else:
     Velocity = Brake(Velocity, dt, Friction)    // 2.3, inlined copy of ApplyVelocityBraking
 Velocity = Velocity * (1 - bFluid * Friction * dt) + Acceleration * dt
@@ -242,7 +242,7 @@ V0 = Velocity; avg = 0; t = dt
 while t > 0:
     h = min(0.03, t); t -= h
     Velocity = Velocity - 2 * Velocity * h * Friction          // = Velocity * (1 - 2 h F)
-    if dot(Velocity, V0) > 0: avg += Velocity * (h / dt)       // uses the post-update velocity
+    if dot(Velocity, V0) > 0: avg += (Velocity * h) * (1 / dt) // post-update velocity; one f32 reciprocal of dt
 Velocity = avg
 if dot(Velocity, V0) < 0 or |Velocity|^2 < 100: Velocity = 0  // 100 → 10 uu/s
 ```
@@ -271,6 +271,25 @@ The constant 1.0 is read from 0x101633D88 (Mac) and 0x2211478 (Win32; addresses 
 are virtual addresses with image base 0x400000). One recorded pair, used as the regression value: with
 `dt = 0.01631380245089531` (f32 bits 0x3C85A486) a displacement of −14.2109375 uu gives
 −871.0989990234375 uu/s; `−14.2109375 / dt` is the next float, −871.0990600585938.
+
+The same helper and the order of the multiplications inside the velocity update (2.1, 2.3), read in both
+executables on 2026-10-11 [CONFIRMED for the instruction order; not measurable on the recordings]:
+
+- Turning friction: the difference `Velocity − AccelDir·s` is multiplied by `dt` first and by `Friction`
+  second (Mac 0x100F6BE60 then 0x100F6BE6B; Win32 0x18B75B0 then 0x18B75BC). With a friction that is a
+  power of two the order cannot change a float, and the ground friction is 8. For flying
+  (`Friction = 0.5 × 0.3`) the other order changes the velocity after the update on 24 of the 9,481
+  attached pairs and the position on none.
+- Braking: a piece adds `(Velocity·h)·(1/dt)` to the average, the reciprocal of the whole `dt` being
+  computed once (Mac: 0x100F6BDA6, products at 0x100F6BE93 and 0x100F6BE9C in the UDK routine, 0x100ADC2E3,
+  0x100ADC317 and 0x100ADC320 in `APawn::ApplyVelocityBraking`; Win32: 0x18B7436, products at 0x18B741C and
+  0x18B743A). With one piece (`dt ≤ 0.03`) the average is `(V₁·dt)·(1/dt)`, which is not always `V₁`:
+  on 338 of 1,084 recorded braking frames it is the neighbouring float, and on none of them does the
+  position tell the two apart.
+
+A walking or flying velocity is replaced by the displacement-derived one at the end of the same call, so
+these orders only reach a later frame through a position, and in the recordings they never do. They are
+recorded here because a reimplementation has to pick an order, and the native one is known.
 
 True divisions that are **not** this pattern, and stay divisions in a reimplementation: the low-speed
 air help `(10 − s2) / dt` (4.2; 0x100ADFD02), the slope-slide distance `g·dt / (2·max(F, 0.5))` (3.5;
@@ -1211,6 +1230,11 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   2.4 the same day: the five sites re-read in both executables, the walking and falling counts
   recounted, and the wall-contact average and the flying velocity, first listed as not measurable,
   measured on the recordings (the flying one through a model of the gun's pull).
+- 2026-10-11: second verification pass of 2.4 (every count recomputed from the raw recordings with an
+  independent model, all confirmed; the five sites and the Win32 speed cap re-read). Corrected the order
+  of two products in the pseudo-code of 2.1 (turning friction: `dt` before `Friction`) and 2.3 (braking
+  average: `(V·h)·(1/dt)`, not `V·(h/dt)`), which the first version had written in an order neither
+  executable has; 2.4 says what the recordings can and cannot show about them.
 - 2026-10-10: section 10.1 (the box checks of triangles, convex elements, spheres, sphyls, box
   elements, brushes and BSP: shape, axis order, contact normal, rules for a start in contact), from the
   disassembly and from running the triangle and convex routines in a local interpreter; 3 and 9.2
