@@ -1,8 +1,8 @@
 //! `RB_BodySetup` decoding and the static meshes' simple-collision switches
 //! against the user's own installed game (read-only).
 //!
-//! Reads `ASAMU_ORIGINAL_DIR` (the folder containing
-//! `A Story About My Uncle.app`) or the default macOS Steam location and
+//! Finds the install as every real-data test does (`tests/original_data`:
+//! `ASAMU_ORIGINAL_DIR` or the Steam library, either build of the game) and
 //! skips cleanly when the data is absent. Only counts and structural facts
 //! are asserted; nothing is copied or written.
 //!
@@ -28,19 +28,10 @@ use asamu_ue3::model::{LoadedPackage, PackageSet};
 use asamu_ue3::staticmesh::{SimpleCollisionFlags, decode_static_mesh, is_static_mesh};
 use asamu_ue3::{Property, Value};
 
-const COOKED: &str = "A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac";
+mod original_data;
 
 fn cooked_dir() -> Option<PathBuf> {
-    let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-        Some(r) => PathBuf::from(r),
-        None => {
-            let home = std::env::var_os("HOME")?;
-            PathBuf::from(home)
-                .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle")
-        }
-    };
-    let dir = root.join(COOKED);
-    dir.is_dir().then_some(dir)
+    original_data::cooked_dir()
 }
 
 macro_rules! require_data {
@@ -50,7 +41,7 @@ macro_rules! require_data {
             None => {
                 eprintln!(
                     "SKIP: original game data not found (set ASAMU_ORIGINAL_DIR to the folder \
-                     containing 'A Story About My Uncle.app')"
+                     of the original install: see tests/original_data)"
                 );
                 return;
             }

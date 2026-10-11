@@ -3230,23 +3230,13 @@ mod tests {
     /// does. Skips cleanly when the install is absent.
     #[test]
     fn real_simple_collision_counts() {
-        let Some(home) = std::env::var_os("HOME") else {
-            return;
-        };
-        let root = std::env::var_os("ASAMU_ORIGINAL_DIR").map_or_else(
-            || {
-                PathBuf::from(home).join(
-                    "Library/Application Support/Steam/steamapps/common/A Story About My Uncle",
-                )
-            },
-            PathBuf::from,
-        );
-        let cooked = root.join("A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac");
-        if !cooked.is_dir() {
+        // Either build of the game (the packages are the same files in the
+        // Mac app bundle and in the Windows install).
+        let Ok(install) = asamu_locate::locate() else {
             eprintln!("SKIP: original game data not found");
             return;
-        }
-        let dirs = vec![cooked.clone(), cooked.join("Maps")];
+        };
+        let dirs = vec![install.cooked_dir.clone(), install.maps_dir.clone()];
         let files = package_files(&dirs, &[]);
         let mut exports = 0usize;
         let mut first: BTreeMap<String, (SimpleCollisionEntry, String)> = BTreeMap::new();
@@ -3367,11 +3357,7 @@ mod tests {
     fn real_meshes_convert_and_validate() {
         // Either build of the game (the packages are the same files in the
         // Mac app bundle and in the Windows install).
-        let install = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-            Some(d) => asamu_locate::from_original_dir(Path::new(&d)).ok(),
-            None => asamu_locate::locate().ok(),
-        };
-        let Some(install) = install else {
+        let Ok(install) = asamu_locate::locate() else {
             eprintln!("SKIP: original game data not found");
             return;
         };
