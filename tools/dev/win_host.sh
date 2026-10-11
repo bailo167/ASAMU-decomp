@@ -37,12 +37,30 @@
 # machine outside <root>\work\NAME, <root>\target-NAME and <root>\logs\NAME
 # (what cargo, exec and ps do there is up to what you run).
 #
+# On that machine's screen (a program started over SSH cannot show a window;
+# these go through tools/dev/desk_runner.py, which the owner of the machine
+# starts by double-clicking <root>\start-runner.cmd, once per sign-in):
+#   desk-install           put the desk runner and start-runner.cmd in <root>
+#   desk NAME PROG ARGS... run PROG in the desktop session, in work tree NAME: waits, streams the
+#                          output, the exit code is the program's (124 time limit, 125 runner not
+#                          running or job refused, 126 could not start, 130 cancelled; a code above
+#                          255 arrives as its low eight bits, and never as 0). Ctrl+C, or ending
+#                          this command in another way, ends the program there. PROG is
+#                          <root>\target-NAME\release\PROG.exe, or a path below <root>\target-NAME,
+#                          or an absolute path below <root>; the runner starts nothing else
+#   desk-status            is the desk runner alive (heartbeat age, jobs)
+#   desk-stop              stop the desk runner; its jobs end with it
+#   desk-cancel ID         end one desk job
+#
 # Environment:
 #   ASAMU_WIN_HOST   SSH host name or alias (required; key authentication, no prompts)
 #   ASAMU_WIN_ROOT   folder there for work trees and build output (default D:\asamu when the
 #                    variable is not set; an empty value is refused, like a drive's top folder)
 #   ASAMU_WIN_ENV    extra environment for cargo/exec/gate/ps NAME, as PowerShell text,
 #                    e.g. '$env:ASAMU_CONVERTED_DIR="D:\asamu\converted"'
+#   ASAMU_DESK_TIMEOUT  seconds after which a desk job and everything it started is ended (default 900)
+#   ASAMU_DESK_ENV   environment for a desk job: NAME=VALUE pairs separated by ';' (only ASAMU_*, WGPU_*,
+#                    BEVY_*, RUST_BACKTRACE, RUST_LOG), e.g. 'ASAMU_CONVERTED_DIR=D:\asamu\converted'
 #
 # Exit codes: 0 success; for cargo, exec and ps the code of what was run (a
 # program's code outside 0..254 is reported as 254); 1 a gate step failed, or
@@ -84,6 +102,7 @@ cleanup() {
 trap cleanup EXIT
 
 usage() {
+  # The comment block at the top of this file, whatever its length.
   awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
   exit "${1:-$EX_USAGE}"
 }
@@ -497,6 +516,77 @@ case "$cmd" in
     probe
     ps_run "WhInfo"
     ;;
+  # ---- desk runner: this project's programs in the desktop session ---------
+  # (tools/dev/desk_runner.py; one self-contained block, keep it last)
+  desk | desk-install | desk-status | desk-stop | desk-cancel)
+    # PowerShell that runs the installed runner script there with the arguments $1.
+    desk_ps() {
+      printf '%s' "\$desk = Join-Path (Join-Path \$root 'runner') 'desk_runner.py'; if (-not (Test-Path \$desk)) { [Console]::Error.WriteLine('desk: the desk runner is not installed on that machine: run \"tools/dev/win_host.sh desk-install\" first'); exit 125 }; \$py = Get-Command py -ErrorAction SilentlyContinue; \$pre = @('-3'); if (-not \$py) { \$py = Get-Command python -ErrorAction SilentlyContinue; \$pre = @() }; if (-not \$py) { [Console]::Error.WriteLine('desk: Python 3 was not found on that machine'); exit 125 }; & \$py.Source @pre -B -I -X utf8 \$desk $1; exit \$LASTEXITCODE"
+    }
+    case "$cmd" in
+      desk-install)
+        [ $# -eq 0 ] || die "usage: desk-install"
+        ps_run "New-Item -ItemType Directory -Force -Path (Join-Path \$root 'runner') | Out-Null"
+        scp "${SSH_OPTS[@]}" -q "$HERE/desk_runner.py" "$HOST:$(printf '%s' "$ROOT/runner/desk_runner.py" | tr '\\' '/')"
+        ps_run "$(desk_ps "install --root \$root")"
+        ;;
+      desk-status)
+        ps_run "$(desk_ps "status --root \$root")"
+        ;;
+      desk-stop)
+        ps_run "$(desk_ps "stop --root \$root")"
+        ;;
+      desk-cancel)
+        [ $# -eq 1 ] || die "usage: desk-cancel ID"
+        # Checked here as well: the id becomes part of a command line on the way.
+        [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || die "desk-cancel: '$1' is not a job id (see desk-status)"
+        ps_run "$(desk_ps "cancel --root \$root $(psq "$1")")"
+        ;;
+      desk)
+        [ $# -ge 2 ] || die "usage: desk NAME PROGRAM [ARGS...]"
+        name="$1"
+        prog="$2"
+        shift 2
+        check_name "$name"
+        case "$prog" in
+          [A-Za-z]:[\\/]*) ;;
+          *[\\/]*) prog="$ROOT\\target-$name\\$prog" ;;
+          *.*) prog="$ROOT\\target-$name\\release\\$prog" ;;
+          *) prog="$ROOT\\target-$name\\release\\$prog.exe" ;;
+        esac
+        # The job travels as one token, so no argument can be mangled by a
+        # command line on the way: the runner gets the list as it is here.
+        job_id="$(date -u +%Y%m%d-%H%M%S)-$$-$RANDOM"
+        packed="$(python3 "$HERE/desk_runner.py" pack --id "$job_id" --program "$prog" --cwd "$ROOT\\work\\$name" \
+          --timeout "${ASAMU_DESK_TIMEOUT:-900}" --env-list "${ASAMU_DESK_ENV:-}" -- "$@")"
+        # Interrupting or ending this command must not leave the program
+        # running on the other machine's screen: ask the runner to end the job.
+        # The wait for the job runs in the background, because bash acts on a
+        # signal only when the command it waits for in the foreground is over:
+        # ended by a signal of its own (a time limit of the caller, a closed
+        # terminal), it would otherwise go on waiting until the job's limit.
+        desk_wait=""
+        desk_interrupted() {
+          trap '' INT TERM HUP
+          ps_run "$(desk_ps "cancel --root \$root $(psq "$job_id")")" >&2 || true
+          # The wait ends by itself once the runner has ended the job.
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$desk_wait" 2> /dev/null || break
+            sleep 1
+          done
+          kill "$desk_wait" 2> /dev/null || true
+          exit 130
+        }
+        trap desk_interrupted INT TERM HUP
+        ps_run "$(desk_ps "submit --root \$root --packed $(psq "$packed")")" &
+        desk_wait=$!
+        desk_code=0
+        wait "$desk_wait" || desk_code=$?
+        exit "$desk_code"
+        ;;
+    esac
+    ;;
+  # ---- end of the desk runner block ----------------------------------------
   *)
     echo "win_host: unknown command $(printf '%q' "$cmd")" >&2
     usage
