@@ -24,7 +24,16 @@
 //! Read from the user's own macOS executable (function addresses are that
 //! file's; our reading of each routine was then checked by running the
 //! routine's instructions in a local interpreter on random inputs and
-//! comparing every result with the rule as written here).
+//! comparing every result with the rule as written here). That interpreter
+//! was not kept, so the case counts below cannot be regenerated. A second,
+//! independent pass read the same routines statically (the order of the
+//! axes from the operands of each test, the comparisons that update the
+//! latest entry and the earliest exit, the selection of the result, the
+//! constants from the file's bytes) and agrees with every rule stated here
+//! for a sweep that starts clear; it found the scale dependence described
+//! under "Convex hulls". Regenerate with `objdump -d` over 0x1007889D0 to
+//! 0x10078C2A0, 0x100AA4840 to 0x100AA6710, 0x100AAD350 to 0x100AAD4B0 and
+//! 0x100AB3D60 to 0x100AB3F80.
 //!
 //! **Triangles** (the per-triangle path of static meshes: the box check of
 //! the kDOP tree at 0x100C5B650 calls the triangle routine at 0x1007889D0).
@@ -50,6 +59,18 @@
 //!   mesh's transform, flips it for mirrored meshes and normalises it. The
 //!   test itself runs in the mesh's space with the box's axes carried into
 //!   that space, which gives the same axes as testing in world space.
+//! - Those carried axes are not normalised (the check's constructor at
+//!   0x100C5B2A0 stores them as the inverse matrix gives them and the box
+//!   check hands them over as stored: CONFIRMED, read statically, second
+//!   pass), so they are as long as one over the mesh's scale and the 1e-8
+//!   test above is applied to vectors of that length. For a mesh scaled
+//!   uniformly by `s` the box's own face axes have the squared length
+//!   `1 / s⁴` and are skipped for `s` above 100, and an edge axis is
+//!   skipped when the edge is within `asin(1e-4·s)` of the box's edge
+//!   (0.57° at scale 100). The consequence is the one described for convex
+//!   hulls below, at scales ten times larger. In the user's data 127
+//!   pawn-blocking placements of a mesh without a simple body are scaled
+//!   above 100 (NATIVE_PHYSICS.md 10.1).
 //!
 //! **Convex hulls** (the simple-collision elements of a mesh: the convex
 //! element's check at 0x100AA5A70 with the per-axis test at 0x100AAD350 and
@@ -60,7 +81,24 @@
 //!   every face-normal direction the element stores, then for every edge
 //!   direction the element stores its cross products with the box's X, Y and
 //!   Z edges. The hull's projection on an axis is the range of its vertices.
-//!   An axis is skipped below a squared length of 1e-4 (0x1016393A0).
+//! - An axis is skipped below a squared length of 1e-4 (0x1016393A0), and
+//!   that length is not a unit vector's. The test runs in the element's own
+//!   space: the aggregate check multiplies the body's scale into its matrix
+//!   and inverts it, and the box's three edge directions are the rows of
+//!   that inverse, as long as one over the scale. The box's face axes are
+//!   cross products of two rows and the edge axes are a stored (unit) edge
+//!   direction crossed with one row, each handed to the per-axis test as
+//!   computed. CONFIRMED (read statically, second pass). So for a body
+//!   scaled uniformly by `s` the box's own three face axes have the squared
+//!   length `1 / s⁴` and are **all skipped for `s` above 10**, and an edge
+//!   axis is skipped when the edge is within `asin(0.01·s)` of the world
+//!   axis (0.57° at scale 1; every edge axis above scale 100) instead of
+//!   only when parallel. A skipped axis cannot separate, so the original's
+//!   solid is then larger than the hull: it reports edge and corner
+//!   contacts earlier. STRONG for that consequence (it follows from the
+//!   code; no recording has been compared with it yet). In the user's data
+//!   2,485 of the 13,564 pawn-blocking placements of a mesh with a simple
+//!   body are scaled above 10 and no volume is (NATIVE_PHYSICS.md 10.1).
 //! - The aggregate check takes an element only when its time is strictly
 //!   earlier than the best so far (convex elements first, then spheres,
 //!   boxes, sphyls), and maps the normal to world space as above.
@@ -106,8 +144,27 @@
 //!   its latest-entry axis is that same axis. A per-body switch turns this
 //!   off for convex elements.
 //!
-//! Ours keeps the convention of the rest of this collision code instead
-//! ([`super::cylinder`]): an axis on which the start is separated, touching
+//! # Ours
+//!
+//! Triangles and convex hulls: the original's axes in its order with its
+//! tie rule, but in world space with unit vectors, where only an edge axis
+//! below 1e-8 (a parallel pair) is skipped. For triangles that is the
+//! original's test at scale 1. Ours therefore always tests the box's face
+//! axes and tests edge axes the original skips: equal to the original for
+//! a mesh at scale 1 (for a convex body: at scale 1 with edges parallel to
+//! the world axes or more than 0.57° from them), and otherwise never
+//! earlier than the original and sometimes later (see the skip rules above).
+//! The movement code does not sweep the box yet, the scene has no simple
+//! bodies, and none of its volumes is scaled above 10 or turned other than
+//! by quarter turns about Z. Before meshes placed at a scale above 100 and
+//! bodies placed at a scale above 10 are swept by the pawn's box, the
+//! scene has to apply the original's skip rules (it has both transforms at
+//! hand). A recording of a walk against the edge of such a mesh would show
+//! the difference.
+//!
+//! For a sweep that starts in contact ours keeps the convention of the rest
+//! of this collision code instead ([`super::cylinder`]): an axis on which
+//! the start is separated, touching
 //! or overlapping by no more than the tolerance `tol` counts as separated
 //! at the start. If the motion does not close that axis there is no
 //! contact (a resting box can always slide or leave); if it does, the
@@ -133,6 +190,8 @@ use super::cylinder::triangle_normal;
 /// Squared length below which the cross product of two unit directions is
 /// no axis (the directions are parallel). The original's value for
 /// triangles (the double at 0x101645800 in the user's macOS executable).
+/// Used for hulls as well: the original's convex test compares with 1e-4,
+/// but vectors that are not unit (see the module docs, "Convex hulls").
 const PARALLEL_EPS2: f64 = 1.0e-8;
 
 /// Running state of one sweep against one convex obstacle.
