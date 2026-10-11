@@ -105,6 +105,8 @@ then `sync NAME` (mirror this checkout; run it again after every edit), `gate NA
 line per step, logs kept there) or `cargo NAME <args>`, and `clean NAME` when the work is merged. Pick a NAME of
 your own and use only that work tree and target folder. `rustfmt`, `bash -n`, `tools/dev/test_win_host.sh` and a
 prebuilt `repo-hygiene` still run locally. Exit code 255 means the machine could not be reached: wait and retry.
+After a change to `tools/dev/win_host*`, run both of its tests (`docs/BUILDING.md`, "Testing the script"): the
+second one runs on the Windows machine and is the one that tests what `clean` and `sync` may delete.
 The rules for that machine:
 
 - Write only below its work root. The original game install there is read-only: never modify it, never start
