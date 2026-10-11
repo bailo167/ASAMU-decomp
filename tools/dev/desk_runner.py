@@ -16,14 +16,17 @@ It is deliberately small and strict (Python standard library only):
   path (symbolic links and junctions followed) is inside the root folder
   (`D:\\asamu` on the owner's laptop); on Windows it must be an `.exe`, and
   shells, script hosts and interpreters are refused by name. The working
-  directory must resolve inside the root too.
+  directory must resolve inside the root too. A path on a network drive is
+  refused before the file system is asked about it.
 * On Windows the start itself is checked as well, because a folder on the
   way can be swapped for a junction after the check: the working directory
   is held in place while the process is created, and the process stays
   suspended until the system says which file it was made from.
 * Every job has a time limit. When it passes, the whole process tree of the
-  job is ended (a Windows job object; a process group elsewhere). Nothing a
-  job started outlives the job or the runner. The loop that enforces the
+  job is ended (a Windows job object, which a process cannot leave; a
+  process group elsewhere). Nothing a job started outlives the job or the
+  runner. Not part of a job's tree: what it gets some other program to
+  start for it (COM, WMI, the task scheduler). The loop that enforces the
   limits never waits for the console window, and does a bounded amount of
   work per round however full the inbox is.
 * At most a few jobs run at once; a few more wait in a queue.
@@ -32,14 +35,18 @@ It is deliberately small and strict (Python standard library only):
   odd, ends the runner.
 * The runner opens no network port, and writes only inside `<root>/runner`,
   never through a link: a link where one of its files goes is removed or
-  refused, and on Windows its folders are held in place while it runs.
+  refused, and on Windows its folders are held in place while it runs. The
+  client commands (submit, cancel, stop) keep to the same rule.
 * It writes a heartbeat file, stops when `<root>/runner/stop` appears or when
   its window is closed, and refuses to start twice.
 
 What it is NOT: a sandbox. Whoever can put job files in the inbox can also
-put a program under the root. The rules above keep the tooling honest (no
-"cmd /c ...", nothing outside the project's folder, nothing left running);
-they do not defend against the account that owns the folder.
+put a program under the root: a copy of any program under another name, or
+a second name (hard link) for a file elsewhere on the same drive, which is
+the same file and cannot be told from a copy. The rules above keep the
+tooling honest (no "cmd /c ...", nothing outside the project's folder,
+nothing left running); they do not defend against the account that owns the
+folder.
 
 Protocol (version 1), all below `<root>/runner`:
 
@@ -65,8 +72,9 @@ Commands:
   submit --root ROOT ... -- ARGS       enqueue a job, wait, stream its output,
                                        exit with its exit code (124 timed out,
                                        125 runner problem or refusal, 126 could
-                                       not start, 130 cancelled); interrupting
-                                       the wait cancels the job
+                                       not start, 130 cancelled; a code above
+                                       255 as its low eight bits, never as 0);
+                                       interrupting the wait cancels the job
   status / stop / cancel ID / install  see `--help`
   pack ... -- ARGS                     encode a job for `submit --packed`
                                        (used by tools/dev/win_host.sh)
@@ -283,17 +291,69 @@ def is_inside(path: str, folder: str, allow_equal: bool = False) -> bool:
         return False
 
 
+def is_same_or_below(path: str, folder: str) -> bool | None:
+    """Whether `folder` is `path` itself or one of the folders above it, judged
+    by which file each one IS and not by how it is spelled. Two spellings can
+    name one folder (a file system that ignores case, as on macOS), and one
+    spelling in two cases can name two folders (a file system that does not,
+    which Windows can switch on for a single folder). None when the file
+    system gives its files no identity to compare; the spelling then decides
+    alone."""
+    try:
+        target = os.stat(folder)
+    except OSError:
+        return False
+    if not target.st_ino:
+        return None
+    current = path
+    for _ in range(MAX_PATH_CHARS):
+        try:
+            if os.path.samestat(os.stat(current), target):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return False
+
+
+DRIVE_REMOTE = 4
+
+
+def drive_type(drive: str) -> int | None:
+    """Windows: what kind of drive a letter is (`GetDriveTypeW`; 4 is a network
+    drive). The answer comes from the machine's own table of drives, not from
+    the drive. None elsewhere, or when it cannot be asked."""
+    if os.name != "nt":
+        return None
+    try:
+        k32 = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
+        k32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
+        k32.GetDriveTypeW.restype = ctypes.c_uint32
+        return int(k32.GetDriveTypeW(drive[:1] + ":\\"))
+    except (OSError, AttributeError):
+        return None
+
+
 def resolve_inside(text: object, root_real: str, what: str, policy: Policy, allow_root: bool) -> str:
     """Spelling check, then the real path (links and junctions followed), then
-    the containment check against the root and the runner's own folder."""
+    the containment check against the root and the runner's own folder, by
+    spelling and by which folder it really is."""
     spelled = check_path_text(text, what, policy)
+    if policy.windows and drive_type(spelled) == DRIVE_REMOTE:
+        # Before the file system is asked: a server that does not answer
+        # would hold up the loop that enforces the time limits.
+        raise JobRejected(f"{what} is on a network drive; only a path on a local drive is allowed")
     try:
         real = os.path.realpath(spelled, strict=True)
     except (OSError, ValueError) as err:
         raise JobRejected(f"{what} does not exist or cannot be resolved ({type(err).__name__})") from None
-    if not is_inside(real, root_real, allow_equal=allow_root):
+    if not is_inside(real, root_real, allow_equal=allow_root) or is_same_or_below(real, root_real) is False:
         raise JobRejected(f"{what} is outside {root_real} once links are followed")
-    if is_inside(real, os.path.join(root_real, "runner"), allow_equal=True):
+    own = os.path.join(root_real, "runner")
+    if is_inside(real, own, allow_equal=True) or is_same_or_below(real, own) is True:
         raise JobRejected(f"{what} is inside the runner's own folder")
     return real
 
@@ -809,7 +869,9 @@ class ProcessLauncher:
                             "checked (a link was put in its place); it was ended before it ran"
                         )
                     self._win.resume(popen.pid)
-                except LaunchError:
+                except BaseException:
+                    # Whatever went wrong (an interrupt included): the process
+                    # is still suspended and must not stay behind like that.
                     popen.kill()
                     popen.wait(timeout=KILL_GRACE_S)
                     raise
@@ -826,14 +888,19 @@ class ProcessLauncher:
                     close_fds=True,
                     start_new_session=True,
                 )
-        except (OSError, ValueError, LaunchError, subprocess.SubprocessError) as err:
+        except BaseException as err:
+            # Whatever it was: nothing of a start that failed is kept open.
+            # Closing the job object ends a process that was already in it.
             if job is not None and self._win is not None:
                 self._win.k32.CloseHandle(job)
             for handle in files:
-                handle.close()
-            if isinstance(err, LaunchError):
-                raise
-            raise LaunchError(f"{type(err).__name__}: {printable(err, 160)}") from None
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            if isinstance(err, (OSError, ValueError, subprocess.SubprocessError)):
+                raise LaunchError(f"{type(err).__name__}: {printable(err, 160)}") from None
+            raise
         return RunningProcess(popen, files, self._win, job)
 
 
@@ -942,12 +1009,67 @@ def write_json_atomic(path: str, obj: object) -> None:
 
 
 def read_json(path: str) -> dict[str, Any] | None:
+    """A status or heartbeat file as a dictionary; None for anything else.
+    These files lie in a folder others can write to: whatever is in them,
+    reading one must not end the program that reads it."""
     try:
         with open(path, "r", encoding="utf-8") as handle:
             obj = json.loads(handle.read(4 * 1024 * 1024))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return obj if isinstance(obj, dict) else None
+
+
+def check_own_folder(folder: str) -> None:
+    """One of the runner's folders must be a real folder in place: through a
+    link, what is written there would land somewhere else."""
+    try:
+        info = os.lstat(folder)
+        real = os.path.realpath(folder, strict=True)
+    except OSError as err:
+        raise RunnerError(f"folder {printable(folder)} is missing ({type(err).__name__})") from None
+    if not stat.S_ISDIR(info.st_mode) or _is_link(info) or os.path.normcase(real) != os.path.normcase(folder):
+        raise RunnerError(f"folder {printable(folder)} is a link or not a folder; refusing to use it")
+
+
+class FoldersInPlace:
+    """For the client side (submit, cancel, stop), which writes into the
+    runner's folders too and can be used when no runner holds them: checks
+    that the folders are real folders, and on Windows holds them in place
+    until the write is done. Raises `RunnerError` when one is a link.
+
+        with FoldersInPlace(layout.base, layout.inbox):
+            ...write into the inbox...
+    """
+
+    def __init__(self, *folders: str):
+        self._folders = folders
+        self._win: _WinApi | None = None
+        self._pins: list[int] = []
+
+    def __enter__(self) -> "FoldersInPlace":
+        try:
+            for folder in self._folders:
+                check_own_folder(folder)
+            if os.name == "nt":
+                self._win = _WinApi()
+                for folder in self._folders:
+                    try:
+                        self._pins.append(self._win.pin_folder(folder))
+                    except LaunchError as err:
+                        raise RunnerError(f"folder {printable(folder)} cannot be held in place: {err}") from None
+                for folder in self._folders:
+                    check_own_folder(folder)
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        while self._pins:
+            handle = self._pins.pop()
+            if self._win is not None:
+                self._win.unpin(handle)
 
 
 class InstanceLock:
@@ -1261,13 +1383,7 @@ class Runner:
 
     @staticmethod
     def _check_own_folder(folder: str) -> None:
-        try:
-            info = os.lstat(folder)
-            real = os.path.realpath(folder, strict=True)
-        except OSError as err:
-            raise RunnerError(f"folder {printable(folder)} is missing ({type(err).__name__})") from None
-        if not stat.S_ISDIR(info.st_mode) or _is_link(info) or os.path.normcase(real) != os.path.normcase(folder):
-            raise RunnerError(f"folder {printable(folder)} is a link or not a folder; refusing to use it")
+        check_own_folder(folder)
 
     def _check_own_files(self) -> None:
         """The files the runner keeps writing must be plain files of its own
@@ -1333,16 +1449,19 @@ class Runner:
             time.sleep(0.2)
         else:
             other = read_json(self.layout.heartbeat) or {}
+            hint = ""
+            if other.get("interactive") is False:
+                hint = (
+                    ". That one has no window (it was not started by double-click): stop it from the other "
+                    'computer with "tools/dev/win_host.sh desk-stop", then start this one again'
+                )
             raise RunnerError(
                 f"a desk runner is already running for {printable(self.root)} "
-                f"(process {printable(other.get('pid', '?'), 12)}); not starting a second one"
+                f"(process {printable(other.get('pid', '?'), 12)}); not starting a second one{hint}"
             )
+        self._remove_old_stop_marker()
         self._running = True
         self._started_unix = self.clock.time()
-        try:
-            os.unlink(self.layout.stop)
-        except OSError:
-            pass
         for line in self.banner():
             self._print(line)
         self.say(f"started; root {printable(self.root)}")
@@ -1350,6 +1469,22 @@ class Runner:
         self._clear_inbox_at_start()
         self._beat(force=True)
         self.say(f"waiting for jobs in {printable(self.layout.inbox)}")
+
+    def _remove_old_stop_marker(self) -> None:
+        """A stop request left from last time must not stop this runner. One
+        that cannot be removed (a folder with that name, say) would stop it
+        in its first round, every time, without a word about why."""
+        for remove in (os.unlink, os.rmdir):
+            try:
+                remove(self.layout.stop)
+            except OSError:
+                pass
+        if os.path.lexists(self.layout.stop):
+            self._lock.release()
+            raise RunnerError(
+                f"{printable(self.layout.stop)} is in the way and cannot be removed; it would stop the runner at once. "
+                "Remove it by hand and start again"
+            )
 
     def _clear_inbox_at_start(self) -> None:
         """Nothing runs that was not submitted while the runner was up."""
@@ -2038,7 +2173,7 @@ def pack_job(
 def unpack_job(token: str) -> dict[str, Any]:
     try:
         obj = json.loads(base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
-    except (ValueError, UnicodeError) as err:
+    except (ValueError, UnicodeError, RecursionError) as err:
         raise JobRejected(f"--packed is not a packed job ({type(err).__name__})") from None
     if not isinstance(obj, dict) or set(obj) - {"id"} != PACKED_KEYS:
         raise JobRejected("--packed is not a packed job")
@@ -2077,15 +2212,24 @@ def _pump(path: str, offset: int, sink: BinaryIO) -> int:
 
 
 def exit_code_for(status: dict[str, Any]) -> int:
-    """The exit code `submit` ends with for a finished job's status."""
+    """The exit code `submit` ends with for a finished job's status: always
+    0 to 255, and 0 only when the program's own code was 0.
+
+    Windows exit codes have 32 bits; on the way back through SSH only the
+    low eight arrive, so a program that ended with 256 or 0xC0000100 would
+    look like one that succeeded. Such a code comes back as its low eight
+    bits, or as 1 when those are 0. The full code is in the status file and
+    in the line `submit` writes when the job ends."""
     state = status.get("state")
     if state == "finished":
         code = status.get("exit_code")
         if not isinstance(code, int) or isinstance(code, bool):
             return EXIT_RUNNER
+        if code == 0:
+            return 0
         if code < 0:
             return 128 + min(-code, 127)
-        return code & 0xFFFFFFFF
+        return (code & 0xFF) or 1
     if state == "timed_out":
         return EXIT_TIMED_OUT
     if state == "failed_to_start":
@@ -2148,9 +2292,13 @@ def command_submit(
         )
     target = os.path.join(layout.inbox, job_id + ".json")
     try:
-        with os.fdopen(open_own_file(target + ".tmp", "new"), "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(obj, handle)
-        os.replace(target + ".tmp", target)
+        with FoldersInPlace(layout.base, layout.inbox):
+            with os.fdopen(open_own_file(target + ".tmp", "new"), "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(obj, handle)
+            os.replace(target + ".tmp", target)
+    except RunnerError as problem:
+        note(f"could not write the job file: {problem}")
+        return EXIT_RUNNER
     except OSError as problem:
         note(f"could not write the job file ({type(problem).__name__})")
         return EXIT_RUNNER
@@ -2161,21 +2309,36 @@ def command_submit(
         return 0
 
     try:
-        return _wait_for_job(root_real, job_id, out, err, note, clock)
+        return _wait_for_job(root_real, job_id, out, err, note, clock, runner_instance(beat))
     except KeyboardInterrupt:
         try:
             request_cancel(layout, job_id)
             note(f"interrupted: asked the runner to end job {job_id}")
-        except OSError:
+        except (OSError, RunnerError):
             note(f"interrupted; job {job_id} goes on until it ends or its time limit passes")
         return EXIT_CANCELLED
 
 
+def runner_instance(beat: dict[str, Any] | None) -> tuple[object, object]:
+    """What tells one run of the runner from the next, from its heartbeat."""
+    beat = beat or {}
+    pid, started = beat.get("pid"), beat.get("started_unix")
+    return (pid if isinstance(pid, int) else None, started if isinstance(started, (int, float)) else None)
+
+
 def _wait_for_job(
-    root_real: str, job_id: str, out: BinaryIO, err: TextIO, note: Callable[[str], None], clock: Any
+    root_real: str,
+    job_id: str,
+    out: BinaryIO,
+    err: TextIO,
+    note: Callable[[str], None],
+    clock: Any,
+    sent_to: tuple[object, object] | None = None,
 ) -> int:
     """Follow a job to its end: its state changes on `err`, its output as it
-    is written, and at the end the exit code for it."""
+    is written, and at the end the exit code for it. `sent_to` is the runner
+    the job was sent to (`runner_instance`): a job does not outlive its
+    runner, so when another runner has taken its place the wait is over."""
     layout = Layout(root_real)
     stderr_sink = getattr(err, "buffer", None)
     offsets = [0, 0]
@@ -2189,7 +2352,7 @@ def _wait_for_job(
             # for ever, and do not leave the job to start later unattended.
             try:
                 request_cancel(layout, job_id)
-            except OSError:
+            except (OSError, RunnerError):
                 pass
             note(
                 f"the runner is alive but did not take job {job_id} within {NOT_TAKEN_AFTER_S:g} s (look at its window: "
@@ -2215,23 +2378,34 @@ def _wait_for_job(
         if clock.monotonic() - last_alive_check >= HEARTBEAT_PERIOD_S:
             last_alive_check = clock.monotonic()
             now_state = runner_state(root_real, clock)
-            if not now_state["alive"]:
+            replaced = now_state["alive"] and sent_to is not None and runner_instance(now_state["heartbeat"]) != sent_to
+            if not now_state["alive"] or replaced:
                 clock.sleep(1.0)
                 status = read_json(layout.status(job_id)) or {}
                 if status.get("state") in TERMINAL_STATES:
                     continue
                 note(f"the runner went away while job {job_id} was {current or 'not yet taken'}")
-                note(not_running_message(root_real, now_state))
+                if replaced:
+                    # The runner ended without a word (killed, or the machine
+                    # restarted) and was started again: the status of this
+                    # job will never change, and the job ended with its runner.
+                    note("another runner has been started since; the job ended with the one it was sent to. Send it again")
+                else:
+                    note(not_running_message(root_real, now_state))
                 return EXIT_RUNNER
         clock.sleep(0.2)
 
 
 def request_cancel(layout: Layout, job_id: str) -> None:
-    """Ask the runner to end a job (written like a job file: whole or not at all)."""
+    """Ask the runner to end a job (written like a job file: whole or not at
+    all). `RunnerError` when the inbox is missing or is a link: a cancellation
+    can be asked for when no runner is there to hold its folders in place, and
+    it must not be written to wherever a link leads."""
     target = os.path.join(layout.inbox, job_id + ".cancel")
-    with os.fdopen(open_own_file(target + ".tmp", "new"), "w", encoding="ascii") as handle:
-        handle.write("cancel\n")
-    os.replace(target + ".tmp", target)
+    with FoldersInPlace(layout.base, layout.inbox):
+        with os.fdopen(open_own_file(target + ".tmp", "new"), "w", encoding="ascii") as handle:
+            handle.write("cancel\n")
+        os.replace(target + ".tmp", target)
 
 
 def command_status(root: str, as_json: bool, out: TextIO | None = None, clock: Any = None) -> int:
@@ -2286,8 +2460,12 @@ def command_stop(root: str, out: TextIO | None = None, clock: Any = None, wait_s
         out.write("desk: no runner is running; nothing to stop\n")
         return 0
     try:
-        with os.fdopen(open_own_file(layout.stop, "new"), "w", encoding="ascii") as handle:
-            handle.write("stop\n")
+        with FoldersInPlace(layout.base):
+            with os.fdopen(open_own_file(layout.stop, "new"), "w", encoding="ascii") as handle:
+                handle.write("stop\n")
+    except RunnerError as problem:
+        out.write(f"desk: could not write the stop file: {problem}\n")
+        return EXIT_RUNNER
     except OSError as problem:
         out.write(f"desk: could not write the stop file ({type(problem).__name__})\n")
         return EXIT_RUNNER

@@ -1173,7 +1173,9 @@ class ClientSide(RootCase):
         self.assertEqual(dr.exit_code_for({"state": "finished", "exit_code": 0}), 0)
         self.assertEqual(dr.exit_code_for({"state": "finished", "exit_code": 101}), 101)
         self.assertEqual(dr.exit_code_for({"state": "finished", "exit_code": -9}), 137)
-        self.assertEqual(dr.exit_code_for({"state": "finished", "exit_code": 3221225477}), 3221225477)
+        self.assertEqual(dr.exit_code_for({"state": "finished", "exit_code": 255}), 255)
+        # Above 255 (changed in the third pass): see ThirdPass.test_an_exit_code_above_255_never_reads_as_success.
+        self.assertEqual(dr.exit_code_for({"state": "finished", "exit_code": 3221225477}), 5)
         self.assertEqual(dr.exit_code_for({"state": "finished", "exit_code": None}), dr.EXIT_RUNNER)
         self.assertEqual(dr.exit_code_for({"state": "timed_out"}), 124)
         self.assertEqual(dr.exit_code_for({"state": "failed_to_start"}), 126)
@@ -2585,6 +2587,577 @@ class StartCmd(RootCase):
         self.assertIn(b"ASAMU-decomp desk runner", shown)
         self.assertIn(b"not running any more", shown)
         self.assertEqual(proc.returncode, 0)
+
+
+# --------------------------------------------------------------------------
+# Third pass: an independent review that attacked the runner once more. Every
+# attempt is a test; the ones that got through say so.
+
+
+def case_sensitive_folder(folder: str) -> bool:
+    """Whether names in `folder` (new and empty) that differ only in case are
+    different files. On Windows this first tries to switch that on for this
+    one folder, which the system allows only while the folder is empty."""
+    if WINDOWS:
+        try:
+            subprocess.run(["fsutil.exe", "file", "setCaseSensitiveInfo", folder, "enable"], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return False
+    probe = os.path.join(folder, "case-probe")
+    with open(probe, "w"):
+        pass
+    try:
+        return not os.path.exists(os.path.join(folder, "CASE-PROBE"))
+    finally:
+        os.unlink(probe)
+
+
+class ThirdPass(AttackCase):
+    def test_hostile_folder_whose_name_differs_from_the_root_only_in_case(self):
+        """Got through (on Windows, where spellings are compared without
+        regard to case): beside `root` a second folder `ROOT`, which a file
+        system that tells the two apart allows. A program in it was taken
+        for one inside the root."""
+        parent = os.path.join(self.base, "by-case")
+        os.makedirs(parent)
+        if not case_sensitive_folder(parent):
+            self.skipTest("this file system does not tell names apart by case, so the second folder cannot exist")
+        root, twin = os.path.join(parent, "root"), os.path.join(parent, "ROOT")
+        program = make_program(os.path.join(root, "bin"))
+        twin_program = make_program(os.path.join(twin, "bin"))
+        for folder in (root, twin):
+            os.makedirs(os.path.join(folder, "work"))
+        self.assertFalse(os.path.samefile(twin, root))
+        self.assertEqual(sorted(os.listdir(parent)), ["ROOT", "root"])
+
+        def job(**changes) -> dict:
+            return self.job(**{"program": program, "cwd": os.path.join(root, "work"), **changes})
+
+        self.assertEqual(dr.validate_job(job(), "job-1", root, HOST).program, program)
+        for changes in ({"program": twin_program}, {"cwd": os.path.join(twin, "work")}, {"cwd": twin}):
+            with self.assertRaises(dr.JobRejected) as caught:
+                dr.validate_job(job(**changes), "job-1", root, HOST)
+            self.assertIn("is outside", str(caught.exception))
+        runner = dr.Runner(root, clock=self.clock, launcher=self.launcher, out=io.StringIO())
+        self.addCleanup(runner.shutdown, "test over")
+        runner.startup()
+        with open(os.path.join(runner.layout.inbox, "twin.json"), "w") as handle:
+            json.dump(job(program=twin_program), handle)
+        with open(os.path.join(runner.layout.inbox, "good.json"), "w") as handle:
+            json.dump(job(), handle)
+        runner.step()
+        self.assertIn("is outside", dr.read_json(runner.layout.status("twin"))["reason"])
+        self.assertEqual([call["argv"][0] for call in self.launcher.calls], [program])
+
+    def test_containment_is_judged_by_the_folder_itself_as_well_as_by_spelling(self):
+        """The same hole on any platform: whatever fools the comparison of
+        spellings, a program that is not below the root folder is refused."""
+        below = dr.is_same_or_below
+        self.assertTrue(below(self.program, self.root))
+        self.assertTrue(below(self.root, self.root))
+        self.assertTrue(below(self.work, self.root))
+        self.assertFalse(below(self.outside_program, self.root))
+        self.assertFalse(below(self.base, self.root))
+        self.assertFalse(below(self.program, os.path.join(self.base, "not-there")))
+        self.assertFalse(below(os.path.join(self.root, "not-there", "x"), self.outside))
+        real_is_inside = dr.is_inside
+
+        def fooled(path, folder, allow_equal=False):
+            return True if folder == self.root else real_is_inside(path, folder, allow_equal)
+
+        with mock.patch.object(dr, "is_inside", fooled):
+            self.refused(self.job(program=self.outside_program), "is outside")
+            self.refused(self.job(cwd=self.outside), "is outside")
+            self.assertEqual(self.check(self.job()).program, self.program)
+
+        # A file system that gives its files no identity: the spelling decides alone, as before.
+        real_stat = os.stat
+
+        def without_identity(path, *args, **kwargs):
+            values = list(real_stat(path, *args, **kwargs))
+            values[1] = 0  # st_ino
+            return os.stat_result(values)
+
+        with mock.patch.object(os, "stat", without_identity):
+            self.assertIsNone(below(self.program, self.root))
+            self.assertEqual(self.check(self.job()).program, self.program)
+            self.refused(self.job(program=self.outside_program), "is outside")
+            os.makedirs(self.layout.base, exist_ok=True)
+            self.refused(self.job(cwd=self.layout.base), "inside the runner's own folder")
+
+    def test_hostile_spelling_of_the_runners_own_folder_in_another_case(self):
+        """Got through (on macOS): where the file system ignores case,
+        `RUNNER` is the runner's own folder, and nothing may run from it."""
+        os.makedirs(self.layout.inbox)
+        make_program(self.layout.base, "planted")
+        shouted = os.path.join(self.root, "RUNNER")
+        if not os.path.isdir(shouted) or not os.path.samefile(shouted, self.layout.base):
+            self.skipTest("this file system tells names apart by case: RUNNER is not the runner's folder here")
+        name = os.path.basename(self.program)
+        self.refused(self.job(program=os.path.join(shouted, "planted" + os.path.splitext(name)[1])), "inside the runner's own folder")
+        self.refused(self.job(cwd=os.path.join(self.root, "Runner", "Inbox")), "inside the runner's own folder")
+
+    def test_hostile_path_on_a_network_drive_is_refused_before_the_file_system_is_asked(self):
+        """A drive letter can stand for a server. Asking the file system about
+        a path there waits for the server, and the loop that waits is the one
+        that enforces the time limits."""
+        asked: list[str] = []
+
+        def no_file_system(path, *args, **kwargs):
+            asked.append(path)
+            raise AssertionError("the file system was asked about a path on a network drive")
+
+        with mock.patch.object(dr, "drive_type", return_value=dr.DRIVE_REMOTE), \
+                mock.patch.object(os.path, "realpath", no_file_system):
+            for what, allow_root in (("program", False), ("working directory", True)):
+                with self.assertRaises(dr.JobRejected) as caught:
+                    dr.resolve_inside("Z:/share\\bin\\tool.exe", self.root, what, WIN, allow_root)
+                self.assertIn(f"{what} is on a network drive", str(caught.exception))
+            with self.assertRaises(dr.JobRejected) as caught:
+                dr.validate_job(self.job(program="Z:\\share\\bin\\tool.exe"), "job-1", self.root, WIN)
+            self.assertIn("network drive", str(caught.exception))
+        self.assertEqual(asked, [])
+        # The rule is one of Windows paths only, and a local drive is not held up by it.
+        with mock.patch.object(dr, "drive_type", return_value=dr.DRIVE_REMOTE):
+            if not WINDOWS:
+                self.assertEqual(self.check(self.job()).program, self.program)
+        if WINDOWS:
+            self.assertIn(dr.drive_type(self.root), (2, 3), "the test's own drive is a local one")
+            self.assertEqual(self.check(self.job()).program, self.program)
+        else:
+            self.assertIsNone(dr.drive_type("C:\\x"))
+
+    def test_hostile_link_where_the_inbox_is_while_no_runner_holds_it(self):
+        """Got through: `cancel` needs no running runner, so nothing held the
+        folders in place, and its file was written to where a link led."""
+        os.makedirs(self.layout.base)
+        if not dir_link(self.outside, self.layout.inbox):
+            self.skipTest("this account may not create links to folders")
+        self.addCleanup(remove_dir_link, self.layout.inbox)
+        out = io.StringIO()
+        self.assertEqual(dr.command_cancel(self.root, "job-1", out), dr.EXIT_RUNNER)
+        self.assertIn("is a link", out.getvalue())
+        with self.assertRaises(dr.RunnerError):
+            dr.request_cancel(self.layout, "job-1")
+        self.outside_untouched()
+        # The same with the whole runner folder being the link.
+        remove_dir_link(self.layout.inbox)
+        os.rmdir(self.layout.base)
+        elsewhere = os.path.join(self.base, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, "inbox"))
+        self.assertTrue(dir_link(elsewhere, self.layout.base))
+        self.addCleanup(remove_dir_link, self.layout.base)
+        self.assertEqual(dr.command_cancel(self.root, "job-1", io.StringIO()), dr.EXIT_RUNNER)
+        self.assertEqual(dr.command_stop(self.root, io.StringIO(), self.clock, wait_seconds=0.0), 0)
+        self.assertEqual(os.listdir(os.path.join(elsewhere, "inbox")), [])
+        self.assertEqual(os.listdir(elsewhere), ["inbox"])
+        self.outside_untouched()
+
+    def test_cancel_still_works_beside_a_running_runner(self):
+        """The check above must not get in the way of the ordinary case: on
+        Windows the runner and the client then hold the same folders."""
+        self.start()
+        self.drop("j1")
+        self.runner.step()
+        self.assertEqual(self.state("j1"), "running")
+        self.assertEqual(dr.command_cancel(self.root, "j1", io.StringIO()), 0)
+        self.runner.step()
+        self.runner.step()
+        self.assertEqual(self.state("j1"), "cancelled")
+        self.assertEqual(dr.command_cancel(os.path.join(self.base, "no-such-root"), "j1", io.StringIO()), dr.EXIT_RUNNER)
+
+    @unittest.skipIf(WINDOWS, "on Windows the runner holds its folders in place while it runs, so this swap cannot "
+                              "be made at all: see test_hostile_swap_of_a_runner_folder_cannot_even_be_made")
+    def test_hostile_inbox_swapped_for_a_link_before_a_job_is_sent(self):
+        self.start()
+        moved = self.layout.inbox + ".moved"
+        os.rename(self.layout.inbox, moved)
+        if not dir_link(self.outside, self.layout.inbox):
+            self.skipTest("this account may not create links to folders")
+        self.addCleanup(remove_dir_link, self.layout.inbox)
+        fields = {k: v for k, v in self.job().items() if k != "version"}
+        fields.update(env={}, id="sent")
+        err = io.StringIO()
+        code = dr.command_submit(self.root, fields, wait=False, out=io.BytesIO(), err=err, clock=self.clock)
+        self.assertEqual(code, dr.EXIT_RUNNER, err.getvalue())
+        self.assertIn("could not write the job file", err.getvalue())
+        self.outside_untouched()
+
+    def test_hostile_status_and_heartbeat_files_nested_too_deeply(self):
+        """Got through: brackets nested a hundred thousand deep in a file the
+        client reads ended `status` (and a waiting `submit`) with a traceback."""
+        self.start()
+        for text in ("[" * 200_000, '{"a":' * 100_000, "[" * 100_000 + "]" * 100_000, '{"running": ' + "[" * 100_000):
+            with open(self.layout.heartbeat, "w") as handle:
+                handle.write(text)
+            self.assertIsNone(dr.read_json(self.layout.heartbeat))
+            out = io.StringIO()
+            self.assertEqual(dr.command_status(self.root, False, out, self.clock), 1)
+            self.assertIn("not responding", out.getvalue())
+            self.assertFalse(dr.runner_state(self.root, self.clock)["alive"])
+        # A second runner reads the first one's heartbeat to say who is running.
+        second = self.make_runner(out=io.StringIO())
+        with self.assertRaises(dr.RunnerError) as caught:
+            second.startup()
+        self.assertIn("already running", str(caught.exception))
+        with open(self.layout.status("deep"), "w") as handle:
+            handle.write("[" * 200_000)
+        self.assertIsNone(dr.read_json(self.layout.status("deep")))
+        self.assertTrue(self.runner.step(), "and the runner itself goes on")
+
+    def test_hostile_packed_job_nested_too_deeply(self):
+        import base64
+
+        deep = base64.urlsafe_b64encode(b"[" * 20_000 + b"]" * 20_000).decode("ascii")
+        with self.assertRaises(dr.JobRejected):
+            dr.unpack_job(deep)
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            self.assertEqual(dr.main(["submit", "--root", self.root, "--packed", deep]), 2)
+        self.assertIn("not a packed job", err.getvalue())
+
+    def test_hostile_job_file_that_is_valid_but_nested_deeply_in_every_field(self):
+        """Valid JSON, small, and thousands of levels deep where a text, a
+        number or a list of texts belongs. Whether the reader gives up on the
+        depth or the checks see the wrong kind of value: refused, runner alive."""
+        self.start()
+        deep = "[" * 4000 + "]" * 4000
+        deep_object = '{"a":' * 4000 + "1" + "}" * 4000
+        good = json.dumps(self.job())
+        cases = {
+            "d-program": good.replace(json.dumps(self.program), deep),
+            "d-cwd": good.replace(json.dumps(self.work), deep),
+            "d-args": good.replace('["--level", "graybox"]', "[" + deep + "]"),
+            "d-timeout": good.replace('"timeout_seconds": 60', '"timeout_seconds": ' + deep),
+            "d-version": good.replace('"version": 1', '"version": ' + deep_object),
+            "d-env": good[:-1] + ', "env": {"ASAMU_A": ' + deep + ', "ASAMU_B": ' + deep_object + "}}",
+            "d-id": good[:-1] + ', "id": ' + deep + "}",
+            "d-extra": good[:-1] + ', "more": ' + deep_object + "}",
+        }
+        for job_id, text in cases.items():
+            self.assertNotEqual(text, good, job_id)
+            self.assertLess(len(text), dr.MAX_JOB_FILE_BYTES)
+            self.drop(job_id, raw=text.encode("utf-8"))
+        self.assertTrue(self.runner.step())
+        for job_id in cases:
+            self.assertEqual(self.state(job_id), "rejected", job_id)
+        self.assertEqual(len(self.launcher.calls), 0)
+        self.drop("fine")
+        self.assertTrue(self.runner.step())
+        self.assertEqual(self.state("fine"), "running")
+
+    def test_hostile_half_characters_in_arguments_and_paths(self):
+        """JSON can spell half of a character pair (`\\ud800`), which no text
+        encoding can write. In an argument it is passed on as it is; in a path
+        it names nothing; in neither case does it end the runner."""
+        self.start()
+        self.drop("half-arg", raw=json.dumps(self.job(args=["x\ud800y", "\udfff"])).encode("ascii"))
+        self.drop("half-path", raw=json.dumps(self.job(program=self.program + "\ud800")).encode("ascii"))
+        self.drop("half-cwd", raw=json.dumps(self.job(cwd=self.work + "\udc00")).encode("ascii"))
+        self.drop("half-env", raw=json.dumps(self.job(env={"ASAMU_X": "a\ud800b"})).encode("ascii"))
+        self.assertTrue(self.runner.step())
+        self.assertEqual(self.state("half-path"), "rejected")
+        self.assertEqual(self.state("half-cwd"), "rejected")
+        self.assertEqual(self.state("half-arg"), "running")
+        self.assertEqual(self.status("half-arg")["args"], ["x\ud800y", "\udfff"])
+        self.assertEqual(self.state("half-env"), "running")
+        self.assertEqual([call["argv"][1:] for call in self.launcher.calls][0], ["x\ud800y", "\udfff"])
+        self.console.getvalue().encode("ascii")  # what the window shows is plain ASCII
+        self.runner._beat(force=True)
+        self.assertEqual(len(dr.read_json(self.layout.heartbeat)["running"]), 2)
+
+    def test_an_exit_code_above_255_never_reads_as_success(self):
+        """Got through: a Windows exit code has 32 bits, and of what `submit`
+        ends with only the low eight arrive on the other side of SSH. A
+        program that ended with 256 or 0xC0000100 looked like a success."""
+        code_for = lambda code: dr.exit_code_for({"state": "finished", "exit_code": code})  # noqa: E731
+        for code in (256, 512, 65536, 0xC0000100, 0x80000000, 1 << 31, 1 << 40):
+            self.assertEqual(code_for(code), 1, hex(code))
+        self.assertEqual(code_for(0xC0000005), 5)
+        self.assertEqual(code_for(0xC0000409), 9)
+        self.assertEqual(code_for(257), 1)
+        self.assertEqual(code_for(0x1FF), 255)
+        self.assertEqual(code_for(-1), 129)
+        self.assertEqual(code_for(-(1 << 40)), 255)
+        for code in list(range(-300, 70000, 7)) + [1 << 32, (1 << 32) - 1, (1 << 32) + 256]:
+            mapped = code_for(code)
+            self.assertTrue(0 <= mapped <= 255, code)
+            self.assertEqual(mapped == 0, code == 0, code)
+        for code in (True, False, 1.0, "0", None, [0]):
+            self.assertEqual(code_for(code), dr.EXIT_RUNNER, repr(code))
+
+    def test_hostile_stop_marker_that_cannot_be_removed(self):
+        """A folder called `stop` stopped every new runner in its first round,
+        without a word about why. An empty one is removed; one that cannot be
+        removed is named, and the runner does not pretend to have started."""
+        os.makedirs(self.layout.stop)
+        self.start()
+        self.assertFalse(os.path.lexists(self.layout.stop))
+        self.assertTrue(self.runner.step())
+        self.runner.shutdown("test")
+        os.makedirs(os.path.join(self.layout.stop, "kept"))
+        second = self.make_runner(out=io.StringIO())
+        with self.assertRaises(dr.RunnerError) as caught:
+            second.startup()
+        self.assertIn("is in the way", str(caught.exception))
+        self.assertFalse(dr.InstanceLock.held_by_someone(self.layout.lock), "it holds nothing after refusing to start")
+        self.assertTrue(os.path.isdir(os.path.join(self.layout.stop, "kept")), "nothing in it was removed")
+        shutil.rmtree(self.layout.stop)
+        third = self.make_runner(out=io.StringIO())
+        third.startup()
+        self.assertTrue(third.step())
+
+    def test_a_runner_that_was_killed_and_started_again_does_not_leave_the_client_waiting(self):
+        """Got through: a runner that is killed writes no last word, so the
+        status of its job stays "running". Started again within the two
+        seconds between two looks of the client, the new runner looked alive
+        and well, and `submit` waited for a job that no longer existed, for ever."""
+        self.clock.now = time.time()  # results are kept or pruned by their real age when a runner starts
+        self.start()
+        fields = {k: v for k, v in self.job().items() if k != "version"}
+        fields.update(env={}, id="orphan")
+        err = io.StringIO()
+        self.assertEqual(dr.command_submit(self.root, fields, wait=False, out=io.BytesIO(), err=err, clock=self.clock), 0)
+        self.runner.step()
+        self.assertEqual(self.state("orphan"), "running")
+        sent_to = dr.runner_instance(dr.read_json(self.layout.heartbeat))
+        # The runner dies without a word, and another one is started at once.
+        self.runner._lock.release()
+        self.runner._running = False
+        self.runner._unpin_own_folders()
+        self.clock.advance(1.0)
+        second = self.make_runner(out=io.StringIO())
+        second.startup()
+        self.assertEqual(self.state("orphan"), "running", "nobody wrote the end of the job")
+        self.assertNotEqual(dr.runner_instance(dr.read_json(self.layout.heartbeat)), sent_to)
+        notes: list[str] = []
+
+        class Ticking(FakeClock):
+            def sleep(inner, seconds: float) -> None:
+                super().sleep(seconds)
+                second.step()  # keeps its heartbeat fresh, as a live runner does
+                if inner.slept > 600:
+                    raise AssertionError("the client is still waiting after ten minutes")
+
+        ticking = Ticking()
+        ticking.now, ticking.mono = self.clock.now, self.clock.mono
+        second.clock = ticking
+        code = dr._wait_for_job(self.root, "orphan", io.BytesIO(), io.StringIO(), notes.append, ticking, sent_to)
+        self.assertEqual(code, dr.EXIT_RUNNER)
+        self.assertLess(ticking.slept, 10.0)
+        self.assertTrue(any("another runner has been started" in text for text in notes), notes)
+        # The same runner going on is, of course, no reason to give up.
+        self.assertEqual(dr.runner_instance({"pid": 5, "started_unix": 1.5}), (5, 1.5))
+        self.assertEqual(dr.runner_instance({"pid": "5", "started_unix": [1]}), (None, None))
+        self.assertEqual(dr.runner_instance(None), (None, None))
+
+    def test_a_second_start_beside_a_runner_without_a_window_says_how_to_stop_that_one(self):
+        """A runner started over SSH holds the lock and shows nothing on the
+        screen. The owner who then double-clicks start-runner.cmd has to be
+        told more than "already running": there is no window to close."""
+        first = self.make_runner(out=io.StringIO(), session={"interactive": False, "window_station": "Service-0x0-1$", "session_id": 0, "elevated": True})
+        first.startup()
+        second = self.make_runner(out=io.StringIO())
+        with self.assertRaises(dr.RunnerError) as caught:
+            second.startup()
+        self.assertIn("already running", str(caught.exception))
+        self.assertIn("desk-stop", str(caught.exception))
+        first.shutdown("test")
+        third = self.make_runner(out=io.StringIO(), session={"interactive": True, "window_station": "WinSta0", "session_id": 1, "elevated": False})
+        third.startup()
+        fourth = self.make_runner(out=io.StringIO())
+        with self.assertRaises(dr.RunnerError) as caught:
+            fourth.startup()
+        self.assertNotIn("desk-stop", str(caught.exception), "a runner with a window is stopped by closing it")
+
+    def test_a_second_name_for_a_file_outside_the_root_is_the_same_as_a_copy(self):
+        """Not a refusal: a known limit, written down as a test so that nobody
+        takes it for more. A hard link under the root to a program elsewhere
+        on the same drive is that program, has no target to follow, and
+        passes like a copy would. (Build tools make such links themselves:
+        cargo's `target/release/x.exe` is a second name of a file in `deps`.)"""
+        second_name = os.path.join(self.root, "bin", "second-name" + os.path.splitext(self.program)[1])
+        try:
+            os.link(self.outside_program, second_name)
+        except (OSError, NotImplementedError):
+            self.skipTest("hard links cannot be made here")
+        self.assertEqual(self.check(self.job(program=second_name)).program, second_name)
+
+
+class ThirdPassCommandLine(unittest.TestCase):
+    def test_arguments_that_look_like_options_survive_the_pack_command(self):
+        """`win_host.sh desk` hands the program's arguments to `pack` after a
+        `--`. None may be taken for an option of `pack`, dropped or doubled."""
+        script = os.path.abspath(dr.__file__)
+        for args in ([], ["--"], ["--", "--foo"], ["--help"], ["-h"], ["--id", "y"], ["--program", "z"], ["a", "--", "b"],
+                     ["--", "--"], [""], ["-"], ["--timeout=1"], ["--level", "AG-Workshop", "--", "x"], ["--env-list", "PATH=x"]):
+            done = subprocess.run(
+                [sys.executable, "-B", script, "pack", "--id", "x", "--program", "D:\\asamu\\a.exe", "--cwd", "D:\\asamu",
+                 "--timeout", "5", "--env-list", "", "--", *args],
+                capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            obj = dr.unpack_job(done.stdout.strip())
+            self.assertEqual(obj["args"], args)
+            self.assertEqual(obj["env"], {})
+            self.assertEqual(obj["id"], "x")
+
+
+@unittest.skipUnless(WINDOWS, "a Windows job object is what holds a job's processes; elsewhere a process that starts "
+                              "its own session leaves the group, as the module says")
+class LeavingTheJob(RealProcessCase):
+    """A job that tries to get a process out of its job object, or to make
+    processes without end."""
+
+    def start_runner(self) -> dr.Runner:
+        self.clock = FakeClock()
+        runner = dr.Runner(self.root, clock=self.clock, out=io.StringIO())
+        self.addCleanup(runner.shutdown, "test over")
+        runner.startup()
+        return runner
+
+    def read_lines(self, path: str, last: str, seconds: float = 60.0) -> list[str]:
+        deadline = time.monotonic() + seconds
+        lines: list[str] = []
+        while time.monotonic() < deadline:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    lines = handle.read().splitlines()
+            except OSError:
+                lines = []
+            if any(line.startswith(last) for line in lines):
+                break
+            time.sleep(0.1)
+        return lines
+
+    def test_hostile_job_that_tries_to_leave_its_job_object(self):
+        runner = self.start_runner()
+        report = os.path.join(self.scratch, "report.txt")
+        script = self.script("leave.py", r"""
+import subprocess, sys, time
+flags = {"breakaway": 0x01000000, "detached": 0x00000008, "newgroup": 0x00000200, "nowindow": 0x08000000,
+         "breakaway-detached": 0x01000008}
+lines = []
+for name, flag in flags.items():
+    try:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], creationflags=flag)
+        lines.append(f"{name} started {child.pid}")
+    except OSError as err:
+        lines.append(f"{name} refused {err.winerror}")
+lines.append("done")
+with open(sys.argv[1], "w") as handle:
+    handle.write("\n".join(lines) + "\n")
+time.sleep(600)
+""")
+        with open(os.path.join(self.layout.inbox, "leave.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + [script, report], timeout_seconds=120), handle)
+        runner.step()
+        lines = self.read_lines(report, "done")
+        self.assertIn("done", lines, lines)
+        outcome = {line.split()[0]: line.split()[1:] for line in lines if line != "done"}
+        self.assertEqual(outcome["breakaway"][0], "refused", "a process may not be created outside the job object")
+        self.assertEqual(outcome["breakaway-detached"][0], "refused")
+        self.pids = [int(words[1]) for words in outcome.values() if words[0] == "started"]
+        self.assertEqual(len(self.pids), 3, outcome)
+        self.assertEqual([pid for pid in self.pids if not pid_alive(pid)], [])
+        self.clock.advance(121.0)
+        runner.step()
+        status = dr.read_json(self.layout.status("leave"))
+        assert status is not None
+        self.assertEqual(status["state"], "timed_out")
+        self.assertEqual(self.wait_all_gone(self.pids), [], "a detached child or one in a new group is still in the job object")
+
+    def test_hostile_job_that_starts_processes_without_end(self):
+        runner = self.start_runner()
+        report = os.path.join(self.scratch, "report.txt")
+        script = self.script("many.py", r"""
+import subprocess, sys, time
+made, stopped = [], "never"
+for _ in range(dr_limit * 3):
+    try:
+        made.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"]).pid)
+    except OSError as err:
+        stopped = str(err.winerror)
+        break
+with open(sys.argv[1], "w") as handle:
+    handle.write("\n".join(["pid %d" % pid for pid in made] + ["stopped " + stopped, "done"]) + "\n")
+time.sleep(600)
+""".replace("dr_limit", str(dr.MAX_PROCESSES_PER_JOB)))
+        with open(os.path.join(self.layout.inbox, "many.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + [script, report], timeout_seconds=300), handle)
+        runner.step()
+        lines = self.read_lines(report, "done", 180.0)
+        self.assertIn("done", lines, lines[-3:])
+        self.pids = [int(line.split()[1]) for line in lines if line.startswith("pid ")]
+        self.assertNotIn("stopped never", lines)
+        self.assertLess(len(self.pids), dr.MAX_PROCESSES_PER_JOB, "the job object caps the number of processes of one job")
+        self.assertGreater(len(self.pids), dr.MAX_PROCESSES_PER_JOB // 2)
+        self.assertEqual(dr.command_cancel(self.root, "many", io.StringIO()), 0)
+        runner.step()
+        runner.step()
+        status = dr.read_json(self.layout.status("many"))
+        assert status is not None
+        self.assertEqual(status["state"], "cancelled")
+        self.assertTrue(status["process_tree_ended"])
+        self.assertEqual(self.wait_all_gone(self.pids), [])
+
+    def test_an_interrupt_in_the_middle_of_a_start_leaves_no_suspended_process(self):
+        """Got through (by reading, not by an attack from outside): between
+        creating the process, suspended, and putting it into its job object
+        only one kind of failure ended it again. Anything else, Ctrl+C in the
+        runner's window included, left it behind suspended for ever."""
+        real_popen = subprocess.Popen
+        made: list[int] = []
+
+        def recording(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            made.append(proc.pid)
+            return proc
+
+        launcher = dr.ProcessLauncher()
+        out, err = os.path.join(self.scratch, "o.txt"), os.path.join(self.scratch, "e.txt")
+        argv = [self.native] + self.prefix + ["-c", "import time; time.sleep(600)"]
+        for step in ("assign", "image_path", "resume"):
+            with mock.patch.object(subprocess, "Popen", recording), \
+                    mock.patch.object(dr._WinApi, step, side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    launcher.start(argv, self.work, dict(os.environ), out, err)
+        self.pids = list(made)
+        self.assertEqual(len(made), 3)
+        self.assertEqual(self.wait_all_gone(made), [], "a process that was created suspended stayed behind")
+
+    def test_hostile_program_swapped_for_a_link_to_a_file_between_check_and_start(self):
+        """The junction case (LastMomentSwap) with a symbolic link to a file:
+        the program itself is replaced, not a folder on the way to it."""
+        runner = self.start_runner()
+        marker = os.path.join(self.outside, "ran.txt")
+        evil = os.path.join(self.outside, os.path.basename(self.native))
+        shutil.copyfile(self.native, evil)
+        probe = os.path.join(self.outside, "probe-link")
+        if not try_symlink(evil, probe):
+            self.skipTest("this account may not create symbolic links")
+        os.unlink(probe)
+        real_popen = subprocess.Popen
+        swapped: list[bool] = []
+
+        def swapping(*args, **kwargs):
+            if not swapped:
+                os.rename(self.native, self.native + ".moved")
+                swapped.append(try_symlink(evil, self.native))
+            return real_popen(*args, **kwargs)
+
+        code = f"open({marker!r}, 'w').close()"
+        with open(os.path.join(self.layout.inbox, "swap.json"), "w") as handle:
+            json.dump(self.job(program=self.native, args=self.prefix + ["-c", code]), handle)
+        with mock.patch.object(subprocess, "Popen", swapping):
+            runner.step()
+        self.assertEqual(swapped, [True], "the swap was made at the last moment")
+        status = dr.read_json(self.layout.status("swap"))
+        assert status is not None
+        self.assertEqual(status.get("state"), "failed_to_start", status)
+        self.assertIn("not the file that was checked", status["reason"])
+        time.sleep(1.0)
+        self.assertFalse(os.path.exists(marker), "the program from outside the root ran")
 
 
 if __name__ == "__main__":
