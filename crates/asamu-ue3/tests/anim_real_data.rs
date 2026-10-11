@@ -8,19 +8,10 @@ use std::path::{Path, PathBuf};
 use asamu_ue3::anim::{AnimCoverage, anim_coverage};
 use asamu_ue3::model::{LoadedPackage, PackageSet};
 
-const COOKED: &str = "A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac";
+mod original_data;
 
 fn cooked_dir() -> Option<PathBuf> {
-    let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-        Some(r) => PathBuf::from(r),
-        None => {
-            let home = std::env::var_os("HOME")?;
-            PathBuf::from(home)
-                .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle")
-        }
-    };
-    let dir = root.join(COOKED);
-    dir.is_dir().then_some(dir)
+    original_data::cooked_dir()
 }
 
 fn packages(dir: &Path) -> Vec<PathBuf> {

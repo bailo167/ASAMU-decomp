@@ -24,16 +24,10 @@ use asamu_ue3::model::{LoadedPackage, PackageSet};
 use asamu_ue3::staticmesh::{decode_static_mesh, is_static_mesh};
 use asamu_ue3::types::Guid;
 
-const COOKED: &str = "A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac";
+mod original_data;
 
 fn cooked_dir() -> Option<PathBuf> {
-    let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-        Some(r) => PathBuf::from(r),
-        None => PathBuf::from(std::env::var_os("HOME")?)
-            .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle"),
-    };
-    let dir = root.join(COOKED);
-    dir.is_dir().then_some(dir)
+    original_data::cooked_dir()
 }
 
 macro_rules! require_data {
@@ -43,7 +37,7 @@ macro_rules! require_data {
             None => {
                 eprintln!(
                     "SKIP: original game data not found (set ASAMU_ORIGINAL_DIR to the folder \
-                     containing 'A Story About My Uncle.app')"
+                     of the original install: see tests/original_data)"
                 );
                 return;
             }

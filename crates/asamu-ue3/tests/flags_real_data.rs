@@ -17,22 +17,9 @@ use asamu_ue3::flags::{self, export, name, object, package_source::package_sourc
 use asamu_ue3::script::{ScriptBody, decode_script_object};
 use asamu_ue3::{NoSchema, Package, package_flags};
 
-const APP: &str = "A Story About My Uncle.app/Contents/Resources";
+mod original_data;
 
-fn install_root() -> Option<PathBuf> {
-    let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-        Some(r) => PathBuf::from(r),
-        None => {
-            let home = std::env::var_os("HOME")?;
-            PathBuf::from(home)
-                .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle")
-        }
-    };
-    root.join(APP)
-        .join("ASAMU/CookedMac")
-        .is_dir()
-        .then_some(root)
-}
+use original_data::OriginalData;
 
 fn packages(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -104,9 +91,9 @@ struct Census {
     imports_resolved_not_public: usize,
 }
 
-fn effective_suppress_list(root: &Path) -> BTreeSet<String> {
+fn effective_suppress_list(content_dir: &Path) -> BTreeSet<String> {
     let read = |rel: &str| {
-        std::fs::read(root.join(APP).join(rel))
+        std::fs::read(content_dir.join(rel))
             .map(|b| b.iter().map(|&c| char::from(c)).collect::<String>())
             .unwrap_or_default()
     };
@@ -135,9 +122,9 @@ fn outermost(pkg: &Package, i: usize) -> usize {
     cur
 }
 
-fn build(root: &Path) -> Census {
-    let cooked = root.join(APP).join("ASAMU/CookedMac");
-    let suppress = effective_suppress_list(root);
+fn build(install: &OriginalData) -> Census {
+    let cooked = &install.cooked_dir;
+    let suppress = effective_suppress_list(&install.content_dir);
     let mut c = Census::default();
     // Lower-cased object path -> (class name, object flags) for every export
     // that can be the target of a cross-package import: everything in the
@@ -146,7 +133,7 @@ fn build(root: &Path) -> Census {
     // with that package's name).
     let mut targets: HashMap<String, Vec<(String, u64)>> = HashMap::new();
     let mut imports: Vec<(String, String)> = Vec::new();
-    for path in packages(&cooked) {
+    for path in packages(cooked) {
         let pkg = Package::open(&path).unwrap();
         let file = path.file_name().unwrap().to_string_lossy().into_owned();
         let base = path.file_stem().unwrap().to_string_lossy().into_owned();
@@ -271,7 +258,7 @@ fn build(root: &Path) -> Census {
 
 fn census() -> Option<&'static Census> {
     static CELL: OnceLock<Option<Census>> = OnceLock::new();
-    CELL.get_or_init(|| install_root().map(|r| build(&r)))
+    CELL.get_or_init(|| original_data::original_data().map(|d| build(&d)))
         .as_ref()
 }
 
@@ -282,7 +269,7 @@ macro_rules! require_census {
             None => {
                 eprintln!(
                     "SKIP: original game data not found (set ASAMU_ORIGINAL_DIR to the folder \
-                     containing 'A Story About My Uncle.app')"
+                     of the original install: see tests/original_data)"
                 );
                 return;
             }

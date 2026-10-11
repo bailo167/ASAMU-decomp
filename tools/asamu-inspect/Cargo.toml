@@ -15,5 +15,9 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# Tests only: finds the user's installed game for the real-data checks.
+asamu-locate.workspace = true
+
 [lints]
 workspace = true

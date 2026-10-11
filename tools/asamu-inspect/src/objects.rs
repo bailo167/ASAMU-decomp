@@ -17,7 +17,7 @@ use asamu_ue3::script::{self, ScriptBody, ScriptKind};
 use asamu_ue3::{Package, Property, flags};
 use serde::Serialize;
 
-use crate::{print_json, safety};
+use crate::{print_json, relative_label, safety};
 
 fn open_set(file: &Path) -> Result<(PackageSet, std::sync::Arc<LoadedPackage>)> {
     PackageSet::for_file(file).with_context(|| format!("opening {}", file.display()))
@@ -474,11 +474,7 @@ pub fn cmd_coverage(dir: &Path, all_objects: bool, json: bool) -> Result<()> {
     let set = PackageSet::new(&[dir.to_path_buf(), dir.join("Maps")]);
     let mut rows = Vec::new();
     for f in &files {
-        let label = f
-            .strip_prefix(dir)
-            .unwrap_or(f)
-            .to_string_lossy()
-            .into_owned();
+        let label = relative_label(dir, f);
         // Script packages stay cached in the set (they are the schema); other
         // packages are decoded standalone and dropped.
         let res = if is_script_package(f) {

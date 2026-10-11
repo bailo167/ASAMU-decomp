@@ -14,8 +14,8 @@
 //!   decoded fields re-encode to exactly the corrupted bytes (nothing the
 //!   decoder accepts is silently normalised or dropped).
 //!
-//! Reads `ASAMU_ORIGINAL_DIR` (the folder containing
-//! `A Story About My Uncle.app`) or the default macOS Steam location and
+//! Finds the install as every real-data test does (`tests/original_data`:
+//! `ASAMU_ORIGINAL_DIR` or the Steam library, either build of the game) and
 //! skips cleanly when the data is absent. Nothing is copied or written; only
 //! counts are printed (`-- --nocapture`).
 
@@ -29,19 +29,10 @@ use asamu_ue3::bodysetup::{
 use asamu_ue3::flags;
 use asamu_ue3::model::PackageSet;
 
-const COOKED: &str = "A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac";
+mod original_data;
 
 fn cooked_dir() -> Option<PathBuf> {
-    let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-        Some(r) => PathBuf::from(r),
-        None => {
-            let home = std::env::var_os("HOME")?;
-            PathBuf::from(home)
-                .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle")
-        }
-    };
-    let dir = root.join(COOKED);
-    dir.is_dir().then_some(dir)
+    original_data::cooked_dir()
 }
 
 fn packages(dir: &Path) -> Vec<PathBuf> {
@@ -106,7 +97,7 @@ fn shipped_payloads_cut_extended_and_corrupted() {
     let Some(dir) = cooked_dir() else {
         eprintln!(
             "SKIP: original game data not found (set ASAMU_ORIGINAL_DIR to the folder \
-             containing 'A Story About My Uncle.app')"
+             of the original install: see tests/original_data)"
         );
         return;
     };

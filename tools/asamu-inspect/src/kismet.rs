@@ -451,14 +451,13 @@ mod tests {
         assert_eq!(json, expected);
     }
 
+    /// The cooked folder of the user's install, found as the tools find it
+    /// (`ASAMU_ORIGINAL_DIR` or the Steam library; the Mac app bundle or the
+    /// Windows install: the packages are the same files).
     fn cooked_dir() -> Option<std::path::PathBuf> {
-        let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-            Some(r) => std::path::PathBuf::from(r),
-            None => std::path::PathBuf::from(std::env::var_os("HOME")?)
-                .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle"),
-        };
-        let dir = root.join("A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac");
-        dir.is_dir().then_some(dir)
+        asamu_locate::locate()
+            .ok()
+            .map(|install| install.cooked_dir)
     }
 
     /// Real data (skipped when absent): the JSON of a map is byte-identical

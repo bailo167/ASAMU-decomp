@@ -13,19 +13,10 @@ use std::path::{Path, PathBuf};
 
 use asamu_ue3::{IndexKind, Package, PackageIndex, Storage, package_flags};
 
-const COOKED: &str = "A Story About My Uncle.app/Contents/Resources/ASAMU/CookedMac";
+mod original_data;
 
 fn cooked_dir() -> Option<PathBuf> {
-    let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-        Some(r) => PathBuf::from(r),
-        None => {
-            let home = std::env::var_os("HOME")?;
-            PathBuf::from(home)
-                .join("Library/Application Support/Steam/steamapps/common/A Story About My Uncle")
-        }
-    };
-    let dir = root.join(COOKED);
-    dir.is_dir().then_some(dir)
+    original_data::cooked_dir()
 }
 
 fn packages(dir: &Path) -> Vec<PathBuf> {
@@ -56,7 +47,7 @@ macro_rules! require_data {
             None => {
                 eprintln!(
                     "SKIP: original game data not found (set ASAMU_ORIGINAL_DIR to the folder \
-                     containing 'A Story About My Uncle.app')"
+                     of the original install: see tests/original_data)"
                 );
                 return;
             }
@@ -68,11 +59,60 @@ fn name_of(p: &Path) -> String {
     p.file_name().unwrap().to_string_lossy().into_owned()
 }
 
+/// The lookup that every real-data test file shares, on folders made here
+/// (no game data, so this runs on CI on every host): each retail layout is
+/// found with its own content and cooked folders, the Mac bundle first when
+/// a root has both, and a folder without a cooked folder is not an install.
+#[test]
+fn the_install_lookup_knows_both_retail_layouts() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(empty.join("ASAMU")).unwrap();
+    std::fs::create_dir_all(empty.join("Engine")).unwrap();
+    assert!(original_data::original_data_in(&empty).is_none());
+    // A file named like the cooked folder is not one.
+    std::fs::write(empty.join("ASAMU").join("CookedPC"), b"").unwrap();
+    assert!(original_data::original_data_in(&empty).is_none());
+    assert!(original_data::original_data_in(&tmp.path().join("absent")).is_none());
+
+    let windows = tmp.path().join("windows");
+    let windows_cooked = windows.join("ASAMU").join("CookedPC");
+    std::fs::create_dir_all(&windows_cooked).unwrap();
+    std::fs::create_dir_all(windows.join("Engine")).unwrap();
+    std::fs::create_dir_all(windows.join("Binaries").join("Win32")).unwrap();
+    let found = original_data::original_data_in(&windows).unwrap();
+    assert_eq!(found.content_dir, windows);
+    assert_eq!(found.cooked_dir, windows_cooked);
+
+    let mac = tmp.path().join("mac");
+    let resources = mac
+        .join("A Story About My Uncle.app")
+        .join("Contents")
+        .join("Resources");
+    let mac_cooked = resources.join("ASAMU").join("CookedMac");
+    std::fs::create_dir_all(&mac_cooked).unwrap();
+    std::fs::create_dir_all(resources.join("Engine")).unwrap();
+    let found = original_data::original_data_in(&mac).unwrap();
+    assert_eq!(found.content_dir, resources);
+    assert_eq!(found.cooked_dir, mac_cooked);
+
+    std::fs::create_dir_all(mac.join("ASAMU").join("CookedPC")).unwrap();
+    std::fs::create_dir_all(mac.join("Engine")).unwrap();
+    let found = original_data::original_data_in(&mac).unwrap();
+    assert_eq!(found.content_dir, resources);
+    assert_eq!(found.cooked_dir, mac_cooked);
+}
+
 #[test]
 fn every_package_parses_and_resolves() {
     let dir = require_data!();
     let files = packages(&dir);
-    assert_eq!(files.len(), 42, "expected 42 packages in CookedMac + Maps");
+    assert_eq!(
+        files.len(),
+        42,
+        "expected 42 packages in the cooked folder + Maps"
+    );
     let mut totals = (0usize, 0usize, 0usize);
     let mut compressed = 0;
     let mut thumbnailed = 0;

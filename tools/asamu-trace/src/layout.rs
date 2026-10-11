@@ -891,8 +891,18 @@ pub fn default_executable(l: &RecorderLayout) -> Option<PathBuf> {
                 )
             })
         })?;
-    let p = root.join(&l.executable);
+    let p = install_file(&root, &l.executable);
     p.is_file().then_some(p)
+}
+
+/// `relative` (a path of a layout file, written with `/`) below `root`, with
+/// the host's separator between its components. A plain `join` keeps the `/`
+/// on Windows, and the report then names the executable it read as
+/// `...\Binaries/Win32/...`.
+fn install_file(root: &Path, relative: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    path.extend(relative.split('/').filter(|part| !part.is_empty()));
+    path
 }
 
 /// All checks of a repository checkout.
@@ -914,6 +924,28 @@ impl LayoutReport {
     #[must_use]
     pub fn failures(&self) -> Vec<&Check> {
         self.checks.iter().filter(|c| !c.ok).collect()
+    }
+
+    /// One line for the end of a report: the counts and, for each of the two
+    /// builds, the executable its binary checks read (or that they were
+    /// skipped). The two are independent: on a machine with only the Windows
+    /// install the Windows binary checks run and the Mac ones do not.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let executable = |p: &Option<PathBuf>| {
+            p.as_ref().map_or_else(
+                || "not found (binary checks skipped)".to_owned(),
+                |p| p.display().to_string(),
+            )
+        };
+        format!(
+            "{} checks, {} failed; {} Python lookups; Mac executable: {}; Windows executable: {}",
+            self.checks.len(),
+            self.failures().len(),
+            self.python_lookups,
+            executable(&self.binary),
+            executable(&self.win32_binary),
+        )
     }
 }
 
@@ -2285,7 +2317,7 @@ pub fn default_win32_executable(root: &Path, l: &RecorderLayout) -> Option<PathB
     let candidates = [
         std::env::var_os(WIN32_EXECUTABLE_ENV).map(PathBuf::from),
         Some(root.join(WIN32_LOCAL_EXECUTABLE)),
-        std::env::var_os("ASAMU_ORIGINAL_DIR").map(|d| PathBuf::from(d).join(&l.executable)),
+        std::env::var_os("ASAMU_ORIGINAL_DIR").map(|d| install_file(Path::new(&d), &l.executable)),
     ];
     candidates.into_iter().flatten().find(|p| p.is_file())
 }
@@ -3014,6 +3046,51 @@ mod tests {
                 assert_eq!(binary, 1);
             }
         }
+    }
+
+    #[test]
+    fn layout_paths_are_joined_with_the_host_separator() {
+        let root = Path::new("install");
+        let joined = install_file(root, "Binaries/Win32/game.exe");
+        let expected = root.join("Binaries").join("Win32").join("game.exe");
+        // Compared as text: `Path` equality does not tell `/` from `\` on
+        // Windows, and the text is what the report prints.
+        assert_eq!(joined.to_string_lossy(), expected.to_string_lossy());
+        assert_eq!(install_file(root, "game"), root.join("game"));
+    }
+
+    #[test]
+    fn the_summary_names_each_checked_executable() {
+        let ok = |group| Check {
+            group,
+            what: String::new(),
+            ok: true,
+        };
+        let mut r = LayoutReport {
+            checks: vec![ok("schema"), ok("win32:binary")],
+            python_lookups: 3,
+            binary: None,
+            win32_binary: Some(PathBuf::from("game.exe")),
+        };
+        // Only the Windows executable was found: its checks ran, and the
+        // line must not read as if every binary check had been skipped.
+        assert_eq!(
+            r.summary(),
+            "2 checks, 0 failed; 3 Python lookups; Mac executable: not found (binary checks \
+             skipped); Windows executable: game.exe"
+        );
+        r.checks.push(Check {
+            group: "binary",
+            what: String::new(),
+            ok: false,
+        });
+        r.binary = Some(PathBuf::from("ASAMU"));
+        r.win32_binary = None;
+        assert_eq!(
+            r.summary(),
+            "3 checks, 1 failed; 3 Python lookups; Mac executable: ASAMU; Windows executable: \
+             not found (binary checks skipped)"
+        );
     }
 
     #[test]
