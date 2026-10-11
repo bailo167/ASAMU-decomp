@@ -683,6 +683,18 @@ else
   echo "skip  case-only rename: says that the name differs from git's (this file system is case sensitive: git lists the new name)"
 fi
 
+# A tracked file replaced by a folder, and a tracked folder replaced by a file:
+# what is on disk is sent, and what git still lists of the old shape is not.
+printf 'a file' > "$S/file-then-folder" && mkdir -p "$S/folder-then-file" && printf 'in it' > "$S/folder-then-file/inside.txt"
+git -C "$S" add file-then-folder folder-then-file
+rm "$S/file-then-folder" && mkdir "$S/file-then-folder" && printf 'now in a folder' > "$S/file-then-folder/new.txt"
+rm -r "$S/folder-then-file" && printf 'now a file' > "$S/folder-then-file"
+printf '%s\n' "file-then-folder/new.txt" "folder-then-file" >> "$T/names"
+wh "$S" sync h1
+is "file and folder swapped: exit code" "$RC" 0
+check "file and folder swapped: what is on disk is sent" inspect tar "$LOG" 3 "$S" "$T/names"
+hasnt "file and folder swapped: nothing is reported as left out" "$T/err" "left out"
+
 # The packer on its own, with lists git would not produce or that this file
 # system could not hold: it must refuse all of them (exit code 3), on every system.
 pack_check() { # pack_check DESCRIPTION WORD: the list in $T/list must be refused with WORD in the message

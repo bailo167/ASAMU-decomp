@@ -164,8 +164,10 @@ def collect(repo, list_path):
         path = os.path.join(repo, name)
         try:
             info = os.lstat(path)
-        except FileNotFoundError:
-            continue  # tracked, deleted in the working tree: not there to mirror
+        except (FileNotFoundError, NotADirectoryError):
+            # Tracked, and deleted in the working tree (or a folder on its way
+            # was replaced by a file): not there to mirror.
+            continue
         except OSError as error:
             problems.append("%s: cannot be read (%s)" % (shown(name), error.strerror))
             continue
@@ -180,7 +182,10 @@ def collect(repo, list_path):
             )
             continue
         if stat.S_ISDIR(info.st_mode):
-            notes.append("left out %s: a repository of its own (submodule), not part of this checkout" % shown(name))
+            if os.path.lexists(os.path.join(path, ".git")):
+                notes.append("left out %s: a repository of its own (submodule), not part of this checkout" % shown(name))
+            # Otherwise a folder that took the place of a tracked file (git
+            # lists the files in it on their own), or a submodule without files.
             continue
         if not stat.S_ISREG(info.st_mode):
             problems.append("%s: is not a regular file" % shown(name))
