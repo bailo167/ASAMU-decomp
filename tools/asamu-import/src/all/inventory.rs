@@ -8,8 +8,13 @@
 //! `Maps` folder. Files are matched by their path relative to the cooked
 //! folder, so a copied data tree verifies as well as a Steam install, and an
 //! inventory is used only when its cooked folder has the same name as the
-//! install's (`CookedMac` vs `CookedPC`: different cooks never "mismatch",
-//! they have no inventory).
+//! install's (`CookedMac` for the macOS depot, `CookedPC` for the Windows
+//! depot); among those the one of the install's Steam build is preferred. A
+//! cook no inventory describes never "mismatches": it has no inventory.
+//!
+//! The 45 input files of the two inventoried depots of Steam build 1822049
+//! (macOS 278362, Windows 278361) are byte-identical (same sizes and
+//! SHA-256), which a test below asserts on the embedded data.
 //!
 //! Policy (set by `all`): missing files refuse the run (a conversion would
 //! silently produce less), different sizes or hashes only warn (another
@@ -21,12 +26,20 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The committed inventories: (id, JSON).
-pub const EMBEDDED: &[(&str, &str)] = &[(
-    "mac-depot278362-build1822049",
-    include_str!(
-        "../../../../docs/reverse-engineering/data/inventory/mac-depot278362-build1822049.json"
+pub const EMBEDDED: &[(&str, &str)] = &[
+    (
+        "mac-depot278362-build1822049",
+        include_str!(
+            "../../../../docs/reverse-engineering/data/inventory/mac-depot278362-build1822049.json"
+        ),
     ),
-)];
+    (
+        "win-depot278361-build1822049",
+        include_str!(
+            "../../../../docs/reverse-engineering/data/inventory/win-depot278361-build1822049.json"
+        ),
+    ),
+];
 
 /// Extensions of the files the conversions read.
 pub const INPUT_EXTENSIONS: &[&str] = &["u", "upk", "asamu", "tfc"];
@@ -74,11 +87,11 @@ pub struct InventoryFile {
 pub struct Inventory {
     /// Identifier (the file stem).
     pub id: String,
-    /// Install layout label (`mac-app`).
+    /// Install layout label (`mac-app`, `windows`).
     pub layout: String,
     /// Steam build id.
     pub build_id: Option<u64>,
-    /// Name of the cooked folder (`CookedMac`).
+    /// Name of the cooked folder (`CookedMac`, `CookedPC`).
     pub cooked_dir: String,
     /// Input files, sorted by `cooked_rel`.
     pub files: Vec<InventoryFile>,
@@ -225,6 +238,31 @@ impl Verification {
     }
 }
 
+/// The inventoried builds as a phrase: `the macOS build (CookedMac, Steam
+/// build 1822049) and the Windows build (CookedPC, Steam build 1822049)`.
+fn describe_inventories(inventories: &[Inventory]) -> String {
+    let parts: Vec<String> = inventories
+        .iter()
+        .map(|i| {
+            let platform = match i.layout.as_str() {
+                "mac-app" => "macOS",
+                "windows" => "Windows",
+                "linux" => "Linux",
+                other => other,
+            };
+            match i.build_id {
+                Some(b) => format!("the {platform} build ({}, Steam build {b})", i.cooked_dir),
+                None => format!("the {platform} build ({})", i.cooked_dir),
+            }
+        })
+        .collect();
+    match parts.split_last() {
+        None => "no build".to_owned(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Compare `disk` (the input files found in an install whose cooked folder is
 /// named `cooked_dir`, Steam build `build_id`) with the matching inventory.
 pub fn verify(
@@ -255,7 +293,8 @@ pub fn verify(
             unlisted: Vec::new(),
             notes: vec![format!(
                 "no committed inventory describes a {cooked_dir} cook; the conversions are \
-                 verified on the Mac build (CookedMac, Steam build 1822049) only"
+                 verified on {} only",
+                describe_inventories(inventories)
             )],
         };
     };
@@ -369,6 +408,107 @@ mod tests {
     }
 
     #[test]
+    fn embedded_inventory_lists_the_windows_inputs() {
+        let all = Inventory::embedded().unwrap();
+        let win = all
+            .iter()
+            .find(|i| i.id == "win-depot278361-build1822049")
+            .unwrap();
+        assert_eq!(win.layout, "windows");
+        assert_eq!(win.build_id, Some(1_822_049));
+        assert_eq!(win.cooked_dir, "CookedPC");
+        assert_eq!(win.files.len(), 45);
+        assert_eq!(
+            win.files
+                .iter()
+                .filter(|f| f.cooked_rel.starts_with("Maps/"))
+                .count(),
+            21
+        );
+        // The Windows depot ships the very files the macOS depot ships: same
+        // relative paths, sizes and SHA-256 for all 45 inputs.
+        let mac = all
+            .iter()
+            .find(|i| i.id == "mac-depot278362-build1822049")
+            .unwrap();
+        assert_eq!(win.files, mac.files);
+    }
+
+    #[test]
+    fn the_install_cook_and_build_select_the_inventory() {
+        let all = Inventory::embedded().unwrap();
+        let disk_of = |inv: &Inventory| -> Vec<DiskFile> {
+            inv.files
+                .iter()
+                .map(|f| disk(&f.cooked_rel, f.size, &f.sha256))
+                .collect()
+        };
+        let mac = all.iter().find(|i| i.layout == "mac-app").unwrap();
+        let win = all.iter().find(|i| i.layout == "windows").unwrap();
+        // A Windows install: its own inventory, all 45 files match.
+        let v = verify(&all, "CookedPC", Some(1_822_049), &disk_of(win));
+        assert_eq!(v.status, VerifyStatus::Match);
+        assert_eq!(v.inventory.as_deref(), Some("win-depot278361-build1822049"));
+        assert_eq!((v.checked, v.matched), (45, 45));
+        assert!(v.notes.is_empty() && v.unlisted.is_empty());
+        // Case differences in the folder name do not matter (Windows file systems).
+        let v = verify(&all, "cookedpc", Some(1_822_049), &disk_of(win));
+        assert_eq!(v.inventory.as_deref(), Some("win-depot278361-build1822049"));
+        // A macOS install keeps its own.
+        let v = verify(&all, "CookedMac", Some(1_822_049), &disk_of(mac));
+        assert_eq!(v.status, VerifyStatus::Match);
+        assert_eq!(v.inventory.as_deref(), Some("mac-depot278362-build1822049"));
+        // A copied Windows data tree without Steam's app manifest still verifies.
+        let v = verify(&all, "CookedPC", None, &disk_of(win));
+        assert_eq!(v.status, VerifyStatus::Match);
+        assert_eq!(v.notes.len(), 1);
+        // A changed file in a Windows install is reported against the Windows inventory.
+        let mut changed = disk_of(win);
+        changed[0].sha256 = "00".repeat(32);
+        let v = verify(&all, "CookedPC", Some(1_822_049), &changed);
+        assert_eq!(v.status, VerifyStatus::Mismatch);
+        assert_eq!(v.mismatched.len(), 1);
+        assert_eq!(v.inventory.as_deref(), Some("win-depot278361-build1822049"));
+        // A cook nobody inventoried names the builds that were.
+        let v = verify(&all, "CookedLinux", None, &[]);
+        assert_eq!(v.status, VerifyStatus::NoInventory);
+        assert_eq!(
+            v.notes,
+            vec![
+                "no committed inventory describes a CookedLinux cook; the conversions are \
+                 verified on the macOS build (CookedMac, Steam build 1822049) and the Windows \
+                 build (CookedPC, Steam build 1822049) only"
+                    .to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn inventories_are_described_as_a_phrase() {
+        let inv = |layout: &str, cooked: &str, build: Option<u64>| Inventory {
+            id: "x".to_owned(),
+            layout: layout.to_owned(),
+            build_id: build,
+            cooked_dir: cooked.to_owned(),
+            files: Vec::new(),
+        };
+        assert_eq!(describe_inventories(&[]), "no build");
+        assert_eq!(
+            describe_inventories(&[inv("mac-app", "CookedMac", Some(7))]),
+            "the macOS build (CookedMac, Steam build 7)"
+        );
+        assert_eq!(
+            describe_inventories(&[
+                inv("mac-app", "CookedMac", Some(7)),
+                inv("windows", "CookedPC", None),
+                inv("loose", "CookedX", Some(9)),
+            ]),
+            "the macOS build (CookedMac, Steam build 7), the Windows build (CookedPC) and the \
+             loose build (CookedX, Steam build 9)"
+        );
+    }
+
+    #[test]
     fn match_mismatch_missing_unlisted() {
         let inv = Inventory::parse(
             "t",
@@ -413,6 +553,14 @@ mod tests {
         let v = verify(std::slice::from_ref(&inv), "CookedPC", None, &ok);
         assert_eq!(v.status, VerifyStatus::NoInventory);
         assert!(v.inventory.is_none());
+        assert_eq!(
+            v.notes,
+            vec![
+                "no committed inventory describes a CookedPC cook; the conversions are \
+                 verified on the macOS build (CookedMac, Steam build 7) only"
+                    .to_owned()
+            ]
+        );
     }
 
     #[test]

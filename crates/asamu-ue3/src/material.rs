@@ -877,8 +877,13 @@ fn value_linear_color(v: &Value) -> Option<[f32; 4]> {
 /// `Color` (bytes B, G, R, A) converted the way `FLinearColor(FColor)` does
 /// in this build: R, G, B through `(c / 255) ^ 2.2` (the executable's
 /// `PowOneOver255Table`), A linearly. CONFIRMED from the executable.
+///
+/// The power is [`crate::portable_math::powf`], not the platform's C
+/// library (whose `powf` differs between systems in the last bit: the macOS
+/// one returns the neighbouring value for the bytes 79 and 198), so every
+/// system converts a colour to the same values.
 pub fn color_to_linear(bgra: [u8; 4]) -> [f32; 4] {
-    let g = |b: u8| (f32::from(b) / 255.0).powf(2.2);
+    let g = |b: u8| crate::portable_math::powf(f32::from(b) / 255.0, 2.2);
     [
         g(bgra[2]),
         g(bgra[1]),
@@ -1865,7 +1870,9 @@ impl Eval<'_, '_> {
                 let e = self.input(pkg, n, "Exponent", frame, depth);
                 match (b, e) {
                     (Some(Term::Const(v, k)), Some(Term::Const(x, _))) => {
-                        Term::Const(v.map(|c| c.max(0.0).powf(x[0])), k)
+                        // Portable power, sine and cosine here and below:
+                        // folded constants reach converted data.
+                        Term::Const(v.map(|c| crate::portable_math::powf(c.max(0.0), x[0])), k)
                     }
                     (Some(t), _) => {
                         self.note("Power of a non-constant value ignored");
@@ -1939,11 +1946,13 @@ impl Eval<'_, '_> {
                                 "frac" => x - x.floor(),
                                 "squareroot" => x.max(0.0).sqrt(),
                                 "sine" if period > 0.0 => {
-                                    (x * std::f32::consts::TAU / period).sin()
+                                    crate::portable_math::sinf(x * std::f32::consts::TAU / period)
                                 }
-                                "sine" => x.sin(),
-                                _ if period > 0.0 => (x * std::f32::consts::TAU / period).cos(),
-                                _ => x.cos(),
+                                "sine" => crate::portable_math::sinf(x),
+                                _ if period > 0.0 => {
+                                    crate::portable_math::cosf(x * std::f32::consts::TAU / period)
+                                }
+                                _ => crate::portable_math::cosf(x),
                             }
                         };
                         Term::Const(v.map(g), k)

@@ -724,8 +724,13 @@ impl DecalFrame {
     #[must_use]
     pub fn from_axes(origin: Vec3, axes: [Vec3; 3], rotation_degrees: f32) -> Self {
         let [x, y, z] = axes;
+        // Portable sine and cosine (the frame reaches converted data);
+        // `to_radians` is one multiplication, exact on every system.
         let a = f64::from(rotation_degrees).to_radians();
-        let (s, c) = (a.sin() as f32, a.cos() as f32);
+        let (s, c) = (
+            crate::portable_math::sin(a) as f32,
+            crate::portable_math::cos(a) as f32,
+        );
         let width_axis = normalize([
             c * y[0] + s * z[0],
             c * y[1] + s * z[1],

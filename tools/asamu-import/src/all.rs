@@ -58,6 +58,14 @@
 //! writes outside its folder fails and its output is discarded. Because each
 //! stage starts from an empty folder, no module needs `--force`.
 //!
+//! The swap is two folder renames. Windows refuses to rename a folder while
+//! any program has a file inside it open (measured: "Access is denied", with
+//! any sharing mode), so a refused rename is tried again for about two
+//! seconds (a virus scanner reading a new file lets go quickly) and then
+//! fails the stage with a hint to close the program; the old output is put
+//! back if the new one cannot be moved in, the staged copy is removed, and
+//! the next run converts the stage again.
+//!
 //! `--force` reruns every selected stage; `--only` / `--skip` select stages.
 //!
 //! # Package cache
@@ -76,7 +84,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use asamu_locate::Install;
@@ -218,7 +226,10 @@ pub struct Stage {
     /// File (inside `dir`) whose presence marks a finished stage; `None`:
     /// any entry in `dir`.
     pub key_file: Option<&'static str>,
-    /// Reads nothing but packages (may use the package cache).
+    /// Reads nothing but packages (may use the package cache). A stage that
+    /// also reads any other file of the install (configuration, texture
+    /// file caches, localization text) must not set this: the cache holds
+    /// packages only, and a missing file would change the output silently.
     pub packages_only: bool,
     /// Canonical arguments (part of the fingerprint).
     pub args: Vec<String>,
@@ -300,10 +311,15 @@ pub fn real_stages(args: &Args) -> Vec<Stage> {
             Vec::new(),
             crate::materials::run,
         ),
+        // Reads the packages and the install's engine configuration files
+        // (they name the default post-process chain), which the package
+        // cache does not hold: pointed at the cache it silently wrote
+        // scenes without that chain (found by comparing digests with and
+        // without `--package-cache`), so it reads the install.
         stage(
             StageId::Levels,
             manifest,
-            true,
+            false,
             Vec::new(),
             crate::levels::run,
         ),
@@ -1366,10 +1382,34 @@ fn run_staged(out: &Path, stage: &Stage, original: &Path) -> Result<(StageStatus
         Some(f) => produced.join(f).is_file(),
         None => std::fs::read_dir(&produced).is_ok_and(|mut rd| rd.next().is_some()),
     };
-    let outcome = match result {
+    match place_output(out, stage, &produced, key_present, result) {
+        Ok(outcome) => {
+            remove_tree(&staging)?;
+            Ok(outcome)
+        }
+        Err(e) => {
+            // The swap failed (the stage is reported as failed): do not leave
+            // a second copy of the stage behind. The swap's error is the one
+            // worth reporting, so a failure to clean up is not.
+            let _ = remove_tree(&staging);
+            Err(e)
+        }
+    }
+}
+
+/// Move a finished stage's staged folder into place (or decide not to) and
+/// say how the stage ended.
+fn place_output(
+    out: &Path,
+    stage: &Stage,
+    produced: &Path,
+    key_present: bool,
+    result: Result<()>,
+) -> Result<(StageStatus, Option<String>)> {
+    Ok(match result {
         Ok(()) => {
-            if dir_exists(&produced) {
-                swap_in(out, stage.dir, &produced)?;
+            if dir_exists(produced) {
+                swap_in(out, stage.dir, produced)?;
             } else {
                 // Finished with no output: the old output is stale too.
                 remove_tree(&out.join(stage.dir))?;
@@ -1380,14 +1420,12 @@ fn run_staged(out: &Path, stage: &Stage, original: &Path) -> Result<(StageStatus
         Err(e) => {
             let mut msg = format!("{e:#}");
             if key_present {
-                swap_in(out, stage.dir, &produced)?;
+                swap_in(out, stage.dir, produced)?;
                 msg.push_str(" (partial output kept)");
             }
             (StageStatus::Failed, Some(msg))
         }
-    };
-    remove_tree(&staging)?;
-    Ok(outcome)
+    })
 }
 
 /// Replace `<out>/<dir>` with `produced`.
@@ -1402,15 +1440,101 @@ fn swap_in(out: &Path, dir: &str, produced: &Path) -> Result<()> {
     }
     let replaced = out.join(REPLACED_DIR);
     remove_tree(&replaced)?;
-    if std::fs::symlink_metadata(&live).is_ok() {
+    let aside = replaced.join(dir);
+    let had_old = std::fs::symlink_metadata(&live).is_ok();
+    if had_old {
         std::fs::create_dir_all(&replaced)
             .with_context(|| format!("creating {}", replaced.display()))?;
-        std::fs::rename(&live, replaced.join(dir))
-            .with_context(|| format!("moving the old {} aside", live.display()))?;
+        if let Err(e) = rename_patiently(&live, &aside) {
+            // Nothing moved: the old output is complete and in place.
+            let _ = std::fs::remove_dir(&replaced);
+            return Err(rename_error(
+                &e,
+                &format!("moving the old {} aside", live.display()),
+                "the previous output is unchanged",
+            ));
+        }
     }
-    std::fs::rename(produced, &live)
-        .with_context(|| format!("moving the new output to {}", live.display()))?;
-    remove_tree(&replaced)
+    if let Err(e) = rename_patiently(produced, &live) {
+        // Put the old output back so the folder stays usable.
+        let state = if !had_old {
+            "there was no previous output".to_owned()
+        } else if rename_patiently(&aside, &live).is_ok() {
+            let _ = std::fs::remove_dir(&replaced);
+            "the previous output was put back".to_owned()
+        } else {
+            format!(
+                "the previous output is in {} (move it back by hand; the next run deletes it)",
+                aside.display()
+            )
+        };
+        return Err(rename_error(
+            &e,
+            &format!("moving the new output to {}", live.display()),
+            &state,
+        ));
+    }
+    // The new output is in place. A leftover old copy (a scanner still
+    // reading it) is removed by the next stage or the next run.
+    let _ = remove_tree(&replaced);
+    Ok(())
+}
+
+/// How often and how long a refused folder rename is tried again on Windows:
+/// 20 + 40 + ... + 1280 ms, about 2.5 s in all.
+const RENAME_ATTEMPTS: u32 = 8;
+const RENAME_FIRST_DELAY: Duration = Duration::from_millis(20);
+
+/// Is `e` the error of renaming or removing something another program has
+/// open? Windows reports "access denied" (5) for a folder holding an open
+/// file, and a sharing or lock violation (32, 33) for an open file itself.
+/// Elsewhere a rename never fails for that reason, and "permission denied"
+/// means what it says.
+fn is_in_use_error(e: &std::io::Error) -> bool {
+    cfg!(windows)
+        && (e.kind() == std::io::ErrorKind::PermissionDenied
+            || matches!(e.raw_os_error(), Some(5 | 32 | 33)))
+}
+
+/// Rename `from` to `to`, trying again for a while when another program has
+/// a file inside open (see [`is_in_use_error`]): virus scanners open freshly
+/// written files for a moment. Any other error is returned at once.
+fn rename_patiently(from: &Path, to: &Path) -> std::io::Result<()> {
+    rename_with_retries(from, to, RENAME_ATTEMPTS, RENAME_FIRST_DELAY)
+}
+
+fn rename_with_retries(
+    from: &Path,
+    to: &Path,
+    attempts: u32,
+    first_delay: Duration,
+) -> std::io::Result<()> {
+    let mut delay = first_delay;
+    let mut attempt = 1;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < attempts && is_in_use_error(&e) => {
+                std::thread::sleep(delay);
+                delay = delay.saturating_mul(2);
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The error of a failed swap rename: what was being done, the system's
+/// message, what state the output is in, and (when a program has the files
+/// open) what to do about it.
+fn rename_error(e: &std::io::Error, what: &str, state: &str) -> anyhow::Error {
+    let hint = if is_in_use_error(e) {
+        "; another program has files in that folder open: close the game (asamu) and any \
+         viewer or editor using the converted data, then run the import again"
+    } else {
+        ""
+    };
+    anyhow!("{what}: {e} ({state}{hint})")
 }
 
 /// Remove `p` (a folder this command created, or a stale entry). A symbolic

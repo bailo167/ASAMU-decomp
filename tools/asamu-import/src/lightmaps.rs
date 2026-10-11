@@ -348,8 +348,7 @@ pub fn rgb9e5(rgb: [f32; 3]) -> u32 {
     if max <= 0.0 {
         return 0;
     }
-    let floor_log2 = max.log2().floor() as i32;
-    let mut exp = floor_log2.max(-B - 1) + 1 + B;
+    let mut exp = floor_log2(max).max(-B - 1) + 1 + B;
     let denom = |e: i32| 2f64.powi(e - B - N);
     let maxm = (max / denom(exp) + 0.5).floor() as i32;
     if maxm == 1 << N {
@@ -358,6 +357,16 @@ pub fn rgb9e5(rgb: [f32; 3]) -> u32 {
     let exp = exp.clamp(0, 31);
     let q = |v: f64| ((v / denom(exp) + 0.5).floor() as u32).min(511);
     q(r) | (q(g) << 9) | (q(b) << 18) | ((exp as u32) << 27)
+}
+
+/// `floor(log2(v))` of a positive finite `v`, exactly: the exponent field of
+/// the number. (`f64::log2` is the platform's C library function, which may
+/// return a whole number for a value just below a power of two; the encoding
+/// must not depend on the system it runs on.) A subnormal `v` yields −1023,
+/// which is below every exponent the caller keeps.
+fn floor_log2(v: f64) -> i32 {
+    // An 11-bit field: the cast cannot truncate.
+    ((v.to_bits() >> 52) & 0x7FF) as i32 - 1023
 }
 
 /// Decode `R9G9B9E5` (tests).
@@ -476,7 +485,7 @@ fn linear_to_srgb_byte(v: f32) -> u8 {
     let s = if v <= 0.003_130_8 {
         v * 12.92
     } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+        1.055 * asamu_ue3::portable_math::powf(v, 1.0 / 2.4) - 0.055
     };
     (s * 255.0 + 0.5) as u8
 }
@@ -1373,6 +1382,60 @@ mod tests {
             rgb9e5([1.0; 3]),
             256 | (256 << 9) | (256 << 18) | (16 << 27)
         );
+    }
+
+    #[test]
+    fn floor_log2_is_exact_at_powers_of_two() {
+        assert_eq!(floor_log2(1.0), 0);
+        assert_eq!(floor_log2(1.5), 0);
+        assert_eq!(floor_log2(2.0), 1);
+        assert_eq!(floor_log2(65_408.0), 15);
+        assert_eq!(floor_log2(0.75), -1);
+        assert_eq!(floor_log2(f64::from(f32::MIN_POSITIVE)), -126);
+        // The smallest positive f32 (a subnormal there) is a normal f64.
+        assert_eq!(floor_log2(f64::from(f32::from_bits(1))), -149);
+        assert_eq!(floor_log2(f64::MIN_POSITIVE / 2.0), -1023);
+        for k in -40..=16 {
+            let p = 2f64.powi(k);
+            assert_eq!(floor_log2(p), k, "2^{k}");
+            // The neighbours of a power of two are on either side of the step.
+            assert_eq!(
+                floor_log2(f64::from_bits(p.to_bits() - 1)),
+                k - 1,
+                "below 2^{k}"
+            );
+            assert_eq!(
+                floor_log2(f64::from_bits(p.to_bits() + 1)),
+                k,
+                "above 2^{k}"
+            );
+        }
+        // The encoder's exponent follows it: a channel just below 1.0 keeps
+        // nine significant bits, 1.0 itself moves to the next exponent.
+        let below_one = f32::from_bits(1.0f32.to_bits() - 1);
+        assert_eq!(rgb9e5([below_one, 0.0, 0.0]) >> 27, 16);
+        assert_eq!(rgb9e5([1.0, 0.0, 0.0]) >> 27, 16);
+        assert_eq!(rgb9e5([0.49, 0.0, 0.0]) >> 27, 14);
+        assert_eq!(rgb9e5([0.5, 0.0, 0.0]) >> 27, 15);
+        assert_eq!(rgb9e5([0.5, 0.0, 0.0]) & 511, 256);
+    }
+
+    #[test]
+    fn preview_bytes_are_the_srgb_encoding() {
+        assert_eq!(linear_to_srgb_byte(0.0), 0);
+        assert_eq!(linear_to_srgb_byte(1.0), 255);
+        assert_eq!(linear_to_srgb_byte(2.0), 255);
+        assert_eq!(linear_to_srgb_byte(-1.0), 0);
+        // Linear 0.5 is sRGB 0.7354 (188 of 255); the linear toe below 0.0031308.
+        assert_eq!(linear_to_srgb_byte(0.5), 188);
+        assert_eq!(linear_to_srgb_byte(0.002), 7);
+        // The decode of every byte encodes back to that byte.
+        for b in 0..=255u8 {
+            assert_eq!(
+                linear_to_srgb_byte(asamu_ue3::lightmap::srgb_to_linear(b)),
+                b
+            );
+        }
     }
 
     #[test]

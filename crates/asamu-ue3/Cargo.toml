@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
+libm.workspace = true
 
 [dev-dependencies]
 # Tests only: finds the user's installed game for the real-data checks.

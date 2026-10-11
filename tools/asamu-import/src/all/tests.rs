@@ -519,6 +519,191 @@ fn old_output_stays_until_the_new_output_is_complete() {
     assert!(!f.out.join(STAGING_DIR).exists());
 }
 
+// ---------------------------------------------------------------------------
+// The swap of a stage folder
+// ---------------------------------------------------------------------------
+
+/// `<out>/textures` holding `old`, and a staged replacement holding `new`.
+fn swap_fixture(tmp: &Path) -> (PathBuf, PathBuf) {
+    let out = tmp.join("converted");
+    let live = out.join("textures");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("manifest.json"), b"old").unwrap();
+    let produced = out.join(STAGING_DIR).join("textures");
+    std::fs::create_dir_all(&produced).unwrap();
+    std::fs::write(produced.join("manifest.json"), b"new").unwrap();
+    (out, produced)
+}
+
+#[test]
+fn swap_replaces_the_stage_folder_and_leaves_nothing_behind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (out, produced) = swap_fixture(tmp.path());
+    std::fs::write(out.join("textures").join("stale.dds"), b"stale").unwrap();
+    swap_in(&out, "textures", &produced).unwrap();
+    assert_eq!(
+        std::fs::read(out.join("textures/manifest.json")).unwrap(),
+        b"new"
+    );
+    assert!(!out.join("textures/stale.dds").exists());
+    assert!(!produced.exists());
+    assert!(!out.join(REPLACED_DIR).exists());
+    // A first conversion: nothing to move aside.
+    let staged = out.join(STAGING_DIR).join("meshes");
+    std::fs::create_dir_all(&staged).unwrap();
+    std::fs::write(staged.join("manifest.json"), b"m").unwrap();
+    swap_in(&out, "meshes", &staged).unwrap();
+    assert!(out.join("meshes/manifest.json").is_file());
+    assert!(!out.join(REPLACED_DIR).exists());
+}
+
+#[test]
+fn a_failed_swap_puts_the_old_output_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (out, produced) = swap_fixture(tmp.path());
+    // The staged output vanished: moving it in fails after the old output
+    // was moved aside.
+    std::fs::remove_dir_all(&produced).unwrap();
+    let err = format!("{:#}", swap_in(&out, "textures", &produced).unwrap_err());
+    assert!(err.contains("moving the new output to"), "{err}");
+    assert!(err.contains("the previous output was put back"), "{err}");
+    assert!(!err.contains("another program"), "{err}");
+    assert_eq!(
+        std::fs::read(out.join("textures/manifest.json")).unwrap(),
+        b"old"
+    );
+    assert!(!out.join(REPLACED_DIR).exists());
+    // Without a previous output the error says so.
+    let err = format!("{:#}", swap_in(&out, "meshes", &produced).unwrap_err());
+    assert!(err.contains("there was no previous output"), "{err}");
+    assert!(!out.join("meshes").exists());
+    assert!(!out.join(REPLACED_DIR).exists());
+}
+
+#[test]
+fn renames_are_not_retried_for_ordinary_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing");
+    let started = Instant::now();
+    // 30 attempts a second apart would take half a minute.
+    let err = rename_with_retries(&missing, &tmp.path().join("to"), 30, Duration::from_secs(1))
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(!is_in_use_error(&err));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    // An ordinary rename goes through at the first attempt.
+    let from = tmp.path().join("from");
+    std::fs::create_dir_all(&from).unwrap();
+    rename_with_retries(&from, &tmp.path().join("to"), 1, Duration::ZERO).unwrap();
+    assert!(tmp.path().join("to").is_dir());
+}
+
+#[test]
+fn only_windows_reports_folders_in_use() {
+    let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    assert_eq!(is_in_use_error(&denied), cfg!(windows));
+    assert!(!is_in_use_error(&std::io::Error::from(
+        std::io::ErrorKind::NotFound
+    )));
+    let hinted = format!("{:#}", rename_error(&denied, "moving x", "unchanged"));
+    assert!(hinted.starts_with("moving x: "), "{hinted}");
+    assert!(hinted.contains("(unchanged"), "{hinted}");
+    assert_eq!(hinted.contains("another program has files"), cfg!(windows));
+}
+
+/// Windows only: no other system refuses to rename a folder because a file
+/// inside it is open, so there is nothing to wait for or to report there
+/// (the first assertion is exactly that refusal).
+#[cfg(windows)]
+#[test]
+fn a_folder_with_an_open_file_is_renamed_once_the_file_is_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let from = tmp.path().join("from");
+    let to = tmp.path().join("to");
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::write(from.join("texture.dds"), b"DDS ").unwrap();
+    let reader = std::fs::File::open(from.join("texture.dds")).unwrap();
+    let refused = std::fs::rename(&from, &to).unwrap_err();
+    assert!(is_in_use_error(&refused), "{refused:?}");
+    // A scanner lets go after a moment: the patient rename then succeeds.
+    let closer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        drop(reader);
+    });
+    rename_with_retries(&from, &to, 10, Duration::from_millis(20)).unwrap();
+    closer.join().unwrap();
+    assert!(to.join("texture.dds").is_file());
+    assert!(!from.exists());
+}
+
+/// Windows only (same reason): the swap itself waits. A file of the old
+/// output, then a file of the staged output, is open for a moment (a virus
+/// scanner, a viewer being closed); both renames of the swap go through once
+/// it is closed, and nothing is left behind. Without the retries in
+/// `swap_in` this fails with "Access is denied".
+#[cfg(windows)]
+#[test]
+fn the_swap_waits_for_a_file_that_is_closed_a_moment_later() {
+    for old_output_is_held in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (out, produced) = swap_fixture(tmp.path());
+        let held = if old_output_is_held {
+            out.join("textures")
+        } else {
+            produced.clone()
+        };
+        let reader = std::fs::File::open(held.join("manifest.json")).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(reader);
+        });
+        swap_in(&out, "textures", &produced).unwrap();
+        closer.join().unwrap();
+        assert_eq!(
+            std::fs::read(out.join("textures/manifest.json")).unwrap(),
+            b"new",
+            "old output held: {old_output_is_held}"
+        );
+        assert!(!produced.exists());
+        assert!(!out.join(REPLACED_DIR).exists());
+    }
+}
+
+/// Windows only (same reason): a program that keeps a converted file open
+/// makes the stage fail with a hint, and the old output stays in place.
+#[cfg(windows)]
+#[test]
+fn a_stage_folder_in_use_fails_the_stage_and_keeps_the_old_output() {
+    let f = fixture();
+    execute(&f.env(), stages(&Log::default(), &[]), &args(&[])).unwrap();
+    let before = f.record("textures").outputs.unwrap();
+    let reader = std::fs::File::open(f.out.join("textures/data.bin")).unwrap();
+    let r = execute(
+        &f.env(),
+        stages(&Log::default(), &[]),
+        &args(&["--force", "--only", "textures"]),
+    )
+    .unwrap();
+    assert_eq!(r.failed(), vec!["textures"]);
+    let rec = f.record("textures");
+    let err = rec.error.unwrap();
+    assert!(err.contains("moving the old"), "{err}");
+    assert!(err.contains("the previous output is unchanged"), "{err}");
+    assert!(err.contains("another program has files"), "{err}");
+    assert!(!err.contains(&f.out.display().to_string()), "{err}");
+    // The old output is complete, and no second copy is left behind.
+    assert_eq!(tree_digest(&f.out.join("textures")).unwrap(), before);
+    assert!(!f.out.join(STAGING_DIR).exists());
+    assert!(!f.out.join(REPLACED_DIR).exists());
+    drop(reader);
+    // Closed: the next run converts the stage again.
+    let log = Log::default();
+    let r = execute(&f.env(), stages(&log, &[]), &args(&[])).unwrap();
+    assert!(r.failed().is_empty());
+    assert_eq!(ran(&log), vec![StageId::Textures]);
+    assert_eq!(f.record("textures").status, StageStatus::Ok);
+}
+
 #[test]
 fn writing_outside_the_stage_folder_is_rejected() {
     let f = fixture();
@@ -968,7 +1153,11 @@ fn real_stage_arguments_parse_with_the_module_args() {
     parse_stage_args::<crate::particles::Args>(&argv(StageId::Particles)).unwrap();
     parse_stage_args::<crate::decals::Args>(&argv(StageId::Decals)).unwrap();
     parse_stage_args::<crate::localization::Args>(&argv(StageId::Localization)).unwrap();
-    // Only stages that read nothing but packages may use the package cache.
+    // Only stages that read nothing but packages may use the package cache
+    // (it holds nothing else). Levels is not one of them: it reads the
+    // install's engine configuration for the default post-process chain, and
+    // through the cache it wrote scenes without it (the levels digest of a
+    // real install differed with `--package-cache`).
     let cache_ok: Vec<StageId> = st
         .iter()
         .filter(|s| s.packages_only)
@@ -979,7 +1168,6 @@ fn real_stage_arguments_parse_with_the_module_args() {
         [
             StageId::Meshes,
             StageId::Materials,
-            StageId::Levels,
             StageId::Audio,
             StageId::Matinee,
             StageId::Skeletal
@@ -1201,10 +1389,24 @@ fn real_install_matches_the_committed_inventory() {
     let r = execute(&env, real_stages(&a), &a).unwrap();
     assert!(!out.exists());
     let v = &r.manifest.verification;
-    if install.cooked_dir.ends_with("CookedMac") {
+    // The two inventoried depots of Steam build 1822049 (macOS, Windows).
+    let expected = if install.cooked_dir.ends_with("CookedMac") {
+        Some("mac-depot278362-build1822049")
+    } else if install.cooked_dir.ends_with("CookedPC") && install.build_id == Some(1_822_049) {
+        Some("win-depot278361-build1822049")
+    } else {
+        None
+    };
+    if let Some(id) = expected {
         assert_eq!(v.status, VerifyStatus::Match, "{v:?}");
-        assert_eq!(v.checked, 45);
+        assert_eq!(v.inventory.as_deref(), Some(id));
+        assert_eq!((v.checked, v.matched), (45, 45));
         assert_eq!(r.manifest.install.inputs.files, 45);
+        // Both depots ship the same 45 files, so the input fingerprint is the same.
+        assert_eq!(
+            r.manifest.install.inputs.sha256,
+            "604eea70f27bfa8397c6ded72b834dbfb3fef63fb4b7ed4730d449de6309c521"
+        );
     }
     assert_eq!(r.actions.len(), StageId::ALL.len());
 }

@@ -308,10 +308,18 @@ fn quat_from_rows(m: [[f64; 3]; 3]) -> Q {
 /// quaternion, through the engine's `FRotationMatrix` rows (row-vector
 /// convention `v' = v · M`).
 pub fn rotator_to_quat(pitch: i32, yaw: i32, roll: i32) -> [f64; 4] {
-    let a = |u: i32| f64::from(u) * std::f64::consts::TAU / 65536.0;
-    let (sp, cp) = a(pitch).sin_cos();
-    let (sy, cy) = a(yaw).sin_cos();
-    let (sr, cr) = a(roll).sin_cos();
+    // Portable sine and cosine: the quaternions reach converted data, which
+    // must be the same whatever system converted it.
+    let sin_cos = |u: i32| {
+        let a = f64::from(u) * std::f64::consts::TAU / 65536.0;
+        (
+            asamu_ue3::portable_math::sin(a),
+            asamu_ue3::portable_math::cos(a),
+        )
+    };
+    let (sp, cp) = sin_cos(pitch);
+    let (sy, cy) = sin_cos(yaw);
+    let (sr, cr) = sin_cos(roll);
     let rows = [
         [cp * cy, cp * sy, sp],
         [sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp],
@@ -2542,6 +2550,9 @@ pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// See `rotator_quaternions_have_the_same_bits_on_every_platform`.
+    const ROTATOR_QUAT_HASH: u64 = 0x5EE6_66D3_DED6_3D2B;
+
     #[test]
     fn quaternion_axis_map_matches_the_vector_axis_map() {
         // Rotating in UE3 space then mapping equals mapping then rotating.
@@ -2554,6 +2565,25 @@ mod tests {
         for k in 0..3 {
             assert!((mapped[k] - gv[k]).abs() < 1e-6, "{mapped:?} vs {gv:?}");
         }
+    }
+
+    /// The quaternions reach converted data, so their bits must not depend
+    /// on the system's C library (its sine and cosine differ in the last bit
+    /// between macOS, Windows and the portable implementation). The hash is
+    /// what the portable functions give (recorded on Windows x86_64); with
+    /// the platform `sin_cos` this test fails.
+    #[test]
+    fn rotator_quaternions_have_the_same_bits_on_every_platform() {
+        let mut bytes = Vec::new();
+        for i in 0..4096i32 {
+            // Angles off the quarter turns, negative ones and ones beyond a
+            // full turn, in all three components.
+            let q = rotator_to_quat(i * 37 - 30_000, i * 1021, i * 4093 - 196_608);
+            for c in q {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        assert_eq!(fnv1a64(&[&bytes]), ROTATOR_QUAT_HASH);
     }
 
     #[test]

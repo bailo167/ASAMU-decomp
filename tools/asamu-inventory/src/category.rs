@@ -9,13 +9,13 @@
 //! | 4 | `map` | extension `asamu` (ASAMU's `MapExt`), `umap`, `ut3`, `udk` |
 //! | 5 | `texture-related` | extension `tfc` `dds`, or sniffed UE3 compressed-chunk header |
 //! | 6 | `ue3-package` | sniffed UE3 package tag, or extension `u` `upk` |
-//! | 7 | `config` | extension `ini`, or a path component `Config` |
+//! | 7 | `config` | extension `ini`, a path component `Config`, or a .NET application configuration file (`*.exe.config`, `*.dll.config`) |
 //! | 8 | `localization` | a path component `Localization`, or a UE3 language extension (`int`, `deu`, `fra`, ...) |
 //! | 9 | `audio` | sniffed Ogg / WAVE, or extension `ogg` `wav` `mp3` `xma` `fsb` `bnk` `flac` `opus` |
 //! | 10 | `movie` | sniffed Bink / SWF / GFx, or extension `bik` `bk2` `usm` `mp4` `avi` `webm` `swf` `gfx` |
 //! | 11 | `font` | extension `ttf` `otf` `ttc` `fon` |
 //! | 12 | `mesh-animation` | extension `psk` `psa` `fbx` `ase` `obj` `fxa` `apx` `apb` |
-//! | 13 | `metadata` | `Info.plist`, `PkgInfo`, `steam_appid.txt`, a cooker TOC (`*TOC.txt`, `*TOC_<LANG>.txt`), a name starting `CookerSync`, extension `plist` `strings` `nib` |
+//! | 13 | `metadata` | `Info.plist`, `PkgInfo`, `steam_appid.txt`, `build.properties` (the engine build stamp), a cooker TOC (`*TOC.txt`, `*TOC_<LANG>.txt`), a name starting `CookerSync`, extension `plist` `strings` `nib` |
 //! | 14 | `image` | sniffed raster image or image extension, outside editor resources (e.g. splash screens) |
 //! | 15 | `engine-resource` | `Engine/Stats/...` (FPS/memory chart HTML/CSS templates) |
 //! | 16 | `documentation` | extension `txt` `html` `htm` `rtf` `chm` `pdf` `md` |
@@ -127,6 +127,15 @@ pub fn is_toc_name(file_name: &str) -> bool {
     stem.split('_').next().is_some_and(|s| s.ends_with("toc"))
 }
 
+/// Whether a file name is a .NET application configuration file next to its binary
+/// (`ASAMU-Win32-Shipping.exe.config`): `<binary>.exe.config` or `<binary>.dll.config`.
+pub fn is_dotnet_app_config(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    [".exe.config", ".dll.config"]
+        .iter()
+        .any(|suffix| lower.len() > suffix.len() && lower.ends_with(suffix))
+}
+
 /// Categorize one file. `rel_path` uses `/` separators.
 pub fn categorize(rel_path: &str, ext: Option<&str>, kind: FileType) -> Category {
     let components: Vec<&str> = rel_path.split('/').filter(|c| !c.is_empty()).collect();
@@ -162,7 +171,7 @@ pub fn categorize(rel_path: &str, ext: Option<&str>, kind: FileType) -> Category
     {
         return Category::Ue3Package;
     }
-    if ext == "ini" || has_component(dirs, "Config") {
+    if ext == "ini" || has_component(dirs, "Config") || is_dotnet_app_config(file_name) {
         return Category::Config;
     }
     if has_component(dirs, "Localization") || ext_in(LANGUAGE_EXTENSIONS) {
@@ -186,9 +195,14 @@ pub fn categorize(rel_path: &str, ext: Option<&str>, kind: FileType) -> Category
     if ext_in(&["psk", "psa", "fbx", "ase", "obj", "fxa", "apx", "apb"]) {
         return Category::MeshAnimation;
     }
-    if ["Info.plist", "PkgInfo", "steam_appid.txt"]
-        .iter()
-        .any(|n| file_name.eq_ignore_ascii_case(n))
+    if [
+        "Info.plist",
+        "PkgInfo",
+        "steam_appid.txt",
+        "build.properties",
+    ]
+    .iter()
+    .any(|n| file_name.eq_ignore_ascii_case(n))
         || is_toc_name(file_name)
         || starts_with_ci(file_name, "CookerSync")
         || ext_in(&["plist", "strings", "nib"])
@@ -383,6 +397,38 @@ mod tests {
         assert_eq!(
             categorize("Binaries/Win32/x.dll", Some("dll"), T::Unknown).as_str(),
             "executable"
+        );
+        // The two loose text files of the Windows depot's `Binaries` folder.
+        assert_eq!(
+            categorize(
+                "Binaries/Win32/ASAMU-Win32-Shipping.exe.config",
+                Some("config"),
+                T::Xml
+            )
+            .as_str(),
+            "config"
+        );
+        assert_eq!(
+            categorize(
+                "Binaries/build.properties",
+                Some("properties"),
+                T::AsciiText
+            )
+            .as_str(),
+            "metadata"
+        );
+        // Only the two documented names: other `.config` / `.properties` files stay unknown.
+        assert_eq!(
+            categorize("a/web.config", Some("config"), T::Xml).as_str(),
+            "unknown"
+        );
+        assert_eq!(
+            categorize("a/.exe.config", Some("config"), T::Xml).as_str(),
+            "unknown"
+        );
+        assert_eq!(
+            categorize("a/gradle.properties", Some("properties"), T::AsciiText).as_str(),
+            "unknown"
         );
         assert_eq!(
             categorize("ASAMU/Movies/Intro.bik", Some("bik"), T::Bink).as_str(),

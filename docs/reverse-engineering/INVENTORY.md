@@ -1,9 +1,15 @@
 # Original installation inventory
 
-Source: the legitimately owned Steam installation on the analysis Mac
-(`~/Library/Application Support/Steam/steamapps/common/A Story About My Uncle`). Read-only: nothing
-in the install is modified, and no original bytes are committed. Everything below is metadata
-(paths, sizes, hashes, counts, magic numbers) produced by the repository's own tools.
+Sources: two legitimately owned Steam installations of the same Steam build (1822049): the macOS
+depot on the analysis Mac
+(`~/Library/Application Support/Steam/steamapps/common/A Story About My Uncle`) and the Windows
+depot on a Windows 11 machine (`<Steam>/steamapps/common/A Story About My Uncle`). Read-only:
+nothing in an install is modified, and no original bytes are committed. Everything below is
+metadata (paths, sizes, hashes, counts, magic numbers) produced by the repository's own tools.
+
+The sections up to "Findings" describe the macOS depot; ["Windows depot"](#windows-depot-278361)
+describes the Windows one and how the two differ, and
+["Converting on Windows"](#converting-on-windows) records what `asamu-import` does with it.
 
 ## Method and reproduction
 
@@ -27,7 +33,9 @@ cargo run -p asamu-locate -- --json
 cargo run --release -p asamu-inventory -- \
   --out docs/reverse-engineering/data/inventory/mac-depot278362-build1822049.json \
   --summary docs/reverse-engineering/data/inventory/mac-depot278362-build1822049.summary.md
-# Re-inventory the install and diff it against the committed JSON (skips without game data):
+# On a Windows install the same command with the win-depot278361-build1822049 file names.
+# Re-inventory the install and diff it against the committed JSON of its depot (skips without
+# game data, or when the installed depot or build has no committed inventory):
 cargo test -p asamu-inventory --test real_install
 ```
 
@@ -37,6 +45,8 @@ Committed sanitized data:
 |---|---|
 | [`data/inventory/mac-depot278362-build1822049.json`](data/inventory/mac-depot278362-build1822049.json) | Per-file path, size, extension, SHA-256, sniffed type (+ UE3 version/licensee, short detail), category; per-category/extension/type totals; TOC cross-check reports. Schema `asamu-inventory/1`. |
 | [`data/inventory/mac-depot278362-build1822049.summary.md`](data/inventory/mac-depot278362-build1822049.summary.md) | The generated Markdown summary (all tables below come from it). |
+| [`data/inventory/win-depot278361-build1822049.json`](data/inventory/win-depot278361-build1822049.json) | The same for the Windows depot (1,699 files). |
+| [`data/inventory/win-depot278361-build1822049.summary.md`](data/inventory/win-depot278361-build1822049.summary.md) | Its generated summary. |
 
 ### Type sniffing
 
@@ -59,20 +69,22 @@ ASCII / UTF-8 text heuristic, zlib header, else `unknown` with the first four by
 | 4 | `map` | extension `asamu` (ASAMU's `MapExt`), `umap`, `ut3`, `udk` |
 | 5 | `texture-related` | extension `tfc` `dds`, or sniffed UE3 compressed-chunk header |
 | 6 | `ue3-package` | sniffed UE3 package tag, or extension `u` `upk` (map `_LOC_INT` packages stay here) |
-| 7 | `config` | extension `ini`, or a path component `Config` |
+| 7 | `config` | extension `ini`, a path component `Config`, or a .NET application configuration file (`*.exe.config`, `*.dll.config`) |
 | 8 | `localization` | a path component `Localization`, or a UE3 language extension (`int`, `deu`, `fra`, ...) |
 | 9 | `audio` | sniffed Ogg / WAVE, or extension `ogg` `wav` `mp3` `xma` `fsb` `bnk` `flac` `opus` |
 | 10 | `movie` | sniffed Bink / SWF / GFx, or extension `bik` `bk2` `usm` `mp4` `avi` `webm` `swf` `gfx` |
 | 11 | `font` | extension `ttf` `otf` `ttc` `fon` |
 | 12 | `mesh-animation` | extension `psk` `psa` `fbx` `ase` `obj` `fxa` `apx` `apb` |
-| 13 | `metadata` | `Info.plist`, `PkgInfo`, `steam_appid.txt`, cooker TOCs, `CookerSync*`, extension `plist` `strings` `nib` |
+| 13 | `metadata` | `Info.plist`, `PkgInfo`, `steam_appid.txt`, `build.properties` (the engine build stamp), cooker TOCs, `CookerSync*`, extension `plist` `strings` `nib` |
 | 14 | `image` | sniffed raster image or image extension outside editor resources (splash screens) |
 | 15 | `engine-resource` | `Engine/Stats/...` (FPS/memory chart HTML/CSS templates) |
 | 16 | `documentation` | extension `txt` `html` `htm` `rtf` `chm` `pdf` `md` |
 | 17 | `unknown` | everything else |
 
-The Mac depot has no files in the audio, movie, font, mesh/animation, documentation or unknown
-categories (CONFIRMED by the category totals below). Documentation-like files that do ship
+Neither depot has files in the audio, movie, font, mesh/animation, documentation or unknown
+categories (CONFIRMED by the category totals of both inventories; the two rules marked for
+`*.exe.config` and `build.properties` were added for the two loose text files of the Windows
+depot's `Binaries` folder, which would otherwise be `unknown`). Documentation-like files that do ship
 (`FaceFX.chm`, `EULA.rtf`, GPL/LGPL texts, `UDKOffline.html`) sit under `Engine/EditorResources`
 and therefore count as `editor-resource` (rule 2 wins). Game audio, movies and meshes are
 presumably inside the UE3 packages (TENTATIVE until the packages are parsed).
@@ -443,7 +455,8 @@ On disk under the base folder but not listed in the TOC:
   the TOC size**; the exception is `RefShaderCache-PC-D3D-SM3.upk` (+44,218 B on disk).
 - All 11 TOC-listed `Engine/Config` files (10 `Base*.ini` and `ConsoleVariables.ini`) are smaller on disk than in the TOC by
   exactly their line count, and contain no CR bytes: they were converted from CRLF to LF for the Mac
-  depot. (`ASAMU/Config/*.ini` match the TOC sizes.)
+  depot. (`ASAMU/Config/*.ini` match the TOC sizes.) The Windows depot's copies have exactly the
+  TOC sizes, and these 11 are the only files present in both depots that differ.
 - `Engine/Shaders/Binaries`: 147 `.bin` files, all starting `01 00 00 00`; the rest is high-entropy
   (median 7.96 bits/byte over the 116 files ≥ 1 KiB). File names mirror UE3 `.usf` shader source names
   (`MaterialTemplate`, `BasePassPixelShader`, `Common`, ...). The PC TOC lists them with identical sizes.
@@ -453,28 +466,352 @@ On disk under the base folder but not listed in the TOC:
   of the other 26 language files 20 are plain ASCII and 6 are empty), 93 ASCII, 30 UTF-8 (28 `.xaml`,
   one `.ini`, `UDKOffline.html`), one UTF-16BE (`InfoPlist.strings`).
 - `ASAMU/Config/DefaultEngine.ini` sets `MapExt=asamu` and `SeekFreePCPaths=..\..\ASAMU\CookedPC`.
+- **The Mac depot is the PC cook** (was STRONG from sizes alone): all 48 files of `CookedMac`
+  (42 packages, 3 texture file caches, 3 global shader caches; 1,145,238,923 bytes) are
+  byte-identical to the 48 files of the Windows depot's `CookedPC` (same SHA-256, see
+  ["Windows depot"](#windows-depot-278361)). The cook TOC is a `PCTOC`, shader caches are PC-named,
+  and the config points `SeekFreePCPaths` at `CookedPC`. Importer consequence: one set of decoders
+  serves both builds, and the conversions' inputs are the same bytes.
+- The Windows layout is `Binaries/Win32/ASAMU-Win32-Shipping.exe`, `ASAMU/CookedPC/` and `Engine/`
+  directly in the install folder, as the PC TOC lists it (was STRONG; now read from a Windows
+  install). No `Win64` folder exists. `asamu-locate` reports that shape without a warning; it still
+  accepts `ASAMU.exe`/`UDK.exe`, `Win64` and `CookedPCConsole` with an UNVERIFIED warning, and a
+  Linux layout is UNVERIFIED (no Linux depot has been examined).
 
 ### STRONG
 
-- **The Mac depot reuses the PC cook.** 47/48 cooked files have exactly the sizes the PC cook's TOC
-  records (sizes only; contents of the PC files are not available to compare), the cook TOC is a `PCTOC`, shader caches are PC-named, and the config still points
-  `SeekFreePCPaths` at `CookedPC`. Importer consequence (TENTATIVE until packages are parsed):
-  cooked data should use PC platform formats.
-- Expected Windows layout: `Binaries/Win32/ASAMU-Win32-Shipping.exe` and `ASAMU/CookedPC/` (from the
-  PC TOC, which the PC cooker wrote). No `Win64` entries appear. Not verified against a Windows depot;
-  `asamu-locate` treats Windows/Linux layouts as UNVERIFIED and also accepts `ASAMU.exe`/`UDK.exe`
-  and `CookedPCConsole`.
+- (nothing at the moment)
 
 ### TENTATIVE
 
 - The D3D shader caches, `WinDrv.u`, the PC splash bitmaps and the editor resources are unused by the
   Mac runtime (inferred from their nature; not traced).
 - The `RefShaderCache-PC-D3D-SM3.upk` size difference suggests that file was re-cooked or replaced
-  after the TOC was written.
+  after the TOC was written. (It is not something the Mac port introduced: the Windows depot
+  ships the same bytes.)
 - `Engine/Shaders/Binaries/*.bin` are packed (compressed and/or encrypted) shader sources.
 
 ### UNKNOWN
 
 - The container format of `Engine/Shaders/Binaries/*.bin`.
-- Why `ASAMU/Localization/INT/ASAMU.int` is 12 bytes smaller than its TOC size (UTF-16LE, no CR bytes on disk).
-- Depot IDs and contents of any Windows or Linux depot of App 278360 (none installed here).
+- Why `ASAMU/Localization/INT/ASAMU.int` is 12 bytes smaller than its TOC size (UTF-16LE, no CR bytes on disk;
+  the Windows depot ships the same bytes).
+- Whether App 278360 has a Linux depot, and what it holds (none has been examined).
+
+## Windows depot 278361
+
+Source: a Steam install on a Windows 11 machine, inventoried on 2026-10-10 with the tools above
+(built for Windows). All of this section is CONFIRMED unless a line says otherwise.
+
+### Steam metadata
+
+| Field | Value | Source |
+|---|---|---|
+| App ID | 278360 | `steamapps/appmanifest_278360.acf` |
+| Install dir | `A Story About My Uncle` | appmanifest `installdir` |
+| Depot | 278361 (manifest 8314284209762417428) | appmanifest `InstalledDepots` |
+| Build ID | 1822049 (the build of the inventoried macOS depot) | appmanifest `buildid` |
+| Size on disk | 1,258,264,110 bytes | appmanifest `SizeOnDisk` and the depot's `size`; equals the sum of all inventoried file sizes exactly |
+| Files | 1,699 | `asamu-inventory`; no symbolic links, junctions, hidden or system files |
+| StateFlags | 4 (fully installed) | appmanifest `StateFlags` |
+
+`asamu-locate`: layout `windows`, found through the default Steam root's own library, build 1822049,
+depot 278361, no warnings (the unit test `real_install_if_present` asserts these when that depot is
+installed). The game had been played on that machine, and the install holds depot files only: no
+generated configuration, log or save is in it (a `My Games` folder named after the game exists in
+the user's documents folder; that the game writes there is TENTATIVE, it was not opened).
+
+### Layout
+
+```
+A Story About My Uncle/
+├── ASAMU/
+│   ├── Build/         CookerSync_Game.xml
+│   ├── Config/        Default*.ini (11)
+│   ├── CookedPC/      12 .u, 9 .upk, 3 .tfc, 3 GlobalShaderCache .bin
+│   │   └── Maps/      12 .asamu + 9 *_LOC_INT.upk
+│   ├── Localization/  the same 14 language folders as the macOS depot
+│   ├── Splash/PC/     Splash.bmp, EdSplash.bmp
+│   └── PCTOC.txt, PCTOC_<LANG>.txt (13 languages)
+├── Binaries/
+│   ├── build.properties
+│   └── Win32/         ASAMU-Win32-Shipping.exe (42,971,136 bytes, PE i386), ASAMU-Win32-Shipping.com,
+│                      ASAMU-Win32-Shipping.exe.config, steam_api.dll, steam_appid.txt, 47 more DLLs,
+│                      UE3ShaderCompileWorker.exe, UnrealLightmass.exe, UserCode/UnSetupNativeWrapper.exe
+└── Engine/
+    ├── Config/        Base*.ini (10), ConsoleVariables.ini (no platform subfolders)
+    ├── Localization/  9 folders: CZE DEU ESN FRA HUN INT ITA POL SLO
+    ├── Shaders/Binaries/  147 .bin
+    ├── EditorResources/, Extras/3dsMaxScripts/, Splash/PC/, Stats/
+```
+
+All 53 executable images (4 `.exe`, 48 `.dll`, 1 `.com`) are 32-bit (`PE i386`); there is no `Win64`
+folder. `ASAMU-Win32-Shipping.exe` has SHA-256
+`17f2aeb601086089f4cbf144d2eb2b4b672c2d0594ad81f8f75ba27736d26e4e`, the hash `WINDOWS_BINARY.md`
+recorded independently for the executable it analysed.
+
+### Per category
+
+| Category | Files | Bytes |
+|---|---:|---:|
+| `texture-related` | 3 | 568,543,124 |
+| `map` | 12 | 310,259,743 |
+| `shader` | 153 | 172,765,731 |
+| `ue3-package` | 27 | 94,809,180 |
+| `executable` | 53 | 80,414,760 |
+| `editor-resource` | 1080 | 18,373,230 |
+| `localization` | 318 | 8,718,549 |
+| `image` | 4 | 2,928,224 |
+| `metadata` | 17 | 1,231,599 |
+| `config` | 23 | 208,468 |
+| `engine-resource` | 9 | 11,502 |
+
+The other tables (per extension, per type, the 42 packages with their hashes, the TOC cross-check)
+are in the generated summary.
+
+### How the two depots differ
+
+Paths are compared after removing the macOS depot's `A Story About My Uncle.app/Contents/Resources/`
+prefix and reading `CookedMac` as `CookedPC` (regenerate: compare the `files` arrays of the two
+committed JSON inventories by path and `sha256`).
+
+| | Files | Bytes |
+|---|---:|---:|
+| In both depots, byte-identical (same SHA-256) | 1,588 | 1,173,937,075 |
+| In both depots, different | 11 | Windows copies larger by 3,666 in total |
+| Only in the Windows depot | 100 | 84,152,852 |
+| Only in the macOS depot | 37 | 72,241,677 |
+
+- **Byte-identical: everything the importer reads, and all other game data.** The whole cooked
+  folder (48 files, 1,145,238,923 bytes: the 42 packages, the 3 texture file caches and the 3 global
+  shader caches), `ASAMU/Config` (11), `ASAMU/Localization` (191), the 14 TOC files,
+  `ASAMU/Build` (1), `ASAMU/Splash/PC` (2), `Engine/EditorResources` (1,079), `Engine/Extras` (1),
+  `Engine/Shaders` (147), `Engine/Stats` (9) and the six engine languages both depots have (85).
+  The importer's test `embedded_inventory_lists_the_windows_inputs` asserts that the 45 input files
+  of the two committed inventories have the same paths, sizes and hashes.
+- **Different (11):** `Engine/Config/Base*.ini` (10) and `Engine/Config/ConsoleVariables.ini`. Each
+  Windows copy is larger than the macOS copy by the difference the macOS TOC cross-check lists above
+  (523, 51, 367, 1,114, 170, 9, 393, 251, 734, 34 and 20 bytes) and has exactly the size the TOC
+  records: the macOS depot's copies had their CRLF line ends turned into LF.
+- **Only Windows (100):** `Binaries/` (56 files, 80,415,336 bytes: the executables above, the two
+  loose text files and `steam_appid.txt`), the engine localization of three more languages
+  (`Engine/Localization/CZE`, `HUN`, `SLO`: 42 files, 2,273,404 bytes) and `Engine/Splash/PC`
+  (2 files, 1,464,112 bytes).
+- **Only macOS (37):** the application bundle's own files (`Info.plist`, `PkgInfo`, the four
+  binaries in `MacOS/`, `English.lproj/` (2) and `Resources/steam_appid.txt`: 9 files), `ASAMU/Config/Mac`
+  (4), `ASAMU/Splash/Mac` (2), `Engine/Config/Linux`, `Mac`, `Mobile` and `PCServer` (5 each) and
+  `Engine/Splash/Mac` (2; same sizes as the Windows depot's `Engine/Splash/PC` files, different
+  bytes).
+
+### Cooker TOC cross-check
+
+On Windows the TOC's `..\X` paths resolve at the install root itself, so nothing is remapped and
+nothing is missing: all 1,397 `PCTOC.txt` entries exist at their exact path, and 1,393 have the TOC
+size. The four that differ:
+
+| Path | TOC bytes | Disk bytes | Difference |
+|---|---:|---:|---:|
+| `ASAMU/CookedPC/RefShaderCache-PC-D3D-SM3.upk` | 31,379,963 | 31,424,181 | +44218 |
+| `ASAMU/Localization/INT/ASAMU.int` | 31,308 | 31,296 | -12 |
+| `ASAMU/PCTOC.txt` | 88,813 | 88,877 | +64 |
+| `Binaries/build.properties` | 87 | 94 | +7 |
+
+The first three are the three non-config differences of the macOS depot's cross-check (the same
+files, byte-identical in both depots). 302 files on disk are not in `PCTOC.txt`: the 13 language
+TOCs, the localization of the 13 other game languages (177 files) and of the 8 other engine
+languages (112 files). The 13 language TOCs each list every one of their entries at its exact path
+with two size differences (their sets are in the JSON).
+
+### Independent verification
+
+- Two `asamu-inventory --out ... --summary ...` runs on the Windows machine produced byte-identical
+  JSON (410,816 bytes) and summary files; the committed files are those. The JSON holds no absolute
+  path, no drive letter, no backslash and no user name.
+- Every one of the 1,699 files was hashed a second time with PowerShell's `Get-FileHash` (another
+  SHA-256 implementation) and sized with the file system's own length: 1,699 of 1,699 rows agree
+  with the JSON, with no file on either side missing from the other.
+- `cargo test -p asamu-inventory --test real_install` on that machine re-inventories the install and
+  compares every row and the TOC reports with the committed JSON: passed.
+
+## Converting on Windows
+
+`asamu-import` (built for `x86_64-pc-windows-msvc`, Rust 1.98.0) was run on the Windows depot on
+2026-10-10, and its results compared with a conversion of the macOS depot made on the analysis Mac
+(`aarch64-apple-darwin`). Everything here is a measurement of the importer, not of the game.
+
+The measurements were repeated on 2026-10-11 with the importer that also writes simple collision
+(`MESHES.md`, mesh manifest version 2): a conversion from nothing, the comparison with the macOS
+conversion file by file (path, size and SHA-256 of all 13,407 and 13,091 files, hashed with another
+SHA-256 implementation than the importer's), and the experiments named below. The macOS conversion
+on record is older than both the simple-collision output and the portable math, so it is the
+reference for what the macOS importer wrote *before* those changes.
+
+### Result
+
+`asamu-import all` finds the install through Steam, reports
+`all 45 input files match win-depot278361-build1822049 (size and SHA-256)`, and all twelve stages
+finish `ok`: 13,407 files, 2,286,853,777 bytes (13,091 files and 2,282,441,395 bytes before the
+simple-collision output). The input fingerprint in the run manifest
+(`install.inputs.sha256`, over the 45 paths, sizes and hashes) is
+`604eea70f27bfa8397c6ded72b834dbfb3fef63fb4b7ed4730d449de6309c521` on both systems.
+
+A stage's digest in the run manifest is a SHA-256 over the path, size and SHA-256 of every file the
+stage wrote, so equal digests mean byte-identical output trees.
+
+| Stage | Files | Bytes | Same digest as the macOS conversion |
+|---|---:|---:|---|
+| `textures` | 7,702 | 1,287,215,285 | yes |
+| `meshes` | 2,081 | 70,525,421 | not comparable: the macOS conversion has no simple collision, see below |
+| `materials` | 1 | 2,538,921 | yes |
+| `levels` | 37 | 76,104,460 | no: 3 of 37 files, see below |
+| `audio` | 774 | 58,757,448 | yes |
+| `matinee` | 16 | 1,062,984 | yes |
+| `skeletal` | 55 | 85,849,167 | yes |
+| `kismet` | 13 | 3,010,893 | yes |
+| `lightmaps` | 2,649 | 617,684,091 | no: 10 of 2,649 files, see below |
+| `particles` | 13 | 5,649,857 | yes |
+| `decals` | 50 | 77,016,867 | yes |
+| `localization` | 16 | 1,438,383 | yes |
+
+Nine stages are byte-identical across the two systems, file for file. `localization` is identical
+although the Windows depot has three more engine languages, because the stage reads
+`ASAMU/Localization` only.
+
+`meshes`: the 882 `.gltf` and 882 `.bin` files are byte-identical to the macOS conversion's. The
+other 317 files are the simple-collision output, which the macOS conversion on record does not
+have: 316 `.collision.json` files (4,119,188 bytes) and `manifest.json`, which differs from the
+macOS one in its version (2 against 1), the 882 `simple_collision` records and the 882
+`content_hash` values (the hash now covers the collision switches and shapes) and in nothing else.
+Before the simple-collision output the stage had the macOS digest (1,765 files, 66,113,039 bytes,
+`9dbdd7105c7b30e9…`, measured 2026-10-10), and the counts and sizes after it are the ones
+`MESHES.md` records for a macOS conversion (2,081 files, 70,525,421 bytes, a manifest of 1,675,457
+bytes); no macOS digest of the new output is on record.
+
+### The two stages that differed, and why
+
+Both differences come from the C math library of the system the importer runs on, not from the
+game data (which is the same bytes).
+
+- **`levels`**: the scene files of `AG-Epilogue`, `AG-Workshop` and `ASAMUFrontEndMap` differ in 88
+  numbers in all, every one an element of a `local_to_world` matrix that is smaller than 10⁻¹⁵ in
+  magnitude on both systems (for example `0.0` against `-7.27331e-17`; the largest difference is
+  1.6 × 10⁻¹⁶); nothing else in the 37 files differs. These elements are differences of two
+  products of table sines that cancel mathematically. The rotator table is `sin(i · 2π / 16384)` evaluated in double precision, and for
+  847 of its 16,384 entries the macOS library and the Windows C runtime return doubles that differ
+  in the last bit (neither is the correctly rounded value for all entries: 633 and 512 entries
+  differ from it, counted against 70-digit decimal arithmetic; counted again on 2026-10-11 from
+  tables read out of both C libraries: 847, 633 and 512). Rounded to single precision the two
+  tables are identical, which is why only cancelling terms show the difference.
+- **`lightmaps`**: 8 of the 12 map indexes and two atlas textures differ. In the eight indexes, 26
+  `max_irradiance` / `mean_irradiance` numbers differ in all (1 to 5 per map), by at most
+  1.5 × 10⁻⁷ (relative), and nothing else. In the two atlases (`AG-BeautifulCity/atlas_72.dds`,
+  `AG-StarHaven/atlas_100.dds`) 1 and 4 texels differ, each by one step of one 9-bit channel of the
+  `R9G9B9E5` value (what a last-bit difference gives when a value lies at a rounding boundary of
+  the encoder; TENTATIVE as the mechanism, the counts are measured). The light map decode raises `(c + 0.055) / 1.055` to the power 2.4 in single precision for each of the 256 byte values;
+  the macOS `powf` returns a different last bit than the Windows one for two of them (bytes 71 and
+  180). The Windows results are the correctly rounded ones for all 256.
+
+Proof that nothing else is involved: a test build that returned the macOS library's 16,384 sines and
+256 decoded bytes (tables recorded on the Mac) instead of computing them, run on the Windows
+machine, produced the macOS conversion's digests for both stages exactly
+(`ce92daaa24494d51…` and `7a4b4d04c263c8e8…`). The experiment was repeated on 2026-10-11 with
+tables recorded anew from the Mac's C library, with the same result.
+
+**Fix (in this repository):** the decoders now take these functions from
+`asamu_ue3::portable_math` (the pure-Rust `libm` crate, and for the single-precision functions a
+double-precision evaluation rounded once), which computes the same bits on every system: the sine,
+cosine and power of `libm` 0.2.16 use IEEE arithmetic and exactly rounded operations only (read in
+its source; its architecture-specific paths are exactly rounded operations such as the square
+root, and 32-bit x86 without SSE, which is not a target here). What was moved:
+
+| Function | Was | Reaches |
+|---|---|---|
+| `asamu_ue3::level::rotator_sin_cos` (the rotator sine table) | `f64::sin` | `levels`, and through `decal::rotator_axes` the decal frames |
+| `asamu_ue3::lightmap::srgb_to_linear` | `f32::powf` | `lightmaps` |
+| `asamu_ue3::material::color_to_linear`, and the folding of constant Power, Sine and Cosine material expressions | `f32::powf`, `f32::sin`, `f32::cos` | `materials` and what reads material parameters |
+| `asamu_ue3::decal::DecalFrame::from_axes` (the decal's own rotation) | `f64::sin`, `f64::cos` | `decals` |
+| `asamu-import` `decals::srgb_to_linear` (mask values) | `f32::powf` | `decals` |
+| `asamu-import` `skeletal::rotator_to_quat` | `f64::sin_cos` | `skeletal` |
+| `asamu-import` `lightmaps::rgb9e5` (the shared exponent) | `f64::log2`, now the exponent field of the number | `lightmaps` |
+| `asamu-import` `lightmaps::linear_to_srgb_byte` | `f32::powf` | PNG previews (`--png`) only |
+
+Tests pin whole tables by hash. The hashes of the three power tables are those of the correctly
+rounded results, computed independently with decimal arithmetic; the sine and cosine hashes were
+reproduced on macOS arm64 by a transcription of the algorithm into another language, and the
+Windows x86_64 build returns the same bits. Measured on the Mac's C library: its `powf` returns the
+neighbouring value for the bytes 71 and 180 at the exponent 2.4 and for 79 and 198 at 2.2; the
+Windows C runtime's `powf` is correctly rounded for all 256 bytes at both exponents.
+
+On Windows these changes are invisible in the output: a build with every one of these calls put
+back on the Windows C runtime (the preview function excepted, which a default run does not use)
+wrote the same digests for `materials`, `levels`, `matinee`, `skeletal`, `kismet`, `lightmaps`,
+`particles` and `decals` (measured 2026-10-11). So the digests every system should now produce are
+the ones in the table above: `levels`
+`ddb720291028e5c8fcf8d87ee62fe75d0e2bb86c87f623915d4f2e78adf9004f`, `lightmaps`
+`0a867328d4bd4f7c5eb358c6fd86bb7fa640e613383aecc425fa15d6c02561bf`.
+
+What this means for a macOS conversion, which has not been repeated with the fixed importer:
+
+- `levels` and `lightmaps` **will change** there, to the Windows digests: 88 matrix elements in 3
+  scene files, and 26 numbers and 5 texels in 10 light map files, as listed above (STRONG: the
+  functions are platform-independent by construction and pinned by tests, and the experiment above
+  shows they were the only platform-dependent inputs of the two stages).
+- The nine stages that are byte-identical on the two systems are expected to stay as they are
+  (STRONG for the same reason, and because the Windows output did not change either); for `meshes`
+  that holds for the files the macOS conversion on record has.
+- Until someone runs it, the macOS conversion on record still has the old two digests.
+
+One decoder still calls the platform's C library where its results reach converted data:
+`asamu_ue3::matinee` (the single-precision rotator table, `atan2`, `acos` and `sin` of the
+rotation conversions and the quaternion interpolation). It reproduces the engine's own evaluation
+and has a second implementation in `asamu-kismet` that must agree with it, so it was left alone;
+its output (`matinee`, and the transforms `kismet` embeds) is identical on macOS arm64 and Windows
+x86_64 for the shipped data, and a third C library (Linux has not been measured) could differ there.
+
+### Determinism, reruns and the folder swap (Windows, NTFS)
+
+- Two `all --force` runs in a row wrote byte-identical run manifests (same SHA-256 of
+  `asamu-import-run.json`, which holds all twelve stage digests), and so did every other full run of
+  the same build.
+- A rerun with nothing to do takes 0.13 to 0.18 s (seven measurements; 0.11 to 0.16 s in three more
+  on 2026-10-11), reports every stage `up to date`, and leaves the manifest unchanged.
+- Two conversions from nothing into two different folders wrote byte-identical run manifests
+  (2026-10-11).
+- The swap of a finished stage folder into place (two folder renames) worked in every run while no
+  program had the files open, with no `.staging` or `.replaced` folder left behind.
+- **Windows refuses to rename a folder while any program has a file inside it open**, whatever
+  sharing mode that program asked for (measured: "Access is denied", error 5). With a converted file
+  held open, the stage fails after about 2.7 s of retries with a message that says so, the previous
+  output stays complete and in place, the staged copy is removed, and the next run (after the file
+  is closed) converts the stage again. So: close the game runtime before re-importing.
+
+### Options tried on Windows
+
+- `--package-cache`: the cache of the 42 decompressed packages is 1,575,133,703 bytes and took 2.5
+  to 3.1 s to build. A forced run through it gave the same twelve digests as a run without it,
+  **after a fix**: the first such run wrote a different `levels` folder (36,408 bytes smaller, digest
+  `02d8227b20f8fed3…`). `levels` was marked as reading nothing but packages, but it also reads the
+  install's engine configuration files (they name the default post-process chain), which the cache
+  does not hold; through the cache it left that chain out without a word. The stage reads the
+  install now. This was not specific to Windows: it would have happened on any system. Repeated on
+  2026-10-11: a conversion from nothing with the option wrote the same twelve digests as one
+  without it, and a build with `levels` marked as reading only packages again wrote the smaller
+  folder with that digest.
+- `--png` (PNG previews): `textures` 15,403 files, 3,703,000,306 bytes; `lightmaps` 5,267 files,
+  1,073,300,906 bytes; both `ok`. No macOS run with this option is on record to compare with.
+- `--lang DEU`: `audio` 774 files, 58,761,691 bytes, the same digest with and without the package
+  cache.
+
+### Time
+
+Seven full default conversions were timed. Other compile jobs were running on the machine (18 to
+21 of its 24 cores were busy each of the six times it was sampled), so these are upper bounds, not
+a benchmark: 60.0, 65.5 and 67.2 s for three runs, and 101.5, 314.7, 366.3 and 546.2 s for four
+runs under heavier load. The macOS conversion took 44.4 s. Fastest Windows run, per stage (macOS in brackets):
+textures 8.5 s (5.1), meshes 4.0 (2.9), materials 4.6 (3.8), levels 4.2 (3.0), audio 1.9 (1.7),
+matinee 2.4 (2.0), skeletal 2.9 (2.3), kismet 4.7 (3.3), lightmaps 15.8 (9.3), particles 6.8 (5.0),
+decals 2.3 (2.1), localization 0.1 (0.2). A 60 s run used 54 s of user and 28 s of kernel CPU time
+and peaked at 1.6 GB of memory; real-time virus scanning was on (it was not changed). How long an
+otherwise idle machine takes is UNKNOWN. The three conversions of 2026-10-11 (with the
+simple-collision output, the machine again busy with other builds) took 111.6, 136.7 and 178.4 s,
+and a fourth with `--package-cache` (which builds the cache first) 66.2 s.

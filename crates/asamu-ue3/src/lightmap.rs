@@ -1093,12 +1093,15 @@ pub fn encode_lighting_native(n: &LightingNative, native_base: Option<i64>) -> O
 /// Light map textures are sampled with sRGB decoding: `LightMapTexture2D`
 /// has no tagged `SRGB`, so it keeps the `Engine.Texture` default (`true`);
 /// see `LIGHTMAPS.md`.
+///
+/// The power is [`crate::portable_math::powf`], not the platform's C
+/// library, so every system decodes a byte to the same value.
 pub fn srgb_to_linear(v: u8) -> f32 {
     let c = f32::from(v) / 255.0;
     if c <= 0.040_45 {
         c / 12.92
     } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+        crate::portable_math::powf((c + 0.055) / 1.055, 2.4)
     }
 }
 
