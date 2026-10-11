@@ -27,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Needs no Rust and no Windows machine: a fake ssh and scp record what would be sent.
+      - name: Self-test of tools/dev/win_host.sh (Linux)
+        run: bash tools/dev/test_win_host.sh
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
@@ -51,6 +54,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - name: Self-test of tools/dev/win_host.sh (macOS; the Linux run is in the hygiene job)
+        if: runner.os == 'macOS'
+        run: bash tools/dev/test_win_host.sh
+      - name: Test of the PowerShell half of tools/dev/win_host.sh (Windows PowerShell 5.1, in the runner's temporary folder)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          WIN_HOST_TEST_DIR: ${{ runner.temp }}\win_host_remote_test
+        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\dev\test_win_host_remote.ps1
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy
