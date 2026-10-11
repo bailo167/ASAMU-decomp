@@ -90,7 +90,23 @@ are taken before that tick's rotation update), Z removed, normalised, times `Acc
 magnitude is lost (also natively, NATIVE_PHYSICS.md finding 2). While the move-input lock is active (§8) the
 input layer zeroes the move axes first, so the acceleration is zero. The value is written to the pawn, then
 the jump check runs (§3).
-→ Rust: `accel = AccelRate · normalize_or_zero(fwd·X + strafe·Y)` with yaw-only axes.
+- The axes come from the native `GetAxes`, i.e. from the engine's angle table (A-CM-8): each angle of the
+  pawn rotation is floored to a multiple of 4 rotator units [CONFIRMED (native); measured: 10,051 of 10,051
+  recorded on-axis accelerations fit the floored angles, 2,105 the exact ones].
+- "Before that tick's rotation update" means the rotation the previous tick ended with [measured: the
+  recorded acceleration is on the stick's axis in the previous record's pawn rotation on 10,051 of 10,051
+  samples, in the same record's on 7,907]. The pawn's yaw then equals the view yaw, because the look update
+  turns the pawn to the view in the same call (A-CM-9) [measured: equal modulo a turn on 45,237 of 45,237
+  records].
+- The pawn's roll (it leans while moving: up to 2,046 units, 11.2°, in the recordings; `MaxLeanRoll` is 2048)
+  and the pitch it keeps from a flight for the first walking move after a release take part in the axes; they
+  turn the move direction by up to 0.56° and 4.8° [STRONG, docs/TRACE_CAPTURE.md 3.4]. With the stick on an
+  axis and the pitch 0 the roll changes nothing: the forward axis has no roll in it, and the right axis keeps
+  its direction once its Z part is dropped [measured: 9,977 of 9,977 such accelerations, 7,628 of them under
+  a roll, lie on the yaw-only table axes; gated test `crates/asamu-player/tests/parity_recordings.rs`].
+→ Rust: `accel = AccelRate · normalize_or_zero(fwd·X + strafe·Y)` with the table axes of the yaw before the
+look update (`pawn::controller_move`, `sim::rotator_axes_flat`). Not ported: the lean roll and the kept
+pitch (the simulation has no pawn roll or pitch yet).
 
 **A-WK-2 Ground physics** is the native walking of NATIVE_PHYSICS.md §2–3 with `MaxSpeed = GroundSpeed`,
 `Friction = 8.0`.
@@ -107,8 +123,21 @@ the jump check runs (§3).
 | controller `ResetPlayer` exec | 440 | sprint stopped, power jump cancelled, velocity 0, AirSpeed 2000, grapple released |
 | cheat `SetSpeed F` (the controller's `GameCheatManager` exists in standalone games) | `440 × F` (class default × F; water speed too, not AirSpeed) | used by map Kismet: Workshop `setspeed 0.3` (132); Epilogue `SetSpeed 0.15` (66) and `setspeed 0.3` (132) |
 
-Any later sprint apply/remove or story transition overwrites a `SetSpeed` value with the 440-based values;
-whether the Workshop/Epilogue sequences prevent sprinting is UNKNOWN.
+`SetSpeed F` is the stock cheat manager's command [CONFIRMED (src, `Engine.CheatManager`)]: it writes the
+two speeds and nothing else (no sprint flag, no pawn state), from the class defaults (`UTPawn` `GroundSpeed`
+440, not `MoveSpeed`). In `f32`, 440 × 0.3 = 132.0 and 440 × 0.15 = 66.0 exactly. Measured: the original's
+`GroundSpeed` is 132.0 on 3,001 of 3,001 recorded AG-Workshop frames (docs/PARITY_FINDINGS.md P6).
+
+Every other writer keeps writing its own 440-based value afterwards, whatever the command left
+[CONFIRMED (src)]:
+- In story mode the sprint keys do nothing (A-ST-2), so the commanded speed stays until the story transition:
+  leaving story mode writes 440, entering it (again) 264. The Workshop runs the command right after entering
+  story mode, so there a sprint press leaves 132.
+- Outside story mode a sprint press on the ground writes 880, its release 440, a jump attempt while
+  sprinting 440, a landing with the sprint armed 880.
+No recording contains a sprint press after the command, so this is the script's rule, not a measurement.
+→ Rust: `pawn::set_speed(state, params, factor)` and `pawn::console_command(state, params, line)` (the
+command word matched without regard to case). The Kismet host does not call them yet.
 
 **A-WK-4 Sprint state machine** [CONFIRMED (src, config)] (`StartSprinting`/`StopSprinting`, left shift /
 gamepad left shoulder):
@@ -373,7 +402,16 @@ step `h` = 0.016 s:
 rotation, then camera animations/modifiers (stock camera, native). The weapon trace and the boost aim use
 the same location and the camera's POV rotation (G-TG-1).
 
-**A-CM-2 View pitch** [CONFIRMED (cdo)]: limited to [−18 000, 18 000] rotator units (≈ ±98.9°).
+**A-CM-2 View pitch** [CONFIRMED (cdo) limits; CONFIRMED (src) rule, stock `PlayerController` view limit,
+which the ASAMU controller does not override]: after every look update the pitch is reduced to 0…65 535; a
+value strictly above `ViewPitchMax` (18 000) and strictly below `65 535 + ViewPitchMin` (47 535) is moved to
+`ViewPitchMax` when it is below half a turn and to 47 535 otherwise. As signed angles the limits are
+therefore **+18 000 and −18 001** (≈ +98.877° and −98.882°): the lower one is one unit further out because
+the rule adds the minimum to 65 535, not to 65 536. It is a forbidden band, not a saturating clamp: a single
+delta wider than the band (more than 162° in one frame) can jump across it.
+Measured: 50 recorded frames at exactly +18 000 and none above; the lowest recorded pitch is −11 998, so the
+lower limit is in no recording.
+→ Rust: `sim::limit_view_pitch`.
 
 **A-CM-3 FOV** [CONFIRMED (config + src)]: the settings manager issues `FOV <setting>` at login (90 by default;
 ≤ 0 replaced by 90), locking the camera FOV. Only zoom changes it during play.
@@ -389,7 +427,8 @@ native pre-physics snapshot `OldZ`, `S = |V|`, phase = the bob phase.
   the hit height above the centre (70 when nothing is hit).
 - **Walk bob** (moves the view and therefore the grapple/boost trace origin): walking: phase advances by
   `0.2·dt` when `S < 10`, else by `dt × {0.55 story | 0.85 sprinting | 0.65 otherwise}`; lateral offset =
-  pawn-right axis × `0.01·S·sin(8·phase)`; vertical offset = `0.0075·S·sin(16·phase)` when `S > 10`, else 0
+  pawn-right axis (`GetAxes` of the pawn rotation after this tick's look update: table angles, A-CM-8) ×
+  `0.01·S·sin(8·phase)`; vertical offset = `0.0075·S·sin(16·phase)` when `S > 10`, else 0
   (the stock additive vertical term is never set, so it stays 0). Not walking (and not swimming): phase := 0
   and the offset decays by `(1 − min(1, 8dt))`. Amplitudes at 440 uu/s: ±4.4 uu lateral, ±3.3 uu vertical;
   doubled at 880. The `Bob` value is clamped to ±0.05 (it is 0.01); with `bWeaponBob` off the offset would be
@@ -410,6 +449,96 @@ the aim rotation.
 
 **A-CM-7 Other feedback**: speed lines (G-FX-2); a falling-wind sound parameter equal to `|V.x + V.y + V.z|`
 (sum of components, not the magnitude) sampled every 0.1 s; screen fades (death).
+
+**A-CM-8 Rotations become directions through the engine's angle table** [CONFIRMED (native); measured]
+- **Table.** The engine builds 16 384 single-precision sines at start-up
+  (`FGlobalMath::FGlobalMath @ 0x1000FA0A0`; the Windows build's constructor is at `0x5B1E70`, same
+  arithmetic). Entry `i` is the sine of the `f32` argument `f32(f64(f32(i) · 2) · π · 2⁻¹⁴)`: the index is
+  doubled in single precision, multiplied by π and 2⁻¹⁴ in double precision (constants at `0x101645730` and
+  `0x101645740`), and narrowed before the sine. The sine routine is the platform's: `sinf` on macOS,
+  `__libm_sse2_sinf` of the Visual C++ 2010 runtime on Windows.
+- **Lookup.** `sin(a) = T[(a >> 2) & 0x3FFF]` and `cos(a) = T[((a + 16 384) >> 2) & 0x3FFF]`
+  (`FRotator::Vector @ 0x1000FC740`, `UObject::execGetAxes @ 0x1000C3C80`). So the low two bits of an angle
+  are dropped, which floors it to a multiple of 4 units towards −∞ also when it is negative (the shift works
+  on the two's-complement bits), bits above 15 are dropped, and there is no cosine table: a cosine is the
+  sine entry a quarter turn on.
+- **Vectors.** `vector(rotation)` = `(cp·cy, cp·sy, sp)` in single precision, not renormalised
+  (`FRotator::Vector`, reached from `UObject::execRotatorToVector @ 0x1000C03E0`). `GetAxes` gives
+  `X = (cp·cy, cp·sy, sp)`, `Y = (sr·sp·cy − cr·sy, sr·sp·sy + cr·cy, −sr·cp)`,
+  `Z = (−(sr·sy + cr·sp·cy), sr·cy − cr·sp·sy, cr·cp)`; with pitch and roll 0 that is exactly
+  `X = (cy, sy, 0)`, `Y = (−sy, cy, 0)`, because the entries for 0° and 90° are exactly 0 and 1.
+- **Not the true sine.** The `f32` argument is part of the values: the entry for 180° is `sin(f32(π))` =
+  −8.742278e-8, not 0, and the table's cos 90° is that same entry (sin 0° and cos 270° are exactly 0, sin 90°
+  and cos 0° exactly 1). An entry differs from the true sine of its angle by up to 2.4e-7 (half an ulp of
+  the argument, where the sine is steepest).
+- **Who uses it** (script calls that end in the two native routines): the controller's walking move
+  (`GetAxes`, A-WK-1), the walk bob's right axis (`GetAxes`, A-CM-4), the fire trace and the crosshair trace
+  (`vector(aim)`, G-TG-1/2), the boost aim (`vector(aim)`, A-RB-3/4) and the boost's corkscrew rotation
+  (a vector rotated by the rotator of the aim direction).
+- **Measured** (the three Windows recordings; reproduce with the gated test
+  `crates/asamu-player/tests/parity_recordings.rs` and `ASAMU_TRACE_RAW_DIR`): acceleration of walking or
+  falling frames whose previous pawn rotation the table reads as yaw only (pitch and roll below 4 units) and
+  whose stick is on an axis: 2,349 samples (2,217 walking, 132 falling).
+  - The recorded acceleration is within 8.2e-8 rad of the table axis of the floored previous yaw on all
+    2,349 (the rounding of three single-precision scalings, by the stick's size and by two normalisations,
+    allows 1.8e-7 rad).
+  - Floor, not truncation towards zero: the axis of the yaw truncated towards zero is 4 units (3.8e-4 rad)
+    away on every one of the 1,112 samples whose previous yaw is negative and no multiple of 4.
+  - Not the exact angle: it fits none of the 1,933 samples whose previous yaw is no multiple of 4.
+  - The table, not the exact sine of the floored angle: that is more than 1e-7 rad away on 330 samples (up
+    to 2.3e-7 rad, the table's own argument rounding).
+  - The previous record's yaw, not the same record's: the same record's fits 1,845 (the view did not turn).
+  Example: raw WS1 records 1513 and 1514 (previous yaw −32 768) have the
+  acceleration y = −1.7904183e-4 = 2048 × −8.742278e-8, and record 1515 (previous yaw −32 777, read as
+  −32 780) has y = 2.3562655 against 2.3562658 from the table and 2.3561940 from the exact sine.
+- **Last bit of the entries** [STRONG]: our entries are the correctly rounded sines of the same arguments
+  (all 16 384 equal an independent computation). The Windows routine converts its argument to double
+  precision, evaluates there and narrows once (read from the routine's main path in runtime version
+  10.0.40219.325), which gives the correctly rounded value except in vanishingly rare ties; the table of
+  the running game has not been read out. Apple's `sinf` in the x86_64 library the macOS build loads is 1
+  ulp off the correctly rounded value on 4 of the 16 384 entries (called on macOS 26 under Rosetta; the
+  arm64 library on 220), so the macOS build's table need not be bit-identical to the Windows one.
+→ Rust: `asamu_player::sim::{angle_table_index, angle_table_entry, rotator_sin, rotator_cos,
+rotator_vector, rotator_axes_flat}`, used by the controller move, the walk bob and every aim of the script
+layer. Not ported: pitch and roll in the move axes (A-WK-1) and the table in the boost's corkscrew rotation
+(`rocket_boots::rotate_by_aim` uses exact trigonometry).
+
+**A-CM-9 The view rotation is an integer rotator** [CONFIRMED (src, native); measured]
+- The controller's rotation is three integers. A look update (stock `PlayerController` rotation update;
+  called by the walking move after the axes were taken, and by the `Grappling` move; not in the
+  `ReleaseGrapple` tick, G-RL-7) converts the frame's turn and look-up inputs, floats in rotator units, to
+  integers, adds them to yaw and pitch, limits the pitch (A-CM-2), and turns the pawn to the result (pitch
+  forced to 0 while walking or falling, roll kept).
+- The conversion drops the fraction towards zero, every frame (a float-to-int cast in the function's
+  bytecode; `UObject::execFloatToInt @ 0x1000B8AB0` truncates). Nothing carries the fraction over.
+- The yaw is never reduced (recorded values run past ±32 768, e.g. −32 777); every reader drops the bits
+  above 15 (A-CM-8). The pitch is reduced to 0…65 535 by its limit.
+- Measured: whole-unit deltas reproduce the recorded yaw and pitch on 45,223 of 45,223 ticks, and
+  `sim::apply_look`, fed each recorded change as the trace converter encodes it and carried from the first
+  record of a run to its last (14 runs, the longest 10,631 ticks), reproduces both bit for bit on all 45,223
+  (`crates/asamu-player/tests/parity_recordings.rs`). The recorded pitch is the masked value (0…65 535), as
+  the limit leaves it, on 45,236 of 45,237 records; the other one is the record of a respawn, which sets the
+  rotation without a look update (pitch −17), and the next record holds 65 519.
+- A whole replay can still lose the view after a grapple release: the tick after a release has no look
+  update (G-RL-7), so when our simulation releases on a tick where the original did not (its grapple ended
+  on another tick, or never attached, or attached and let go within one tick), the delta of that tick is
+  skipped. Free-running replays of the 14 recorded runs (`asamu-trace replay --start force --compare` on the
+  converted levels; recounted 2026-10-11, the numbers move with every collision change): stopped at the first
+  level event (the default; 20,220 ticks replayed), yaw and pitch are bit-equal on every tick of 12 runs and
+  in the other two (PLAY2 runs 0 and 5) up to the first such tick (892 and 1069); carried through the level
+  events (`--level-events inject`, 45,237 ticks) on every tick of 10 runs, the other four (PLAY2 runs 0, 1, 4
+  and 5) up to ticks 892, 1222, 3289 and 1069. Every tick on which the view change differs is such a tick or
+  a respawn that sets the rotation (12 ticks in all). That is a consequence of the grapple differences
+  (docs/PARITY_FINDINGS.md P1 to P5), not of the look update: restarted every tick from the recorded previous
+  sample (`--one-step --level-events inject`), the whole tick leaves yaw and pitch equal to the recording on
+  all 45,225 compared ticks of the 14 runs.
+→ Rust: `sim::apply_look`. The public view angles stay radians; each holds the exact radian image of a
+unit, the update decodes it, works in integers and stores the image of the result, so nothing accumulates
+(before: 1.1e-5 rad of drift per 10,632 ticks). A look delta within one `f32` ulp of a whole number of
+units is that number, anything else is truncated towards zero (`sim::look_delta_units`). The yaw is kept
+reduced to 16 bits. The placeholder pipeline (no script layer) keeps its radian arithmetic.
+Not ported: the input scaling that turns mouse counts or a stick into the float turn (`PlayerInput`); the
+app's own mapping feeds radians.
 
 ## 11. Death, kill zones, respawn, checkpoints, saving
 
@@ -547,7 +676,9 @@ after it (integrated next frame).
 ## 17. Open questions
 
 1. Input dispatch placement relative to the actor ticks (assumed before them; G-TM-2).
-2. Whether the Workshop/Epilogue slow-walk (`SetSpeed`) can be overridden by sprinting in practice.
+2. Whether the Workshop/Epilogue slow-walk (`SetSpeed`) can be overridden by sprinting in practice. By the
+   script: not in story mode (the sprint keys do nothing there), yes outside it (A-WK-3). No recording has a
+   sprint press after the command.
 3. Is KillZ ever reached (A-DT-3)?
 4. Which rocket-boot and grapple-capacity Kismet actions fire at which moment per level.
 5. Exact landing velocity seen by `Landed` for slides/step landings (native, NATIVE_PHYSICS.md §4.4).
@@ -623,3 +754,24 @@ Method as in GRAPPLE.md §0/§19. Outcome per item:
   (damping during a boost), leap/boost lock interplay, KillZ damage-type branch, landing slowdown absence and
   the complete velocity-writer list added; tick order upgraded to STRONG; DoJump, landing, power-jump,
   boots, death and eye-height sections restructured as rules, tables, timelines and formulas.
+- 2026-10-10 (first recordings, docs/PARITY_FINDINGS.md P6, P7, P9): A-CM-8 (the engine's angle table: rule
+  read from both executables, measured on the recordings) and A-CM-9 (integer view rotation, fraction of a
+  look delta dropped) added; A-WK-1 gained the table axes, the measured time of the rotation and the open
+  roll/pitch part; A-CM-2 **corrected**: the lower pitch limit is −18 001, and the limit is a band on the
+  16-bit circle; A-WK-3: what `SetSpeed` writes and what overwrites it, from the stock script (the earlier
+  "UNKNOWN" about sprinting is now a script rule without a measurement).
+- 2026-10-10 (independent verification of the above): the measurements of A-CM-8 and A-CM-9 are now a gated
+  test on the raw recordings (`parity_recordings.rs`) and the counts here are its output; the floor against
+  a truncation towards zero is counted on negative angles (1,112 samples; 13 anchors, GRAPPLE.md G-TG-1);
+  the `sinf` count for macOS corrected to the x86_64 library (4 entries, not 220).
+- 2026-10-11 (second independent verification, own scripts on the raw recordings and own reading of the
+  macOS routines): the native rules of A-CM-8 and the truncating conversion of A-CM-9 read again and found as
+  described; the counts of A-WK-1, A-WK-3, A-CM-2, A-CM-8, A-CM-9 and GRAPPLE.md G-TG-1 reproduced, with the
+  findings' 10,051 on-axis samples counted as 10,049 between consecutive records of one level (all on the
+  floored axes). A second gated test widens the floor-against-truncation count to samples under a lean roll
+  (9,977 samples; 1,406 with a negative yaw that is no multiple of 4, none on the axes of the yaw truncated
+  towards zero). One-step replays through the whole tick reproduce yaw and pitch on all 45,225 compared
+  ticks. **Corrected:** A-WK-1 gave the effect of the lean on the move direction (0.56°) as the size of the
+  lean, which reaches 11.2°; A-CM-9 said the recorded pitch is always masked, which one record of a respawn
+  is not; A-CM-9's count of free-running replays (12 of 14 runs over 45,237 ticks) holds for replays stopped
+  at the first level event (20,220 ticks), carried through them it is 10 of 14.

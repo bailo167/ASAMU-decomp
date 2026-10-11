@@ -25,7 +25,8 @@
 //! - 3.1–3.5 walking (once-per-call velocity update, uphill moves through
 //!   `stepUp`, floor probe `MaxStepHeight + 2`, hover band 1.9–2.4 → 2.15,
 //!   floor-trace skip, steep-slope slide, fall decision, slope gravity slide,
-//!   velocity re-derived from displacement with `Z = 0`).
+//!   velocity re-derived from displacement with `Z = 0`; 2.4 for the float
+//!   form of every velocity derived from a displacement).
 //! - 4.1–4.8 falling (gravity chain, air-control wall probe and limiter,
 //!   semi-implicit sub-steps, landing at `WalkableFloorZ` with the
 //!   0.003 / 0.1 landing-velocity rule, wall/ceiling slides, `TwoWallAdjust`,
@@ -86,9 +87,26 @@
 //!
 //! `f32` arithmetic in a fixed order with IEEE basic operations and `sqrt`
 //! only; no hashing, no RNG, no globals; collision queries are deterministic
-//! by the [`CollisionWorld`] contract. Last-bit agreement with the original
-//! executable is not a goal (its vector normalisation/division helpers may
-//! round differently — UNKNOWN).
+//! by the [`CollisionWorld`] contract.
+//!
+//! Float form (NATIVE_PHYSICS.md section 2.4): a velocity derived from a
+//! displacement is the displacement times the `f32` reciprocal of the time
+//! ([`velocity_from_displacement`]), as in the original (CONFIRMED: every
+//! such site of walking, falling and flying in both executables; on the
+//! recordings 27,443 of 27,443 walking, 7,798 of 7,885 falling and, through
+//! a model of the gun's pull, 9,467 of 9,481 flying pairs, the misses being
+//! contacts and script events). Inside the velocity update the operations
+//! are in the order of the native code, which both executables share and no
+//! recording can check (the differences never reach a recorded position):
+//! the turning friction is `(difference · dt) · friction` and a braking
+//! piece adds `(v · h) · (1 / dt)` ([`udk_calc_velocity_with`],
+//! [`apply_velocity_braking`]). Vector normalisation
+//! ([`safe_normal`]) is `v · (1 / sqrt(|v|²))` with a correctly rounded
+//! square root and division, which is what the macOS executable does; the
+//! Windows executable uses the processor's approximate reciprocal square
+//! root with one refinement step instead, so against a Windows recording a
+//! normalised vector (the speed cap, the acceleration direction) can be one
+//! unit in the last place off.
 
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -391,6 +409,34 @@ pub fn nearly_zero(v: Vec3) -> bool {
     v.x.abs() < NEARLY_ZERO && v.y.abs() < NEARLY_ZERO && v.z.abs() < NEARLY_ZERO
 }
 
+/// The velocity that covers `displacement` in `time` seconds, in the
+/// original's float form (spec 2.4): the displacement times the `f32`
+/// reciprocal of the time, **not** the displacement divided by the time. The
+/// two differ by one unit in the last place on 3,604 of the 10,570 moving
+/// walking pairs of the first recordings.
+///
+/// This is how the engine's vector type divides by a scalar, so every
+/// "velocity from the distance actually moved" of the movement modes has it.
+/// NativeCode (x86_64 Mac executable; 1.0 is data 0x101633D88):
+/// `APawn::physWalking` reciprocal at 0x100ADB927; `APawn::physFalling` at
+/// 0x100AE0464 (average after wall contact), 0x100AE04D1 (refinement) and
+/// 0x100AE0747 (landing, time = step · `Hit.Time`); `APawn::physFlying` at
+/// 0x100AE1CE8. The Win32 executable has the same form at each of the five
+/// sites. Measured on the Windows build for walking: 27,443 of 27,443
+/// recorded pairs equal this form, 23,839 the division
+/// (`docs/PARITY_FINDINGS.md` V17). Falling and flying are measured too
+/// (spec 2.4): where the two forms give different floats the recordings
+/// have this one on 3,497 falling and 4,045 flying pairs and the division
+/// on none. Only the landing velocity rests on the native code alone.
+///
+/// `time` is positive at every call site (a sub-step, a tick or a contact
+/// time above [`LANDING_MIN_CONTACT_TIME`]).
+#[must_use]
+pub fn velocity_from_displacement(displacement: Vec3, time: f32) -> Vec3 {
+    let reciprocal = 1.0 / time;
+    displacement * reciprocal
+}
+
 /// Sub-step length for `remaining` seconds (spec 1.4).
 #[must_use]
 pub fn substep(remaining: f32) -> f32 {
@@ -405,6 +451,20 @@ pub fn substep(remaining: f32) -> f32 {
 /// `1 − 2·friction·h` in pieces `h ≤ 0.03` s and returns the time-weighted
 /// average of the post-update velocities (pieces reversed relative to the
 /// start velocity are left out), snapped to zero on reversal or below 10 uu/s.
+///
+/// Float form: a piece adds `(v · h) · (1 / dt)`, the velocity times the
+/// piece first and then times one `f32` reciprocal of the whole time; it
+/// does not add `v · (h / dt)`. With a single piece (`dt ≤ 0.03`) the
+/// result is therefore `(v · dt) · (1 / dt)`, which is not always `v`.
+/// NativeCode, the same in both executables and in both copies of the
+/// routine: macOS `APawn::ApplyVelocityBraking` (reciprocal at 0x100ADC2E3,
+/// the two products at 0x100ADC317 and 0x100ADC320) and the copy
+/// inside `AUDKPawn::CalcVelocity`, which is the one the player runs
+/// (0x100F6BDA6; 0x100F6BE93 and 0x100F6BE9C); Win32 the copy inside the UDK
+/// routine (reciprocal at 0x18B7436, the products at 0x18B741C and
+/// 0x18B743A). No recording can tell the two forms
+/// apart: they give a different velocity on 338 of 1,084 recorded braking
+/// frames and the same position on every one.
 #[must_use]
 pub fn apply_velocity_braking(velocity: Vec3, dt: f32, friction: f32) -> Vec3 {
     let start = velocity;
@@ -412,6 +472,8 @@ pub fn apply_velocity_braking(velocity: Vec3, dt: f32, friction: f32) -> Vec3 {
     let mut average = Vec3::ZERO;
     let mut t = dt;
     let mut pieces = 0;
+    // Only used inside the loop, which runs for a positive `dt` only.
+    let reciprocal = 1.0 / dt;
     while t > 0.0 && pieces < MAX_BRAKING_PIECES {
         let h = t.min(BRAKING_SUBSTEP);
         let next = t - h;
@@ -422,7 +484,7 @@ pub fn apply_velocity_braking(velocity: Vec3, dt: f32, friction: f32) -> Vec3 {
         pieces += 1;
         v -= (v + v) * h * friction;
         if v.dot(start) > 0.0 {
-            average += v * (h / dt);
+            average += v * h * reciprocal;
         }
     }
     if average.dot(start) < 0.0 || average.length_squared() < BRAKE_STOP_SPEED_SQUARED {
@@ -479,9 +541,15 @@ pub fn udk_calc_velocity_with(
     let mut v = velocity;
     if !brake || acceleration != Vec3::ZERO {
         // Turning friction: pulls the velocity direction towards the input
-        // (with no input it scales the velocity by `1 − F·dt`).
+        // (with no input it scales the velocity by `1 − F·dt`). The
+        // difference is multiplied by the time first and by the friction
+        // second (NativeCode: macOS 0x100F6BE60 then 0x100F6BE6B, Win32
+        // 0x18B75B0 then 0x18B75BC). The order changes nothing while the
+        // friction is a power of two (GroundFriction 8); with the flying
+        // friction 0.15 it is one unit in the last place on 24 of 9,481
+        // recorded frames, none of which shows it in the position.
         let speed = v.length();
-        v -= (v - accel_dir * speed) * friction * dt;
+        v -= (v - accel_dir * speed) * dt * friction;
     } else {
         v = apply_velocity_braking(v, dt, friction);
     }
@@ -882,8 +950,8 @@ impl<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> Pawn<'_, '_, W, H> {
         if remaining > 0.0 {
             self.stats.dropped_time += remaining;
         }
-        // Still walking: velocity = actual displacement / dt, Z = 0.
-        self.velocity = (self.location - old_location) / dt;
+        // Still walking: velocity = actual displacement × (1 / dt), Z = 0.
+        self.velocity = velocity_from_displacement(self.location - old_location, dt);
         self.velocity.z = 0.0;
         Flow::Done
     }
@@ -1013,7 +1081,7 @@ impl<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> Pawn<'_, '_, W, H> {
             self.floor = Vec3::Z;
         }
         // 6. Velocity from the displacement (velocity into walls is lost).
-        self.velocity = (self.location - old_location) / dt;
+        self.velocity = velocity_from_displacement(self.location - old_location, dt);
         Flow::Done
     }
 
@@ -1089,7 +1157,8 @@ impl<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> Pawn<'_, '_, W, H> {
                     // ---- landing (4.4) ----
                     let contact = step * hit.time;
                     if contact > LANDING_MIN_CONTACT_TIME && hit.time > POINT_ONE {
-                        self.velocity = (self.location - old_location) / contact;
+                        self.velocity =
+                            velocity_from_displacement(self.location - old_location, contact);
                     }
                     let returned = step * (1.0 - hit.time);
                     self.stats.returned_time += returned;
@@ -1131,13 +1200,13 @@ impl<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> Pawn<'_, '_, W, H> {
                     }
                 }
                 // No horizontal extrapolation after wall contact.
-                let average = (self.location - old_location) / step;
+                let average = velocity_from_displacement(self.location - old_location, step);
                 old_velocity.x = average.x;
                 old_velocity.y = average.y;
             }
 
             // ---- velocity refinement (4.6) ----
-            let mut v = (self.location - old_location) / step;
+            let mut v = velocity_from_displacement(self.location - old_location, step);
             if old_velocity.z >= 0.0 || v.z < old_velocity.z {
                 v = v * 2.0 - old_velocity;
             }
@@ -1358,6 +1427,33 @@ mod tests {
         assert_eq!(safe_normal(Vec3::new(f32::INFINITY, 0.0, 0.0)), Vec3::ZERO);
         assert!(nearly_zero(Vec3::new(9.9e-5, -9.9e-5, 0.0)));
         assert!(!nearly_zero(Vec3::new(1e-4, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn velocity_from_displacement_multiplies_by_the_f32_reciprocal() {
+        // The pair of `docs/PARITY_FINDINGS.md` (P8, WP-C1), taken from the
+        // recordings of the original: a tick of 0.01631380245089531 s
+        // (bits 0x3C85A486) and a displacement of −14.2109375 uu give
+        // −871.0989990234375 uu/s. The f32 reciprocal of the time is
+        // 61.297786712646484 (bits 0x427530EF) and the product rounds to
+        // bits 0xC459C656; the quotient rounds to the next float away from
+        // zero, −871.0990600585938 (bits 0xC459C657).
+        let dt = 0.01631380245089531_f64 as f32;
+        assert_eq!(dt.to_bits(), 0x3C85_A486);
+        let moved = Vec3::new(-14.2109375, 0.0, 14.2109375);
+        let v = velocity_from_displacement(moved, dt);
+        assert_eq!(f64::from(v.x), -871.0989990234375);
+        assert_eq!(v.x.to_bits(), 0xC459_C656);
+        // Every component gets the same reciprocal; zero stays zero.
+        assert_eq!(v.z.to_bits(), (-v.x).to_bits());
+        assert_eq!(v.y, 0.0);
+        // The division form is a different float for this pair.
+        assert_eq!(f64::from(moved.x / dt), -871.0990600585938);
+        // Where the reciprocal is exact the two forms agree: 3 uu in 0.25 s.
+        assert_eq!(
+            velocity_from_displacement(Vec3::new(3.0, -1.5, 0.0), 0.25),
+            Vec3::new(12.0, -6.0, 0.0)
+        );
     }
 
     #[test]

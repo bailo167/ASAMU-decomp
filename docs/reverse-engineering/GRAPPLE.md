@@ -159,6 +159,15 @@ returns, the gun has traced, decided and — on success — switched the pawn to
   returns the base aim rotation, which the pawn takes from the controller's view point, i.e. the camera
   cache), zero spread. That rotation includes active camera-animation offsets (grapple loop, landing,
   boots) [chain CONFIRMED (src); magnitude and one-frame cache lag TENTATIVE].
+- The unit vector is the engine's `vector(rotation)`: `(cp·cy, cp·sy, sp)` with sines and cosines from the
+  angle table, which floors pitch and yaw each to a multiple of 4 rotator units (up to 0.016° low;
+  ABILITIES.md A-CM-8) [CONFIRMED (native, `FRotator::Vector @ 0x1000FC740`); measured: with the floored
+  angles 47 of 52 recorded airborne anchors on static targets lie within 0.05 uu of the ray (median 0.00) at
+  ranges up to 4,939 uu; with the exact angles the median distance is 0.74 uu and the largest 1.99. A local
+  recount from the eye of the record before the first attached one (pawn location plus recorded eye height)
+  along that record's view: floored 47 of 52, truncated towards zero instead 34 (none of the 13 whose yaw is
+  negative and no multiple of 4, against 13 of 13 floored), exact angles 5]. The crosshair trace (G-TG-2)
+  and the boost aim use the same conversion.
 - End `E = S + 16384·dir`. One zero-extent trace that reports actors, flag `TRACEFLAG_Bullet`, issued by the
   pawn (weapon trace owner = instigator), so the pawn itself is not hit [STRONG].
 - The stock instant-hit routine builds an **ordered impact list**: a first hit that is a non-blocking
@@ -168,7 +177,8 @@ returns, the gun has traced, decided and — on success — switched the pawn to
   0–16 `TriggerVolume`s). `ASAMUCheckpoint` uses `COLLIDE_TouchAllButWeapons` and is not hit [STRONG].
 - When nothing is hit, the impact has no actor and its location is `E`.
 → Rust: `fire_trace(eye_with_bob, view_dir_incl_camera_anim) -> Vec<Impact>`; until the trigger question is
-answered, treat triggers as transparent and flag it in trace comparisons.
+answered, treat triggers as transparent and flag it in trace comparisons. The direction is
+`PlayerState::aim_direction` (`sim::rotator_vector` of the cached view; camera animations are not in it).
 
 **G-TG-2 Crosshair (HUD only)** [CONFIRMED (src)] Every gun tick a second trace to `fMaxDistance + 1000` =
 6000 uu decides the crosshair. Outside story mode it turns positive when the hit is closer than 5000 uu to
@@ -652,3 +662,6 @@ bytecode literal search and native re-reads, as in §0. Outcome per item:
   with native evidence (G-TM-2) and state-local reset added (G-TM-5); G-RL-7 upgraded; physics-switch
   velocity rule confirmed natively; crosshair BSP case, initial latch value, crystal refill timing and the
   no-op console commands added; attach/release sections restructured as grouped effects.
+- 2026-10-10 (first recordings, docs/PARITY_FINDINGS.md P7): G-TG-1: the aim direction is the engine's
+  table-based `vector(rotation)` (angles floored to 4 rotator units), read natively and measured on 52
+  recorded anchors.

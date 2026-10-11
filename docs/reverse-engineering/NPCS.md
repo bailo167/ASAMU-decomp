@@ -418,7 +418,9 @@ walking villager's cylinder lags its pawn by one tick).
 The engine's model is the same (CONFIRMED: `UCylinderComponent::LineCheck`, decompiled and read by the
 verification pass): the trace extent is added to the cylinder (`Extent.X` to the radius, `Extent.Z` to the half
 height; the moving extent is treated as a circle, not a box), the line is clipped against the top and bottom
-planes and then against the circle, and the normal is the cap's or the radial one. Where ours differs (ours,
+planes and then against the circle, and the normal is the cap's or the radial one. The box query added for the
+pawn's real shape (`CollisionScene::sweep_box`, NATIVE_PHYSICS.md 10.1) follows it: against a pawn cylinder the
+box counts as the cylinder of its X and Z half extents. Where ours differs (ours,
 TENTATIVE impact): a start already inside the circle and between the caps is blocked by the engine only
 against motion towards the axis (dot product of the move and the offset below −0.1, radial normal), where ours
 picks the least-penetration face; the engine pulls every hit time back by 0.001 of the move, ours uses the

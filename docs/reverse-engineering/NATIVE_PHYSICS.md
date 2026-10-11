@@ -38,7 +38,7 @@ evidence for each so a later agent can confirm them against the script property 
 | 2 | **Ground acceleration magnitude is always `AccelRate`**: walking normalises the script's `Acceleration` to a direction and the UDK velocity update multiplies it by `AccelRate`. Analog input magnitude is discarded natively. | CONFIRMED |
 | 3 | Walking velocity is updated **once per physWalking call with the whole delta time**; only the *movement* is sub-stepped (≤ 0.05 s pieces, ≤ 8 iterations per tick shared across modes). | CONFIRMED |
 | 4 | Braking (no input) integrates in 0.03 s pieces with factor `2·GroundFriction`, then **replaces the velocity by the time-weighted average** of the pieces; speeds below 10 uu/s snap to zero. | CONFIRMED |
-| 5 | Walking up slopes is implemented as **step-up → move → step-down**; the pawn hovers 1.9–2.4 uu above the floor (target 2.15). Final walking velocity = actual displacement / dt with Z = 0. | CONFIRMED |
+| 5 | Walking up slopes is implemented as **step-up → move → step-down**; the pawn hovers 1.9–2.4 uu above the floor (target 2.15). Final walking velocity = actual displacement × (1/dt) with Z = 0 (float form: 2.4). | CONFIRMED |
 | 6 | Falling uses semi-implicit Euler per sub-step **followed by a velocity "refinement" `V = 2·avg − V_old`**, which makes the *effective* vertical acceleration **2 × GravityZ** (and doubles air acceleration). With `DefaultGravityZ = −520` this is −1040 uu/s². | CONFIRMED (code + disassembly); TENTATIVE external corroboration from stock UDK jump-height defaults (see 4.6) |
 | 7 | Gravity = `WorldInfo` gravity (lazy: GlobalGravityZ if non-zero, else DefaultGravityZ = **−520.0** from `ASAMU/Config/DefaultGame.ini`), overridden inside GravityVolumes, then × `CustomGravityScaling` (UDKPawn+0x5A4). | CONFIRMED (code + config) |
 | 8 | Air control: if a pawn flag (Pawn+0x298 bit 51, hypothesis `bLimitFallAccel`) is set, air acceleration is clamped to `AccelRate·AirControl` (+ a low-speed boost below 10 uu/s, and a horizontal speed bound when already above GroundSpeed). If the flag is clear, the script acceleration is used unclamped. **The flag's default must be read from script.** | CONFIRMED logic; UNKNOWN default |
@@ -204,7 +204,7 @@ player without root motion this is the path [STRONG]. Otherwise it defers to `AP
 Acceleration = AccelDir * AccelRate            // overwrites the script value; AccelDir is unit or zero
 if (!bBrake || Acceleration != 0):             // exact-zero test
     s = |Velocity|
-    Velocity -= (Velocity - AccelDir * s) * Friction * dt     // "turning friction"
+    Velocity -= ((Velocity - AccelDir * s) * dt) * Friction   // "turning friction": times dt, then times Friction
 else:
     Velocity = Brake(Velocity, dt, Friction)    // 2.3, inlined copy of ApplyVelocityBraking
 Velocity = Velocity * (1 - bFluid * Friction * dt) + Acceleration * dt
@@ -242,7 +242,7 @@ V0 = Velocity; avg = 0; t = dt
 while t > 0:
     h = min(0.03, t); t -= h
     Velocity = Velocity - 2 * Velocity * h * Friction          // = Velocity * (1 - 2 h F)
-    if dot(Velocity, V0) > 0: avg += Velocity * (h / dt)       // uses the post-update velocity
+    if dot(Velocity, V0) > 0: avg += (Velocity * h) * (1 / dt) // post-update velocity; one f32 reciprocal of dt
 Velocity = avg
 if dot(Velocity, V0) < 0 or |Velocity|^2 < 100: Velocity = 0  // 100 → 10 uu/s
 ```
@@ -250,11 +250,113 @@ if dot(Velocity, V0) < 0 or |Velocity|^2 < 100: Velocity = 0  // 100 → 10 uu/s
 The result is the **time-weighted average** of the decaying velocity over the sub-intervals, not the
 end value. Constants: 0.03 @ 0x101731DB0, 100.0 @ 0x10163713C.
 
+### 2.4 Velocity derived from a displacement: the float form [CONFIRMED]
+
+Every place where a movement mode replaces `Velocity` by "the distance actually moved over the time it
+took" computes **one f32 reciprocal `r = 1.0 / time` and multiplies each of the three components by
+`r`**. It does not divide the components by the time. The instruction pattern is the same at every site
+in both executables (a scalar division of the constant 1.0 by the time, then three multiplications),
+which is what a vector-divided-by-scalar helper written as "multiply by the reciprocal" compiles to.
+The two forms give different floats for many inputs (one unit in the last place).
+
+| Site | Time | Mac x86_64: reciprocal at | Win32: reciprocal at | Recordings (Windows build) |
+|---|---|---|---|---|
+| Walking, final velocity (3.1) | the call's `dt` | 0x100ADB927 | 0xB27006 | 27,443 of 27,443 consecutive walking records equal the reciprocal form; the division form equals 23,839 (`docs/PARITY_FINDINGS.md` V17) |
+| Falling, average after wall contact (4.5 step 4) | the sub-step | 0x100AE0464 | 0xB2854B | of the 87 falling pairs that do not follow the plain refinement, 66 follow it with the old horizontal velocity replaced by the average (the horizontal result is then the average itself) in the reciprocal form, 35 in the division form; where the two give different floats (40 pairs): reciprocal 31, division 0 |
+| Falling, refinement (4.6) | the sub-step | 0x100AE04D1 | 0xB285E9 | as part of `2·avg − V_old`: 7,798 of 7,885 falling pairs with the reciprocal form, 4,301 with the division; where the two give different floats (3,534 pairs): reciprocal 3,497, division 0 (the 87 others: 66 wall contacts, see the row above; 15 frames where the script scaled the vertical velocity by 0.7 before the physics, which the same form then reproduces to the bit; 5 respawn teleports; 1 contact frame. The smallest miss is 2.1 uu/s, none is a last place) |
+| Falling, landing velocity (4.4) | `step·Hit.Time` | 0x100AE0747 | 0xB2899B | not observable: the rest of the landing frame is walked and the walking velocity replaces it (native code only) |
+| Flying, final velocity (`GRAPPLE.md` G-PH-3 step 6) | the call's `dt` | 0x100AE1CE8 | 0xB1AAE3 | the recorded velocity is this one plus the pull the gun adds after the move, so it is compared through an f32 model of that pull (below): 9,467 of 9,481 attached pairs with the reciprocal form, 5,422 with the division; where the two give different floats (4,052 pairs): reciprocal 4,045, division 0 |
+
+The constant 1.0 is read from 0x101633D88 (Mac) and 0x2211478 (Win32; addresses of the Win32 executable
+are virtual addresses with image base 0x400000). One recorded pair, used as the regression value: with
+`dt = 0.01631380245089531` (f32 bits 0x3C85A486) a displacement of −14.2109375 uu gives
+−871.0989990234375 uu/s; `−14.2109375 / dt` is the next float, −871.0990600585938.
+
+The same helper and the order of the multiplications inside the velocity update (2.1, 2.3), read in both
+executables on 2026-10-11 [CONFIRMED for the instruction order; not measurable on the recordings]:
+
+- Turning friction: the difference `Velocity − AccelDir·s` is multiplied by `dt` first and by `Friction`
+  second (Mac 0x100F6BE60 then 0x100F6BE6B; Win32 0x18B75B0 then 0x18B75BC). With a friction that is a
+  power of two the order cannot change a float, and the ground friction is 8. For flying
+  (`Friction = 0.5 × 0.3`) the other order changes the velocity after the update on 24 of the 9,481
+  attached pairs and the position on none.
+- Braking: a piece adds `(Velocity·h)·(1/dt)` to the average, the reciprocal of the whole `dt` being
+  computed once (Mac: 0x100F6BDA6, products at 0x100F6BE93 and 0x100F6BE9C in the UDK routine, 0x100ADC2E3,
+  0x100ADC317 and 0x100ADC320 in `APawn::ApplyVelocityBraking`; Win32: 0x18B7436, products at 0x18B741C and
+  0x18B743A). With one piece (`dt ≤ 0.03`) the average is `(V₁·dt)·(1/dt)`, which is not always `V₁`:
+  on 338 of 1,084 recorded braking frames it is the neighbouring float, and on none of them does the
+  position tell the two apart.
+
+A walking or flying velocity is replaced by the displacement-derived one at the end of the same call, so
+these orders only reach a later frame through a position, and in the recordings they never do. They are
+recorded here because a reimplementation has to pick an order, and the native one is known.
+
+One limit of the recordings applies to this whole section: their longest frame is 0.0246 s (walking
+0.0234, falling 0.0246, flying 0.0206), so no recorded call has a second sub-step (1.4, above 0.05 s) or
+a second braking piece (2.3, above 0.03 s). Which time a site uses when the two differ (the call's `dt`
+for walking and flying, the sub-step for falling) and the sum over several braking pieces therefore
+rest on the native code alone; the walking one is the routine's first argument in the Win32 build
+(0xB27006 divides by it).
+
+True divisions that are **not** this pattern, and stay divisions in a reimplementation: the low-speed
+air help `(10 − s2) / dt` (4.2; 0x100ADFD02), the slope-slide distance `g·dt / (2·max(F, 0.5))` (3.5;
+0x100ADA8CA) and the walked fraction `moved / |Delta|` when a walking pawn starts to fall (1.4;
+0x100ADBC3B).
+
+The counts in the table are over all pairs of consecutive records of the three Windows recordings with
+the same physics mode in both (per level, walking: AG-BeautifulCity 20,795, AG-Workshop 3,000,
+AG-ParadiseCave 2,509, AG-Darkcave 1,139, every pair in the reciprocal form; falling: 5,415 of 5,468,
+1,629 of 1,663 and 754 of 754 in BeautifulCity, ParadiseCave and Darkcave; flying: 5,500 of 5,509,
+3,550 of 3,555 and 417 of 417). The model of the pull used for flying is `GRAPPLE.md` G-PH-2 in f32, in
+this order: the unit vector from the pawn to the anchor (the Windows normalisation below), times the
+frame time, times 10000, times the f32 reciprocal of (recorded distance ÷ 1000); the sum with the
+physics velocity is the recorded velocity. The 14 pairs it does not reproduce miss by 1.7 to 1,624 uu/s
+(contacts and other events), not by a last place.
+
+Normalisation is a different helper, and here the two builds differ [CONFIRMED]. The Mac executable
+computes `1.0 / sqrt(len²)` with a real square root and a real division, then multiplies. The Win32
+executable takes the processor's approximate reciprocal square root (the `RSQRTSS` instruction) and
+refines it once, `0.5 · (r · (3 − (len²·r)·r))` in that order (3.0 @ 0x2233988, 0.5 @ 0x221152C): for
+example the speed cap of `AUDKPawn::CalcVelocity` (estimate at 0x18B77F8) and the acceleration direction
+at the start of `APawn::physWalking` (0xB25C85). The result is not correctly rounded, and the estimate
+itself is specified only by an error bound, not bit for bit. Measured on the recordings with the
+estimate of the recording machine's processor (2 × 1,024 distinct values over two binades, read out on
+that machine): of 2,832 flat walking frames at the speed cap, the two forms give a different velocity on
+1,205 and a different position on 16; the Windows form reproduces the recorded position on 16 of those
+16, the Mac form on none. This is the "one unit in the last place at the speed cap" of the first
+recordings (13 Workshop frames, 3 elsewhere). Two more places show the same thing in the recordings:
+the 2000 uu/s cap of flying (7,742 capped frames; the position differs between the forms on 15, the
+Windows form matches 15 of 15, the Mac form none) and the unit vector of the gun's pull, which is
+script-side (`Normal`): of the 9,481 attached pairs the two forms give a different recorded velocity
+on 776, the Windows form matches 773, the Mac form none. The script-side helper has the same code in
+the Win32 executable (the `Normal` native at 0x588CC0, found through its entry in the native name
+table at 0x29A8768: squared length exactly 1 returns the input, below 1e-8 returns zero, else the
+estimate at 0x588DCF with the same refinement). The port in `asamu-player` uses the Mac form, so
+against a Windows recording about 8% of the attached frames differ in the last place of the velocity.
+The estimate is a property of the processor, not of the game: the table read out on the recording
+machine (an Intel processor) reproduces the recordings, and another processor family may return other
+estimates (the instruction is specified by an error bound only), so the Windows build need not be
+bit-reproducible across machines at these places.
+
+Reproduce (local executables, read-only; `$WIN_EXE` is `Binaries/Win32/ASAMU-Win32-Shipping.exe` of a
+Windows install):
+
+```sh
+D="objdump -d --no-show-raw-insn --x86-asm-syntax=intel"
+$D --start-address=0x100ADB900 --stop-address=0x100ADB960 "$EXE"   # Mac physWalking: divss, mulps, mulss
+$D --start-address=0x100AE0449 --stop-address=0x100AE04F0 "$EXE"   # Mac physFalling: wall average, refinement
+$D --start-address=0x100AE0720 --stop-address=0x100AE0765 "$EXE"   # Mac physFalling: landing
+$D --start-address=0x100AE1CCC --stop-address=0x100AE1D0B "$EXE"   # Mac physFlying
+$D --start-address=0xB26FEF --stop-address=0xB27060 "$WIN_EXE"      # Win32 physWalking
+$D --start-address=0x18B779E --stop-address=0x18B7870 "$WIN_EXE"    # Win32 speed cap: rsqrtss and one refinement
+```
+
 ## 3. Walking: physWalking
 
 `APawn::physWalking(dt, Iterations) @ 0x100ADA470` (not overridden by UDK). All steps CONFIRMED unless
 labelled. "Floor" is the stored floor normal (Pawn+0x37C). Traces use the collision cylinder extent
-(radius, radius, half-height) unless noted.
+(radius, radius, half-height) unless noted; world geometry answers such a trace with the axis-aligned
+box of that extent, not with a cylinder (10.1).
 
 ### 3.1 Algorithm
 
@@ -291,7 +393,7 @@ while remaining > 0 and Iterations <= 7 and (Controller or bit 49):
     if Physics became Swimming: startSwimming(...); return
 after loop:
     if still Walking:
-        if not (old bit 19) and not bJustTeleported: Velocity = (Location - OldLocation) / dt
+        if not (old bit 19) and not bJustTeleported: Velocity = (Location - OldLocation) * (1 / dt)   // 2.4
         Velocity.Z = 0
     Controller.PostPhysWalking(dt)                                              // empty for players
 ```
@@ -517,7 +619,8 @@ returns non-zero values only inside water volumes (Volume+0x291 bit 4); in air `
 
 If `Hit.Normal.Z ≥ WalkableFloorZ` [+0x258]:
 - if `step·Hit.Time > 0.003` and `Hit.Time > 0.1` and not bJustTeleported:
-  `Velocity = (Location − OldLocation) / (step·Hit.Time)` (velocity actually travelled until contact);
+  `Velocity = (Location − OldLocation) · (1 / (step·Hit.Time))` (velocity actually travelled until
+  contact; the reciprocal form of 2.4);
 - `processLanded(Hit.Normal, Hit.Actor, remaining + step·(1 − Hit.Time), Iterations)` (5.2); return.
 
 (If the hit actor is a pawn, the move was upward, `Hit.Time = 0` and the normal is straight up, script
@@ -537,13 +640,14 @@ If `Hit.Normal.Z ≥ WalkableFloorZ` [+0x258]:
      is walkable → land with zero carried time.
 3. If `dot(Slide, Adjusted) < 0`, nothing more is moved.
 4. For the refinement below, the old horizontal velocity is replaced by the actual average horizontal
-   velocity of this sub-step (so no horizontal extrapolation after wall contact).
+   velocity of this sub-step, `(Location − OldLocation) · (1 / step)` (2.4), so there is no horizontal
+   extrapolation after wall contact.
 
 ### 4.6 Velocity refinement after each sub-step (the "2× gravity" effect)
 
 If not landed, not root-motion, not bJustTeleported and Physics ≠ None [CONFIRMED, disassembly]:
 ```
-Velocity = (Location - OldLocation) / step                    // average velocity actually travelled
+Velocity = (Location - OldLocation) * (1 / step)              // average velocity actually travelled (2.4)
 if OldVelocity.Z >= 0 or Velocity.Z < OldVelocity.Z:
     Velocity = 2 * Velocity - OldVelocity                      // "end velocity", all three axes
 if |Velocity| > TerminalVelocity: Velocity = SafeNormal(Velocity) * TerminalVelocity   // 3D
@@ -903,12 +1007,13 @@ DefaultGravityZ (−520.0 config).
 
 ### 9.2 World queries the Rust model needs
 
-1. **Swept cylinder move** (`MoveActor`): sweep a vertical cylinder (radius ×1.001 horizontally,
-   half-height) by Delta; stop at the first blocking hit; return Time ∈ [0,1], Normal, hit actor,
+1. **Swept box move** (`MoveActor`): sweep the axis-aligned box of the collision cylinder's extent
+   (radius ×1.001 on X and Y, half-height on Z; a box, not a cylinder: 10.1) by Delta; stop at the
+   first blocking hit; return Time ∈ [0,1], Normal, hit actor,
    material/physical-material friction, "started penetrating". The original's collision primitives
    keep a small skin; the walking code relies on hovering 1.9–2.4 uu above floors, so our sweep must be
    conservative in the same way [exact skin UNKNOWN].
-2. **Cylinder line check** (`SingleLineCheck` with extent): floor probe (length MaxStepHeight + 2),
+2. **Extent line check** (`SingleLineCheck` with extent; the same box, 10.1): floor probe (length MaxStepHeight + 2),
    air-control wall probe (world only), landing sanity probe (0.9× extent), base search (8 uu).
 3. **Point/small-extent probes** for ledge checks (only needed for crouch/slow walk).
 4. **Encroachment test** for crouch growth, **teleport** (`FarMoveActor`) for uncrouch/revert.
@@ -921,7 +1026,7 @@ tick(dt):
   [script] controller: input → Acceleration (expected AccelRate·normalised wish dir), rotation
   [script] pawn Tick / state code; jump sets Velocity.Z and Physics = Falling
   performPhysics(dt): crouch housekeeping → startNewPhysics(dt, 0) → rotation
-      Walking:  CalcVelocity once (2.1) → ≤8 sub-steps of move/step-up/floor-snap/ledge → V = disp/dt, Vz=0
+      Walking:  CalcVelocity once (2.1) → ≤8 sub-steps of move/step-up/floor-snap/ledge → V = disp·(1/dt), Vz=0
       Falling:  air-control clamp once → sub-steps: V=V+(A,g)dt; move by V·h; land/slide; V=2·avg−V_old; clamp terminal
       transitions carry unused sub-step time (1.4)
   TickSpecial: [script] UpdateEyeHeight
@@ -966,6 +1071,182 @@ serve non-pawn actors and AI. `APawn::physicsRotation @ 0x100AD9000` is supersed
 If script ever switches the player into one of these modes (e.g. ladders, swimming, grapple via
 Flying/Spider), that routine must be specified next.
 
+### 10.1 Extent (box) checks of world geometry: shape, contact normal, start rules
+
+Every move and every extent trace of the pawn reaches the world's primitives as a line check with a
+non-zero extent. The primitives treat that extent as an **axis-aligned box in world space** with the
+extent as half sizes, `(21, 21, 44)` for the player (DEFAULTS.md), not as a cylinder. The first
+recordings agree (`docs/PARITY_FINDINGS.md` P4: CONFIRMED on floors, STRONG on walls). Only another
+pawn's `CylinderComponent` treats the extent as a circle (NPCS.md, "NPC pawn collision").
+
+All of the following was read in the Mac executable and, for the triangle and convex routines, checked
+by running the routine's own instructions in a local interpreter on random inputs and comparing every
+returned flag, time and normal bit for bit with the rule as written here: 6,000 cases for the triangle
+routine, 1,500 for the convex one, no difference. [CONFIRMED] unless labelled.
+
+That interpreter was not kept (nothing under the ignored research folders regenerates the two counts). A
+second, independent pass on 2026-10-11 read the same routines statically, without running them
+(`objdump -d --x86-asm-syntax=intel` over 0x1007889D0 to 0x10078C2A0, 0x100AA4840 to 0x100AA6710, 0x100AAD350
+to 0x100AAD4B0 and 0x100AB3D60 to 0x100AB3F80; constants from the file's bytes): the order of the thirteen
+axes from the operands of each inlined test, the strict comparisons that update the latest entry and the
+earliest exit, the sign of the axis against the motion, the selection of the result at the end of the
+triangle routine, and the convex per-axis test. It agrees with every rule below for a sweep that starts
+clear, with the start rules as far as it read them (the triangle routine's, and the two thresholds of the
+convex one), and adds the scale dependence of both rules (below). [CONFIRMED: two routes]
+
+**Triangles** (static meshes on the per-triangle path). The kDOP box check
+(`TkDOPNodeCompact<FStaticMeshCollisionDataProvider,…>::BoxCheck @ 0x100C5B650`) calls
+`FindSeparatingAxis @ 0x1007889D0` (the overload with nine vectors) per triangle, in the mesh's own
+space with the box's three edge directions carried into that space.
+
+- 13 axes in this order: the box's three face axes (the cross products Y×X, Z×Y, X×Z of its edge
+  directions: Z, X, Y for a world-aligned box), the triangle's normal (E0×E1), then X×E0, X×E1,
+  X×E2, Y×E0, Y×E1, Y×E2, Z×E0, Z×E1, Z×E2, with the edges `E0 = V1 − V0`, `E1 = V2 − V1`,
+  `E2 = V0 − V2` normalised first. An axis shorter than 1e-8 in squared length (f64 at
+  0x101645800) is skipped.
+- On each axis the box's centre is projected at the start and at the end, the triangle's three
+  corners are projected and widened by the box's projected half size, and the entry and exit times
+  of the centre into that range follow. The routine keeps the latest entry and its axis, updating
+  only on a strictly later entry (the earlier axis wins a tie), and the earliest exit and its axis.
+  It reports no hit as soon as the earliest exit is negative or earlier than the latest entry.
+- The hit time is the latest entry; the **normal is the axis of the latest entry, signed against
+  the motion**, returned unnormalised. `UStaticMeshComponent::LineCheck @ 0x100C58790` maps it to
+  world space with the transpose adjoint of the mesh's matrix, flips it when the matrix mirrors,
+  and normalises it. A triangle replaces the best hit so far only with a strictly earlier time.
+- So: a box face against a triangle vertex or edge gives a world axis; a box vertex or edge on the
+  triangle's face gives the triangle's normal; a box edge crossing a triangle edge gives the unit
+  vector perpendicular to both; a corner against an edge or a vertex gives whichever of the 13 axes
+  entered last. No normal ever points "radially" from a vertex or an edge.
+
+**Convex elements** (the simple-collision body of a mesh: `FKAggregateGeom::LineCheck @ 0x100AA4840`
+calls `FKConvexElem::LineCheck @ 0x100AA5A70` per element; the per-axis test is
+`FConvexSweptBoxSeparatingAxisCheck::TestConvexSweptBoxSeparatingAxis @ 0x100AAD350` and
+`@ 0x100AB3D60`). The same rule with these axes, in this order: the box's face axes (X×Y, Y×Z, Z×X:
+Z, X, Y), every entry of the element's `FaceNormalDirections`, then for every entry E of its
+`EdgeDirections` the three cross products E×X, E×Y, E×Z. The element's range on an axis is the range
+of its vertices. An axis shorter than 1e-4 in squared length (f64 at 0x1016393A0) is skipped. The
+aggregate check tests convex elements first, then spheres, boxes and sphyls, taking a later one only
+with a strictly earlier time, and maps and normalises the normal as above.
+
+**Both rules depend on the scale of what is hit** (second pass, [CONFIRMED] by static reading). For
+triangles: the constructor of the box check (`TkDOPBoxCollisionCheck<…>` at 0x100C5B2A0) stores the box's
+three axes at +0xB4, +0xC0 and +0xCC as the inverse of the mesh's matrix gives them (a call of
+`FMatrix::Inverse` for each, no square root in the routine), and the box check passes those three addresses to the
+triangle routine (0x100C5BA41 to 0x100C5BB1A), with the extent in world units. They are as long as one
+over the mesh's scale, and the triangle routine's 1e-8 comparison is made with the cross products of
+those vectors as computed. For a mesh scaled uniformly by `s` the box's three face axes have the squared
+length `1 / s⁴` and are skipped when `s` is above 100, and an edge axis (squared length `sin²θ / s²`) is
+skipped when the edge is within `asin(1e-4·s)` of the box's edge: 0.0057° at scale 1, 0.57° at scale 100.
+For convex elements the same happens at scales ten times smaller, as follows. The aggregate
+check multiplies the body's scale into the rows of its matrix and inverts the product (`FMatrix::Inverse`,
+called at 0x100AA49A1); the start, the end and the box's axes go to the element in that space, the extent
+unchanged. The element's check takes the box's three edge directions from the rows of the inverse
+(0x100AA5C6D onwards), so they are as long as one over the scale, and hands every axis to the per-axis
+routine as computed, not normalised: the box's face axes are the cross products of two rows, the edge axes
+a stored (unit) edge direction crossed with one row. The first thing the per-axis routine does
+(0x100AAD350 to 0x100AAD38B) is the 1e-4 comparison with the squared length of that vector. So, for a body
+scaled uniformly by `s`:
+
+- the box's three face axes have the squared length `1 / s⁴` and are all skipped when `s` is above 10;
+- an edge axis has the squared length `sin²θ / s²` (θ: the angle between the edge and the world axis) and
+  is skipped when the edge is within `asin(0.01·s)` of that axis: 0.57° at scale 1, 5.7° at scale 10, and
+  every edge axis when `s` is above 100;
+- the element's own face directions are stored with unit length and are never skipped.
+
+A skipped axis cannot separate the two bodies, so the solid the original sweeps against is then larger
+than the element and contacts with its edges and corners come earlier: above scale 100 the box is stopped
+by the element's face planes pushed out by the box and by nothing else, with no bevel at an edge.
+[STRONG: it follows from the code; no recording has been compared with it yet.] A body whose faces are
+parallel to the world axes loses nothing: its own face directions are those axes.
+
+How much of the user's data this touches (counted from a local conversion on 2026-10-11: the scene files'
+component transforms and the mesh list's simple-body references): of 22,782 mesh components that block
+the pawn, 13,564 use a mesh with a simple-collision body; 2,485 of those are placed at a scale above 10 on
+at least one axis (2,157 on all three, 330 above 100), 39 different meshes. Of the 9,218 whose mesh has no
+simple body (triangles for the pawn too), 127 are placed at a scale above 100 on at least one axis (108 on
+all three; 4 above 1,000). Of the 906 blocking-volume actors none is scaled above 10 and none is turned
+other than by quarter turns about Z, so blocking volumes are not affected beyond the 0.57° rule.
+
+**Spheres and sphyls** (`FKSphereElem::LineCheck @ 0x100AA6710`, `FKSphylElem::LineCheck
+@ 0x100AA7510`) return "no hit" at once when any component of the extent is non-zero: they never
+block a pawn move, only zero-extent traces.
+
+**Box elements** (`FKBoxElem::LineCheck @ 0x100AA69A0` with
+`FBoxSweptBoxSeparatingAxisCheck::FindSeparatingAxis @ 0x100AAC780`): fifteen calls of one per-axis
+test, the first three with the axes of one of the two boxes. The same family of test [STRONG]; its
+axis order and start rules were not read [UNKNOWN]. The user's data has no box element (0 boxes, 0
+sphyls, 1 sphere, 2,439 convex elements in the 882 converted meshes).
+
+**Brushes** (blocking volumes: `UBrushComponent::LineCheck @ 0x100759CB0`). The component hands
+the trace, with or without extent, to the aggregate check of its own convex elements (the routine
+above, so the convex rule applies), and on a hit pulls the time back by 0.1 uu of travel for a trace
+shorter than 1 uu and by min(0.1 × length, 1.0) uu otherwise (0.1: f32 at 0x1016457B8; 1.0: f32 at
+0x101633D88), unless the trace carries flag 0x80000. There is one computation for both kinds of
+trace, so the cap of 1.0 holds for zero-extent traces of brushes too (this was TENTATIVE in
+`docs/PARITY_FINDINGS.md` section 7). Before anything else the routine returns "no hit" for a trace
+carrying flag 0x20000 when bit 0 of the component's byte at +0x2AC is clear. 0x20000 is what the
+script's bullet flag becomes (`AActor::execTrace @ 0x100B377A0` shifts bit 0 of the script's extra
+trace flags up by 17) and one of the two bits that force the per-triangle path of static meshes
+(`docs/PARITY_FINDINGS.md` V3). So the grapple's fire trace (GRAPPLE.md section 4, `TRACEFLAG_Bullet`)
+passes every brush whose bit is clear. The bit is `bBlockComplexCollisionTrace` [STRONG: it is the first bit after
+the cached physics data, as in the property order of `Engine.BrushComponent`]; its value on the
+user's volumes was not read [UNKNOWN], and a volume whose component does not block zero-extent
+traces at all is passed either way.
+
+**BSP** (`UModel::LineCheck @ 0x10092BD20` → `FBoxLineCheckInfo::BoxLineCheck @ 0x10092C440`,
+`FBoxLineCheckInfo::ClipTo @ 0x10092E920`): per convex leaf hull, the line is clipped against the
+hull's planes pushed out by the box, then against the six axis-aligned planes of the hull's bounds,
+then against bevel planes built from pairs of hull planes and the world axes. The same construction
+with the solid's faces tested before the world axes [STRONG: structure read, not emulated].
+
+**A sweep that starts in contact** (triangle and convex routines):
+
+- Overlapping on every axis at the start (the latest entry is negative): a hit at time 0 whose
+  normal is the reversed, normalised direction of motion. Exception: no hit, with the time reported
+  as 1, when the negated latest entry is greater than the earliest exit and the motion has a
+  positive component along that exit's axis (the box is already most of the way out). The convex
+  routine also sets the result's "started penetrating" flag.
+- "Close and parallel": when the motion projected on an axis is below a threshold in size and the
+  start lies outside the widened range on that axis by less than the same threshold, the axis is
+  remembered: threshold 1e-4 for triangles (f32 at 0x10163FED8; the first such axis is kept), 0.01
+  for convex elements (f32 at 0x101633DA8; the last such axis is kept). If such an axis exists and
+  either the latest entry is within the sweep or the latest-entry axis is that same axis (either
+  sign), the result is a hit at time 0 with the normal `axis − 0.05 × direction` (0.05: f32 at
+  0x101636058), normalised. The aggregate geometry carries a switch that turns this off for its
+  convex elements (first bit of the byte at +0x48).
+- When the projected motion on an axis is below 1e-8 (f64 at 0x101645800) the axis only decides
+  "separated or not" from the start position and takes no part in entry and exit.
+
+These rules have no tolerance of their own; the original relies on every hit having been pulled back
+(9.5 item 7, `docs/PARITY_FINDINGS.md` P3), so a pawn normally starts 0.1 uu or more from everything.
+
+**Ours** (`crates/asamu-world/src/collision/box_sweep.rs`, `CollisionScene::sweep_box`): the same
+axes in the same order with the same tie rule, in `f64` and in world space, for triangles (static
+meshes and BSP surfaces alike) and for convex solids; exact first-contact times, the pull-back left
+to the caller. Our own kernel's rule, run beside the rule above on 20,000 sweeps that start clear,
+gave the same hit or miss every time and the same normal on all 9,797 hits (largest time difference
+8.2e-7, the original's single precision); the script of that comparison was not kept either.
+Differences: BSP goes through the triangle test (its leaf hulls are not in the converted data); a
+start in contact follows this code base's tolerance rule instead of the two rules above (documented in
+the module); box elements use the convex rule; and ours works with unit vectors in world space and
+skips an edge axis only below 1e-8 (a parallel pair), for triangles and for convex solids, so it does
+**not** reproduce the scale-dependent skipping above: ours always tests the box's face axes and every
+edge axis that is not degenerate, which makes its contact never earlier than the original's and
+sometimes later. Nothing depends on it yet (the movement code still sweeps the cylinder, simple-collision
+bodies are not in the scene, and the volumes are not affected), but the scene must reproduce the
+skipping before the 127 and 2,485 large placements above are collided with the box.
+
+What is checked without the original (`crates/asamu-world/tests/collision_box_verify.rs`, run on
+2026-10-11): 16,000 random sweeps in seven families (every triangle shape, corners and edges passing at
+1e-9 to 1 uu, whole numbers with exact ties, 2e5 uu from the origin, sweeps of up to 1e7 uu, moves of a
+frame, degenerate triangles) against a reference that finds the first contact from the distance between
+the box and the triangle: 11,977 hits and 3,321 misses agree, 81 sweeps graze within 1e-7 uu, 621 slide
+level with the obstacle (no contact by our start rule); the largest time difference is 1.4e-7 uu of
+travel; all 166 exact ties between the box's face axes report the first in the order Z, X, Y. Changing
+the tie comparison or that order in the kernel fails these tests and no other.
+[TENTATIVE that nothing observable follows; a recording of a walk into the outer corner of a BSP
+wall at an angle, and one of a pawn pushed into geometry by a mover, would settle it.]
+
 ## 11. Verification log
 
 An independent adversarial pass (2026-10-09) re-read the local decompilation, the disassembly and the
@@ -992,7 +1273,7 @@ the call-site disassembly.
 | 11 | ShouldCatchAir always false; WantsLedgeCheck only when crouched or walking slowly | CONFIRMED |
 | 12 | Fall decision flags (bits 10/22/2/4, bJustTeleported, mustJump) incl. the "zero move" flag | CONFIRMED (the zero-move flag was traced in disassembly because the decompiler mistyped it); **corrected** bit-59 wording and the MayFall precondition (3.4) |
 | 13 | Slope slide: Nz < 0.99 and Nz·F < 3.3, `g·dt²/(2·max(F,0.5))`, whole-call dt on every sub-step | CONFIRMED |
-| 14 | Final walking velocity = displacement / dt with Z = 0, suppressed by the bit-19 value at call start or bJustTeleported | CONFIRMED |
+| 14 | Final walking velocity = displacement / dt with Z = 0, suppressed by the bit-19 value at call start or bJustTeleported | CONFIRMED; **refined** (2026-10-10): the float form is displacement × (1/dt), see 2.4 |
 | 15 | Falling: velocity updated by NewFallVelocity(Acceleration + (0,0,GravityZ)) **before** the move; move uses the new velocity; afterwards `V = 2·avg − V_old` when `V_old.Z ≥ 0 or avg.Z < V_old.Z`; terminal-velocity clamp via vtable +0x280 | CONFIRMED (code + disassembly); the 2× effective acceleration is an arithmetic consequence |
 | 16 | Air-control probe and clamp (0.05, 10, BoundSpeed, bit 51 = byte +0x29E bit 3) | CONFIRMED |
 | 17 | Landing threshold WalkableFloorZ (Pawn+0x258); landing velocity only if step·Time > 0.003 and Time > 0.1 | CONFIRMED |
@@ -1015,3 +1296,18 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   the stepUp walking/slide details, the fall-decision preconditions and base-restore rule, the
   CheckForLedges acceptance bound, and the stuck-falling nudge citation; labelled the names of modes
   5/6/13 TENTATIVE; every constants-table row now cites `Function @ address`.
+- 2026-10-10: section 2.4 (float form of every velocity derived from a displacement; the normalisation
+  helper of the two builds), from the disassembly of both executables and the first recordings; the
+  statements in 3.1, 4.4, 4.5, 4.6, 9.3 and verification row 14 now point to it. Verification pass of
+  2.4 the same day: the five sites re-read in both executables, the walking and falling counts
+  recounted, and the wall-contact average and the flying velocity, first listed as not measurable,
+  measured on the recordings (the flying one through a model of the gun's pull).
+- 2026-10-11: second verification pass of 2.4 (every count recomputed from the raw recordings with an
+  independent model, all confirmed; the five sites and the Win32 speed cap re-read). Corrected the order
+  of two products in the pseudo-code of 2.1 (turning friction: `dt` before `Friction`) and 2.3 (braking
+  average: `(V·h)·(1/dt)`, not `V·(h/dt)`), which the first version had written in an order neither
+  executable has; 2.4 says what the recordings can and cannot show about them.
+- 2026-10-10: section 10.1 (the box checks of triangles, convex elements, spheres, sphyls, box
+  elements, brushes and BSP: shape, axis order, contact normal, rules for a start in contact), from the
+  disassembly and from running the triangle and convex routines in a local interpreter; 3 and 9.2
+  now say "box" where they said "cylinder".

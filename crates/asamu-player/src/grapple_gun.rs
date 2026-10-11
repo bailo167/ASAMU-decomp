@@ -410,7 +410,12 @@ pub struct ImpactHit {
 /// point-of-view rotation ([`PlayerState::aim_direction`]: the view as the
 /// previous tick ended — for a press in the input event that is the current
 /// view, for a refire-served fire in the gun's timers it lacks this tick's
-/// look update), `WeaponRange` long, zero extent.
+/// look update), `WeaponRange` long, zero extent. The direction is the
+/// vector the original builds from that rotation: pitch and yaw each floored
+/// to 4 rotator units by the engine's sine table
+/// ([`crate::sim::rotator_vector`]; measured: 47 of 52 recorded airborne
+/// anchors lie within 0.05 uu of that ray, with exact angles the median
+/// distance is 0.74 uu).
 #[must_use]
 pub fn fire_trace<W: CollisionWorld + ?Sized>(
     state: &PlayerState,
@@ -463,8 +468,9 @@ pub struct GunAim {
 }
 
 /// Previews the fire trace of a press in the next tick (no state change):
-/// along the current view, which the next tick's camera cache will hold.
-/// `None` without gun parameters.
+/// along the current view, which the next tick's camera cache will hold,
+/// as the original turns it into a direction
+/// ([`PlayerState::native_view_direction`]). `None` without gun parameters.
 #[must_use]
 pub fn aim<W: CollisionWorld + ?Sized>(
     state: &PlayerState,
@@ -472,7 +478,7 @@ pub fn aim<W: CollisionWorld + ?Sized>(
     world: &W,
 ) -> Option<GunAim> {
     let gun = params.gun.as_ref()?;
-    let impact = fire_trace_along(state, params, gun, world, state.view_direction());
+    let impact = fire_trace_along(state, params, gun, world, state.native_view_direction());
     let distance = (impact.start - impact.location).length();
     let acceptable = impact.hit.is_some_and(|h| {
         h.grapple_able && face_rule_passes(&h, gun) && distance < gun.max_distance.value

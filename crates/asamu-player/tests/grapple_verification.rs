@@ -80,6 +80,19 @@ fn level_pitch(distance: f32) -> f32 {
     (-38.0_f32).atan2(distance)
 }
 
+/// Where the fire trace of [`level_pitch`] meets a wall at `distance` from a
+/// pawn centred at z = 1000: the original aims along the pitch's rotator
+/// unit floored to a multiple of 4 (ABILITIES.md A-CM-8), so the hit is
+/// `distance · tan` of that angle below the eye (38 above the centre), up to
+/// `distance · tan(3.5 units)` away from the centre's height.
+fn level_anchor(distance: f32) -> Vec3 {
+    let turn = std::f64::consts::TAU;
+    let units = (f64::from(level_pitch(distance)) * 65_536.0 / turn).round();
+    let floored = (units / 4.0).floor() * 4.0;
+    let drop = f64::from(distance) * (floored * turn / 65_536.0).tan();
+    Vec3::new(distance, 0.0, (1038.0 + drop) as f32)
+}
+
 /// A grapple-able wall whose face is at `x` (facing −X).
 fn wall_at(x: f32) -> BoxWorld {
     BoxWorld::new().with_box(
@@ -137,7 +150,16 @@ fn g_ph_2_pull_is_ten_million_over_d_at_the_spec_reference_distances() {
             s.velocity.x
         );
         assert!((s.velocity.x / DT - accel).abs() <= accel * 1e-4, "{d}");
-        assert!(s.velocity.y.abs() < 1e-3 && s.velocity.z.abs() < 1e-2);
+        // The pull points at the anchor, which the floored aim puts a
+        // little off the centre's height (`level_anchor`): 0.34 uu below at
+        // 4999, 0.02 above at 1000, 0.06 below at 201.
+        let to_anchor = level_anchor(d) - Vec3::new(0.0, 0.0, 1000.0);
+        let expected_z = expected * to_anchor.z / to_anchor.length();
+        assert!(
+            s.velocity.y.abs() < 1e-3 && (s.velocity.z - expected_z).abs() < 1e-3,
+            "{d}: {} vs z {expected_z}",
+            s.velocity
+        );
     }
 }
 
@@ -1111,7 +1133,12 @@ fn g_tg_1_aims_during_the_actor_ticks_use_the_camera_cache_of_the_previous_tick(
     {
         tick(&mut s, &idle(), &params, &world);
     }
-    let before = s.view_direction();
+    // The aim is the vector the original builds from the cached rotation:
+    // table angles, each floored to 4 rotator units (ABILITIES.md A-CM-8).
+    // For this view (0.3, −0.2 rad: units 3129 and −2086, read as 3128 and
+    // −2088) it is 1.1e-4 and 1.8e-4 rad from the exact direction.
+    let before = s.native_view_direction();
+    assert!((before - s.view_direction()).length() < 2.5e-4);
     let turn = InputFrame {
         look_yaw_delta: 0.5,
         ..InputFrame::default()

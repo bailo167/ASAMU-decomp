@@ -76,6 +76,19 @@ fn level_pitch(distance: f32) -> f32 {
     (-38.0_f32).atan2(distance)
 }
 
+/// Where the fire trace of [`level_pitch`] meets a wall at `distance` from a
+/// pawn centred at z = 1000: the original aims along the pitch's rotator
+/// unit floored to a multiple of 4 (ABILITIES.md A-CM-8), so the hit is
+/// `distance · tan` of that angle below the eye (38 above the centre), up to
+/// `distance · tan(3.5 units)` away from the centre's height.
+fn level_anchor(distance: f32) -> Vec3 {
+    let turn = std::f64::consts::TAU;
+    let units = (f64::from(level_pitch(distance)) * 65_536.0 / turn).round();
+    let floored = (units / 4.0).floor() * 4.0;
+    let drop = f64::from(distance) * (floored * turn / 65_536.0).tan();
+    Vec3::new(distance, 0.0, (1038.0 + drop) as f32)
+}
+
 /// A grapple-able wall whose face is at `x` (facing −X), large enough.
 fn wall_at(x: f32) -> BoxWorld {
     BoxWorld::new().with_box(
@@ -123,7 +136,7 @@ fn straight_pull(distance: f32, dt: f32) -> (u32, f32) {
     assert!(attach_events(&e), "{e:?}");
     let anchor = s.grapple_anchor().expect("attached");
     assert!(
-        (anchor - Vec3::new(distance, 0.0, 1000.0)).length() < 0.05,
+        (anchor - level_anchor(distance)).length() < 0.05,
         "{anchor}"
     );
     if let Some(r) = e.gun.released {
@@ -623,8 +636,11 @@ fn g_in_5_the_attach_trace_uses_the_view_of_the_previous_tick() {
     };
     let e = tick(&mut s, &press, &params, &world);
     assert!(attach_events(&e), "{e:?}");
-    assert!(
-        (s.yaw - 0.5).abs() < 1e-6,
+    // 0.5 rad is 5215.19 rotator units; the original adds the delta as an
+    // integer and drops the fraction (ABILITIES.md A-CM-9): 5215 units.
+    assert_eq!(
+        s.yaw,
+        asamu_core::rotator::rotator_units_to_radians(5215),
         "the look still applies afterwards"
     );
 }

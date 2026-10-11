@@ -488,8 +488,15 @@ impl Scene {
                 (game, forward())
             }
             Self::LookingUp => {
+                // Two looks up of 1 rad (10430 rotator units each) end at
+                // the pitch limit: 10430, then 20860, which the limit moves
+                // to 18000. The original's limit is a band on the 16-bit
+                // circle (ABILITIES.md A-CM-2), not a saturating clamp: the
+                // 3 rad per tick used here before would reach the limit on
+                // the first tick and jump across the band on the second
+                // (18000 + 31291 = 49291, a legal downward pitch).
                 let up = InputFrame {
-                    look_pitch_delta: 3.0,
+                    look_pitch_delta: 1.0,
                     ..InputFrame::default()
                 };
                 settle(&mut game, &up, 2);

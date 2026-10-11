@@ -2,15 +2,21 @@
 //!
 //! # Shape
 //!
-//! The pawn is an upright, flat-ended cylinder of radius `r` and half-height
-//! `h` (UE3 `CylinderComponent`: `CollisionRadius`, `CollisionHeight`; the
-//! player uses 21 × 44, `docs/reverse-engineering/DEFAULTS.md`). The same
-//! shape is used by `asamu_player::world::BoxWorld`, so box worlds and
-//! triangle worlds agree on contact geometry. (Stock UE3 performs extent
-//! traces against BSP and static-mesh kDOP trees with an axis-aligned *box*
-//! of the cylinder's extent; whether ASAMU's pawn collides as a box or as a
-//! cylinder is not settled by the evidence — TENTATIVE. The cylinder is the
-//! shape the movement spec and the rest of this code base use.)
+//! An upright, flat-ended cylinder of radius `r` and half-height `h` (UE3
+//! `CylinderComponent`: `CollisionRadius`, `CollisionHeight`; the player
+//! uses 21 × 44, `docs/reverse-engineering/DEFAULTS.md`). The same shape is
+//! used by `asamu_player::world::BoxWorld`, so box worlds and triangle
+//! worlds agree on contact geometry.
+//!
+//! This is **not** the shape the original sweeps the pawn as. The first
+//! recordings of the original settle what was open here: the pawn is swept
+//! as the axis-aligned *box* of the cylinder's extent, `(21, 21, 44)`
+//! (`docs/PARITY_FINDINGS.md` P4: CONFIRMED on floors, STRONG on walls; the
+//! native box checks are described in [`super::box_sweep`]). On slopes the
+//! box rests up to `21·(|a| + |b| − √(a² + b²))` higher than this cylinder
+//! and it cannot pass corners the cylinder passes. The cylinder queries stay
+//! as they are until the movement code has switched to
+//! [`super::CollisionScene::sweep_box`].
 //!
 //! # Method
 //!

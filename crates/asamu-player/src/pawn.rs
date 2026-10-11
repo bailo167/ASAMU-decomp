@@ -38,9 +38,11 @@
 //!    reached them; physics and the gun then use the updated world.
 //! 3. **Controller**, by controller state:
 //!    `PlayerWalking`: acceleration from the move axes along the pawn's yaw
-//!    **before** this tick's rotation update (A-WK-1), zero while the
-//!    move-input lock is held (A-IL-1); then the look update; then the jump
-//!    attempt `DoJump` if the jump flag is set. `Grappling` (attached,
+//!    **before** this tick's rotation update (A-WK-1; the axes come from the
+//!    engine's angle table, which floors the yaw to 4 rotator units, A-CM-8),
+//!    zero while the move-input lock is held (A-IL-1); then the look update
+//!    in whole rotator units (A-CM-9); then the jump attempt `DoJump` if the
+//!    jump flag is set. `Grappling` (attached,
 //!    G-PH-1): zero acceleration, look update, jump flag discarded.
 //!    `ReleaseGrapple` (the first controller tick after a grapple release,
 //!    G-RL-7): no move and no look update, jump flag discarded.
@@ -71,19 +73,21 @@
 //! tags), A-PJ-1…6 (power jump and leap), A-RB-1…8 (rocket boots,
 //! [`crate::rocket_boots`]), A-IL-1 (move-input lock counter), A-ST-1…4
 //! (story mode, zoom), A-CM-1…4 (view location, pitch limit, FOV, eye
-//! height and walk bob) and the whole grapple of GRAPPLE.md
+//! height and walk bob), A-CM-8/9 (table angles for the move axes, the walk
+//! bob and every aim; integer view rotation: [`crate::sim`]), the console
+//! command `SetSpeed` ([`set_speed`], [`console_command`]) and the whole
+//! grapple of GRAPPLE.md
 //! ([`crate::grapple_gun`]: targeting, acceptance, attach, flying physics
 //! with the pull, every release path, budget, Kismet events). The
 //! controller states `Grappling` (attached: zero acceleration, jump flag
 //! discarded, G-PH-1) and `ReleaseGrapple` (one tick without move and look,
 //! G-RL-7) follow the gun. Not ported: death fade and checkpoints (§11,
 //! `asamu-game` keeps its graybox rules), cinematic mode, hand/jump bob and
-//! camera animations (visual only), sounds (reported as events).
+//! camera animations (visual only), sounds (reported as events), the pawn's
+//! lean roll and kept flight pitch in the move axes (A-WK-1).
 
 use asamu_core::Provenance;
-use asamu_core::coords::{ue_forward_flat, ue_right_flat};
 use asamu_core::det_math;
-use asamu_core::rotator::wrap_radians;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
@@ -93,7 +97,7 @@ use crate::input::InputFrame;
 use crate::movement::{Landing, LocomotionIntent, MovementModel, PawnHooks};
 use crate::params::{PawnParams, PlayerParams};
 use crate::rocket_boots::{self, BootsEvent, RocketBoots};
-use crate::sim::{PlayerState, StepEvents};
+use crate::sim::{self, PlayerState, StepEvents};
 use crate::world::{CollisionShape, CollisionWorld};
 
 // ---------------------------------------------------------------------------
@@ -876,6 +880,97 @@ pub fn set_zoom_available(state: &mut PlayerState, enabled: bool) {
     }
 }
 
+/// The console command `SetSpeed F` (A-WK-3): run-time `GroundSpeed` = the
+/// pawn class's default `GroundSpeed` × `factor`
+/// ([`crate::MovementParams::max_ground_speed`], 440: the `UTPawn` default,
+/// which is not `MoveSpeed`). Returns whether the speed was written.
+///
+/// This is the stock cheat-manager command (`Engine.CheatManager`; a
+/// standalone game's controller has one). Level scripts issue it through a
+/// Kismet console-command action: AG-Workshop `setspeed 0.3` (132; the
+/// original's `GroundSpeed` reads 132.0 on 3,001 of 3,001 recorded Workshop
+/// frames), AG-Epilogue `SetSpeed 0.15` and `setspeed 0.3`. It writes the
+/// speed and nothing else: no sprint flag, no pawn state (it also scales the
+/// water speed, which this simulation does not have).
+///
+/// Every other `GroundSpeed` writer still writes its own value afterwards
+/// (A-WK-3): a sprint press on the ground gives `MoveSpeed × 2`, its release
+/// `MoveSpeed`, entering story mode `MoveSpeed × 0.6`, leaving it
+/// `MoveSpeed`. In story mode the sprint keys do nothing (A-ST-2), so there
+/// the value stays until the story transition; that is the Workshop's case.
+/// Rule CONFIRMED (src); a sprint press after the command is in no
+/// recording.
+///
+/// The pawn is started first if it has not been (as [`enter_story_mode`]
+/// does). No-op without pawn parameters, and when the product is not finite
+/// (a guard of ours, so that the state stays finite: a factor that is not
+/// finite, or one large enough to overflow, e.g. `setspeed 1e38`; none of
+/// the maps' commands is near that).
+pub fn set_speed(state: &mut PlayerState, params: &PlayerParams, factor: f32) -> bool {
+    if params.pawn.is_none() {
+        return false;
+    }
+    let ground_speed = params.movement.max_ground_speed.value * factor;
+    if !ground_speed.is_finite() {
+        return false;
+    }
+    if !state.script.started {
+        start(state, params);
+    }
+    state.script.ground_speed = ground_speed;
+    true
+}
+
+/// What [`console_command`] did with a command line.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum ConsoleCommand {
+    /// `SetSpeed F` ran ([`set_speed`]).
+    SetSpeed {
+        /// The factor `F`.
+        factor: f32,
+        /// `GroundSpeed` after the command, UU/s.
+        ground_speed: f32,
+    },
+    /// Not a command of the pawn script layer (or one whose argument does
+    /// not parse): nothing changed.
+    NotHandled,
+}
+
+/// Applies a console command line to the pawn script layer, as a level
+/// script's console-command action issues it to the player. Handled:
+/// `SetSpeed F` ([`set_speed`]); the command word is matched without regard
+/// to case (the engine's command lookup is case-insensitive; the maps spell
+/// it `setspeed` and `SetSpeed`). Everything else returns
+/// [`ConsoleCommand::NotHandled`] and changes nothing: other commands
+/// (`changesize`, …) are not the pawn script layer's, and what the original
+/// does with a missing or malformed argument is not needed for the three
+/// commands the maps contain and is not modelled.
+pub fn console_command(
+    state: &mut PlayerState,
+    params: &PlayerParams,
+    command: &str,
+) -> ConsoleCommand {
+    let mut words = command.split_whitespace();
+    let (Some(word), Some(argument), None) = (words.next(), words.next(), words.next()) else {
+        return ConsoleCommand::NotHandled;
+    };
+    if !word.eq_ignore_ascii_case("setspeed") {
+        return ConsoleCommand::NotHandled;
+    }
+    let Ok(factor) = argument.parse::<f32>() else {
+        return ConsoleCommand::NotHandled;
+    };
+    if set_speed(state, params, factor) {
+        ConsoleCommand::SetSpeed {
+            factor,
+            ground_speed: state.script.ground_speed,
+        }
+    } else {
+        ConsoleCommand::NotHandled
+    }
+}
+
 /// The pawn's `Landed` event (§5 decision table) for `landing`. Called by
 /// the movement model at the moment the native `processLanded` calls it.
 pub fn on_landed(
@@ -1274,8 +1369,9 @@ fn update_eye_height<W: CollisionWorld + ?Sized>(
             };
             s.bob_time += dt * rate;
         }
-        // Pawn right axis (pitch is 0 while walking).
-        let right = ue_right_flat(state.yaw);
+        // Pawn right axis as `GetAxes` gives it (A-CM-8: table angles; the
+        // pawn's pitch is 0 while walking, its lean roll is not modelled).
+        let (_, right) = sim::rotator_axes_flat(sim::view_units(state.yaw));
         let mut walk_bob = right * bob * speed * det_math::sin(BOB_LATERAL_FREQUENCY * s.bob_time);
         // The stock additive vertical term is never set, so it stays 0.
         walk_bob.z = 0.0;
@@ -1394,6 +1490,16 @@ fn fire_input_event<W: CollisionWorld + ?Sized>(
 /// - `PlayerWalking` (A-WK-1, A-JP-1): acceleration from the move axes
 ///   (zeroed under the move-input lock, A-IL-1) along the pawn yaw **before**
 ///   this tick's look update, then the look update, then the jump attempt.
+///
+/// The axes are the ones the original's `GetAxes` builds from the pawn
+/// rotation ([`sim::rotator_axes_flat`], A-CM-8): the yaw floored to 4
+/// rotator units, table sines. The pawn's yaw as the tick begins is the view
+/// yaw the previous tick ended with (the look update turns the pawn to the
+/// view in the same call, and in the recordings the two are equal on 45,237
+/// of 45,237 records), so [`PlayerState::yaw`] before the look update is that
+/// rotation. The pawn's lean roll and the pitch it keeps from a flight are
+/// not modelled (docs/PARITY_FINDINGS.md P7). The look update works in
+/// integer rotator units ([`sim::apply_look`], A-CM-9).
 fn controller_move(
     state: &mut PlayerState,
     input: &InputFrame,
@@ -1411,14 +1517,10 @@ fn controller_move(
     } else {
         (input.move_forward, input.move_right)
     };
-    let pawn_yaw = state.yaw;
-    let wish = ue_forward_flat(pawn_yaw) * forward + ue_right_flat(pawn_yaw) * right;
+    let (x_axis, y_axis) = sim::rotator_axes_flat(state.yaw_units());
+    let wish = x_axis * forward + y_axis * right;
     let wish_dir = wish.normalize_or_zero();
-    let max_pitch = params.camera.max_pitch_degrees.value.to_radians();
-    state.yaw = wrap_radians(state.yaw + input.look_yaw_delta);
-    state.pitch = (state.pitch + input.look_pitch_delta)
-        .max(-max_pitch)
-        .min(max_pitch);
+    sim::apply_look(state, input, params);
     if input.jump_pressed && !attached {
         do_jump(state, pawn, events);
     }

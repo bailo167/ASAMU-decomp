@@ -12,7 +12,7 @@
 
 mod common;
 
-use asamu_player::movement::LocomotionIntent;
+use asamu_player::movement::{ClassDefaults, Landing, LocomotionIntent, PawnHooks};
 use asamu_player::ue3_movement::{
     MOVE_RADIUS_INFLATION, PawnPhysicsState, PhysicsMode, TickStats, Ue3PawnMovement,
 };
@@ -1147,6 +1147,405 @@ fn walking_into_an_obtuse_corner_follows_the_second_wall() {
     );
     assert!(p.y > p0.y + 5.0, "{p}");
     assert!(s.grounded && (p.z - p0.z).abs() < 1e-3);
+}
+
+// ---------------------------------------------------------------------------
+// 2.4 Velocity derived from a displacement: the float form.
+//
+// One recorded pair of the original (docs/PARITY_FINDINGS.md P8 / V17): in a
+// tick of 0.01631380245089531 s a displacement of −14.2109375 uu gave the
+// velocity −871.0989990234375 uu/s, which is the displacement times the f32
+// reciprocal of the tick (61.297786712646484); dividing gives the next float,
+// −871.0990600585938. The three tests below put that displacement through
+// each movement mode. They work at a coordinate of 20000, where neighbouring
+// f32 positions are 1/512 uu apart, and at a speed of 871.1 uu/s (f32
+// 871.0999755859375): the move 871.0999755859375 × 0.01631380245089531 =
+// 14.21095… uu then lands on the position 19985.7890625, and
+// 19985.7890625 − 20000 = −14.2109375 exactly (0.2109375 = 108/512). The
+// speeds, the cap and the drag set here are test inputs, not game values.
+// ---------------------------------------------------------------------------
+
+/// The tick length of the recorded pair (f32 bits 0x3C85A486).
+fn recorded_dt() -> f32 {
+    let dt = 0.01631380245089531_f64 as f32;
+    assert_eq!(dt.to_bits(), 0x3C85_A486);
+    dt
+}
+
+/// 871.1 uu/s: the f32 nearest to it is 871.0999755859375.
+const RECORDED_PAIR_SPEED: f32 = 871.1;
+/// The displacement of the recorded pair, uu.
+const RECORDED_PAIR_MOVE: f32 = -14.2109375;
+/// The velocity of the recorded pair, uu/s (f32 bits 0xC459C656).
+const RECORDED_PAIR_VELOCITY: f64 = -871.0989990234375;
+/// What dividing the displacement by the tick gives instead (0xC459C657).
+const RECORDED_PAIR_DIVIDED: f64 = -871.0990600585938;
+
+#[test]
+fn walking_velocity_is_the_displacement_times_the_f32_reciprocal_of_dt() {
+    // 3.1 with 2.4. Walking at the speed cap with the input along the
+    // velocity: the turning-friction term is exactly zero, the acceleration
+    // pushes the speed over the cap and the cap brings it back to
+    // GroundSpeed (to within the rounding of the normalisation, far inside
+    // the 1/1024 uu that would change the position reached).
+    let dt = recorded_dt();
+    let mut params = PlayerParams::default();
+    params.movement.max_ground_speed.value = RECORDED_PAIR_SPEED;
+    assert_eq!(params.movement.movement_speed_modifier.value, 1.0);
+    let world = BoxWorld::new().with_ground(0.0, false);
+    let start = Vec3::new(20000.0, 0.0, hh(&params) + 2.15);
+    let mut s = walking_at(start, Vec3::Z, true, false);
+    s.velocity = Vec3::new(-RECORDED_PAIR_SPEED, 0.0, 0.0);
+    let (_, stats) = tick(&mut s, towards(Vec3::NEG_X), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Walking, dt)]);
+    assert!(s.grounded);
+    assert_eq!(s.position.x - start.x, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.x), RECORDED_PAIR_VELOCITY);
+    assert_ne!(f64::from(s.velocity.x), RECORDED_PAIR_DIVIDED);
+    assert_eq!(s.velocity.y, 0.0);
+    assert_eq!(s.velocity.z, 0.0);
+}
+
+#[test]
+fn falling_refinement_uses_the_f32_reciprocal_of_the_substep() {
+    // 4.3 and 4.6 with 2.4, the analogous case for falling. Free fall
+    // straight down with no input, one sub-step (dt ≤ 0.05):
+    //   V1 = V0 + g·dt, the move is V1·dt, the average velocity is the
+    //   displacement × (1/dt), and since V0.Z < 0 and the average is below
+    //   it the result is 2·average − V0.
+    // V0.Z is chosen so that V1.Z is the speed of the recorded pair:
+    //   g·dt = −520 × 0.01631380245089531 = −8.4831772744…, in f32
+    //   −8.483177185058594 (0xC107BB18); V0.Z = −862.6168 (f32
+    //   −862.6168212890625, 0xC457A77A); their sum −871.0999984741… is in
+    //   f32 −871.0999755859375, the f32 nearest to −871.1.
+    // The displacement is therefore −14.2109375 and the average
+    // −871.0989990234375, so
+    //   V.Z = 2 × (−871.0989990234375) − (−862.6168212890625)
+    //       = −879.5811767578125                  (exact, f32 0xC45BE532).
+    // With the division form the average would be −871.09906005859375 and
+    // the result −879.581298828125 (0xC45BE534), two floats away.
+    let dt = recorded_dt();
+    let params = PlayerParams::default();
+    assert_eq!(gravity(&params), -520.0);
+    assert!(params.movement.terminal_velocity.value > 880.0);
+    let world = BoxWorld::new();
+    let v0 = Vec3::new(0.0, 0.0, -862.6168);
+    assert_eq!(v0.z.to_bits(), 0xC457_A77A);
+    let start = Vec3::new(0.0, 0.0, 20000.0);
+    let mut s = airborne(start, v0);
+    let (events, stats) = tick(&mut s, no_input(), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Falling, dt)]);
+    assert!(!s.grounded && events.landed.is_none());
+    assert_eq!(s.position.z - start.z, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.z), -879.5811767578125);
+    assert_eq!(s.velocity.z.to_bits(), 0xC45B_E532);
+    assert_ne!(f64::from(s.velocity.z), -879.581298828125);
+    assert_eq!(s.velocity.x, 0.0);
+    assert_eq!(s.velocity.y, 0.0);
+    assert_eq!(s.position.x, 0.0);
+    assert_eq!(s.position.y, 0.0);
+}
+
+#[test]
+fn falling_average_after_wall_contact_uses_the_f32_reciprocal_of_the_substep() {
+    // 4.5 step 4 with 2.4: after a wall contact the old horizontal velocity
+    // is replaced by the average actually travelled, displacement × (1/dt),
+    // before the refinement 2·average − old. Sideways (Y) nothing stops the
+    // pawn, so its Y average is the reciprocal form of the recorded pair and
+    // the refinement gives 2·a − a = a exactly: the Y velocity after the
+    // tick is that average itself. (Without the replacement the result would
+    // be 2·a − V0.Y, about −871.098; with the division form it would be
+    // −871.0990600585938.) The wall only has to be hit: it faces −X, far
+    // from the pawn's Y range, and the pawn moves into it at 100 uu/s.
+    let dt = recorded_dt();
+    let mut params = PlayerParams::default();
+    // No air steering and no gravity: the only acceleration is zero.
+    params.movement.custom_gravity_scaling.value = 0.0;
+    let wall_x = 100.0;
+    let world = BoxWorld::new().with_box(
+        Vec3::new(wall_x, 19000.0, 0.0),
+        Vec3::new(wall_x + 50.0, 21000.0, 2000.0),
+        false,
+    );
+    // Half a unit from the wall face (the sweep radius is 1.001 × the
+    // collision radius), so the 1.63 uu move into it is cut short.
+    let start = Vec3::new(wall_x - move_radius(&params) - 0.5, 20000.0, 1000.0);
+    let v0 = Vec3::new(100.0, -RECORDED_PAIR_SPEED, 0.0);
+    let mut s = airborne(start, v0);
+    let (_, stats) = tick(&mut s, no_input(), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Falling, dt)]);
+    assert!(s.position.x - start.x < 0.6, "stopped by the wall");
+    assert_eq!(s.position.y - start.y, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.y), RECORDED_PAIR_VELOCITY);
+    assert_eq!(s.velocity.z, 0.0);
+}
+
+#[test]
+fn flying_velocity_is_the_displacement_times_the_f32_reciprocal_of_dt() {
+    // G-PH-3 step 6 with 2.4. No drag (FluidFriction 0 makes both friction
+    // factors exactly 1), no acceleration and a cap above the speed: the
+    // velocity update leaves V unchanged, the move is V·dt and the velocity
+    // is re-derived from the displacement.
+    let dt = recorded_dt();
+    let mut params = PlayerParams::default();
+    params.movement.fluid_friction.value = 0.0;
+    params.movement.air_speed.value = 2000.0;
+    let world = BoxWorld::new();
+    let start = Vec3::new(20000.0, 0.0, 500.0);
+    let mut s = flying(start, Vec3::new(-RECORDED_PAIR_SPEED, 0.0, 0.0));
+    let (_, stats) = tick(&mut s, no_input(), &params, &world, dt);
+    assert_modes(&stats, &[(PhysicsMode::Flying, dt)]);
+    assert!(s.pawn.flying && !s.grounded);
+    assert_eq!(s.position.x - start.x, RECORDED_PAIR_MOVE);
+    assert_eq!(f64::from(s.velocity.x), RECORDED_PAIR_VELOCITY);
+    assert_ne!(f64::from(s.velocity.x), RECORDED_PAIR_DIVIDED);
+    assert_eq!(s.velocity.y, 0.0);
+    assert_eq!(s.velocity.z, 0.0);
+    assert_eq!(s.position.z, start.z);
+}
+
+/// [`PawnHooks`] with the class defaults that keeps what the pawn's `Landed`
+/// event is told (the velocity and location at the landing, before the rest
+/// of the tick is walked).
+struct LandingRecorder {
+    defaults: ClassDefaults,
+    landings: Vec<Landing>,
+}
+
+impl PawnHooks for LandingRecorder {
+    fn ground_speed(&self) -> f32 {
+        self.defaults.ground_speed
+    }
+
+    fn air_control(&self) -> f32 {
+        self.defaults.air_control
+    }
+
+    fn air_speed(&self) -> f32 {
+        self.defaults.air_speed
+    }
+
+    fn landed(&mut self, landing: &Landing) {
+        self.landings.push(*landing);
+    }
+}
+
+#[test]
+fn landing_velocity_is_the_displacement_times_the_f32_reciprocal_of_the_contact_time() {
+    // 4.4 with 2.4: a landing after `step·Hit.Time` > 0.003 s with
+    // `Hit.Time` > 0.1 replaces the velocity by the displacement of the
+    // sub-step × (1 / (step·Hit.Time)): one f32 reciprocal, three products
+    // (Mac 0x100AE0747, Win32 0xB2899B). No recording shows this velocity
+    // (the rest of the landing frame is walked), so the rule rests on the
+    // native code; this test keeps the port on it.
+    //
+    // Nothing here is taken from the code under test except what it reports
+    // about the landing: where the pawn was (`Landing::location`) and how
+    // much time it handed back (`returned_time`, spec 1.4/5.2:
+    // step·(1 − Hit.Time)). With a tick of 1/32 s (one sub-step, a power of
+    // two) and `Hit.Time` ≥ 0.5 every operation that leads from the returned
+    // time back to the contact time is exact in f32:
+    //   returned · 32 = 1 − Hit.Time   (scaling by a power of two; the
+    //                                   difference of 1 and a float in
+    //                                   [0.5, 1] is exact)
+    //   Hit.Time = 1 − returned · 32,  contact = Hit.Time / 32.
+    // The expected velocity is then written out from the native rule. The
+    // cases differ in height and speed so that the contact time and the
+    // displacement change; the division form gives another float in some of
+    // them, and the test requires that at least one case tells the two
+    // forms apart. If a change of the contact rule (the hit pull-back) ever
+    // leaves none, add cases; the expected value does not change.
+    let step = 1.0_f32 / 32.0;
+    let params = PlayerParams::default();
+    let g = gravity(&params);
+    let world = BoxWorld::new().with_ground(0.0, false);
+    let mut decided = 0;
+    for case in 0..12_u8 {
+        let k = f32::from(case);
+        let start = Vec3::new(0.0, 0.0, hh(&params) + 14.0 + 0.5 * k);
+        let v0 = Vec3::new(150.0 + 10.0 * k, -37.5, -700.0 - 6.25 * k);
+        let mut s = airborne(start, v0);
+        let mut hooks = LandingRecorder {
+            defaults: ClassDefaults::new(&params.movement),
+            landings: Vec::new(),
+        };
+        let mut events = StepEvents::default();
+        let stats = Ue3PawnMovement.advance_scripted_with_stats(
+            &mut s,
+            &no_input(),
+            Vec3::ZERO,
+            &params.movement,
+            &mut hooks,
+            &world,
+            step,
+            &mut events,
+        );
+        assert_eq!(hooks.landings.len(), 1, "case {case}: one landing");
+        let landing = hooks.landings[0];
+        let first = stats.substeps()[0];
+        assert_eq!(
+            (first.mode, first.time),
+            (PhysicsMode::Falling, step),
+            "case {case}"
+        );
+
+        // The contact time, from the time handed back.
+        let untravelled = stats.returned_time * 32.0;
+        assert!(
+            untravelled > 0.0 && untravelled <= 0.5,
+            "case {case}: Hit.Time must be in [0.5, 1) for the exact derivation, 1 - t = {untravelled}"
+        );
+        let hit_time = 1.0 - untravelled;
+        let contact = step * hit_time;
+        assert!(contact > 0.003 && hit_time > 0.1, "case {case}");
+        // The landing location is the start plus that fraction of the
+        // sub-step's move (4.3: V1 = V0 + g·step, move V1·step).
+        let moved = landing.location - start;
+        let full_move_z = (f64::from(v0.z) + g * f64::from(step)) * f64::from(step);
+        close(
+            f64::from(moved.z),
+            full_move_z * f64::from(hit_time),
+            1e-4,
+            "fraction of the move",
+        );
+
+        let reciprocal = 1.0 / contact;
+        let expected = [
+            moved.x * reciprocal,
+            moved.y * reciprocal,
+            moved.z * reciprocal,
+        ];
+        let divided = [moved.x / contact, moved.y / contact, moved.z / contact];
+        assert_eq!(
+            landing.velocity.to_array().map(f32::to_bits),
+            expected.map(f32::to_bits),
+            "case {case}: landing velocity {:?}, reciprocal form {expected:?}, division form {divided:?}",
+            landing.velocity
+        );
+        assert_eq!(events.landed, Some(landing.velocity.z), "case {case}");
+        if expected.map(f32::to_bits) != divided.map(f32::to_bits) {
+            decided += 1;
+        }
+    }
+    assert!(
+        decided >= 1,
+        "no case tells the reciprocal form from the division form: add cases"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2.1 and 2.3: the order of the multiplications inside the velocity update.
+//
+// Both executables multiply in the same order (NATIVE_PHYSICS.md 2.1, 2.3):
+// the turning friction is (difference · dt) · friction, and a braking piece
+// adds (v · h) · (1 / dt) to the average. No recording can tell these from
+// the other orders (the difference never reaches a recorded position), so
+// the expected values are written out from the native rule in f32, one
+// operation at a time, with the value another order would give beside them.
+// The tick is the one of the recorded pair above (f32 bits 0x3C85A486).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn turning_friction_multiplies_by_the_time_before_the_friction() {
+    use asamu_player::ue3_movement::udk_calc_velocity_with;
+    let dt = recorded_dt();
+    let params = PlayerParams::asamu_original();
+
+    // The flying call (GRAPPLE.md G-PH-3): no input, fluid friction, no
+    // braking, friction 0.5 × FluidFriction = 0.15000000596046448
+    // (0x3E19999A), cap 2000. With no input the difference is the velocity:
+    //   V ← V − (V·dt)·F, then V ← V·(1 − F·dt) with 1 − F·dt = 0x3F7F5FA1.
+    // The speed, 1981.6 uu/s, is below the cap.
+    //   component   V − (V·dt)·F   × (1 − F·dt)   with (V·F)·dt instead
+    //   792         0x444583F7     0x4445083B     0x4445083A
+    //   −889        0xC45DB4C5     0xC45D29E2     0xC45D29E3
+    //   1584        0x44C583F7     0x44C5083B     0x44C5083A
+    assert_eq!(params.movement.fluid_friction.value, 0.3);
+    let friction = 0.5 * params.movement.fluid_friction.value;
+    assert_eq!(friction.to_bits(), 0x3E19_999A);
+    let r = udk_calc_velocity_with(
+        Vec3::new(792.0, -889.0, 1584.0),
+        Vec3::ZERO,
+        2048.0,
+        dt,
+        2000.0,
+        friction,
+        true,
+        false,
+    );
+    assert_eq!(
+        r.velocity.to_array().map(f32::to_bits),
+        [0x4445_083B, 0xC45D_29E2, 0x44C5_083B],
+        "{:?}",
+        r.velocity
+    );
+    assert_eq!(r.acceleration, Vec3::ZERO);
+
+    // The walking call with an input: V = (110, 0, 0), input +Y, acceleration
+    // 2048, cap 1000, friction 6. The friction is a test input: the game's
+    // ground friction, 8, is a power of two, and multiplying by a power of
+    // two is exact, so there the order cannot matter.
+    //   |V| = 110, difference = V − input·|V| = (110, −110, 0)
+    //   X: 110 − (110·dt)·6 = 0x42C6773E (99.23289489746094);
+    //      110 − (110·6)·dt would be 0x42C6773D
+    //   Y: 0 − (−110·dt)·6 = 0x412C4614 (0x412C4615 in the other order),
+    //      + 2048·dt = 0x4230B60B (44.17777633666992)
+    assert_eq!(params.movement.ground_friction.value, 8.0);
+    let r = udk_calc_velocity_with(
+        Vec3::new(110.0, 0.0, 0.0),
+        Vec3::Y,
+        2048.0,
+        dt,
+        1000.0,
+        6.0,
+        false,
+        true,
+    );
+    assert_eq!(
+        r.velocity.to_array().map(f32::to_bits),
+        [0x42C6_773E, 0x4230_B60B, 0],
+        "{:?}",
+        r.velocity
+    );
+    assert_eq!(r.acceleration, Vec3::new(0.0, 2048.0, 0.0));
+}
+
+#[test]
+fn braking_average_adds_each_piece_times_the_f32_reciprocal_of_dt() {
+    use asamu_player::ue3_movement::apply_velocity_braking;
+    let params = PlayerParams::asamu_original();
+    let friction = params.movement.ground_friction.value;
+    assert_eq!(friction, 8.0);
+    let start = Vec3::new(250.0, -500.0, 0.0);
+
+    // One piece (dt ≤ 0.03):
+    //   V1 = V0 − ((V0 + V0)·dt)·8 = (0x4338BEAA, 0xC3B8BEAA)
+    //      = (184.74478149414062, −369.48956298828125)
+    //   average = (V1·dt)·(1/dt), 1/dt = 0x427530EF:
+    //      (0x4338BEA9, 0xC3B8BEA9) = (184.74476623535156, −369.4895324707031)
+    // V1·(dt/dt) would be V1 itself, the next float in both components.
+    let v = apply_velocity_braking(start, recorded_dt(), friction);
+    assert_eq!(
+        v.to_array().map(f32::to_bits),
+        [0x4338_BEA9, 0xC3B8_BEA9, 0],
+        "{v:?}"
+    );
+
+    // Two pieces: dt = 1/30 s (0x3D088889) is 0.03 s and then
+    // 0.003333335742354393 s (0x3B5A7418); 1/dt = 0x41EFFFFF.
+    //   V1 = V0 − ((V0 + V0)·0.03)·8 = (130, −260)
+    //   V2 = V1 − ((V1 + V1)·h2)·8   = (0x42F62222, 0xC3762222)
+    //   average = (V1·0.03)·(1/dt) + (V2·h2)·(1/dt)
+    //      = (0x43014E81, 0xC3814E81) = (129.30665588378906, −258.6133117675781)
+    // V1·(0.03/dt) + V2·(h2/dt) would be (0x43014E82, 0xC3814E82).
+    let dt = 1.0_f32 / 30.0;
+    assert_eq!(dt.to_bits(), 0x3D08_8889);
+    let v = apply_velocity_braking(start, dt, friction);
+    assert_eq!(
+        v.to_array().map(f32::to_bits),
+        [0x4301_4E81, 0xC381_4E81, 0],
+        "{v:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
