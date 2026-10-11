@@ -361,7 +361,7 @@ function WhGate([string]$name, [string[]]$only) {
             if ($id -eq 'test') {
                 # The end of the log names the test programs that failed; these are the tests.
                 $tests = @(Select-String -LiteralPath $log -Pattern '^test .+ \.\.\. FAILED\s*$' -Encoding UTF8 | ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique)
-                [Console]::Error.WriteLine('--- ' + $tests.Count + ' failed tests' + $(if ($tests.Count -gt 40) { ' (the first 40):' } else { ':' }))
+                [Console]::Error.WriteLine('--- tests that failed (' + $tests.Count + $(if ($tests.Count -gt 40) { ', the first 40):' } else { '):' }))
                 foreach ($text in @($tests | Select-Object -First 40)) { [Console]::Error.WriteLine($text) }
             }
             [Console]::Error.WriteLine('---')

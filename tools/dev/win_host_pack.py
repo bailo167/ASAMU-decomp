@@ -190,6 +190,11 @@ def collect(repo, list_path):
         if not stat.S_ISREG(info.st_mode):
             problems.append("%s: is not a regular file" % shown(name))
             continue
+        if not os.access(path, os.R_OK):
+            # Found now, not half way through the transfer, when the tree on
+            # the other machine has been emptied already.
+            problems.append("%s: cannot be read (no permission)" % shown(name))
+            continue
         why = name_problem(name)
         if why:
             problems.append("%s: %s" % (shown(name), why))

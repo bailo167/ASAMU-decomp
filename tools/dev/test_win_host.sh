@@ -767,6 +767,14 @@ else
   rm -rf "$S/Folder" "$S/folder"
 fi
 
+printf 'no permission to read' > "$S/unreadable.txt" && chmod 000 "$S/unreadable.txt"
+if [ -r "$S/unreadable.txt" ]; then
+  echo "skip  sync refuses a file that cannot be read (this user can read every file)"
+else
+  refuse 'a file that cannot be read' 'cannot be read (no permission)'
+fi
+rm -f "$S/unreadable.txt"
+
 echo "outside the checkout" > "$T/outside.txt"
 ln -s "$T/outside.txt" "$S/link-to-outside"
 refuse 'a symbolic link to a file' 'symbolic link'
