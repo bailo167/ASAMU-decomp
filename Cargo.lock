@@ -365,6 +365,7 @@ name = "asamu-inspect"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "asamu-locate",
  "asamu-ue3",
  "clap",
  "serde",
@@ -462,6 +463,7 @@ dependencies = [
 name = "asamu-ue3"
 version = "0.0.1"
 dependencies = [
+ "asamu-locate",
  "serde",
  "tempfile",
  "thiserror 2.0.21",

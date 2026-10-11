@@ -1,8 +1,13 @@
 //! Where the real-data tests find the user's own installed game (shared by
-//! every `*_real_data.rs` file; nothing here reads more than folder names).
+//! every `*_real_data.rs` file; nothing here reads more than folder names
+//! and Steam's library metadata).
 //!
-//! `ASAMU_ORIGINAL_DIR` names the install root. Without it the default macOS
-//! Steam location is tried. The retail game has two layouts:
+//! The install is found by `asamu-locate`, as the tools find it: the root
+//! named by `ASAMU_ORIGINAL_DIR`, else the Steam library that holds the game
+//! (the host's default Steam folders, or `ASAMU_STEAM_ROOT`). The tests
+//! therefore run on a Windows or Linux machine with the game installed
+//! without any variable set, and a machine without the game (CI) skips them.
+//! The retail game has two layouts:
 //!
 //! - macOS: `<root>/A Story About My Uncle.app/Contents/Resources/{ASAMU/CookedMac, Engine}`
 //! - Windows: `<root>/{ASAMU/CookedPC, Engine}`
@@ -19,18 +24,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Folder of the Mac app bundle that holds `ASAMU/` and `Engine/`.
-const MAC_CONTENT: [&str; 3] = ["A Story About My Uncle.app", "Contents", "Resources"];
-/// Steam's default install folder below `HOME` on macOS.
-const MAC_STEAM_INSTALL: [&str; 6] = [
-    "Library",
-    "Application Support",
-    "Steam",
-    "steamapps",
-    "common",
-    "A Story About My Uncle",
-];
-
 /// The folders of an original install that the tests read.
 pub struct OriginalData {
     /// Holds `ASAMU/` and `Engine/`.
@@ -39,40 +32,23 @@ pub struct OriginalData {
     pub cooked_dir: PathBuf,
 }
 
-fn join_all(base: &Path, parts: &[&str]) -> PathBuf {
-    let mut path = base.to_path_buf();
-    for part in parts {
-        path.push(part);
+impl From<asamu_locate::Install> for OriginalData {
+    fn from(install: asamu_locate::Install) -> Self {
+        Self {
+            content_dir: install.content_dir,
+            cooked_dir: install.cooked_dir,
+        }
     }
-    path
 }
 
-/// The layout of the install at `root`, if it is one of the two known ones.
+/// The install at `root`, if it has one of the known layouts.
 pub fn original_data_in(root: &Path) -> Option<OriginalData> {
-    let mac = join_all(root, &MAC_CONTENT);
-    let candidates = [
-        (mac.clone(), join_all(&mac, &["ASAMU", "CookedMac"])),
-        (root.to_path_buf(), join_all(root, &["ASAMU", "CookedPC"])),
-    ];
-    candidates
-        .into_iter()
-        .find(|(_, cooked)| cooked.is_dir())
-        .map(|(content_dir, cooked_dir)| OriginalData {
-            content_dir,
-            cooked_dir,
-        })
+    asamu_locate::from_original_dir(root).ok().map(Into::into)
 }
 
 /// The user's install, or `None` when the game data is absent (CI).
 pub fn original_data() -> Option<OriginalData> {
-    let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => join_all(
-            &PathBuf::from(std::env::var_os("HOME")?),
-            &MAC_STEAM_INSTALL,
-        ),
-    };
-    original_data_in(&root)
+    asamu_locate::locate().ok().map(Into::into)
 }
 
 /// The cooked folder of the user's install (`CookedMac` or `CookedPC`).

@@ -2583,23 +2583,13 @@ mod tests {
 
         const PACKAGE_TAG: u32 = 0x9E2A_83C1;
 
+        /// The cooked folder of the user's install, found as the tools
+        /// find it (`ASAMU_ORIGINAL_DIR` or the Steam library; the Mac app
+        /// bundle or the Windows install: the packages are the same files).
         fn cooked_dir() -> Option<PathBuf> {
-            let root = match std::env::var_os("ASAMU_ORIGINAL_DIR") {
-                Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-                _ => PathBuf::from(std::env::var_os("HOME")?).join(
-                    "Library/Application Support/Steam/steamapps/common/A Story About My Uncle",
-                ),
-            };
-            // The Mac build keeps the cook in its app bundle, the Windows
-            // build at the install root; the packages are the same files.
-            let mac = root
-                .join("A Story About My Uncle.app")
-                .join("Contents")
-                .join("Resources")
-                .join("ASAMU")
-                .join("CookedMac");
-            let windows = root.join("ASAMU").join("CookedPC");
-            [mac, windows].into_iter().find(|dir| dir.is_dir())
+            asamu_locate::locate()
+                .ok()
+                .map(|install| install.cooked_dir)
         }
 
         fn package_files(dir: &Path) -> Vec<PathBuf> {
