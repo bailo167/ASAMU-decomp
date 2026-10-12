@@ -195,6 +195,20 @@
 //! applies is undone (the pawn's script state is reset to a fresh start)
 //! and the map's own Kismet sets abilities, as in the original.
 //!
+//! **A load from a checkpoint.** A checkpoint save keeps the script's
+//! events, variables and Matinees ([`LevelScript::save_into`]), and the load
+//! at a level's start puts them back before the "save loaded" events fire
+//! ([`LevelScript::start_from_save`]; rule and evidence:
+//! `asamu_kismet::save_state`, KISMET_RUNTIME.md §12). That is how the
+//! original keeps a level's opening from playing again after Continue: the
+//! shipped scripts start their openings from the "save loaded" event behind
+//! a bool variable the opening sets, and the load restores the variable. A
+//! death, the pause menu's restart and the quick-load key load nothing in
+//! the original (its death sequence resets the falling rocks, fires the
+//! death event and puts the pawn at the latest checkpoint; the call that
+//! would reload the save is commented out in its script), so the script
+//! runs on through them, here too.
+//!
 //! **Camera animations.** The level script owns the player camera's
 //! animation pool ([`asamu_kismet::camera_anim::CameraAnims`], loaded from
 //! `matinee/camera_anims.json` and the maps' own camera animations): after
@@ -356,6 +370,29 @@ pub struct ScriptedTick {
     pub outputs: Vec<Output>,
     /// The NPC events of the game tick ([`Game::npc_events`]).
     pub npc_events: Vec<NpcEvent>,
+}
+
+/// What [`LevelScript::start_from_save`] gave the script to restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptRestore {
+    /// Nothing: no save, or a save without anything of this level's script.
+    Nothing,
+    /// The saved script state (entries in the save; those of other levels
+    /// do not resolve).
+    Saved {
+        /// Events.
+        events: usize,
+        /// Variables.
+        variables: usize,
+        /// Matinees.
+        matinees: usize,
+    },
+    /// Ours: the variables of the level's own start, for a save of this map
+    /// written without a script state.
+    LevelStartVariables {
+        /// Variables.
+        variables: usize,
+    },
 }
 
 /// How [`load_level_with_kismet_options`] starts a converted level.
@@ -1405,6 +1442,77 @@ impl LevelScript {
             }
         }
         self.turn_rule = rule;
+    }
+
+    /// Adds this script's state to a snapshot being written at a checkpoint
+    /// ([`Game::capture_snapshot`] made the rest): every event, variable and
+    /// Matinee of the attached levels, as the original's save writes them
+    /// (`asamu_kismet::save_state`).
+    ///
+    /// When it is taken: the app saves after the tick that made the
+    /// checkpoint the latest, so the state is the script's at the end of
+    /// that tick. The original saves inside the checkpoint's activation: for
+    /// a checkpoint the pawn touches that is after the frame's Kismet
+    /// update, as here; for one a `SeqAct_TriggerCheckpoint` activates it is
+    /// in the middle of the update, before the ops that run after that
+    /// action in the same update (their variable writes are in our save and
+    /// not in the original's; no measured case).
+    pub fn save_into(&self, snapshot: &mut crate::save::Snapshot) {
+        snapshot.set_script_state(&self.runtime.capture_state());
+    }
+
+    /// The level start's load, for the script: the checkpoint index the
+    /// "save loaded" events receive (`None`: no load at all, as in time
+    /// trial; −1: a level without a checkpoint of its own in the save) and
+    /// the script state the load restores before they fire. Call it before
+    /// the first tick.
+    ///
+    /// - A snapshot that holds a script state gives it whole; what resolves
+    ///   is decided path by path, so another map's state restores nothing
+    ///   (the original looks every saved object up by its full path).
+    /// - **Ours:** a snapshot written by this map without a script state
+    ///   (our builds up to 2026-10-12 saved none) gives the variables of
+    ///   the level's own start
+    ///   ([`asamu_kismet::Runtime::level_start_variables`]): the flags that
+    ///   guard the level's opening, so that such a save does not play it
+    ///   again, and nothing else.
+    /// - No snapshot, or one of another map without a script state: nothing.
+    pub fn start_from_save(
+        &mut self,
+        snapshot: Option<&crate::save::Snapshot>,
+        index: Option<i32>,
+    ) -> ScriptRestore {
+        self.runtime.set_start_save_index(index);
+        let (state, what) = match snapshot.filter(|_| index.is_some()) {
+            None => (None, ScriptRestore::Nothing),
+            Some(snap) => match snap.script_state() {
+                Some(state) => {
+                    let what = ScriptRestore::Saved {
+                        events: state.events.len(),
+                        variables: state.variables.len(),
+                        matinees: state.matinees.len(),
+                    };
+                    (Some(state), what)
+                }
+                None if snap
+                    .map
+                    .eq_ignore_ascii_case(self.runtime.graph().package()) =>
+                {
+                    let variables = self.runtime.level_start_variables();
+                    let what = ScriptRestore::LevelStartVariables {
+                        variables: variables.len(),
+                    };
+                    let state = asamu_kismet::ScriptState {
+                        variables,
+                        ..asamu_kismet::ScriptState::default()
+                    };
+                    (Some(state), what)
+                }
+                None => (None, ScriptRestore::Nothing),
+            },
+        };
+        self.runtime.set_start_state(state);
+        what
     }
 
     /// One Kismet-driven tick (see the module docs). `None` (and nothing
@@ -5958,5 +6066,303 @@ mod tests {
         // An actor of another class in the same group is not touched.
         let (map, mut s) = lift_map();
         assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 0);
+    }
+
+    /// The shipped levels' guard of an opening, in our own nodes, on the
+    /// NPC game (a collectible around the player start): "save loaded" (1)
+    /// → compare the flag (3) → false → set the flag (4) → the opening's
+    /// marker (6); true → the after-load marker (9). A level-loaded event
+    /// (10) with its marker (11), and a one-time touch event on the
+    /// collectible (7) with a prompt's marker (8).
+    fn guarded_opening_nodes() -> String {
+        let marker =
+            |id: usize| action(id, "asamu.SeqAct_ToggleZoomAvailable", &["In"], None, "{}");
+        format!(
+            r#"[
+                {{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "path": "T.Seq",
+                  "members": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]}},
+                {{"id": 1, "class": "asamu.SaveGameState_SeqEvent_SavedGameStateLoaded", "kind": "event",
+                  "parent": 0, "path": "T.Seq.SaveLoaded",
+                  "outputs": [{{"desc": "Loaded", "links": [{{"op": 2, "input": 0}}]}}]}},
+                {{"id": 2, "class": "Engine.SeqCond_CompareBool", "kind": "condition", "parent": 0,
+                  "path": "T.Seq.Compare", "inputs": [{{"desc": "In"}}],
+                  "outputs": [{{"desc": "True", "links": [{{"op": 9, "input": 0}}]}},
+                              {{"desc": "False", "links": [{{"op": 4, "input": 0}}]}}],
+                  "variables": [{{"desc": "Bool", "property": null, "vars": [3]}}]}},
+                {{"id": 3, "class": "Engine.SeqVar_Bool", "kind": "variable", "parent": 0,
+                  "path": "T.Seq.OpeningSeen", "var": {{"value": false}}}},
+                {{"id": 4, "class": "Engine.SeqAct_SetBool", "kind": "action", "parent": 0,
+                  "path": "T.Seq.SetSeen", "inputs": [{{"desc": "In"}}],
+                  "outputs": [{{"desc": "Out", "links": [{{"op": 6, "input": 0}}]}}],
+                  "variables": [{{"desc": "Value", "property": null, "vars": [5]}},
+                                {{"desc": "Target", "property": null, "vars": [3]}}],
+                  "params": {{"DefaultValue": true}}, "auto_activate_outputs": true}},
+                {{"id": 5, "class": "Engine.SeqVar_Bool", "kind": "variable", "parent": 0,
+                  "path": "T.Seq.Yes", "var": {{"value": true}}}},
+                {},
+                {{"id": 7, "class": "Engine.SeqEvent_Touch", "kind": "event", "parent": 0,
+                  "path": "T.Seq.GemTouch",
+                  "outputs": [{{"desc": "Touched", "links": [{{"op": 8, "input": 0}}]}},
+                              {{"desc": "UnTouched"}}, {{"desc": "Empty"}}],
+                  "event": {{"originator": "T.TheWorld.PersistentLevel.Gem", "max_trigger_count": 1}}}},
+                {}, {},
+                {{"id": 10, "class": "Engine.SeqEvent_LevelLoaded", "kind": "event", "parent": 0,
+                  "path": "T.Seq.LevelLoaded",
+                  "outputs": [{{"desc": "Loaded and Visible", "links": [{{"op": 11, "input": 0}}]}}],
+                  "event": {{"max_trigger_count": 1}}}},
+                {}
+            ]"#,
+            marker(6),
+            marker(8),
+            marker(9),
+            marker(11),
+        )
+    }
+
+    /// What a continued game of the guarded-opening level did in its first
+    /// `ticks` ticks: activations of the opening (6), the prompt (8), the
+    /// after-load branch (9) and the level-loaded marker (11), and whether a
+    /// collectible was picked up.
+    fn first_ticks(game: &mut Game, script: &mut LevelScript, ticks: usize) -> ([u32; 4], bool) {
+        let mut collected = false;
+        for _ in 0..ticks {
+            let t = script.tick(game, &InputFrame::default()).unwrap();
+            collected |= t
+                .npc_events
+                .iter()
+                .any(|e| matches!(e, NpcEvent::CollectibleCollected { .. }));
+        }
+        let n = |id| script.runtime().activate_count(id);
+        ([n(6), n(8), n(9), n(11)], collected)
+    }
+
+    #[test]
+    fn a_load_from_a_checkpoint_does_not_replay_the_opening_or_the_prompts() {
+        use crate::save::{Document as _, Snapshot, decode_document, encode_document};
+        let nodes = guarded_opening_nodes();
+        // The level entered without a save of its own (New Game's fresh
+        // snapshot): the opening plays, the player picks the collectible
+        // up, its touch shows the one-time prompt.
+        let (mut game, mut script) = npc_game(&nodes);
+        let fresh = Snapshot::fresh();
+        let applied = game.apply_snapshot(&fresh);
+        assert_eq!(applied.checkpoint_index, -1);
+        assert_eq!(
+            script.start_from_save(Some(&fresh), Some(-1)),
+            ScriptRestore::Nothing
+        );
+        assert_eq!(first_ticks(&mut game, &mut script, 4), ([1, 1, 0, 1], true));
+
+        // The save a checkpoint writes there.
+        let mut snap = game.capture_snapshot(Some(&fresh));
+        assert!(!snap.script_saved, "the world's part alone holds no script");
+        script.save_into(&mut snap);
+        assert!(snap.script_saved);
+        assert_eq!(snap.map, "T");
+        assert_eq!(
+            snap.actors["TheWorld.PersistentLevel.Gem"]
+                .get("collected")
+                .and_then(crate::save::Value::as_bool),
+            Some(true)
+        );
+        let state = snap.script_state().unwrap();
+        assert_eq!(
+            state.variables.get("T.Seq.OpeningSeen"),
+            Some(&asamu_kismet::VarState::Bool(true))
+        );
+        assert_eq!(state.events["T.Seq.GemTouch"].trigger_count, 1);
+        assert_eq!(state.events["T.Seq.LevelLoaded"].trigger_count, 1);
+        // Through the file's text and back.
+        let text = encode_document(&snap).unwrap();
+        assert_eq!(Snapshot::FILE, "snapshot.json");
+        let read: Snapshot = decode_document(&text).unwrap();
+        assert_eq!(read, snap);
+        assert_eq!(read.script_state(), Some(state));
+
+        // Continue: the same level, started from that save.
+        let (mut game, mut script) = npc_game(&nodes);
+        game.apply_snapshot(&read);
+        assert!(
+            game.npcs().unwrap().runtime().collectibles[0].collected,
+            "the collectible is the saved one before the first tick"
+        );
+        assert!(matches!(
+            script.start_from_save(Some(&read), Some(2)),
+            ScriptRestore::Saved {
+                events: 3,
+                variables: 2,
+                matinees: 0
+            }
+        ));
+        // No opening, no prompt, nothing picked up again; the branch for a
+        // level that was seen runs, and level loaded fires as on any start.
+        assert_eq!(
+            first_ticks(&mut game, &mut script, 240),
+            ([0, 0, 1, 1], false)
+        );
+        assert!(
+            script.runtime().errors().is_empty(),
+            "{:?}",
+            script.runtime().errors()
+        );
+        // A save of the continued game is the save it came from.
+        let mut again = game.capture_snapshot(Some(&read));
+        script.save_into(&mut again);
+        assert_eq!(again, read);
+    }
+
+    #[test]
+    fn a_save_without_script_state_takes_the_level_s_own_start_flags() {
+        use crate::save::Snapshot;
+        let nodes = guarded_opening_nodes();
+        let (mut game, mut script) = npc_game(&nodes);
+        first_ticks(&mut game, &mut script, 4);
+        // What our builds up to 2026-10-12 wrote: no script state.
+        let old = game.capture_snapshot(None);
+        assert!(!old.script_saved && old.kismet.is_empty());
+        assert_eq!(old.script_state(), None);
+
+        let (mut game, mut script) = npc_game(&nodes);
+        game.apply_snapshot(&old);
+        assert_eq!(
+            script.start_from_save(Some(&old), Some(2)),
+            ScriptRestore::LevelStartVariables { variables: 2 }
+        );
+        // The opening does not play again. (The prompt would, were its
+        // collectible not saved as taken: trigger counts are not in such a
+        // save.)
+        let (counts, collected) = first_ticks(&mut game, &mut script, 240);
+        assert_eq!(
+            (counts[0], counts[2], counts[3], collected),
+            (0, 1, 1, false)
+        );
+        // The next checkpoint's save is a whole one.
+        let mut next = game.capture_snapshot(Some(&old));
+        script.save_into(&mut next);
+        assert!(next.script_saved);
+
+        // Another map's save without script state gives nothing: the level
+        // is entered for the first time and its opening plays.
+        let mut other = old.clone();
+        other.map = "AG-Elsewhere".into();
+        let (mut game, mut script) = npc_game(&nodes);
+        game.apply_snapshot(&other);
+        assert!(
+            !game.npcs().unwrap().runtime().collectibles[0].collected,
+            "another map's collectibles are not this map's"
+        );
+        assert_eq!(
+            script.start_from_save(Some(&other), Some(-1)),
+            ScriptRestore::Nothing
+        );
+        assert_eq!(first_ticks(&mut game, &mut script, 4), ([1, 1, 0, 1], true));
+
+        // Another map's save with a script state (a chapter change): its
+        // paths are not this level's.
+        let mut carried = Snapshot {
+            map: "AG-Elsewhere".into(),
+            ..Snapshot::default()
+        };
+        let mut state = asamu_kismet::ScriptState::default();
+        state.variables.insert(
+            "AG-Elsewhere.Seq.OpeningSeen".into(),
+            asamu_kismet::VarState::Bool(true),
+        );
+        carried.set_script_state(&state);
+        let (mut game, mut script) = npc_game(&nodes);
+        game.apply_snapshot(&carried);
+        assert!(matches!(
+            script.start_from_save(Some(&carried), Some(-1)),
+            ScriptRestore::Saved { variables: 1, .. }
+        ));
+        assert_eq!(first_ticks(&mut game, &mut script, 4), ([1, 1, 0, 1], true));
+
+        // Time trial loads no save: no event, no state, even with one at hand.
+        let (mut game, mut script) = npc_game(&nodes);
+        let mut full = game.capture_snapshot(None);
+        script.save_into(&mut full);
+        assert_eq!(
+            script.start_from_save(Some(&full), None),
+            ScriptRestore::Nothing
+        );
+        assert!(script.runtime().start_state().is_none());
+        assert_eq!(first_ticks(&mut game, &mut script, 4).0, [0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn a_death_and_its_respawn_load_nothing() {
+        let nodes = guarded_opening_nodes();
+        let (mut game, mut script) = npc_game(&nodes);
+        script.start_from_save(None, Some(-1));
+        assert_eq!(first_ticks(&mut game, &mut script, 4).0, [1, 1, 0, 1]);
+        let before = script.runtime().capture_state();
+        let frame = script.runtime().frame();
+        game.kill_player();
+        let mut respawned = false;
+        for _ in 0..120 {
+            let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+            respawned |= t.report.respawned;
+        }
+        assert!(respawned, "the death sequence ran to its reset");
+        // The script ran on: same flags, same trigger counts, nothing
+        // started again.
+        assert_eq!(script.runtime().frame(), frame + 120);
+        assert_eq!(script.runtime().capture_state(), before);
+        let n = |id| script.runtime().activate_count(id);
+        assert_eq!([n(6), n(8), n(9), n(11)], [1, 1, 0, 1]);
+    }
+
+    #[test]
+    fn hostile_script_entries_in_a_snapshot_are_left_out() {
+        use crate::save::{Snapshot, decode_document};
+        let text = r#"{
+            "format": "asamu-decomp/snapshot", "format_version": 1, "map": "T",
+            "script_saved": true,
+            "actors": {
+                "TheWorld.PersistentLevel.Gem": {"kind": "collectible", "collected": "yes"},
+                "TheWorld.PersistentLevel.Other": 7
+            },
+            "kismet": {
+                "a": 1, "b": null, "c": [], "d": {}, "e": {"kind": 3},
+                "f": {"kind": "event"},
+                "g": {"kind": "event", "retrigger_left": "x", "trigger_count": 1, "enabled": true},
+                "h": {"kind": "event", "retrigger_left": 0.5, "trigger_count": 1.5, "enabled": true},
+                "i": {"kind": "matinee", "position": 1, "playing": 1, "paused": false},
+                "j": {"kind": "bool", "value": 1},
+                "k": {"kind": "int", "value": 99999999999},
+                "l": {"kind": "float", "value": "1"},
+                "m": {"kind": "object", "value": 5},
+                "n": {"kind": "string"},
+                "o": {"kind": "vector", "value": [1, 2, 3]},
+                "T.Seq.OpeningSeen": {"kind": "bool", "value": true},
+                "T.Seq.GemTouch": {"kind": "event", "retrigger_left": 0, "trigger_count": 1, "enabled": true},
+                "T.Seq.Null": {"kind": "object", "value": null},
+                "T.Seq.Text": {"kind": "string", "value": "x"},
+                "T.Seq.M": {"kind": "matinee", "position": 2.5, "playing": true, "paused": false}
+            }
+        }"#;
+        let snap: Snapshot = decode_document(text).unwrap();
+        let state = snap.script_state().unwrap();
+        assert_eq!(state.events.len(), 1);
+        assert_eq!(state.variables.len(), 3);
+        assert_eq!(state.matinees.len(), 1);
+        // And it loads: nothing in a save can fail a level start.
+        let nodes = guarded_opening_nodes();
+        let (mut game, mut script) = npc_game(&nodes);
+        game.apply_snapshot(&snap);
+        assert!(!game.npcs().unwrap().runtime().collectibles[0].collected);
+        script.start_from_save(Some(&snap), Some(0));
+        let (counts, _) = first_ticks(&mut game, &mut script, 30);
+        assert_eq!(counts[0], 0, "the flag was restored");
+        assert!(script.runtime().errors().is_empty());
+        // Without the mark the entries are not a script state at all.
+        let unmarked = text.replace(r#""script_saved": true,"#, "");
+        let snap: Snapshot = decode_document(&unmarked).unwrap();
+        assert!(!snap.script_saved);
+        assert_eq!(snap.script_state(), None);
+        // A mark of the wrong shape is a bad document (set aside by the
+        // store, never guessed at).
+        let bad = text.replace(r#""script_saved": true"#, r#""script_saved": "yes""#);
+        assert!(decode_document::<Snapshot>(&bad).is_err());
     }
 }
