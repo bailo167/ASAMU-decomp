@@ -1374,7 +1374,11 @@ mod tests {
         // the notes of each of its 7 runs: alone it means "no markers", and
         // it hides the converter's line neither before nor after it.
         let session = "markers: see the stats file (set with win_remote.sh mark)".to_owned();
-        assert!(markers_of(&[session.clone()]).unwrap().is_empty());
+        assert!(
+            markers_of(std::slice::from_ref(&session))
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             markers_of(&[note.clone(), session.clone()]).unwrap(),
             markers,
