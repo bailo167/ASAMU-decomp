@@ -3080,9 +3080,11 @@ def main(argv):
                         "else the pawn's acceleration)")
     c.add_argument("--move-frame", choices=MOVE_FRAMES, default="original",
                    help="axes an acceleration is read in (yaw: diagnostic)")
-    c.add_argument("--stats", help="the recorder's .stats.json (markers, dropped frames); "
-                                   "default: the one next to the raw file, if any")
-    c.add_argument("--no-stats", action="store_true", help="convert without the recorder's .stats.json")
+    # One or the other (asamu-trace convert refuses both together too).
+    which = c.add_mutually_exclusive_group()
+    which.add_argument("--stats", help="the recorder's .stats.json (markers, dropped frames); "
+                                       "default: the one next to the raw file, if any")
+    which.add_argument("--no-stats", action="store_true", help="convert without the recorder's .stats.json")
     t = sub.add_parser("selftest", help="exercise sampler and converter on a fake memory image")
     t.add_argument("--layout", help="layout file to build the image from (default: the Mac layout)")
     args = ap.parse_args(argv)

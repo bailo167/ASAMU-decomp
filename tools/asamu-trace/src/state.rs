@@ -62,8 +62,10 @@
 //! of [`EYE_HEIGHT_COST`] bytes). They are admitted in that order, each if
 //! its changes × its cost fit into what the fields before it left; one that
 //! does not fit is left out of the run's line and named in a `check:` note
-//! ([`StateFields`]). So the rule for `eye_height` is the one it had, and a
-//! line never grows beyond what it could before.
+//! ([`StateFields`]). So the rule for `eye_height` is the one it had, and
+//! the three together never take more of a line than `eye_height` alone
+//! could before. The other fields of recorder 0.2.0 are outside the budget:
+//! they change with the level, the cylinder or a shot, not with the frame.
 //!
 //! `tools/trace-recorder/asamu_recorder_core.py` (`_state_note`) writes the
 //! same line; `tests/python_crosscheck.rs` compares the two as JSON.

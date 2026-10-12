@@ -353,8 +353,14 @@ uneven ground) and share the bytes the eye height alone had: 16,000 changes × 4
 admitted in that order, each if its changes × its cost (45, 52 and 100 bytes per change: the longest form of
 one change in the line) fit into what the fields before it left. One that does not fit is left out of that
 run's line and named in a `check:` note with the numbers. For `eye_height` this is the rule it had (16,000
-changes), and a line cannot grow beyond what it could before. A refire timer that is paused on some
-sample is named in a `check:` note (its count then stands still, which the line alone does not show).
+changes), and the three together cannot take more of a line than `eye_height` alone could before. The other
+fields of recorder 0.2.0 are outside that budget: they change with the level, the cylinder or a shot, not with
+the frame (in the fake game's recording 220 bytes of the meta line at a run's first tick, and about 120 for a
+shot: `weapon_state` and `refire_rate` change when it starts and when it ends). The budget leaves 328,576 of
+the line's 1,048,576 bytes to everything else, so only a run with a few thousand shots could come near the
+limit; the converter does not check it, and a meta line beyond the limit is refused by the readers of the
+trace. A refire timer that is paused on some sample is named in a `check:` note (its count then stands still,
+which the line alone does not show).
 
 `asamu-trace replay` starts from any tick `T` (`--from-tick`): position, velocity, view and walking/falling
 from sample `T`, and from the recording, never from a guess:
@@ -1214,7 +1220,13 @@ Tested without the game: the recorder's fake-game test writes a 0.2.0 recording 
 every record (`test_win_glue.py --keep DIR`), which `tools/asamu-trace/tests/pipeline.rs` reads, validates and
 converts with the Rust tool: the 12 samples in which the fake game locks the FOV at 50 have FOV 50, the other
 58 have 90, the `state:` note holds each record's floor normal, weapon state, refire timer, cylinder size and
-base level, and the Python converter writes the same trace.
+base level, and the Python converter writes the same trace. A second session of the same fake game
+(`tools/asamu-trace/tests/common/fake_recording.py`, through the recorder's own recording loop) has four
+markers set through the recorder's request files, a torn frame and a record written without its input; its
+`.stats.json` is the one the recorder writes, and the test computes every marker's tick and every `dropped:`
+note from the two files and compares them with what the Rust tool and the Python converter wrote. The Python
+cross-check also converts a recording with each optional member absent in turn and with each one alone (24
+recordings): the samples change with the camera's lock flag and locked FOV only, and only with both.
 
 **The version-1 view** is still there for a reader of plain version-1 files (an older `asamu-trace`):
 
