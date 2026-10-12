@@ -2174,6 +2174,17 @@ fn texture_statistics_decide_between_textures() {
             );
             // Specular = a cube map sampled by a plain texture sample.
             let cube = sample(b, m, "Cube");
+            // Opacity mask = occlusion * tile again: no mean is folded in.
+            let ao2 = sample(b, m, "AO2");
+            let tc2 = coordinates(b, m, "TC2", [13.0, 13.0]);
+            let tile2 = sample_at(b, m, "Tile2", tc2);
+            let mask = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Mask",
+                &[("A", ao2, RGB), ("B", tile2, RGB)],
+            );
             // Normal: a render target.
             let screen = sample(b, m, "Screen");
             vec![
@@ -2181,9 +2192,10 @@ fn texture_statistics_decide_between_textures() {
                 ("EmissiveColor", emissive, None),
                 ("SpecularColor", cube, RGB),
                 ("Normal", screen, RGB),
+                ("OpacityMask", mask, None),
             ]
         },
-        "BLEND_Opaque",
+        "BLEND_Masked",
         false,
     );
     let prepare = |dec: &MaterialDecoder<'_>| {
@@ -2218,6 +2230,18 @@ fn texture_statistics_decide_between_textures() {
             true,
         );
         dec.assume_texture("Mats.M_One.Screen_Tex", None, true, false);
+        dec.assume_texture(
+            "Mats.M_One.AO2_Tex",
+            Some(stats([0.5, 0.5, 0.5], 0.01, false)),
+            false,
+            false,
+        );
+        dec.assume_texture(
+            "Mats.M_One.Tile2_Tex",
+            Some(stats([0.2, 0.15, 0.1], 0.1, false)),
+            false,
+            false,
+        );
     };
     let a = approx_with(&mut b, m, prepare);
     assert_eq!(bound(&a), Some("Mats.M_One.Tile_Tex"), "{:?}", a.notes);
@@ -2225,7 +2249,13 @@ fn texture_statistics_decide_between_textures() {
     assert_eq!(t.uv.scale, [13.0, 13.0]);
     assert_eq!(a.base_color.value, [0.5, 0.5, 0.5, 1.0]);
     assert_eq!(a.dropped.get("base_color"), Some(&vec!["texture"]));
-    assert_eq!(a.dropped_textures, vec!["Mats.M_One.AO_Tex".to_owned()]);
+    assert_eq!(
+        a.dropped_textures,
+        vec![
+            "Mats.M_One.AO2_Tex".to_owned(),
+            "Mats.M_One.AO_Tex".to_owned()
+        ]
+    );
     assert_eq!(
         a.texture_stats.get("Mats.M_One.Tile_Tex").map(|s| s.mean),
         Some([0.2, 0.15, 0.1, 1.0])
@@ -2241,6 +2271,14 @@ fn texture_statistics_decide_between_textures() {
     // The cube map too, whatever samples it.
     assert!(a.specular.texture.is_none());
     assert_eq!(a.specular.value[0], 0.25);
+    // An opacity keeps the same texture but not the other's mean: a mean
+    // could push a whole cut-out under its clip value.
+    let o = a.opacity.as_ref().unwrap();
+    assert_eq!(
+        o.texture.as_ref().unwrap().texture.as_deref(),
+        Some("Mats.M_One.Tile2_Tex")
+    );
+    assert_eq!(o.value, [1.0, 1.0, 1.0, 1.0]);
     // The render target stays bound and is named as filled at run time.
     assert_eq!(a.runtime_textures, vec!["Mats.M_One.Screen_Tex".to_owned()]);
 

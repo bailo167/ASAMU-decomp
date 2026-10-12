@@ -1908,6 +1908,12 @@ struct Eval<'e, 'a> {
     gradient: Option<UvGradient>,
     /// The coordinates read last follow the mesh's (see `TexTerm::placed`).
     placed: bool,
+    /// The input under reduction is a colour whose average matters more
+    /// than its peaks (diffuse, specular): a dropped texture stands in by
+    /// its mean. Not so for an emissive colour (a glow keeps its strength
+    /// where its mask lets it through) or an opacity (a mean could push a
+    /// whole cut-out under its clip value), which drop it as before.
+    fold_means: bool,
     /// Packages of the instance chain (texture lookups).
     homes: Vec<Arc<LoadedPackage>>,
     /// Statistics of the textures sampled, by path.
@@ -2883,7 +2889,7 @@ impl Eval<'_, '_> {
             keep.swizzle.len()
         ));
         self.lose(Lost::TEXTURE);
-        let Some((mean, n)) = drop.mean() else {
+        let Some((mean, n)) = drop.mean().filter(|_| self.fold_means) else {
             return Term::Tex(keep);
         };
         self.note("a dropped texture stands in by its mean value");
@@ -3605,6 +3611,7 @@ impl Eval<'_, '_> {
         }
         self.lost = Lost::NONE;
         self.gradient = None;
+        self.fold_means = matches!(key, "base_color" | "specular");
         let term = self.link(pkg, &link, None, 0);
         let mut ch = self.channel(term, default, name);
         if shape == InputShape::Scalar {
@@ -3783,6 +3790,7 @@ impl MaterialDecoder<'_> {
             last_lost: Lost::NONE,
             gradient: None,
             placed: true,
+            fold_means: false,
             homes: chain.links.iter().map(|(p, _)| p.clone()).collect(),
             stats: BTreeMap::new(),
             runtime_textures: BTreeSet::new(),
