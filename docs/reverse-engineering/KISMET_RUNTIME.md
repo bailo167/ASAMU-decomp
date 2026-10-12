@@ -88,6 +88,7 @@ caps sizes and drops broken links with a warning.
 | A streamed level's root sequence becomes a nested sequence of the persistent level's game sequence when the level is added to the world, so it updates (and is searched) as part of the persistent level. Its begin-play then runs. | Decompiled `UWorld::AddToWorld`. | CONFIRMED |
 | Events raised by actors during their ticks (touches, grapple, landing, deaths) queue Kismet work that runs in the next frame's update. | Activation only queues ops; execution happens in `ExecuteActiveOps` (§2). | CONFIRMED |
 | The frame's input events (fire, boost presses) are processed before `UWorld::Tick`. | Stock engine flow, as assumed by GRAPPLE.md G-TM-2. | STRONG |
+| The sequence update does not move a Matinee's actors: it advances the action's position, and each actor in the interpolating physics moves itself to its track's value in its own tick, later in the frame. | The movement track's update slot is an empty function; `AActor::physInterpolating @ 0x100AE5A70` makes the move (NATIVE_PHYSICS.md 10.5). | CONFIRMED |
 
 **Ours** (`LevelScript::tick`): Kismet update → the update's worm and follow-collision outputs applied to the
 game at once (the original's actions call those actors synchronously) → carry a based player (§6) → `Game::tick`
@@ -95,7 +96,9 @@ game at once (the original's actions call those actors synchronously) → carry 
 interpreter for the next update (whole-frame table: `docs/INTEGRATION.md` §2). The
 one deviation: `Game::tick` begins with the input events, so Kismet runs just before them rather than just
 after. An input event therefore sees this frame's Kismet effects one frame early. Impact TENTATIVE (small;
-trace parity needed).
+trace parity needed). The movers are part of that: ours are placed in the Kismet update, the original's
+move in their own ticks after the input events, so a fire trace of ours meets a mover one tick's motion
+further on (up to 40 uu at the rim of AG-ParadiseCave's wheels) than the original's would.
 
 ## 2. Sequence execution model
 
@@ -312,20 +315,63 @@ Without a Matinee of their own, 120 such passengers sit in StarHaven (crates, bu
 volume on the airships; 105 with collision flags), 78 in ParadiseCave and 19 in BeautifulCity; 13 more in
 StarHaven (propellers, wings) also have their own move tracks. CONFIRMED (counts from the scene data).
 
+How the original carries an attached actor was read later (NATIVE_PHYSICS.md 10.5, CONFIRMED (native)):
+through the transform it keeps relative to its base when it is in the interpolating physics or is
+hard-attached and does not block actors, else by the base's change of transform (or by its translation
+alone with `bIgnoreBaseRotation`). Every one of the 226 actors the shipped levels attach to an `InterpActor`
+takes the first path, 222 of them with a hard attachment, which is the rule above; the other 4 (AG-StarHaven,
+in the interpolating physics without a hard attachment, 3 of them with a Matinee of their own) keep an
+offset in world axes there, which the rule above does not reproduce (open item).
+
+**Turning actors.** The engine turns an actor by itself when its `RotationRate` is not zero and its physics
+is neither `PHYS_None` nor the interpolating one: every tick the rotation gains, member by member, the rate
+times the tick's time with the fraction dropped, and the actor is moved to it where it stands, which
+carries its attached actors (NATIVE_PHYSICS.md 10.5, CONFIRMED (native)). And a Matinee moves an actor only
+in the interpolating physics. So of the actors with a rate in the shipped levels (census of the scene data,
+all `InterpActor`s without a base):
+
+| Level | `PHYS_Rotating` with a rate | of them in a Matinee group | `PHYS_Interpolating` with a rate (all in Matinee groups) |
+|---|---|---|---|
+| AG-ParadiseCave | 7 (three wheel rocks, a big rock, two spheres, a merry-go-round platform) | 3 | 11 |
+| AG-BeautifulCity | 2 (windmill spinners) | 0 | 8 |
+| AG-StarHaven | 5 (a stone ring, four airships; 8 more in that physics have no rate) | 0 | 12 |
+
+the first column turns by its rate, also where a Matinee group names it, and the last follows its tracks
+and never its rate. Measured on the recording KM1 in AG-ParadiseCave, from the path of the grapple's anchor
+helper riding these rocks (GRAPPLE.md G-AT-8; frames of 12.82 ms, angles in rotator units):
+
+| Rock (`InterpActor_*`) | Physics, rate | Frames | Turned | Against the sum of the truncated steps | Against rate × time |
+|---|---|---|---|---|---|
+| `_51` | rotating, yaw −9102, no Matinee | 2,252 | 261,135 | −2.2 to +12.9 | 1,483 short |
+| `_25` / `_101` | rotating, roll −4551, in a Matinee group (−359° in 14.4 s) | 1,828 | 105,968 | −3.5 to +0.8 | 611 short (318 short of the track) |
+| `_64`, `_17` (twice), `_0`, `_57`, `_22`/`_21`, `_149`/`_23`, `_24`/`_151` | interpolating, rates 4551 to 9102, tracks of one turn in 7.2 to 14.4 s | 11,624 | 27,473 to 296,038 | 37 to 735 ahead | 3 short to 64 ahead of one turn per track length |
+
+`_51` turned 116 units (9102 × 0.01282 = 116.7) in 2,249 of its 2,251 single frames. The rocks in the
+interpolating physics follow their tracks: every loop of a track that ends at 359.9° shows as a jump of
+17.7 to 19.4 units (0.1° is 18.2). Since no fraction is kept, the original's turning speed depends on its
+frame time; ours is the rule at the game's tick (9102 units/s: 151 units a tick at 60 Hz, 9060 units/s,
+against the recorded 9048 at 78 frames a second).
+
 **Movers** (ours). At load, every actor bound to a Matinee group, every passenger, the actor
-`SetRotationToPlayerRotation` turns, and every target of a destroy or change-collision action becomes a
-mover body (falling rocks excepted: they move through their rock state). Its static collision instances are
+`SetRotationToPlayerRotation` turns, every target of a destroy or change-collision action, and every
+turning actor of the level's own data with everything attached to it (the level's script need not know
+those: AG-ParadiseCave's `InterpActor_51` and its passengers are in no Kismet actor table) becomes a
+mover body (falling rocks excepted: they move through their rock state). A turning actor is taken out of
+the Matinee groups that name it, and the host turns it after the Kismet update and carries its passengers
+by the original's rules (`kismet_host`, "Turning actors", "Attached actors"). Its static collision instances are
 removed from the static BVH (`take_actor_statics`) and re-created as dynamic instances placed relative to the
 actor's transform; actors without collision get a body too, so their transform and their passengers' are
-tracked. Move tracks and attachment set the actor transform, which re-places the instances, and the actor's
-location is published for grapple anchors (G-AT-8). On the shipped maps 149 actors in ParadiseCave, 225 in
+tracked. Move tracks, the engine's turn and attachment set the actor transform, which re-places the
+instances, and the actor's location and rotation are published for grapple anchors, which ride both
+(G-AT-8). On the shipped maps 149 actors in ParadiseCave, 225 in
 StarHaven, 47 in BeautifulCity, 41 in IceCave, 16 in Workshop, 10 in Darkcave and 3 in Epilogue get bodies
 (before passengers were added: 59, 81 and 29 with collision in ParadiseCave, StarHaven and IceCave).
 
 **Basing** (TENTATIVE). Before the Kismet update, a grounded player standing on a mover is found with a short
-downward sweep. After the update, the player is moved by the mover's change of transform (position through
-the full transform, yaw by the yaw change). UE3's own basing, encroachment, pushing and crushing are not
-modelled.
+downward sweep. After the update and the engine's turns, the player is moved by the mover's change of
+transform (position through the full transform, yaw by the yaw change). The original carries a based
+pawn's location in the same way and hands the turn to the pawn's script, which was not read
+(NATIVE_PHYSICS.md 10.5); encroachment, pushing and crushing are not modelled.
 
 ## 7. Narrator
 
@@ -542,7 +588,12 @@ queued activations per sequence (4,096), pending attractor pads (1,024) and narr
 - Cinematic mode blocks player input in the app (`apps/asamu` `fixed_tick`; the mapping of the stock flags to
   movement, turning and buttons is TENTATIVE).
 - `bSequenceNeedsPublishing` is exported as false.
-- UE3 basing and encroachment for movers (§6); soft attachment is treated as hard (2 actors).
+- UE3 encroachment for movers, and a based pawn's turn (§6). The passengers of a Matinee mover are carried
+  as hard attachments by the interpreter; 4 actors of AG-StarHaven are attached without one (in the
+  interpolating physics: an offset in world axes, NATIVE_PHYSICS.md 10.5), which differs when their base
+  turns.
+- The movers move in the Kismet update, before the frame's input events; the original's move in their own
+  ticks, after them (§1).
 - `SeqAct_ToggleAttractor`'s `Finished` needs the world to report a pad's end (`Runtime::attractor_finished`);
   no shipped action links that output, so nothing waits on it.
 - `SeqEvent_CollectibleCollected`: the game's NPC system reports pick-ups and the host calls
