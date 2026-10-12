@@ -29,6 +29,11 @@
 //!   checkpoint, which the first-encounter cutscene triggers by an event
 //!   key while its Matinee is still playing.
 //!
+//! With `ASAMU_CONTINUE_SAVE_OUT=<folder>` the first and a late save of each
+//! walk, and the cutscene's save of AG-BeautifulCity, are also written as
+//! save folders of ours ([`write_save`]) for a look at the same Continue in
+//! the app.
+//!
 //! What the comparison prints and does not assert is what the original's
 //! rule gives as far as it was read (KISMET_RUNTIME.md §12), listed there
 //! under "What a continued game does not have": loops the level-loaded
@@ -61,7 +66,7 @@ use std::path::{Path, PathBuf};
 use asamu_game::asamu_kismet::{OpClass, Output, ScriptState, ToggleMode};
 use asamu_game::asamu_world::WorldEvent;
 use asamu_game::kismet_host::ScriptRestore;
-use asamu_game::save::{ChapterId, Snapshot, checkpoint_saved};
+use asamu_game::save::{ChapterId, SaveSession, SaveStore, Snapshot, checkpoint_saved};
 use asamu_game::smoke;
 use asamu_game::{Game, LevelScript, ScriptedTick, load_level_with_kismet};
 use asamu_player::InputFrame;
@@ -81,6 +86,24 @@ fn converted_dir() -> Option<PathBuf> {
     let d = PathBuf::from(std::env::var_os("ASAMU_CONVERTED_DIR")?);
     (d.join("levels").is_dir() && d.join("kismet").is_dir() && d.join("matinee").is_dir())
         .then_some(d)
+}
+
+/// With `ASAMU_CONTINUE_SAVE_OUT=<folder>`: writes `snapshot` as a save
+/// folder of ours (`<folder>/<name>/saves`: `snapshot.json`, `general.json`,
+/// `progression.json`), so that the app can be started with
+/// `ASAMU_SAVE_DIR=<folder>/<name>` and `ASAMU_MENU_ACTION=continue` to look
+/// at the same Continue on screen. A developer's aid; the folder is
+/// user-local data and never part of the repository.
+fn write_save(map: &str, name: &str, snapshot: &Snapshot) {
+    let Some(out) = std::env::var_os("ASAMU_CONTINUE_SAVE_OUT") else {
+        return;
+    };
+    let dir = PathBuf::from(out).join(name).join("saves");
+    let mut on_disk = SaveSession::open(SaveStore::new(&dir));
+    on_disk.new_game().unwrap();
+    on_disk.begin_level(map, None).unwrap();
+    on_disk.on_checkpoint_saved(snapshot.clone()).unwrap();
+    eprintln!("the save was written to {}", dir.display());
 }
 
 /// What a stretch of ticks showed and did.
@@ -936,6 +959,14 @@ fn every_story_map_continues_without_its_opening() {
             wrong.extend(compare(&dir, map, &w, &w.saves[i]));
             compared += 1;
         }
+        // The first and a late save, for a look at them in the app.
+        let mut out = vec![0, w.saves.len() * 2 / 3];
+        out.dedup();
+        for i in out {
+            if let Some(save) = w.saves.get(i) {
+                write_save(map, &format!("{map}-cp{}", save.index), &save.snapshot);
+            }
+        }
     }
     eprintln!("{compared} saves compared");
     assert!(
@@ -1277,6 +1308,7 @@ fn beautiful_city_continued_at_the_checkpoint_its_cutscene_triggers() {
     let Some((index, tick)) = saved else {
         panic!("{}: no checkpoint was triggered in 200 s", trigger.0);
     };
+    write_save(MAP, "AG-BeautifulCity-cutscene", &previous);
     let state = script.runtime().capture_state();
     let playing: Vec<(&str, f32)> = state
         .matinees
