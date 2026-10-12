@@ -427,13 +427,15 @@ verify pass's separate decoder). For each of the 316 distinct mesh bodies, the e
 - The reverse also holds: a hull can cover much less than its mesh (8 bodies cover less than half of the mesh box
   along some axis, 52 less than 90 %; `zeth_darkcave.darkcavepart2_part2`, whose box switch is off, 4 %).
 
-Native checks, for the runtime work (addresses and signatures only; **not read here**; the verify pass confirmed
-the symbols and the call targets, and that the aggregate check also calls `FBox::TransformBy` and
-`FMatrix::Inverse`):
+Native checks (the symbols and call targets were confirmed by the verify pass; the routines were read later for
+the runtime work, see "In the runtime" below and `NATIVE_PHYSICS.md` 10.1):
 `FKAggregateGeom::LineCheck` 0x100AA4840 calls `FKConvexElem::LineCheck` 0x100AA5A70, `FKSphereElem::LineCheck`
 0x100AA6710, `FKBoxElem::LineCheck` 0x100AA69A0 and `FKSphylElem::LineCheck` 0x100AA7510 (CONFIRMED: call targets),
-so all four shape kinds take part. The convex check takes the component scale as a vector, the other three as a
-single float. Point checks: `FKAggregateGeom::PointCheck` 0x100AA7E50, `FKConvexElem::PointCheck` 0x100AA8C50,
+so all four shape kinds take part in a zero-extent trace. For a trace with an extent only the convex elements and
+the boxes do: the sphere and capsule checks return "no hit" at once (CONFIRMED). The convex check takes the
+component scale as a vector, the other three as a single float. The aggregate check's calls of `FMatrix::Inverse`
+and `FBox::TransformBy` are its bounds test of a swept trace against each convex element's `ElemBox` (CONFIRMED).
+Point checks, not read: `FKAggregateGeom::PointCheck` 0x100AA7E50, `FKConvexElem::PointCheck` 0x100AA8C50,
 `FKBoxElem::PointCheck` 0x100AA8740.
 
 ### Hostile-input discipline (body setups)
@@ -514,6 +516,100 @@ decoder's output as printed by `asamu-inspect --json props`: 401,366 numbers, 0 
 
 The runtime reads the record through `asamu_assets::manifest::MeshManifest::simple_collision_for_package`; a
 version 1 manifest still loads and simply has no record, which means "convert again", not "no simple collision".
+
+### In the runtime
+
+Evidence side of this subsection: our runtime (`crates/asamu-assets/src/simple_collision.rs`,
+`crates/asamu-world/src/{simple_body,scene}.rs`), except where a native routine or a recording is named.
+
+**Reading.** `asamu_assets::simple_collision::SimpleCollision::from_json` reads a `.collision.json` document
+(format and version checked, every number finite, every triangle index inside its element's vertices, sizes
+not negative, transforms affine). The level loader (`asamu_world::scene::load_map`) reads the manifest's records
+and, per mesh it needs a body of, the shapes file.
+
+**What a placed mesh is collided at** (`scene::mesh_routes`; `docs/PARITY_FINDINGS.md` P1, P2, V3):
+
+| Trace | Body, switch on | No body, switch on | Switch stored `false` |
+|---|---|---|---|
+| swept (the pawn's moves): `UseSimpleBoxCollision` | the body's convex elements and boxes | nothing | the triangles |
+| line that is not a bullet trace: `UseSimpleLineCollision` | the body | nothing | the triangles |
+| bullet trace (the grapple's fire trace) | the triangles | the triangles | the triangles |
+
+A blocking component is placed as its triangles (for whatever goes to them) and as one instance per convex
+element and box of its body (for whatever goes to those), all of the same actor. The pawn-blocking placements
+per map, as the loader counts them on the Windows conversion (`scene_simple_real_data`, 2026-10-12; a map
+includes the sub-levels it streams):
+
+| Map | at the simple body | not at all | at triangles | body shapes placed |
+|---|---:|---:|---:|---:|
+| AG-Workshop | 273 | 755 | 3 | 1,101 |
+| AG-ParadiseCave | 1,518 | 222 | 237 | 17,619 |
+| AG-BeautifulCity (with Freds_place) | 2,060 | 1,132 | 142 | 7,978 |
+| AG-Darkcave | 1,301 | 815 | 108 | 12,188 |
+| AG-StarHaven | 3,112 | 1,833 | 7 | 29,331 |
+| AG-IceCave (with TheCore) | 4,301 | 553 | 138 | 20,444 |
+| AG-Epilogue | 288 | 516 | 2 | 1,116 |
+| TheCore alone | 44 | 98 | 0 | 591 |
+
+Counted by the actors' stored collision flags alone, the same classification gives exactly the figures of
+`docs/PARITY_FINDINGS.md` V6 on all eight maps (273 / 755 / 3, 1,518 / 222 / 237, 2,054 / 1,080 / 142,
+1,301 / 800 / 108, 3,112 / 1,828 / 7, 4,090 / 358 / 138, 288 / 516 / 2, 44 / 98 / 0). The loader's figures are
+higher where an actor's class or stored collision type overrides its flags (`scene.rs`, "Collision flags"): the
+166 falling rocks of AG-IceCave (their meshes have bodies), its 98 recharge crystals and 7 of AG-StarHaven's, and
+15 glow flowers of AG-Darkcave; 2 sound-making foliage actors of AG-StarHaven lose their blocking the same way. Crystals and glow
+flowers have no body and their box switch is on: by this table the pawn passes through them.
+
+**Shapes.**
+
+- A convex element becomes one convex solid made of **all** its vertices, with its stored face-normal and edge
+  directions in their stored order: what the native swept-box check projects and tests
+  (`NATIVE_PHYSICS.md` 10.1). Its surface triangles serve zero-extent traces.
+- A box becomes that box, placed by its own matrix. The native routine for boxes was not read beyond its family
+  (TENTATIVE); no static mesh has one.
+- Spheres and capsules are not placed. `FKSphereElem::LineCheck` (0x100AA6710) and `FKSphylElem::LineCheck`
+  (0x100AA7510) both begin by comparing the three components of the trace's extent with zero and return their
+  "no hit" value when one differs (CONFIRMED, read 2026-10-12: 0x100AA6714 to 0x100AA6757 jumping to the return
+  at 0x100AA695C; 0x100AA7518 to 0x100AA755B jumping to 0x100AA7DBA). So the one sphere of the shipped meshes
+  (`EngineMeshes.Sphere`) never stops the pawn, and its line switch is `false`, so its line traces go to its
+  triangles: no ray test against a sphere or capsule is needed for this game, and none exists. The loader warns
+  if a mesh ever sends line traces to a body that has one.
+- **Elements that are not convex** (584 of 3,446) and hulls that reach outside their mesh are collided as their
+  lists say, like any other. For the swept box an element is the solid its stored directions cut out around its
+  vertices, which contains every vertex and can be larger than the surface its triangles describe; this is the
+  native test's own behaviour (it projects the vertices on the stored directions and never looks at the planes).
+  The test is a fixed number of projections per element: nothing loops, and no input makes it fail (an element
+  without usable vertices is left out with a warning). Zero-extent traces see the triangles, one-sided as seen
+  from the vertices' centre, where the native zero-extent check clips against the element's planes; on the 584
+  those two solids differ (UNKNOWN whether any trace of the game that is not a bullet trace reaches one).
+- The scale of a placement applies to the shapes as to the triangles, mirroring and non-uniform scale included
+  (`a_body_follows_scale_mirroring_and_rotation`). The native swept-box check additionally leaves separating
+  axes out depending on that scale, and tests each element only when the sweep's bounds reach the element's
+  bounds; both are reproduced per placed instance (`NATIVE_PHYSICS.md` 10.1).
+
+**Checked against the recordings** (gated test `scene_simple_real_data`, on the Windows conversion):
+
+- The Workshop door (`AsamuProps03.Meshes.workshop_door_01`, one convex element whose face is at x = 281.96387):
+  the box a move sweeps (21.021 wide, `NATIVE_PHYSICS.md` 9.2) first touches it with its centre at x = 302.98487.
+  The recording puts that plane at 302.9848 (`docs/PARITY_FINDINGS.md` V11).
+- The start of AG-BeautifulCity (`Village_Cave.Village_Entrance_Cave`, 114 convex elements): the box's first
+  contact below the PlayerStart is at z = 54994.237. The recording has the pawn still falling at 54994.449 and at
+  rest at 54996.598 one tick later, which requires the contact between 54993.965 and 54994.449 (V20; on the
+  triangles ours rested 12.43 uu lower).
+- The Workshop floor at (131, −339), under a rug that has no body: the box's centre stops at 116.0 on the BSP
+  (recorded standing height 119.15 = 116.0 + 2.15 + 1.0, V18); a bullet trace ends on the rug at z = 72.193.
+
+**A conversion without simple collision** (mesh manifest version 1) still loads. Every blocking mesh then stops
+the pawn at its triangles, as before this work, and the loader's first warning says that pawn collision is
+approximate and that the meshes should be converted again. A mesh whose shapes file is missing or malformed
+falls back to its triangles in the same way, with a warning naming it.
+
+Open:
+
+- The native point checks (is a place free: spawning, growing) against simple bodies were not read; ours tests
+  the exact solids.
+- The native box-element routine's axis order.
+- What `bNoCollision = true` on one mesh body does.
+- How a non-uniform scale becomes the single float the sphere, box and capsule checks take.
 
 ### Verify pass (2026-10-10) — CONFIRMED
 
@@ -662,7 +758,8 @@ index buffers), plus `LightMapCoordinateIndex`/`LightMapResolution` and the qual
 - Vertex color space; the default `LightMapCoordinateIndex` of untagged meshes.
 - `StaticMeshComponent` per-instance data (lightmaps, vertex color overrides): separate objects, not part of this
   payload. (`RB_BodySetup` is decoded: "Simple collision" above.)
-- The native line and box checks against the simple shapes (`FKAggregateGeom::LineCheck` and the element checks
-  it calls) were not read here; their addresses are listed under "Simple collision" for the runtime work.
+- The native checks against the simple shapes: the swept-box check of convex elements and the aggregate check's
+  bounds test are in `NATIVE_PHYSICS.md` 10.1 and the sphere and capsule checks' early return under "In the
+  runtime" above; the box-element routine, the zero-extent paths and the point checks were not read.
 - Materials are placeholders: binding textures and material parameters belongs to the material work.
 - A Bevy loader for the manifest/glTF output.

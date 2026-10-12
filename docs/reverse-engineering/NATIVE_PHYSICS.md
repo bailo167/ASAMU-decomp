@@ -1225,19 +1225,62 @@ A skipped axis cannot separate the two bodies, so the solid the original sweeps 
 than the element and contacts with its edges and corners come earlier: above scale 100 the box is stopped
 by the element's face planes pushed out by the box and by nothing else, with no bevel at an edge.
 [STRONG: it follows from the code; no recording has been compared with it yet.] A body whose faces are
-parallel to the world axes loses nothing: its own face directions are those axes.
+parallel to the world axes loses nothing: its own face directions are those axes. When the scale is not
+uniform, the box's face axis along one world axis is the cross product of the rows for the other two: it
+is skipped when those two scales multiply to more than 100 (more than 10,000 for triangles).
 
-How much of the user's data this touches (counted from a local conversion on 2026-10-11: the scene files'
-component transforms and the mesh list's simple-body references): of 22,782 mesh components that block
-the pawn, 13,564 use a mesh with a simple-collision body; 2,485 of those are placed at a scale above 10 on
-at least one axis (2,157 on all three, 330 above 100), 39 different meshes. Of the 9,218 whose mesh has no
-simple body (triangles for the pawn too), 127 are placed at a scale above 100 on at least one axis (108 on
-all three; 4 above 1,000). Of the 906 blocking-volume actors none is scaled above 10 and none is turned
-other than by quarter turns about Z, so blocking volumes are not affected beyond the 0.57° rule.
+**What confines such a contact: the bounds test of the aggregate check** (third pass, 2026-10-12, read
+statically from 0x100AA4B22 to 0x100AA4E64) [CONFIRMED]. For a trace with an extent the aggregate check
+does not hand every convex element to the routine above. In the element's space it builds the box
+`[−extent, extent]`, carries it through the inverse matrix (`FBox::TransformBy`, called at 0x100AA4B75)
+and takes half the size of the result as the box's half size there; it takes the smaller and the larger
+of the start and the end on each axis, widens them by that half size plus 0.1 (f32 at 0x1016457B8, added
+at 0x100AA4DA2), and skips every element whose stored bounds (`ElemBox`, at +0x60 and +0x6C of the
+element: the box of its vertices) lie entirely beyond that range on any of the three axes (six
+comparisons from 0x100AA4E14; a touching element is tested). The routine's second loop over the convex
+elements (from 0x100AA5020, taken by its last argument) makes the same six comparisons. A trace without extent
+(all three components zero, tested at 0x100AA4BF7) goes to every element without this test.
+
+With every axis tested the bounds test changes no result. With axes skipped it is what limits the
+enlarged solid: the box is stopped by an element's extended face planes only where the bounds of the
+whole sweep reach the element's bounds widened by the box and by 0.1 of the element's own units (0.1 ×
+scale in the world). Note that it is the bounds of the sweep that are compared, not the sweep.
+
+**Which matrix** [CONFIRMED for brushes, STRONG for static meshes]. Both components get the matrix and
+the scale they hand to the aggregate check from `UPrimitiveComponent::GetTransformAndScale @
+0x100533640` (called directly by the brush component at 0x100759CFF; the static-mesh component's call
+goes through its table). It returns the component's total scale (its own scale and 3-D scale times the
+owner's `DrawScale` and `DrawScale3D`, unless a flag of the component is set: the absolute-scale flag,
+by this use) and the component's `LocalToWorld` with each of its three rows divided by that scale; the
+aggregate check multiplies the rows by the scale again. So the element's space is the component's local
+space and the matrix that is inverted is the component's `LocalToWorld`, whatever the rotation. One
+exception: when all three components of the scale are below 1e-4 in size (f32 at 0x10163FED8) the
+routine logs a warning and returns the identity matrix.
+
+How much of the user's data this touches. Counted on 2026-10-11, before the per-mesh switches were
+applied (the scene files' component transforms and the mesh list's simple-body references): of 22,782
+mesh components that block the pawn by their flags, 13,564 use a mesh with a simple-collision body; 2,485
+of those are placed at a scale above 10 on at least one axis (2,157 on all three, 330 above 100), 39
+different meshes. Of the 906 blocking-volume actors none is scaled above 10 and none is turned other
+than by quarter turns about Z, so blocking volumes are not affected beyond the 0.57° rule. Counted again
+on 2026-10-12 by the scene loader with the rule itself (`crates/asamu-world/tests/scene_simple_real_data.rs`
+on the Windows conversion, the seven story maps with their sub-levels): of 12,853 placements that the
+pawn meets at a simple body, 2,162 lose at least one face axis of the box (two scales multiplying to
+more than 100), which is 31,944 of the 89,419 convex elements placed for them: AG-ParadiseCave 486
+placements, AG-Darkcave 418, AG-IceCave 941, AG-BeautifulCity 188, AG-StarHaven 123, AG-Workshop 3,
+AG-Epilogue 3. They are the large rocks and platforms the levels are built from (`Rocks.Mesh.Rock_Huge_1`
+and `_2`, `Platforms.Meshes.Platform_Medium_1`, the icicles of AG-IceCave). No volume hull loses one. Of
+the 637 placements the pawn meets at triangles (meshes that store the box switch `false`), 20 are placed
+so that two scales multiply to more than 10,000 (13 in AG-ParadiseCave, 7 in AG-BeautifulCity:
+`Platforms.Meshes.Platform_Medium_2` and `Village.rock2`). The earlier figure of 127 counted meshes
+without a simple body, which do not stop the pawn at all (`docs/PARITY_FINDINGS.md` P1).
 
 **Spheres and sphyls** (`FKSphereElem::LineCheck @ 0x100AA6710`, `FKSphylElem::LineCheck
 @ 0x100AA7510`) return "no hit" at once when any component of the extent is non-zero: they never
-block a pawn move, only zero-extent traces.
+block a pawn move, only zero-extent traces. [CONFIRMED, read again on 2026-10-12: each routine loads
+its "no hit" value, compares the three floats of its extent argument with zero one after the other
+(0x100AA6714 to 0x100AA6757; 0x100AA7518 to 0x100AA755B) and jumps to its return (0x100AA695C;
+0x100AA7DBA) on the first that differs, before it touches the result.]
 
 **Box elements** (`FKBoxElem::LineCheck @ 0x100AA69A0` with
 `FBoxSweptBoxSeparatingAxisCheck::FindSeparatingAxis @ 0x100AAC780`): fifteen calls of one per-axis
@@ -1296,13 +1339,35 @@ gave the same hit or miss every time and the same normal on all 9,797 hits (larg
 8.2e-7, the original's single precision); the script of that comparison was not kept either.
 Differences: BSP goes through the triangle test (its leaf hulls are not in the converted data); a
 start in contact follows this code base's tolerance rule instead of the two rules above (documented in
-the module); box elements use the convex rule; and ours works with unit vectors in world space and
-skips an edge axis only below 1e-8 (a parallel pair), for triangles and for convex solids, so it does
-**not** reproduce the scale-dependent skipping above: ours always tests the box's face axes and every
-edge axis that is not degenerate, which makes its contact never earlier than the original's and
-sometimes later. Nothing depends on it yet (the movement code still sweeps the cylinder, simple-collision
-bodies are not in the scene, and the volumes are not affected), but the scene must reproduce the
-skipping before the 127 and 2,485 large placements above are collided with the box.
+the module); box elements use the convex rule. That kernel works with unit vectors in world space and
+skips an edge axis only below 1e-8 (a parallel pair): the exact geometry.
+
+The scale-dependent skipping and the bounds test are applied on top of it, per placed instance
+(`collision::NativeRule`, `box_sweep::AxisSkip`, `box_sweep::convex_precheck`; since 2026-10-12). It
+has to be per instance and per axis, not a property of a mesh or a single number of a placement: which
+axes go depends on the placement's inverse matrix and on each stored edge direction. The scene loader
+puts every simple body, every volume hull (in its component's space) and every mesh met at its
+triangles under it; the kernel decides each axis from the box's edges carried into the element's space,
+as the original does, and evaluates the axes that remain in world space in `f64`. What is not the
+original's:
+
+- A convex solid that loses a face axis is swept only when the sweep itself passes the solid's bounds
+  widened as the bounds test widens them, where the original asks only whether the sweep's bounds reach.
+  The two differ for a long sweep that passes such a solid diagonally in the solid's space; a pawn's
+  moves are a few units long. Without this the search for candidates could not use a hierarchy.
+- For triangles only the edge axes follow the rule (within `asin(1e-4 · scale)` of a box edge). The box's
+  face axes are always tested: what confines a contact once they are skipped is the original's collision
+  tree, and its node boxes are not decoded (MESHES.md, "Collision"). 20 placements are concerned (above).
+  [UNKNOWN how much earlier the original's corner contacts are there.]
+- The thresholds are compared in `f64` on vectors computed in `f64`; the original's are `f32` in the
+  element's space, so a vector within rounding of the threshold can fall on the other side.
+- Box elements and BSP are swept as exact geometry.
+
+`crates/asamu-world/tests/simple_native_rule.rs` holds the rule's consequences as worked examples (an
+octahedron of radius `a` under the player's box: stopped at `a + 44` at scale 5 and at scale 20, where
+its horizontal edges give the vertical axis back, and at `a + 86` at scale 128, where only its four
+face directions are left; the bounds test at 128 + 21 + 12.8 uu), and checks that the hierarchy and the
+reference without one give bit-identical results for 4,000 sweeps against 180 instances under the rule.
 
 What is checked without the original (`crates/asamu-world/tests/collision_box_verify.rs`, run on
 2026-10-11): 16,000 random sweeps in seven families (every triangle shape, corners and edges passing at

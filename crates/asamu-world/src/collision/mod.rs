@@ -35,22 +35,35 @@
 //!   by triangle, one-sided. A ray that starts inside a hull leaves it
 //!   without a hit; the original's zero-extent check of a convex element
 //!   instead reports a hit at time 0 with the reversed direction as the
-//!   normal (0x100AA5A70 in the user's macOS executable, CONFIRMED). No
-//!   trace of ours goes to a simple body yet (bullet traces go to the
-//!   triangles, P1), so nothing depends on it.
+//!   normal (0x100AA5A70 in the user's macOS executable, CONFIRMED). The
+//!   only traces that go to a simple body are [`QueryKind::Line`] ones
+//!   (bullet traces go to the triangles, P1), and the game issues none yet,
+//!   so nothing depends on it.
 //! - **Pawn cylinders** ([`CollisionScene::add_cylinder_mesh`]).
 //!
 //! The simple-collision bodies of the original's meshes are made of convex
 //! elements, boxes, spheres and sphyls (capsules). Convex elements and boxes
-//! are the hulls above. Spheres and sphyls are not represented, and for the
-//! pawn they need nothing: the original's sphere and sphyl checks (in the
-//! user's macOS executable at 0x100AA6710 and 0x100AA7510) report "no hit"
-//! at once for any non-zero extent, so they never block a box sweep
-//! (CONFIRMED, read locally). They do answer zero-extent line checks, so a
-//! mesh whose line traces go to its simple body would need a ray against a
-//! sphere and a ray against a capsule here. The user's data has 2,439 convex
-//! elements in 315 meshes, one sphere (the engine's own sphere mesh), no box
+//! are the hulls above ([`crate::simple_body`] builds them from the
+//! converted shapes and [`crate::scene`] places them). Spheres and sphyls
+//! are not represented, and for the pawn they need nothing: the original's
+//! sphere and sphyl checks (in the user's macOS executable at 0x100AA6710
+//! and 0x100AA7510) report "no hit" at once for any non-zero extent, so they
+//! never block a box sweep (CONFIRMED, read locally, twice). They do answer
+//! zero-extent line checks, so a mesh whose line traces go to its simple
+//! body would need a ray against a sphere and a ray against a capsule here.
+//! The user's data has 2,439 convex elements in 315 meshes, one sphere (the
+//! engine's own sphere mesh, whose line traces go to its triangles), no box
 //! and no sphyl (counted from the 882 meshes of a local conversion).
+//!
+//! # The original's own rule for a swept box
+//!
+//! [`CollisionScene::sweep_box`] against an instance is the exact geometric
+//! test unless the instance is under [`NativeRule`]: then the box is swept
+//! the way the original's routine does it, in the space of what is hit, with
+//! separating axes left out by a threshold that depends on the placement's
+//! scale ([`box_sweep`]). The scene loader puts every mesh, simple body and
+//! volume it places under it; instances built by hand (tests, the pawn
+//! cylinders) are exact unless asked otherwise.
 //!
 //! # Primitive kinds
 //!
@@ -82,11 +95,15 @@
 //! # Collision flags and the enabled switch
 //!
 //! Every instance carries [`InstanceInfo::blocks_pawn`] (non-zero-extent
-//! checks: the player's moves) and [`InstanceInfo::blocks_traces`]
-//! (zero-extent checks: grapple and aim traces); [`QueryFilter`] selects one,
-//! plus a mask of loaded sub-levels. A mesh that the original collides with
-//! differently for the two (its simple body for the pawn, its triangles for
-//! bullet traces: P1, P2) is two instances of the same actor, one per flag.
+//! checks: the player's moves), [`InstanceInfo::blocks_traces`] (the
+//! original's bullet traces: the grapple's fire trace) and
+//! [`Instance::blocks_lines`] (zero-extent traces that are not bullet
+//! traces; the same as `blocks_traces` unless set otherwise).
+//! [`QueryFilter`] selects one ([`QueryKind`]), plus a mask of loaded
+//! sub-levels. A mesh that the original collides with differently for them
+//! (its simple body for the pawn and for line traces, its triangles for
+//! bullet traces: P1, P2) is several instances of the same actor: its
+//! triangles, and one per shape of its body.
 //!
 //! [`Instance::enabled`] switches an instance off for every query without
 //! removing it (blocking volumes that level script toggles, P5):

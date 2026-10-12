@@ -13,17 +13,76 @@
 //!   (`tools/asamu-import/src/meshes.rs`): the kDOP collision triangles of
 //!   every static mesh a level places (the `UCX_<Name>` node written with
 //!   `--collision`, or else the LOD 0 triangles of the collision-enabled
-//!   sections — the same set, CONFIRMED in `MESHES.md`).
+//!   sections — the same set, CONFIRMED in `MESHES.md`);
+//! - the same manifest's `simple_collision` records (mesh manifest version
+//!   2) and the `<Name>.collision.json` shapes they name, through
+//!   `asamu_assets` ([`MeshManifest`], [`SimpleCollision`]): each mesh's
+//!   switches and its simple body.
 //!
 //! and builds a [`LoadedMap`]: a [`CollisionScene`] with every blocking
-//! static-mesh component placed by its `LocalToWorld`, the BSP and the convex
-//! hulls of blocking volumes; the moving actors' collision as dynamic
+//! static-mesh component placed by its `LocalToWorld` (as its triangles, as
+//! the shapes of its simple body, or both: see below), the BSP and the
+//! convex hulls of blocking volumes; the moving actors' collision as dynamic
 //! instances; and the gameplay actors ([`crate::gameplay::SceneActors`]).
 //!
 //! The JSON structures here are our own, independent of `asamu-ue3`; unknown
 //! fields are ignored. Everything read is treated as untrusted: file sizes,
 //! counts, indices and glTF accessors are bounds-checked, malformed meshes
 //! are skipped with a warning, and nothing panics.
+//!
+//! # What a static mesh is collided at
+//!
+//! The original does not collide everything with a mesh's triangles
+//! (`docs/PARITY_FINDINGS.md` P1, P2, V3; MESHES.md, "Simple collision").
+//! Each mesh has two switches, both on unless the mesh stores `false`, and
+//! possibly a simple body (convex elements, boxes, spheres, capsules):
+//!
+//! | Trace | Switch | Switch on, body | Switch on, no body | Switch `false` |
+//! |---|---|---|---|---|
+//! | swept (the pawn) | `UseSimpleBoxCollision` | the body | **nothing** | triangles |
+//! | line, not a bullet | `UseSimpleLineCollision` | the body | nothing | triangles |
+//! | bullet (the grapple) | none | triangles | triangles | triangles |
+//!
+//! ([`mesh_routes`]). A blocking component therefore becomes up to two kinds
+//! of instance of the same actor:
+//!
+//! - its **triangles** ([`PrimitiveKind::TriangleMesh`]), blocking bullet
+//!   traces whenever the component blocks traces, the pawn when the box
+//!   switch is `false`, and line traces when the line switch is `false`;
+//! - one instance per **convex element and box of its body**
+//!   ([`PrimitiveKind::SimpleHull`]; [`crate::simple_body`]), blocking the
+//!   pawn when the box switch is on and line traces when the line switch
+//!   is. Spheres and capsules never stop a swept trace in the original and
+//!   are not placed.
+//!
+//! A mesh whose box switch is on and that has no body (515 of the shipped
+//! game's 882 meshes: rugs, props, light beams) does not stop the pawn at
+//! all. [`LoadStats`] counts the pawn-blocking components of each kind
+//! (`pawn_simple`, `pawn_triangles`, `pawn_none`).
+//!
+//! Every instance placed from converted data (triangles, body shapes,
+//! volume hulls) is under [`crate::collision::NativeRule`]: the box is swept
+//! with the original's own rule for leaving separating axes out, which
+//! depends on the placement's scale (NATIVE_PHYSICS.md 10.1). The BSP and
+//! box elements are swept as exact geometry.
+//!
+//! **Converted data without simple collision** (a mesh manifest of version
+//! 1) still loads: every blocking mesh then stops the pawn at its triangles,
+//! as this loader did before, `LoadStats::pawn_approximate` counts them and
+//! one warning says that pawn collision is approximate and that the meshes
+//! should be converted again. A mesh whose shapes file is missing or
+//! malformed falls back the same way, with a warning naming it.
+//!
+//! # Volumes that can be switched
+//!
+//! A blocking volume with a `bEnabled` property (`Engine.DynamicBlockingVolume`)
+//! collides or not by that property from the start of play, and level script
+//! switches it (P5; [`switchable_volume`]). Its hulls are always placed and
+//! start switched off ([`Instance::enabled`]) when `bEnabled` is false: 15 of
+//! the shipped game's 24. [`set_actor_collision`] (or
+//! [`LoadedMap::set_actor_collision`]) switches every instance of an actor
+//! by actor id, [`actor_collision`] reads the switch, and
+//! `LoadStats::switchable_volumes` / `disabled_volumes` count them.
 //!
 //! # Actor ids
 //!

@@ -511,12 +511,24 @@ fn the_scale_rule_on_the_real_levels() {
                 s[0] * s[1] > 1.0e4 || s[1] * s[2] > 1.0e4 || s[0] * s[2] > 1.0e4
             })
             .count();
+        let volumes: Vec<_> = statics
+            .iter()
+            .filter(|i| i.kind == PrimitiveKind::BrushHull)
+            .collect();
+        let wide_volumes = volumes
+            .iter()
+            .filter(|i| i.native.is_some_and(|r| r.skips_face_axes()))
+            .count();
+        let ruled = statics.iter().filter(|i| i.native.is_some()).count();
         eprintln!(
             "{map:<18} pawn-blocking body shapes {:>6}, leaving out a face axis {:>5} (of {:>4} actors); \
-             pawn-blocking triangle meshes beyond the triangle rule's face threshold {big_triangles}",
+             pawn-blocking triangle meshes beyond the triangle rule's face threshold {big_triangles}; \
+             volume hulls {} (leaving out a face axis {wide_volumes}); instances under the rule {ruled} of {}",
             pawn_hulls.len(),
             wide.len(),
             wide_actors.len(),
+            volumes.len(),
+            statics.len(),
         );
         // Sweeps down onto, and sideways into, a few of the widest.
         let filter = QueryFilter::PAWN;

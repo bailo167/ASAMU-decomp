@@ -174,6 +174,50 @@ What the cooked maps keep, per actor kind (T, from the scenes):
   determinant) scale; 6 are scaled (T). Hull triangles and brush-polygon fans keep their local winding: under a
   mirroring transform (none shipped) they would face inwards, while the transformed hull planes stay correct.
 
+### Volumes whose collision is switched: `DynamicBlockingVolume.bEnabled`
+
+Evidence side: the original (scene data and script, read locally from the user's packages; nothing quoted).
+
+- `Engine.DynamicBlockingVolume` declares one property, `bEnabled` (class default `true`), and is the only
+  blocking-volume class with it. The scene data carries it: `params.bEnabled` is present on all 24 such actors
+  (the scene's `params` hold every property the actor's classes declare below `Engine.Actor`), so the importer
+  needed no change. 15 of the 24 store `false` (T, and `docs/PARITY_FINDINGS.md` V14):
+
+  | Level | `DynamicBlockingVolume` actors | `bEnabled = false` |
+  |---|---:|---:|
+  | AG-BeautifulCity | 7 | 2 |
+  | AG-Darkcave | 6 | 6 |
+  | AG-StarHaven | 7 | 3 |
+  | AG-IceCave | 3 | 3 |
+  | TheCore | 1 | 1 |
+
+  All 24 store `bCollideActors` and `bBlockActors` true, a brush component that blocks traces with an extent
+  and not zero-extent ones, no rotation and no scale.
+- **At the start of play** the class makes one call that sets the actor's collision: whether it collides at all
+  from `bEnabled`, whether it blocks from its stored `bBlockActors` (CONFIRMED: the function's two arguments,
+  from its bytecode; this was STRONG in `docs/PARITY_FINDINGS.md` P5, where only the called function's name had
+  been read). A volume with `bEnabled = false` therefore blocks nothing, whatever its stored `bCollideActors`.
+- **Level script** switches it: the toggle handler all volumes inherit from `Engine.Volume` turns the actor's
+  collision on for the action's first input, off for its second and flips it for its third, keeping the block
+  flag, and then sets the collision component's flags to match (CONFIRMED, same reading); `Engine.BlockingVolume`
+  adds its rigid-body blocking to that. This holds for plain blocking volumes too.
+- **Ours** (`crates/asamu-world/src/scene.rs`): a blocking volume with a `bEnabled` property
+  (`scene::switchable_volume`) always gets its hulls placed, by its component's flags with the actor taken as
+  colliding, and they start switched off when `bEnabled` is false. `scene::set_actor_collision` switches every
+  collision instance of an actor by actor id (static or among the game layer's moving instances),
+  `scene::actor_collision` reads the switch, `LoadedMap::actors_without_collision` lists what is off, and
+  `LoadStats::switchable_volumes` / `disabled_volumes` count them. The switch survives an actor being moved by
+  level script (`CollisionScene::take_actor_statics` hands the instances over as they are). Which Kismet
+  actions reach these actors is the game layer's (`docs/reverse-engineering/KISMET_RUNTIME.md`).
+- The recorded flight through `DynamicBlockingVolume_6` of AG-BeautifulCity (V13) is free in the loaded map:
+  the pawn's box at (4353, −595, 37937) overlaps nothing until the volume is switched on (gated test
+  `scene_simple_real_data`).
+
+Volume hulls are swept by the pawn's box with the original's convex rule in the space of the volume's brush
+component (`NATIVE_PHYSICS.md` 10.1): the hulls are stored in world space, so the loader hands the component's
+transform to the collision instance. No volume of the shipped maps is scaled enough to lose a face axis of the
+box (T, counted by the same test).
+
 ## Transforms — CONFIRMED (native code), partly data-verified
 
 - `AActor::LocalToWorld`: `world = R(S · (local − PrePivot)) + Location`, with `S = DrawScale · DrawScale3D` and
