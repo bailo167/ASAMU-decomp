@@ -322,6 +322,82 @@ mod tests {
         assert_eq!(s.swept_shapes(), 0);
     }
 
+    /// Gated on the user's converted data (`ASAMU_CONVERTED_DIR`, mesh
+    /// manifest version 2): every shapes document the manifest names reads,
+    /// agrees with its record's counts, and together they hold what the
+    /// importer reported for the shipped game (MESHES.md, "Importer
+    /// output": 316 documents, 2,439 convex elements, 1 sphere, no box and
+    /// no capsule).
+    #[test]
+    fn real_shapes_documents_read_and_match_their_records() {
+        let Some(dir) = std::env::var_os("ASAMU_CONVERTED_DIR").map(std::path::PathBuf::from)
+        else {
+            eprintln!("ASAMU_CONVERTED_DIR not set: skipping");
+            return;
+        };
+        let meshes = dir.join("meshes");
+        let Ok(data) = crate::files::read_bounded(
+            &meshes.join("manifest.json"),
+            crate::files::MAX_MANIFEST_BYTES,
+        ) else {
+            eprintln!("no mesh manifest: skipping");
+            return;
+        };
+        let manifest =
+            crate::manifest::MeshManifest::from_json(&meshes.join("manifest.json"), &data).unwrap();
+        if manifest.version < crate::manifest::MESH_MANIFEST_VERSION {
+            eprintln!(
+                "mesh manifest version {}: no shapes, skipping",
+                manifest.version
+            );
+            return;
+        }
+        let mut files = std::collections::BTreeSet::new();
+        let (mut convex, mut boxes, mut spheres, mut sphyls) = (0usize, 0usize, 0usize, 0usize);
+        for (key, record) in &manifest.simple_collision {
+            let Some(rel) = record.safe_shapes().unwrap() else {
+                assert!(!record.has_body_setup, "{key}: a body without shapes");
+                continue;
+            };
+            assert!(record.has_body_setup, "{key}");
+            let path = meshes.join(&rel);
+            let data = crate::files::read_bounded(&path, MAX_SIMPLE_COLLISION_BYTES).unwrap();
+            let shapes = SimpleCollision::from_json(&path, &data).unwrap();
+            assert_eq!(
+                (
+                    shapes.convex.len(),
+                    shapes.boxes.len(),
+                    shapes.spheres.len(),
+                    shapes.sphyls.len()
+                ),
+                (record.convex, record.boxes, record.spheres, record.sphyls),
+                "{key}"
+            );
+            assert!(!shapes.is_empty(), "{key}");
+            for c in &shapes.convex {
+                assert!(c.vertices.len() >= 4 && !c.face_normal_directions.is_empty());
+            }
+            // A mesh that differs between packages has a file per variant;
+            // the others share one.
+            if files.insert(rel) {
+                convex += shapes.convex.len();
+                boxes += shapes.boxes.len();
+                spheres += shapes.spheres.len();
+                sphyls += shapes.sphyls.len();
+            }
+        }
+        eprintln!(
+            "{} shapes documents: {convex} convex elements, {boxes} boxes, {spheres} spheres, {sphyls} capsules",
+            files.len()
+        );
+        if manifest.len() < 882 {
+            eprintln!("partial conversion: the game's counts are not checked");
+            return;
+        }
+        assert_eq!(files.len(), 316);
+        assert_eq!((convex, boxes, spheres, sphyls), (2439, 0, 1, 0));
+    }
+
     #[test]
     fn wrong_documents_are_refused() {
         let reject = |edit: &dyn Fn(&mut serde_json::Value), what: &str| {
