@@ -442,8 +442,9 @@ fn a_save_without_script_state_does_not_play_the_opening_either() {
     );
 }
 
-/// A death at the fifth checkpoint puts the pawn back there and leaves the
-/// level script alone: the original's death sequence loads nothing.
+/// A death at the fifth checkpoint puts the pawn back there and loads
+/// nothing: the level script runs on (the original's death sequence resets
+/// the falling rocks, fires the death event and moves the pawn).
 #[test]
 fn a_death_after_continue_respawns_without_the_opening() {
     let Some((snapshot, fifth, _)) = play_to_the_fifth_checkpoint() else {
@@ -468,7 +469,25 @@ fn a_death_after_continue_respawns_without_the_opening() {
     }
     assert!(respawned);
     assert_eq!(game.latest_checkpoint_index(), Some(fifth));
+    // The script ran on: the level's own death event wrote its variables
+    // (the no-death achievement's flag and a flag of its sounds), and
+    // nothing of the opening changed.
     let after = script.runtime().capture_state();
-    assert_eq!(after.variables, before.variables);
+    let changed: Vec<&String> = after
+        .variables
+        .iter()
+        .filter(|(path, value)| before.variables.get(*path) != Some(*value))
+        .map(|(path, _)| path)
+        .collect();
+    eprintln!("variables a death changed: {changed:?}");
+    assert!(
+        changed.iter().any(|p| p.contains(".Achievement.")),
+        "the level's death event ran: {changed:?}"
+    );
+    assert!(
+        !changed.iter().any(|p| p.contains("Intro_Sequence")),
+        "{changed:?}"
+    );
+    assert_eq!(after.variables.len(), before.variables.len());
     assert_eq!(abilities(&game), (2, false, true));
 }
