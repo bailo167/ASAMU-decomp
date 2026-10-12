@@ -4,7 +4,6 @@
 //! grapple on triangle geometry, level-start abilities and determinism.
 
 use asamu_game::{DEATH_FADE_DOWN_TIME, Game, TickReport};
-use asamu_player::world::CONTACT_SKIN;
 use asamu_player::{CollisionWorld, InputFrame, PlayerParams};
 use asamu_world::WorldEvent;
 use asamu_world::fixtures::{MeshFixtures, Place, SceneFixture, box_mesh, json};
@@ -104,9 +103,12 @@ fn spawns_at_the_player_start_lands_and_walks_on_triangles() {
     s.player_start(Vec3::new(0.0, 0.0, 80.0), 0);
     s.write(&mut src);
     let mut g = game(&src, "AG-Flat");
-    // A-CP-5: the pawn's centre at the start, walking (it drops 36 uu).
+    // A-CP-5: the pawn's centre at the start, in the air: the original
+    // spawns the pawn there in falling physics (PARITY_FINDINGS P10), and
+    // it drops the 36 uu to the floor.
     assert_eq!(g.player().position, Vec3::new(0.0, 0.0, 80.0));
-    assert!(g.player().grounded);
+    assert!(!g.player().grounded && !g.player().pawn.flying);
+    assert_eq!(g.player().velocity, Vec3::ZERO);
     run_until(&mut g, idle(), 60, |_, g| {
         g.player().velocity == Vec3::ZERO && g.player().grounded
     })
@@ -148,6 +150,10 @@ fn spawns_at_the_player_start_lands_and_walks_on_triangles() {
 }
 
 /// A platform at the respawn point, nothing under the start but a kill zone.
+/// The spawn point is 40 uu above the platform, so the pawn's box (half
+/// height 44) is 4 uu inside the floor there, as the spawn points of the
+/// shipped checkpoints that the original lifts are (3 to 6 uu,
+/// PARITY_FINDINGS P10).
 fn death_fixture() -> MemorySource {
     let mut src = MemorySource::new();
     let mut s = SceneFixture::new("AG-Death", -50_000.0);
@@ -166,7 +172,7 @@ fn death_fixture() -> MemorySource {
         Vec3::new(5000.0, 5000.0, -1000.0),
     );
     let marker = s.marker(Place {
-        location: Vec3::new(1000.0, 0.0, 0.0),
+        location: Vec3::new(1000.0, 0.0, 40.0),
         rotation: [0, 16_384, 0],
         scale: Vec3::ONE,
     });
@@ -213,13 +219,19 @@ fn kill_zone_runs_the_death_sequence_and_respawns_at_the_checkpoint() {
     );
     assert!(!g.is_dying());
     assert_eq!(g.respawn_count(), 1);
-    // Teleported onto the platform at the marker (FindSpot lifted the centre
-    // out of the floor), with the marker's yaw; the tick's physics then ran
-    // from there with zero velocity.
+    // Teleported to the marker, with the marker's yaw. The box does not fit
+    // there (its bottom is 4 uu inside the platform), so the engine's
+    // placement search stands it over the floor (`UWorld::FindSpot`, read in
+    // the user's executable; `find_spot` in `converted.rs`): a 1 uu slice at
+    // the centre (bottom at z = 39) is traced down 88 uu, meets the BSP
+    // after 39 uu, reported 1.0 uu short (a tenth of the trace, at most 1.0
+    // on BSP): 38 uu. The centre goes to 40 − (2 × 38/88 − 1) × 44 + 1 = 47:
+    // the bottom 3.0 uu above the floor. The tick's physics then ran from
+    // there with zero velocity: one falling step of 520/3600 uu.
     let p = *g.player();
     assert!(p.position.z > z_at_death);
     assert!(
-        (p.position.truncate() - glam::Vec2::new(1000.0, 0.0)).length() < 1.0,
+        (p.position.truncate() - glam::Vec2::new(1000.0, 0.0)).length() < 1e-3,
         "{}",
         p.position
     );
@@ -228,12 +240,24 @@ fn kill_zone_runs_the_death_sequence_and_respawns_at_the_checkpoint() {
         "yaw {}",
         p.yaw
     );
-    assert!(p.position.z > 40.0 && p.position.z < 60.0, "{}", p.position);
-    // A-DT-2: the physics mode is kept — it died falling, so it falls the
-    // short way onto the platform and lands.
-    run_until(&mut g, idle(), 60, |_, g| g.player().grounded).unwrap();
+    let step = 520.0 / 3600.0;
     assert!(
-        (g.player().position.z - (44.0 + 2.15)).abs() < 0.5,
+        (p.position.z - (47.0 - step)).abs() < 1e-3,
+        "{}",
+        p.position
+    );
+    // A-DT-2: the physics mode is kept — it died falling, so it falls the
+    // 3.0 uu onto the platform and lands: after 4 steps it is 16 × 0.1444 =
+    // 2.311 uu down, the fifth (9 × 0.1444 = 1.3 uu) meets the floor and is
+    // reported a tenth of itself short, and the walking floor check of the
+    // landing tick moves the pawn up by 2.15 (the floor is reported 1.0 uu
+    // nearer than 0.13, that is at 0). It rests 0.13 + 2.15 uu above the
+    // floor, 0.72 below where it was put: what three recorded respawns show
+    // (0.71 to 0.73, PARITY_FINDINGS P10).
+    let landed = run_until(&mut g, idle(), 60, |_, g| g.player().grounded).unwrap();
+    assert_eq!(landed.tick - respawn.tick, 4, "lands in its fifth step");
+    assert!(
+        (g.player().position.z - (44.0 + 2.15 + 0.1 * 9.0 * step)).abs() < 1e-3,
         "{}",
         g.player().position
     );
@@ -655,13 +679,56 @@ fn spawn_inside_geometry_is_lifted_out() {
     s.player_start(Vec3::new(0.0, 0.0, 10.0), 0);
     s.write(&mut src);
     let g = game(&src, "AG-Lift");
+    // The spawn's placement search (`UWorld::FindSpot`; `find_spot` in
+    // `converted.rs`): a 1 uu slice at the centre (bottom at z = 9) traced
+    // down 88 uu meets the BSP after 9 uu, reported 1.0 uu short: 8. The
+    // centre goes to 10 − (2 × 8/88 − 1) × 44 + 1 = 47, the bottom 3.0 uu
+    // above the floor, in the air. (Our stand-in before the routine was read
+    // put the pawn 0.05 uu above the floor.)
     let z = g.player().position.z;
-    assert!((z - (44.0 + CONTACT_SKIN)).abs() < 1e-3, "{z}");
-    assert!(!g.world().overlaps(
-        g.player().position,
-        asamu_player::CollisionShape {
-            radius: 21.0,
-            half_height: 44.0
-        }
-    ));
+    assert!((z - 47.0).abs() < 1e-3, "{z}");
+    assert!(!g.player().grounded);
+    assert!(
+        !g.world()
+            .overlaps_box(g.player().position, Vec3::new(21.0, 21.0, 44.0))
+    );
+}
+
+#[test]
+fn a_spawn_point_in_a_floor_sheet_gets_no_place() {
+    // The placement search starts from a 1 uu slice at the wanted centre.
+    // When that slice does not fit, four half-width slices around it are
+    // tried at the same height; in the plane of a floor none fits, the
+    // search finds no place and the teleport fails: the pawn stays where it
+    // was (the original's reset then only logs). A respawn straight after
+    // the start, with a checkpoint whose spawn point lies in the floor.
+    let mut src = MemorySource::new();
+    let mut s = SceneFixture::new("AG-Sheet", -50_000.0);
+    floor(&mut s, 5000.0, 0.0);
+    s.player_start(Vec3::new(0.0, 0.0, 400.0), 0);
+    let marker = s.marker(Place::at(Vec3::new(1000.0, 0.0, 0.0)));
+    let path = s.path(marker);
+    s.checkpoint(
+        Place::at(Vec3::new(3000.0, 0.0, 40.0)),
+        200.0,
+        60.0,
+        0,
+        json!({"spawnPointActor": path, "spawnPointOffset": {"X": 0.0, "Y": 0.0, "Z": 0.0}}),
+    );
+    s.write(&mut src);
+    let mut g = game(&src, "AG-Sheet");
+    g.tick(&idle()).unwrap();
+    // The level's only checkpoint is where a respawn goes.
+    assert_eq!(
+        g.scene_respawn_point().map(|p| p.0),
+        Some(Vec3::new(1000.0, 0.0, 0.0))
+    );
+    let before = g.player().position;
+    g.respawn();
+    assert_eq!(g.player().position, before, "the teleport failed");
+    assert_eq!(
+        g.player().velocity,
+        Vec3::ZERO,
+        "the reset's velocity write"
+    );
 }

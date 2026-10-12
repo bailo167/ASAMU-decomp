@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use asamu_game::Game;
-use asamu_player::world::{CollisionShape, CollisionWorld};
+use asamu_player::world::CollisionWorld;
 use asamu_player::{InputFrame, PlayerParams};
 use asamu_world::scene;
 use glam::Vec3;
@@ -53,19 +53,21 @@ fn every_map_spawns_the_player_grounded_on_solid_geometry() {
         }
         let p = *g.player();
         assert!(settled.is_some(), "{name}: not at rest after 4 s: {p:?}");
-        // Standing on solid geometry: the floor is within the walking hover
-        // band below the cylinder (NATIVE_PHYSICS.md 3.x: 1.9 – 2.4 uu).
-        let shape = CollisionShape {
-            radius: 21.0,
-            half_height: 44.0,
-        };
+        // Standing on solid geometry: the pawn's box (the shape the
+        // original collides it as, P4) has a floor close below. A pawn that
+        // landed and stands still rests a tenth of its landing move plus
+        // the floor check's 2.15 uu above the floor (NATIVE_PHYSICS.md
+        // 3.3, 4.4); the starts drop 30 to 40 uu, a landing move under 5 uu:
+        // less than 2.65 uu.
+        let extent = Vec3::new(21.0, 21.0, 44.0);
         let floor = g
             .world()
-            .sweep_capsule(p.position, p.position - Vec3::Z * 10.0, shape)
-            .unwrap_or_else(|| panic!("{name}: nothing below the player at {}", p.position));
+            .sweep_box(p.position, p.position - Vec3::Z * 10.0, extent)
+            .unwrap_or_else(|| panic!("{name}: nothing below the player at {}", p.position))
+            .hit;
         assert!(floor.distance < 3.0, "{name}: floor {floor:?}");
         assert!(
-            !g.world().overlaps(p.position, shape),
+            !g.world().overlaps_box(p.position, extent),
             "{name}: spawned inside geometry"
         );
         // Walk forward for 10 s with sprint; time the ticks.
@@ -210,6 +212,7 @@ fn kill_volumes_and_checkpoints_follow_the_spec() {
         assert_eq!(g.active_checkpoint(), Some(hi_def.id), "{name}");
         let (spawn, spawn_rot) = g.scene_respawn_point().unwrap();
         let mut killed = 0;
+        let mut lifts: Vec<(f32, f32)> = Vec::new();
         for v in actors
             .volumes
             .iter()
@@ -246,11 +249,47 @@ fn kill_volumes_and_checkpoints_follow_the_spec() {
                 assert!(k < 100, "{name}: no respawn");
             }
             assert_eq!(k, fade, "{name}: {}", v.name);
+            // The teleport puts the pawn at the spawn point, or, when its
+            // box does not fit there, the engine's placement search stands
+            // it over the floor below: the bottom 2 uu above an 88 uu floor
+            // trace that is reported 1.0 uu (BSP, simple bodies) or 4.0 uu
+            // (mesh triangles) short, or as little as 0.5 uu short where
+            // BSP lies just behind what is hit (the trace is then cut to
+            // 5 uu beyond the BSP hit): 2.5 to 6.0 uu above the floor
+            // (`find_spot` in `converted.rs`; three recorded respawns show
+            // the 3.0, PARITY_FINDINGS P10). How far above the spawn point
+            // that is depends on how deep the spawn point is in the floor
+            // (AG-StarHaven's is 29.8 uu inside a platform's simple body).
+            // The respawn tick's physics has run since: a falling pawn is
+            // one falling step (0.144 uu) lower, a walking one had its
+            // floor check, which moves it by at most 1.05 uu (to a reported
+            // 2.15: a true 3.15 or 4.95).
             let at = g.player().position;
+            let extent = Vec3::new(21.0, 21.0, 44.0);
             assert!(
-                (at.truncate() - spawn.truncate()).length() < 1.0 && (at.z - spawn.z).abs() < 30.0,
+                (at.truncate() - spawn.truncate()).length() < 1.0,
                 "{name}: respawned at {at}, spawn {spawn}"
             );
+            assert!(!g.world().overlaps_box(at, extent), "{name}: {at}");
+            let lift = at.z - spawn.z;
+            // Never further down in that one tick than the walking floor
+            // check reaches (28 uu).
+            assert!(lift > -28.2, "{name}: respawned at {at}, spawn {spawn}");
+            if lift > 0.2 {
+                let gap = g
+                    .world()
+                    .sweep_box(at, at - Vec3::Z * 20.0, extent)
+                    .unwrap_or_else(|| panic!("{name}: lifted by {lift} over nothing"))
+                    .hit
+                    .distance;
+                assert!(
+                    (2.35..=6.01).contains(&gap),
+                    "{name}: lifted by {lift} to {gap} above the floor"
+                );
+                if lifts.last() != Some(&(lift, gap)) {
+                    lifts.push((lift, gap));
+                }
+            }
             // Same direction (the simulation keeps yaw in (-π, π]).
             let yaw = asamu_world::rotation::units_to_radians(spawn_rot[1]);
             let turn = (g.player().yaw - yaw).rem_euclid(core::f32::consts::TAU);
@@ -266,7 +305,8 @@ fn kill_volumes_and_checkpoints_follow_the_spec() {
             killed += 1;
         }
         eprintln!(
-            "{name}: {killed} kill volumes kill; respawn after {fade} ticks at the latest checkpoint"
+            "{name}: {killed} kill volumes kill; respawn after {fade} ticks at the latest checkpoint \
+             (lift above the spawn point, gap above the floor: {lifts:?})"
         );
         assert!(killed > 0, "{name}");
     }

@@ -2,13 +2,14 @@
 //! logic (touches, checkpoints, deaths and respawns, falling rocks, level
 //! streaming) and the Kismet-style controls. See the crate docs.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use asamu_core::DEFAULT_TICK_RATE_HZ;
 use asamu_player::grapple_gun::ReleaseReason;
 use asamu_player::trace::TraceSample;
-use asamu_player::world::{CONTACT_SKIN, CollisionShape};
+use asamu_player::world::{CollisionShape, TraceExtent};
 use asamu_player::{
     BoxWorld, EventLog, InputFrame, PlayerParams, PlayerState, StepEvents, begin_step, finish_step,
     pawn, rocket_boots,
@@ -113,38 +114,243 @@ fn converted_level(map: &LoadedMap, start: &PlayerStartDef) -> Level {
     }
 }
 
-/// Teleport placement (`FarMoveActor` → `FindSpot`, simplified): the spot
-/// itself when free, else the first free spot straight above (4 uu steps,
-/// up to twice the shape's height and radius), settled down onto what is
-/// below it. TENTATIVE stand-in for the engine's `FindSpot`.
-fn find_spot(world: &GameWorld, p: Vec3, shape: CollisionShape) -> Option<Vec3> {
-    if !p.is_finite() {
-        return None;
-    }
-    if !world.overlaps(p, shape) {
-        return Some(p);
-    }
-    let max = 2.0 * (shape.half_height + shape.radius);
-    let mut lift = 4.0;
-    while lift <= max {
-        let up = p + Vec3::Z * lift;
-        if !world.overlaps(up, shape) {
-            use asamu_player::CollisionWorld;
-            return Some(match world.sweep_capsule(up, up - Vec3::Z * lift, shape) {
-                Some(hit) => hit.position + hit.normal * CONTACT_SKIN,
-                None => up - Vec3::Z * lift,
-            });
-        }
-        lift += 4.0;
-    }
-    None
+/// An extent trace of [`find_spot`] as the original's line check reports it.
+struct LineHit {
+    /// Reported hit time (the exact contact's, moved back by the rule of
+    /// the routine that answered).
+    time: f32,
+    /// The box's centre at the reported hit.
+    location: Vec3,
+    /// Hit normal.
+    normal: Vec3,
 }
 
-fn shape_of(params: &PlayerParams) -> CollisionShape {
-    CollisionShape {
-        radius: params.movement.capsule_radius.value,
-        half_height: params.movement.capsule_half_height.value,
+/// The original's single line check with an extent, against what blocks
+/// the pawn: the hit as reported (its location is the trace's start plus the
+/// reported fraction of the trace).
+fn line_check(world: &GameWorld, start: Vec3, end: Vec3, extent: Vec3) -> Option<LineHit> {
+    use asamu_player::CollisionWorld;
+    let hit = world.sweep_box(start, end, extent)?;
+    let time = hit.reported_time(TraceExtent::Box, (end - start).length());
+    Some(LineHit {
+        time,
+        location: start + (end - start) * time,
+        normal: hit.hit.normal,
+    })
+}
+
+/// How far down the placement search looks for a floor, in half heights of
+/// the box. NativeCode: the `f32` −2.0 at 0x1016457D0 of the user's macOS
+/// executable, read by `UWorld::CheckSlice @ 0x1008E8A00` at 0x1008E8ACC.
+const FIND_SPOT_DOWN_HALF_HEIGHTS: f32 = 2.0;
+/// Half height (UU) of the slice the placement search probes with.
+/// NativeCode: the immediate 1.0 at 0x1008E8A8E (`UWorld::CheckSlice`) and
+/// at 0x1008E66C9 (`UWorld::FindSpot @ 0x1008E6570`).
+const FIND_SPOT_SLICE_HALF_HEIGHT: f32 = 1.0;
+/// Added (UU) to the height the floor trace gives. NativeCode: the `f32` 1.0
+/// at 0x101633D88, added at 0x1008E8B86 and 0x1008E8C86
+/// (`UWorld::CheckSlice`).
+const FIND_SPOT_LIFT: f32 = 1.0;
+/// The part of the box's X and Y half sizes a corner slice has. NativeCode:
+/// the vector (0.5, 0.5) at 0x101662F80, used at 0x1008E66BE
+/// (`UWorld::FindSpot`).
+const FIND_SPOT_CORNER_SLICE: f32 = 0.5;
+/// Where a corner slice is tried, in half sizes from the wanted location.
+/// NativeCode: the `f32` 0.55 at 0x10171DA70, used at 0x1008E66F9.
+const FIND_SPOT_CORNER_OFFSET: f32 = 0.55;
+/// How far the location moves towards a corner slice that fits, in that
+/// slice's offsets. NativeCode: the `f32` 1.1 at 0x1016844A8 (and −1.1 at
+/// 0x10171DA74 for the mirrored Y), used at 0x1008E677A and 0x1008E6840.
+const FIND_SPOT_CORNER_STEP: f32 = 1.1;
+/// How far beyond the wanted location the last trace of the corner search
+/// aims, as a part of the distance moved. NativeCode: the `f32` 0.2 at
+/// 0x1016825B8 (and the vector at 0x10171DA50), used at 0x1008E6970.
+const FIND_SPOT_BACK: f32 = 0.2;
+
+/// What the slice step of the placement search found.
+enum Slice {
+    /// A place for the whole box; the location was updated.
+    Fits,
+    /// The slice fits at the location but no place was found from it: the
+    /// search ends without one.
+    Fails,
+    /// The slice itself does not fit at the location: the search goes on
+    /// with the corner slices.
+    Blocked,
+}
+
+/// `UWorld::CheckSlice` (0x1008E8A00 in the user's macOS executable; read
+/// there, described in our own words):
+///
+/// 1. A flat slice of the box (its X and Y half sizes, 1 uu half height) is
+///    tested at the location. If it does not fit, the caller goes on.
+/// 2. The slice is traced straight down by twice the box's half height. A
+///    hit at the reported time `t` sets the location's height so that the
+///    box's bottom is 2 uu above the slice's bottom at that reported hit:
+///    `z − (2t − 1) × half height + 1`. Because the trace reports its hit
+///    short of the floor (by a tenth of its length, at most 1.0 uu on BSP,
+///    brushes and simple bodies, 4.0 uu on mesh triangles), the bottom ends
+///    3.0 or 6.0 uu above the floor for the player's 88 uu trace. Without a
+///    hit the location goes down by one half height.
+/// 3. If the whole box fits there, that is the place (when the floor was
+///    more than a half height below, or absent, the box is first traced up
+///    by a half height and stops at what it meets). If it does not fit, the
+///    location is pushed sideways by the floor hit's horizontal normal times
+///    the X half size and tested once more.
+fn check_slice(world: &GameWorld, location: &mut Vec3, extent: Vec3) -> Slice {
+    let slice = Vec3::new(extent.x, extent.y, FIND_SPOT_SLICE_HALF_HEIGHT);
+    if world.overlaps_box(*location, slice) {
+        return Slice::Blocked;
     }
+    let down = *location - Vec3::Z * (FIND_SPOT_DOWN_HALF_HEIGHTS * extent.z);
+    let floor = line_check(world, *location, down, slice);
+    let normal = floor.as_ref().map_or(Vec3::ZERO, |h| h.normal);
+    let near_floor = match floor {
+        None => {
+            location.z -= extent.z;
+            false
+        }
+        Some(h) if h.time > 0.5 => {
+            location.z = location.z - (h.time + h.time - 1.0) * extent.z + FIND_SPOT_LIFT;
+            false
+        }
+        Some(h) => {
+            location.z = (0.5 - h.time) * 2.0 * extent.z + location.z + FIND_SPOT_LIFT;
+            true
+        }
+    };
+    if !world.overlaps_box(*location, extent) {
+        if !near_floor
+            && let Some(above) =
+                line_check(world, *location, *location + Vec3::Z * extent.z, extent)
+        {
+            *location = above.location;
+        }
+        return Slice::Fits;
+    }
+    location.x += normal.x * extent.x;
+    location.y += normal.y * extent.x;
+    if world.overlaps_box(*location, extent) {
+        Slice::Fails
+    } else {
+        Slice::Fits
+    }
+}
+
+/// Where a spawn or a teleport puts the pawn's box when `wanted` is asked
+/// for: `UWorld::FindSpot` (0x1008E6570 in the user's macOS executable),
+/// which both `UWorld::SpawnActor` (call at 0x1008E5AE6) and
+/// `UWorld::FarMoveActor` (the teleport behind a script's `SetLocation`;
+/// call at 0x1008E9205) run with the actor's unscaled cylinder extent.
+/// `None` when the search finds no place (the teleport then fails and the
+/// pawn stays where it was). Read in the executable and described in our
+/// own words (CONFIRMED for the code; see below for what was measured):
+///
+/// 1. If the box does not encroach on the world at `wanted`, that is the
+///    place, unchanged.
+/// 2. Else the slice step ([`check_slice`]) looks for the floor below
+///    `wanted` and stands the box 2 uu above the reported hit.
+/// 3. If the slice does not fit at `wanted` either, four slices of half the
+///    box's width are tested around it, at ±0.55 half sizes in X and Y
+///    (X negative first, each with Y negative first; at most two may fit).
+///    Each one that fits moves the location 1.1 of its offset; with exactly
+///    one, the move is doubled. Nothing may lie on the line from `wanted`
+///    to the new location; the box must fit there, or the slice step must
+///    find a place from there; and at the end the box is traced from there
+///    to a point 0.2 of the way beyond `wanted` and stops at what it meets.
+///
+/// **Measured** (`docs/PARITY_FINDINGS.md` P10, five recorded respawns): at
+/// two the pawn appears at the checkpoint's spawn point exactly (step 1).
+/// At three it appears 6.09, 8.80 and 7.61 uu above a spawn point that is
+/// inside the floor, falls and comes to rest 0.71, 0.72 and 0.72 uu lower.
+/// Step 2 on a simple-collision floor gives exactly that: the bottom 3.0 uu
+/// above the floor (2 + the 1.0 uu of the trace), and after the fall (which
+/// lands in its fifth 60 Hz frame, a 1.30 uu move reported 0.13 short) and
+/// the first walking floor check, 0.13 + 2.15 = 2.28 uu: 0.72 lower.
+///
+/// **Ours, not the original's:** "encroaches" is the original's point check
+/// of the box against world geometry, whose routines were not read; here
+/// it is the exact overlap test of the pawn's collision
+/// ([`GameWorld::overlaps_box`]), so a spot within a hair of touching may be
+/// judged differently. The original's check also leaves out other pawns;
+/// ours counts NPC cylinders.
+pub(crate) fn find_spot(world: &GameWorld, wanted: Vec3, extent: Vec3) -> Option<Vec3> {
+    if !(wanted.is_finite() && extent.is_finite()) {
+        return None;
+    }
+    if !world.overlaps_box(wanted, extent) {
+        return Some(wanted);
+    }
+    if extent == Vec3::ZERO {
+        return None;
+    }
+    let mut location = wanted;
+    match check_slice(world, &mut location, extent) {
+        Slice::Fits => return Some(location),
+        Slice::Fails => return None,
+        Slice::Blocked => {}
+    }
+    location = wanted;
+    let slice = Vec3::new(
+        extent.x * FIND_SPOT_CORNER_SLICE,
+        extent.y * FIND_SPOT_CORNER_SLICE,
+        FIND_SPOT_SLICE_HALF_HEIGHT,
+    );
+    let mut fits = 0;
+    for side in [-1.0_f32, 1.0] {
+        if fits >= 2 {
+            break;
+        }
+        let x = extent.x * FIND_SPOT_CORNER_OFFSET * side;
+        let y = extent.y * FIND_SPOT_CORNER_OFFSET;
+        if !world.overlaps_box(wanted + Vec3::new(x, -y, 0.0), slice) {
+            fits += 1;
+            location.x += x * FIND_SPOT_CORNER_STEP;
+            location.y += y * -FIND_SPOT_CORNER_STEP;
+            if fits >= 2 {
+                break;
+            }
+        }
+        if !world.overlaps_box(wanted + Vec3::new(x, y, 0.0), slice) {
+            fits += 1;
+            location.x += x * FIND_SPOT_CORNER_STEP;
+            location.y += y * FIND_SPOT_CORNER_STEP;
+        }
+    }
+    match fits {
+        0 => return None,
+        1 => location = location + location - wanted,
+        _ => {}
+    }
+    if !location.is_finite() || world.line_blocked(wanted, location) {
+        return None;
+    }
+    if world.overlaps_box(location, extent)
+        && !matches!(check_slice(world, &mut location, extent), Slice::Fits)
+    {
+        return None;
+    }
+    let beyond = (wanted - location) * FIND_SPOT_BACK + wanted;
+    if let Some(hit) = line_check(world, location, beyond, extent) {
+        location = hit.location;
+    }
+    location.is_finite().then_some(location)
+}
+
+/// Half sizes of the box the original collides the pawn as: its collision
+/// cylinder's radius on X and Y and its half height on Z (P4).
+pub(crate) fn extent_of(shape: CollisionShape) -> Vec3 {
+    Vec3::new(shape.radius, shape.radius, shape.half_height)
+}
+
+/// Gives the actors `actors` dynamic collision instances (their static ones
+/// are taken out of the shared static set, unchanged: kind, switch, flags
+/// and sweep rule stay), so that their collision can be switched during
+/// play ([`SceneCollision::set_actor_collision`]). Actors without static
+/// collision are left alone.
+pub(crate) fn make_switchable(map: &mut LoadedMap, actors: &BTreeSet<u32>) {
+    let taken = map.collision.take_actor_statics(actors);
+    map.dynamic.extend(taken);
 }
 
 impl Game {
@@ -160,13 +366,36 @@ impl Game {
         Self::from_loaded_map(loaded, PlayerParams::asamu_original(), DEFAULT_TICK_RATE_HZ)
     }
 
-    /// Starts a game on an already loaded map (A-CP-5: the pawn spawns at the
-    /// `PlayerStart` with only its yaw, walking).
+    /// Starts a game on an already loaded map.
+    ///
+    /// **Level start (A-CP-5, P10).** The original spawns the pawn at the
+    /// `PlayerStart`'s location with only its yaw, and possessing it puts it
+    /// in falling physics unless it already is (CONFIRMED (src): the game
+    /// info's spawn and the stock pawn's start of movement). It therefore
+    /// **falls** from the `PlayerStart` and lands: in the first recordings
+    /// the first frames of AG-BeautifulCity and AG-Darkcave are falling
+    /// frames whose free fall, extrapolated back, starts at the
+    /// `PlayerStart`'s height to 0.015 uu and 0.0005 uu, and the landing is
+    /// a landing like any other (at the AG-Darkcave start it switched
+    /// `AirControl` to 0.35, A-AC-2). So the pawn starts here at the
+    /// `PlayerStart`, in the air, with zero velocity, and the first tick is
+    /// its first falling frame.
+    ///
+    /// A `PlayerStart` at which the pawn's box is not free goes through the
+    /// engine's placement search first (`find_spot`, the same routine the
+    /// spawn and the teleports run; neither recorded start needs it).
+    ///
+    /// Not reproduced: the original's world clock reads 0.400 s when that
+    /// fall starts (origin UNKNOWN; ours reads 0).
+    ///
+    /// Actors whose collision starts switched off (blocking volumes with
+    /// `bEnabled` false, P5) get dynamic instances, so that
+    /// [`Game::set_actor_collision`] can switch them.
     ///
     /// # Errors
     /// Invalid parameters or tick rate, no player start.
     pub fn from_loaded_map(
-        map: LoadedMap,
+        mut map: LoadedMap,
         params: PlayerParams,
         tick_rate_hz: f64,
     ) -> Result<Self, GameError> {
@@ -179,6 +408,8 @@ impl Game {
             .ok_or(GameError::NoPlayerStart)?;
         let level = converted_level(&map, &start);
         level.validate()?;
+        let off = map.actors_without_collision();
+        make_switchable(&mut map, &off);
         let map = Arc::new(map);
         let objects = WorldObjects::new(&level);
         let world = GameWorld {
@@ -186,11 +417,13 @@ impl Game {
             scene: Some(SceneCollision::new(Arc::clone(&map))),
         };
         let runtime = SceneRuntime::new(&map.actors, map.initial_level_mask(), SCENE_RANDOM_SEED);
-        let shape = shape_of(&params);
-        let spot = find_spot(&world, start.location, shape).unwrap_or(start.location);
+        let extent = extent_of(CollisionShape {
+            radius: params.movement.capsule_radius.value,
+            half_height: params.movement.capsule_half_height.value,
+        });
+        let spot = find_spot(&world, start.location, extent).unwrap_or(start.location);
+        // `PlayerState::new` is in the air: falling physics, zero velocity.
         let mut player = PlayerState::new(spot, rotation::units_to_radians(start.rotation[1]));
-        player.grounded = true;
-        player.pawn.force_floor_check = true;
         pawn::start(&mut player, &params);
         apply_level_abilities(&mut player, &level);
         if level.abilities.story_mode == Some(true) {
@@ -218,7 +451,28 @@ impl Game {
             npcs: None,
             npc_pending: Vec::new(),
             npc_events: Vec::new(),
+            size_factor: 1.0,
         })
+    }
+
+    /// Switches the collision of the actor `id` on or off, as a level
+    /// script's toggle does to a blocking volume (P5; KISMET_RUNTIME.md).
+    /// Returns whether the actor has collision that can be switched: only
+    /// actors that started switched off, and (with the level's Kismet) the
+    /// targets of its toggle actions, have
+    /// ([`SceneCollision::set_actor_collision`]).
+    pub fn set_actor_collision(&mut self, id: u32, enabled: bool) -> bool {
+        self.world
+            .scene
+            .as_mut()
+            .is_some_and(|sc| sc.set_actor_collision(id, enabled) > 0)
+    }
+
+    /// Whether the collision of the actor `id` is switched on (`None` for an
+    /// actor without collision, and on hand-made levels).
+    #[must_use]
+    pub fn actor_collision(&self, id: u32) -> Option<bool> {
+        self.world.scene.as_ref()?.actor_collision(id)
     }
 
     /// The converted map, if this game runs one.
@@ -374,7 +628,8 @@ impl Game {
         &mut self,
         world_events: &mut Vec<WorldEvent>,
     ) -> Option<DeathCause> {
-        let shape = shape_of(&self.params);
+        let shape = self.pawn_cylinder();
+        let extent = extent_of(shape);
         let Some(s) = &mut self.scene else {
             return None;
         };
@@ -386,13 +641,16 @@ impl Game {
         }
         world_events.push(WorldEvent::PlayerRespawned);
         let target = s.runtime.checkpoints.respawn(&s.map.actors.checkpoints);
-        // Teleport (a failed teleport only logs in the original).
+        // Teleport (a failed teleport only logs in the original): the
+        // engine's placement search decides where (`find_spot`), the pawn's
+        // base is dropped and its physics mode kept.
         if let Some((location, rot, _)) = target
-            && let Some(spot) = find_spot(&self.world, location, shape)
+            && let Some(spot) = find_spot(&self.world, location, extent)
         {
             self.player.position = spot;
             self.player.yaw = rotation::units_to_radians(rot[1]);
             self.player.pitch = rotation::units_to_radians(rotation::normalize_axis(rot[0]));
+            self.player.pawn.based = false;
             self.player.pawn.force_floor_check = true;
         }
         if self.player.script.started && self.player.script.boots.enabled {
@@ -442,8 +700,15 @@ impl Game {
         if let Some(s) = &mut self.scene {
             world_events.append(&mut s.pending);
         }
+        let sized = self.sized_params();
         // 1. Input events.
-        let pending = begin_step(&mut self.player, input, &self.params, &self.world, dt);
+        let pending = begin_step(
+            &mut self.player,
+            input,
+            sized.as_ref().unwrap_or(&self.params),
+            &self.world,
+            dt,
+        );
         let input_events = *pending.events();
         self.apply_object_events(&input_events, 0, &mut world_events);
         let mut respawned = false;
@@ -516,7 +781,7 @@ impl Game {
             &self.movement,
             &mut self.player,
             pending,
-            &self.params,
+            sized.as_ref().unwrap_or(&self.params),
             &self.world,
         );
         self.apply_object_events(&events, input_events.kismet.len(), &mut world_events);
@@ -526,7 +791,7 @@ impl Game {
         let tick = self.clock.advance_tick();
 
         // 5. Touches along the tick's path, KillZ.
-        let shape = shape_of(&self.params);
+        let shape = self.pawn_cylinder();
         let after = self.player.position;
         let outcome = match &mut self.scene {
             Some(s) => s.runtime.update_touches(
@@ -543,7 +808,8 @@ impl Game {
         // The NPC side's touches along the same path (collectibles,
         // foliage).
         if let Some(npcs) = &mut self.npcs {
-            let touched = npcs.update_touches(before, after, &self.params);
+            let touched =
+                npcs.update_touches(before, after, sized.as_ref().unwrap_or(&self.params));
             self.npc_pending.extend(touched);
         }
         let mut died = died_at_respawn.or(npc_death);

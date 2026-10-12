@@ -38,10 +38,13 @@
 //! # Converted (original) levels
 //!
 //! [`Game::load_level`] loads a map converted by `asamu-import` from the
-//! user's own install ([`asamu_world::scene`]): triangle collision
-//! ([`GameWorld`], [`world::SceneCollision`]), the streamed sub-levels, and
+//! user's own install ([`asamu_world::scene`]): its collision, answered as
+//! the original's world check answers the pawn's box and the grapple's
+//! trace ([`GameWorld`], [`world::SceneCollision`]), the streamed
+//! sub-levels, and
 //! the gameplay actors with the original's rules ([`asamu_world::gameplay`]):
-//! the player spawns at the `PlayerStart` (A-CP-5), checkpoints activate on
+//! the player spawns at the `PlayerStart` in the air and falls onto the
+//! level (A-CP-5), checkpoints activate on
 //! touch and respawns use the checkpoint list's lookup (A-CP-1..4), kill
 //! zones, dynamic kill zones and `KillZ` start the death sequence (A-DT-1/2:
 //! grapple released and story mode left at once, the pawn keeps simulating
@@ -104,7 +107,9 @@ use asamu_player::params::ParamError;
 use asamu_player::rocket_boots;
 use asamu_player::trace::TraceSample;
 use asamu_player::ue3_movement::PawnPhysicsState;
-use asamu_player::world::{Aabb, ActorClass, ActorTag, CONTACT_SKIN, SolidBox, Surface};
+use asamu_player::world::{
+    Aabb, ActorClass, ActorTag, CONTACT_SKIN, CollisionShape, SolidBox, Surface,
+};
 use asamu_player::{
     BoxWorld, InputFrame, MovementModelKind, PlayerParams, PlayerState, SimEvent, StepEvents,
     Trace, TraceMeta, begin_step, finish_step, pawn,
@@ -162,6 +167,34 @@ pub enum GameError {
     /// The converted level has no `PlayerStart`.
     #[error("the converted level has no PlayerStart")]
     NoPlayerStart,
+}
+
+/// What [`Game::console_command`] did with a command line.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum ConsoleCommand {
+    /// `SetSpeed F` ran ([`pawn::set_speed`]).
+    SetSpeed {
+        /// The factor `F`.
+        factor: f32,
+        /// `GroundSpeed` after the command, UU/s.
+        ground_speed: f32,
+    },
+    /// `ChangeSize F` ran ([`Game::change_size`]).
+    ChangeSize {
+        /// The factor `F`.
+        factor: f32,
+        /// The collision cylinder's radius after the command, UU.
+        radius: f32,
+        /// Its half height, UU.
+        half_height: f32,
+        /// The placement search found a place for the resized pawn (it
+        /// stays where it was otherwise).
+        placed: bool,
+    },
+    /// Not a command the simulation models (or its argument does not
+    /// parse): nothing changed.
+    NotHandled,
 }
 
 /// World-object events of one tick (fixed capacity so [`TickReport`] stays
@@ -320,6 +353,11 @@ pub struct Game {
     npc_pending: Vec<npc::NpcEvent>,
     /// NPC events of the latest tick, in order.
     npc_events: Vec<npc::NpcEvent>,
+    /// The pawn's size as a factor of its class default (1 unless the
+    /// console command `ChangeSize` ran; [`Game::change_size`]). State of
+    /// the running game, not a parameter: [`Game::params`] stays the set
+    /// the game was given.
+    size_factor: f32,
 }
 
 impl Game {
@@ -352,7 +390,33 @@ impl Game {
             npcs: None,
             npc_pending: Vec::new(),
             npc_events: Vec::new(),
+            size_factor: 1.0,
         })
+    }
+
+    /// The parameters the simulation runs with when they differ from
+    /// [`Self::params`]: that set with the collision cylinder scaled by the
+    /// pawn's present size ([`Self::change_size`]). `None` at the class
+    /// default size, when the simulation runs [`Self::params`] itself.
+    pub(crate) fn sized_params(&self) -> Option<PlayerParams> {
+        if self.size_factor == 1.0 {
+            return None;
+        }
+        let mut params = self.params.clone();
+        params.movement.capsule_radius.value *= self.size_factor;
+        params.movement.capsule_half_height.value *= self.size_factor;
+        Some(params)
+    }
+
+    /// The pawn's collision cylinder as it is now: the parameters' cylinder
+    /// times the pawn's size ([`Self::change_size`]).
+    #[must_use]
+    pub fn pawn_cylinder(&self) -> CollisionShape {
+        let m = &self.params.movement;
+        CollisionShape {
+            radius: m.capsule_radius.value * self.size_factor,
+            half_height: m.capsule_half_height.value * self.size_factor,
+        }
     }
 
     /// The hand-made graybox level with the original's parameters and the
@@ -448,10 +512,17 @@ impl Game {
         }
         let dt = self.clock.dt();
         let mut world_events = Vec::new();
+        let sized = self.sized_params();
         // 1. Input events (G-IN-5, G-TM-2): the fire trace sees the map
         // actors where the previous tick left them; the attach's handler
         // calls reach them before they tick.
-        let pending = begin_step(&mut self.player, input, &self.params, &self.world, dt);
+        let pending = begin_step(
+            &mut self.player,
+            input,
+            sized.as_ref().unwrap_or(&self.params),
+            &self.world,
+            dt,
+        );
         let input_events = *pending.events();
         self.apply_object_events(&input_events, 0, &mut world_events);
         // 2. Map-placed actors: movers, crystals, attractor pads (which write
@@ -475,7 +546,7 @@ impl Game {
             &self.movement,
             &mut self.player,
             pending,
-            &self.params,
+            sized.as_ref().unwrap_or(&self.params),
             &self.world,
         );
         self.apply_object_events(&events, input_events.kismet.len(), &mut world_events);
@@ -577,7 +648,8 @@ impl Game {
         let mut released = StepEvents::default();
         let spawn = self.respawn_point();
         let mut old = self.player;
-        let mut fresh = spawn_state(&self.world, &self.params, &spawn);
+        let sized = self.sized_params();
+        let mut fresh = spawn_state(&self.world, sized.as_ref().unwrap_or(&self.params), &spawn);
         if self.params.pawn.is_some() && old.script.started {
             // The original's player reset (ABILITIES.md A-DT-2): grapple
             // released (physics Falling, pawn state `Release`, one
@@ -594,8 +666,8 @@ impl Game {
             }
             fresh.script = old.script;
             if !old.grounded {
-                fresh.position = spawn.feet
-                    + Vec3::Z * (self.params.movement.capsule_half_height.value + CONTACT_SKIN);
+                fresh.position =
+                    spawn.feet + Vec3::Z * (self.pawn_cylinder().half_height + CONTACT_SKIN);
                 fresh.grounded = false;
                 fresh.pawn = PawnPhysicsState::default();
             }
@@ -713,6 +785,86 @@ impl Game {
     /// Kismet `SeqAct_ToggleRocketBoots` (A-RB-1).
     pub fn enable_rocket_boots(&mut self, enable: bool) {
         rocket_boots::enable_rocket_boots(&mut self.player, enable);
+    }
+
+    /// A console command line that level script issues to the player
+    /// (Kismet `SeqAct_ConsoleCommand`). Two commands change the
+    /// simulation, both of the stock cheat manager (ABILITIES.md A-WK-3 and
+    /// §14); the command word is matched without regard to case. Every
+    /// other line changes nothing here.
+    ///
+    /// - `SetSpeed F`: [`pawn::console_command`].
+    /// - `ChangeSize F` ([`Self::change_size`]).
+    pub fn console_command(&mut self, command: &str) -> ConsoleCommand {
+        match pawn::console_command(&mut self.player, &self.params, command) {
+            pawn::ConsoleCommand::SetSpeed {
+                factor,
+                ground_speed,
+            } => {
+                return ConsoleCommand::SetSpeed {
+                    factor,
+                    ground_speed,
+                };
+            }
+            pawn::ConsoleCommand::NotHandled => {}
+        }
+        let mut words = command.split_whitespace();
+        if let (Some(word), Some(argument), None) = (words.next(), words.next(), words.next())
+            && word.eq_ignore_ascii_case("changesize")
+            && let Ok(factor) = argument.parse::<f32>()
+            && let Some(done) = self.change_size(factor)
+        {
+            return done;
+        }
+        ConsoleCommand::NotHandled
+    }
+
+    /// The console command `ChangeSize F` (the stock cheat manager's;
+    /// AG-Epilogue's level script runs `changesize 1.4`): the pawn's
+    /// collision cylinder becomes the pawn class's default radius and half
+    /// height × `F`, and the pawn's location is then set to itself, which
+    /// runs the engine's placement search with the new size (CONFIRMED
+    /// (src) for the command; the search is `find_spot` in `converted.rs`,
+    /// read in the user's executable). A pawn standing on a floor that
+    /// grows is thereby lifted to stand the search's 3.0 uu above it; its
+    /// base is dropped and its physics mode kept, as a teleport does. The
+    /// command also sets the pawn's draw scale, which is presentation and
+    /// not modelled; the eye height is not scaled.
+    ///
+    /// The size is state of the running game ([`Self::pawn_cylinder`]): the
+    /// class default is the cylinder of [`Self::params`], which stays as it
+    /// is. Not measured: AG-Epilogue is in no recording.
+    ///
+    /// `None` (nothing changed) without the pawn script layer, and for a
+    /// factor that is not finite and positive or whose sizes would not be
+    /// valid parameters (guards of ours).
+    pub fn change_size(&mut self, factor: f32) -> Option<ConsoleCommand> {
+        self.params.pawn.as_ref()?;
+        if !(factor.is_finite() && factor > 0.0) {
+            return None;
+        }
+        let before = self.size_factor;
+        self.size_factor = factor;
+        if self.sized_params().is_some_and(|p| p.validate().is_err()) {
+            self.size_factor = before;
+            return None;
+        }
+        // `SetLocation(Location)`: the placement search at the present
+        // location; a search that finds no place leaves the pawn there.
+        let shape = self.pawn_cylinder();
+        let extent = Vec3::new(shape.radius, shape.radius, shape.half_height);
+        let placed = converted::find_spot(&self.world, self.player.position, extent);
+        if let Some(spot) = placed {
+            self.player.position = spot;
+            self.player.pawn.based = false;
+            self.player.pawn.force_floor_check = true;
+        }
+        Some(ConsoleCommand::ChangeSize {
+            factor,
+            radius: shape.radius,
+            half_height: shape.half_height,
+            placed: placed.is_some(),
+        })
     }
 
     /// Kismet `SeqAct_ToggleAttractor`: activates the attractor pad `id`
