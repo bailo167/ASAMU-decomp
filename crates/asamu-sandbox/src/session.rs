@@ -59,6 +59,7 @@ use crate::command::{Command, CommandError, SlotOp, TeleportTarget, TimeOp, Togg
 use crate::inspect::{TeleportTargetInfo, format_value};
 use crate::keys::{Catalog, Effect, effect_of};
 use crate::overlay::{BASE_CLASSIC, Overlay, OverlayError, ParamSetLabel, param_set_label};
+use crate::playground::{CourseClock, level_label};
 use crate::profile::{PROFILE_FORMAT, PROFILE_VERSION, Profile};
 use crate::recording::SandboxRecording;
 use crate::relatch::{RelatchReport, retune};
@@ -237,6 +238,8 @@ pub struct Session {
     next_target: usize,
     /// The running recording saw a parameter set other than Classic.
     recording_ran_modified: bool,
+    /// The clock of the playground's timed routes (idle on other levels).
+    course: CourseClock,
 }
 
 impl Session {
@@ -278,6 +281,7 @@ impl Session {
             marks: BTreeMap::new(),
             next_target: 0,
             recording_ran_modified: false,
+            course: CourseClock::default(),
         }
     }
 
@@ -370,8 +374,10 @@ impl Session {
         let outcome = self.run(&cmd, cx)?;
         self.log.push(tick, cmd);
         if outcome.discontinuity {
-            // What follows is a new attempt: its trail starts here.
+            // What follows is a new attempt: its trail starts here, and a
+            // timed route it was on is not timed.
             self.telemetry.archive_attempt();
+            self.course.cancel();
         }
         Ok(outcome)
     }
@@ -407,6 +413,8 @@ impl Session {
     /// (not while recording). Never changes the game.
     pub fn after_tick(&mut self, game: &Game, script: Option<&LevelScript>, report: &TickReport) {
         self.telemetry.observe(game, report);
+        self.course
+            .observe(game, report.respawned || game.is_dying());
         if game.scene_map().is_some() {
             // The clone cost on converted maps is unmeasured: no keyframes.
             self.rewind.clear();
@@ -419,6 +427,12 @@ impl Session {
     pub fn finish(&mut self, cx: &mut SimCx<'_>) -> Option<SandboxRecording> {
         let trace = cx.game.stop_recording()?;
         Some(self.wrap_recording(trace))
+    }
+
+    /// The clock of the playground's timed routes.
+    #[must_use]
+    pub fn course(&self) -> &CourseClock {
+        &self.course
     }
 
     /// The time-control model.
@@ -574,7 +588,7 @@ impl Session {
              profile {}{} | {}\n{set}\n{rules} | movement model: {}",
             self.profile.name,
             if self.profile_modified() { "*" } else { "" },
-            game.level().name,
+            level_label(game),
             game.movement_model().name(),
         )
     }

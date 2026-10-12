@@ -104,7 +104,12 @@ impl SandboxRecording {
     pub fn finish(mut trace: Trace, session: &Session) -> Self {
         let label = session.label();
         let classic = label == ParamSetLabel::Classic && !session.recording_ran_modified();
-        let level = trace.meta.level.clone().unwrap_or_default();
+        let mut level = trace.meta.level.clone().unwrap_or_default();
+        // The playground is ours: the loader's label for it is not kept.
+        if let Some(ours) = crate::playground::relabel(&level) {
+            level = ours.to_owned();
+            trace.meta.level = Some(level.clone());
+        }
         if !level.starts_with(TRACE_LEVEL_PREFIX) {
             trace.meta.level = Some(format!("{TRACE_LEVEL_PREFIX}{level}"));
         }

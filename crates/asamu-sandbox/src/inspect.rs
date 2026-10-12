@@ -301,7 +301,7 @@ impl<'a> Inspection<'a> {
             label: session.label(),
             profile: session.profile().name.clone(),
             profile_modified: session.profile_modified(),
-            level: self.game.level().name.clone(),
+            level: crate::playground::level_label(self.game),
             tick: self.game.clock().tick(),
             overrides: session.overlay().len(),
             rules: *session.rules(),
