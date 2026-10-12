@@ -1263,16 +1263,32 @@ enlarged solid: the box is stopped by an element's extended face planes only whe
 whole sweep reach the element's bounds widened by the box and by 0.1 of the element's own units (0.1 ×
 scale in the world). Note that it is the bounds of the sweep that are compared, not the sweep.
 
-**Which matrix** [CONFIRMED for brushes, STRONG for static meshes]. Both components get the matrix and
-the scale they hand to the aggregate check from `UPrimitiveComponent::GetTransformAndScale @
-0x100533640` (called directly by the brush component at 0x100759CFF; the static-mesh component's call
-goes through its table). It returns the component's total scale (its own scale and 3-D scale times the
-owner's `DrawScale` and `DrawScale3D`, unless a flag of the component is set: the absolute-scale flag,
-by this use) and the component's `LocalToWorld` with each of its three rows divided by that scale; the
-aggregate check multiplies the rows by the scale again. So the element's space is the component's local
-space and the matrix that is inverted is the component's `LocalToWorld`, whatever the rotation. One
-exception: when all three components of the scale are below 1e-4 in size (f32 at 0x10163FED8) the
-routine logs a warning and returns the identity matrix.
+**Which matrix** [CONFIRMED for brushes and, by the verification pass of 2026-10-12, for static meshes].
+The brush component gets the matrix and the scale it hands to the aggregate check from
+`UPrimitiveComponent::GetTransformAndScale @ 0x100533640` (called at 0x100759CFF). It returns the
+component's total scale (its own scale and 3-D scale times the owner's `DrawScale` and `DrawScale3D`,
+unless a flag of the component is set: the absolute-scale flag, by this use) and the component's
+`LocalToWorld` with each of its three rows divided by that scale; the aggregate check multiplies the rows
+by the scale again. One exception: when all three components of the scale are below 1e-4 in size (f32 at
+0x10163FED8) the routine logs a warning and returns the identity matrix.
+
+The static-mesh component does not call that routine. `UStaticMeshComponent::LineCheck` takes a matrix
+from its own table (slot 0x420, with an index: one matrix per instance, the component's `LocalToWorld`
+for an ordinary component) and separates it itself, at 0x100C58AD4 to 0x100C58C95: the scale on an axis
+is the length of that row of the matrix, the row is divided by it, and a row whose squared length is not
+above 1e-8 (f32 at 0x10163FED4) is left as it is with a scale of zero. The scale is therefore never
+negative; a mirrored placement keeps its mirror in the rows. Then:
+
+- when the absolute product of the three scales is not above 1e-4 (the double at 0x1016393A0, compared at
+  0x100C58C8D), the aggregate check is **not called**: such a placement has no simple collision, for a
+  trace with or without an extent (uniformly: a scale of 0.0464 or less). 7 pawn-blocking placements of a
+  mesh with a body in the user's levels are that small (MESHES.md, "In the runtime"); ours leaves their
+  bodies out (`asamu_world::scene::simple_body_checked`);
+- otherwise the aggregate check is called (0x100C58CE4) with the rows of length one and the scale, and
+  multiplies them again.
+
+So for both components the element's space is the component's local space and the matrix that is
+inverted is the component's `LocalToWorld`, whatever the rotation.
 
 How much of the user's data this touches. Counted on 2026-10-11, before the per-mesh switches were
 applied (the scene files' component transforms and the mesh list's simple-body references): of 22,782
