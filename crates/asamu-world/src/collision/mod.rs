@@ -292,6 +292,66 @@ impl PrimitiveKind {
     }
 }
 
+/// A set of [`PrimitiveKind`]s, for the queries that look only at instances
+/// of some kinds ([`CollisionScene::sweep_box_kinds`],
+/// [`CollisionScene::raycast_kinds`]).
+///
+/// The original's world check does not ask everything at once: it asks the
+/// level's BSP first and then the other primitives on a trace shortened to
+/// end just beyond the BSP hit, and each routine moves its own hit back by
+/// its own amount (`asamu_player::world::bsp_checked_fraction`,
+/// NATIVE_PHYSICS.md 10.2). A caller that reproduces this needs the first
+/// contact of each kind, not only the first contact of all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KindSet(u8);
+
+impl KindSet {
+    /// No kind.
+    pub const NONE: Self = Self(0);
+    /// Every kind.
+    pub const ALL: Self = Self(0b1_1111);
+
+    const fn bit(kind: PrimitiveKind) -> u8 {
+        match kind {
+            PrimitiveKind::Bsp => 1,
+            PrimitiveKind::BrushHull => 1 << 1,
+            PrimitiveKind::SimpleHull => 1 << 2,
+            PrimitiveKind::TriangleMesh => 1 << 3,
+            PrimitiveKind::PawnCylinder => 1 << 4,
+        }
+    }
+
+    /// The set of exactly `kind`.
+    #[must_use]
+    pub const fn only(kind: PrimitiveKind) -> Self {
+        Self(Self::bit(kind))
+    }
+
+    /// This set and `kind`.
+    #[must_use]
+    pub const fn with(self, kind: PrimitiveKind) -> Self {
+        Self(self.0 | Self::bit(kind))
+    }
+
+    /// This set without `kind`.
+    #[must_use]
+    pub const fn without(self, kind: PrimitiveKind) -> Self {
+        Self(self.0 & !Self::bit(kind))
+    }
+
+    /// `true` when `kind` is in the set.
+    #[must_use]
+    pub const fn contains(self, kind: PrimitiveKind) -> bool {
+        self.0 & Self::bit(kind) != 0
+    }
+
+    /// `true` for the empty set.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// What an instance is besides its mesh, transform and [`InstanceInfo`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InstanceOptions {
@@ -952,6 +1012,11 @@ fn visible(filter: &QueryFilter, inst: &Instance) -> bool {
     inst.enabled && filter.accepts_instance(inst)
 }
 
+/// [`visible`], and of one of `kinds`.
+fn visible_of(filter: &QueryFilter, kinds: KindSet, inst: &Instance) -> bool {
+    kinds.contains(inst.kind) && visible(filter, inst)
+}
+
 /// World → the space the original tests the instance in.
 fn element_space(inst: &Instance, rule: &NativeRule) -> Affine {
     inst.to_local.then(&rule.mesh_to_element)
@@ -1547,6 +1612,7 @@ impl CollisionScene {
         dynamic: &[Instance],
         q: &SweepQuery,
         filter: QueryFilter,
+        kinds: KindSet,
     ) -> Option<SceneHit> {
         let inv = bvh::reciprocal(q.d);
         let mut best: Option<SceneHit> = None;
@@ -1563,7 +1629,7 @@ impl CollisionScene {
             .into_iter()
             .filter_map(|i| {
                 let inst = self.statics.get(i as usize)?;
-                if !visible(&filter, inst) {
+                if !visible_of(&filter, kinds, inst) {
                     return None;
                 }
                 // Under the original's rule with a face axis left out, a
@@ -1584,7 +1650,7 @@ impl CollisionScene {
         }
         for (i, inst) in dynamic.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else { break };
-            if !visible(&filter, inst) {
+            if !visible_of(&filter, kinds, inst) {
                 continue;
             }
             if bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0).is_some() {
@@ -1686,7 +1752,7 @@ impl CollisionScene {
             h: f64::from(half_height),
         };
         let q = Self::sweep_query(start, end, shape)?;
-        self.sweep_shape(dynamic, &q, filter)
+        self.sweep_shape(dynamic, &q, filter, KindSet::ALL)
     }
 
     /// Reference implementation of [`Self::sweep_cylinder`] without any
@@ -1729,7 +1795,24 @@ impl CollisionScene {
         filter: QueryFilter,
     ) -> Option<SceneHit> {
         let q = Self::box_query(start, end, half_extents)?;
-        self.sweep_shape(dynamic, &q, filter)
+        self.sweep_shape(dynamic, &q, filter, KindSet::ALL)
+    }
+
+    /// [`Self::sweep_box`] against the instances of `kinds` only: the first
+    /// contact among them, as if nothing else were there (see [`KindSet`]).
+    /// With [`KindSet::ALL`] this is [`Self::sweep_box`].
+    #[must_use]
+    pub fn sweep_box_kinds(
+        &self,
+        dynamic: &[Instance],
+        start: Vec3,
+        end: Vec3,
+        half_extents: Vec3,
+        filter: QueryFilter,
+        kinds: KindSet,
+    ) -> Option<SceneHit> {
+        let q = Self::box_query(start, end, half_extents)?;
+        self.sweep_shape(dynamic, &q, filter, kinds)
     }
 
     /// Reference implementation of [`Self::sweep_box`] without any
@@ -1824,6 +1907,20 @@ impl CollisionScene {
         end: Vec3,
         filter: QueryFilter,
     ) -> Option<SceneHit> {
+        self.raycast_kinds(dynamic, origin, end, filter, KindSet::ALL)
+    }
+
+    /// [`Self::raycast`] against the instances of `kinds` only (see
+    /// [`KindSet`]). With [`KindSet::ALL`] this is [`Self::raycast`].
+    #[must_use]
+    pub fn raycast_kinds(
+        &self,
+        dynamic: &[Instance],
+        origin: Vec3,
+        end: Vec3,
+        filter: QueryFilter,
+        kinds: KindSet,
+    ) -> Option<SceneHit> {
         let o = origin.as_dvec3();
         let dv = end.as_dvec3() - o;
         if !(o.is_finite() && dv.is_finite()) || dv == DVec3::ZERO {
@@ -1842,7 +1939,7 @@ impl CollisionScene {
             .into_iter()
             .filter_map(|i| {
                 let inst = self.statics.get(i as usize)?;
-                if !visible(&filter, inst) {
+                if !visible_of(&filter, kinds, inst) {
                     return None;
                 }
                 bvh::segment_box_entry(o, inv, &inst.bounds, pad, 1.0).map(|t| (t, i))
@@ -1859,7 +1956,7 @@ impl CollisionScene {
         }
         for (i, inst) in dynamic.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else { break };
-            if visible(&filter, inst)
+            if visible_of(&filter, kinds, inst)
                 && bvh::segment_box_entry(o, inv, &inst.bounds, pad, 1.0).is_some()
             {
                 self.ray_instance(inst, InstanceRef::Dynamic(i), o, dv, &mut best);
@@ -2755,5 +2852,73 @@ mod tests {
         assert!((contact_tolerance(Vec3::ZERO) - 1.0e-3).abs() < 1e-12);
         let far = contact_tolerance(Vec3::new(250_000.0, 0.0, 0.0));
         assert!(far > 0.03 && far < 0.04, "{far}");
+    }
+
+    /// Two floors under one probe, the upper one mesh triangles (top at
+    /// z = 10) and the lower one BSP (top at z = 0): a query by kind sees
+    /// the first contact among the instances of its kinds and nothing else,
+    /// for boxes and for rays, and every kind together is the plain query.
+    #[test]
+    fn queries_by_kind_see_only_their_kinds() {
+        let mut b = CollisionSceneBuilder::new();
+        let (v, t) = cube();
+        let m = b.add_mesh(v, t).unwrap();
+        let slab = |top: f64| Affine {
+            rows: [DVec3::X * 200.0, DVec3::Y * 200.0, DVec3::Z * 50.0],
+            translation: DVec3::new(-100.0, -100.0, top - 50.0),
+        };
+        let bsp = b
+            .add_static_with(
+                m,
+                slab(0.0),
+                info(),
+                InstanceOptions::of_kind(PrimitiveKind::Bsp),
+            )
+            .unwrap();
+        let mesh = b
+            .add_static_with(
+                m,
+                slab(10.0),
+                info(),
+                InstanceOptions::of_kind(PrimitiveKind::TriangleMesh),
+            )
+            .unwrap();
+        let s = b.build();
+        let (start, end) = (Vec3::new(0.0, 0.0, 100.0), Vec3::new(0.0, 0.0, -100.0));
+        let half = Vec3::new(21.0, 21.0, 44.0);
+        let sweep = |kinds| s.sweep_box_kinds(&[], start, end, half, QueryFilter::PAWN, kinds);
+        // The box's bottom starts at 56: 46 above the mesh, 56 above the BSP.
+        let all = sweep(KindSet::ALL).unwrap();
+        assert_eq!(all.instance, InstanceRef::Static(mesh));
+        assert!((all.t - 46.0 / 200.0).abs() < 1e-9, "{all:?}");
+        assert_eq!(
+            Some(all),
+            s.sweep_box(&[], start, end, half, QueryFilter::PAWN)
+        );
+        let only_bsp = sweep(KindSet::only(PrimitiveKind::Bsp)).unwrap();
+        assert_eq!(only_bsp.instance, InstanceRef::Static(bsp));
+        assert_eq!(only_bsp.kind, PrimitiveKind::Bsp);
+        assert!((only_bsp.t - 56.0 / 200.0).abs() < 1e-9, "{only_bsp:?}");
+        assert_eq!(
+            sweep(KindSet::ALL.without(PrimitiveKind::Bsp)),
+            Some(all),
+            "the rest without BSP is the mesh"
+        );
+        assert_eq!(sweep(KindSet::only(PrimitiveKind::SimpleHull)), None);
+        assert_eq!(sweep(KindSet::NONE), None);
+        let ray = |kinds| s.raycast_kinds(&[], start, end, QueryFilter::TRACE, kinds);
+        let first = ray(KindSet::ALL).unwrap();
+        assert_eq!(first.instance, InstanceRef::Static(mesh));
+        assert!((first.t - 90.0 / 200.0).abs() < 1e-9, "{first:?}");
+        assert_eq!(Some(first), s.raycast(&[], start, end, QueryFilter::TRACE));
+        let below = ray(KindSet::only(PrimitiveKind::Bsp)).unwrap();
+        assert_eq!(below.instance, InstanceRef::Static(bsp));
+        assert!((below.t - 100.0 / 200.0).abs() < 1e-9, "{below:?}");
+        assert_eq!(ray(KindSet::only(PrimitiveKind::PawnCylinder)), None);
+        // Set arithmetic.
+        let set = KindSet::NONE.with(PrimitiveKind::BrushHull);
+        assert!(set.contains(PrimitiveKind::BrushHull) && !set.contains(PrimitiveKind::Bsp));
+        assert!(set.without(PrimitiveKind::BrushHull).is_empty());
+        assert!(KindSet::NONE.is_empty() && !KindSet::ALL.is_empty());
     }
 }
