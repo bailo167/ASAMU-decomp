@@ -357,13 +357,31 @@ interpolating physics follow their tracks: every loop of a track that ends at 35
 frame time; ours is the rule at the game's tick (9102 units/s: 151 units a tick at 60 Hz, 9060 units/s,
 against the recorded 9048 at 78 frames a second).
 
+One place shows that dependence: **the merry-go-round's two arms** [CONFIRMED (level data, native rules);
+the recording cannot tell the two rules apart there]. `InterpActor_16` and `InterpActor_136` are the same
+platform mesh at one location, half a turn apart, each with four attached actors, and one Matinee group
+names both (one turn of yaw less 0.1° in 30 s, looping). `_136` is in the interpolating physics and follows
+the track, 2183.9 units/s with a hop of 0.1° at each loop; `_16` is in the rotating physics and turns by
+its rate of 2184 units/s, a turn in 30 s only when the tick's step loses nothing. At the recorded frame
+time the step is 2184 × 0.0128206 = 28.0002, so 28 units and 2184.0 units/s: the arms stay half a turn
+apart (the pawn at rest on `_16` turned 28 units in each of 79 frames, KM1 from frame 23,656; the track
+would give the same there, and no loop of the track fell into the 4.1 s on the arm). At 60 Hz the step is
+36 of 36.4 units, 2160 units/s: the arm that turns by its rate falls behind the other by 0.131° a second,
+7.9° a minute (ours; the original does the same at 60 frames a second, and 0.076° a second at the 62 of its
+shipped frame-rate smoothing). Whether the engine's own turns should be taken at the game's tick or at a
+reference frame time is open (`crates/asamu-game/tests/turning_rocks.rs` pins the rule and the size).
+
 **Movers** (ours). At load, every actor bound to a Matinee group, every passenger, the actor
 `SetRotationToPlayerRotation` turns, every target of a destroy or change-collision action, and every
 turning actor of the level's own data with everything attached to it (the level's script need not know
 those: AG-ParadiseCave's `InterpActor_51` and its passengers are in no Kismet actor table) becomes a
 mover body (falling rocks excepted: they move through their rock state). A turning actor is taken out of
 the Matinee groups that name it, and the host turns it after the Kismet update and carries its passengers
-by the original's rules (`kismet_host`, "Turning actors", "Attached actors"). Its static collision instances are
+by the original's rules (`kismet_host`, "Turning actors", "Attached actors"). A static mesh actor is taken
+out of a group that has movement tracks and nothing else, for the same reason: it is not in the
+interpolating physics (three in AG-ParadiseCave: `StaticMeshActor_4`, `_173` and `_347`, which ours moved
+by a wiggle, 50 uu and 256 uu until 2026-10-12; the recorded pawn at rest on `_173` was not moved,
+NATIVE_PHYSICS.md 10.5). It keeps its body, which stays at its placement. Its static collision instances are
 removed from the static BVH (`take_actor_statics`) and re-created as dynamic instances placed relative to the
 actor's transform; actors without collision get a body too, so their transform and their passengers' are
 tracked. Move tracks, the engine's turn and attachment set the actor transform, which re-places the

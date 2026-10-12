@@ -1687,6 +1687,44 @@ Matinee group names but that is not in the interpolating physics is not moved by
 rock in the rotating physics that a Matinee group names turned by its rate's truncated steps and not by
 the track.
 
+**Nothing puts such an actor into the interpolating physics when its Matinee starts** (a second,
+independent reading on 2026-10-12, by the call sites instead of the routines; CONFIRMED (native, script
+names, level data)):
+
+- `USeqAct_Interp::Activated @ 0x1008A4DB0` registers each actor of a group with the action (the action's
+  slot +0x338), runs `performPhysics` for it only when its physics is 7 already (the compare at
+  `0x1008A4F92`) and raises the script event `InterpolationStarted`. It stores no physics.
+- In the whole executable the physics byte (Actor+0xC0) is written by `AActor::setPhysics`, by the network
+  receive routines, by `APawn::TickSimulated` and by the path-building scout, and no routine of
+  `USeqAct_Interp`, `UInterpGroupInst` or `UInterpTrackInstMove` calls `setPhysics` (slot +0x420); the AI
+  group's instance does, for pawns (`objdump -d` over the text, filtered for the store and for the slot).
+- The script side: `Actor`'s handler of that event is empty, and `InterpActor`'s calls `ClearTimer` twice and
+  its moving-sound function, nothing else (`asamu-inspect calls Engine.u InterpActor`). The rocks are plain
+  `Engine.InterpActor`s.
+- The levels: no Kismet action of a story level sets an actor's physics (the action classes of the seven
+  maps' graphs). The actors outside the interpolating physics that a Matinee group with a keyed movement
+  track names are six, all in AG-ParadiseCave: the three rocks in the rotating physics, and three
+  `StaticMeshActor`s (`_4`, `_173`, `_347`; static, not movable and in no physics by the class's defaults,
+  no other physics stored), each in a group with a movement track and nothing else. (Two lights of
+  AG-Workshop in such groups have movement tracks without a key; AG-StarHaven's `PHYS_None` rope actors are
+  in groups with a vector-property track only; skeletal actors in physics none are in groups with
+  animation tracks.)
+- Measured for one of the static mesh actors (KM1): the pawn stood at rest on `StaticMeshActor_173` in
+  frames 25,453 to 25,469 and 25,578 to 25,585 (0.21 s and 0.09 s, 1.4 s apart; velocity and acceleration
+  zero), and its location did not change by one step of the float (1/128 uu) in either, where the group's
+  track goes 50 uu down in 5 s and back at once, eased (slower than 0.04 uu/s only within 3 ms of a
+  turn). The same pawn at rest on the turning `InterpActor_16` was carried every frame. So the static mesh
+  actor did not move.
+
+The same reading agrees with the rest of this section: the dispatch table of `performPhysics` (case 5 goes
+straight to the rate's turn, case 0 returns), the truncating conversions of `physicsRotation`, the three
+branches of the attached-actor loop (`0x1008EAA19`: physics 7; `0x1008EAA2D`: the mask of bits 41 and 62;
+`0x1008EA414`: bit 42), and the bit numbers of the four flags (their order among `Actor`'s boolean
+properties). The placed levels store `RelativeLocation` and `RelativeRotation` for attached actors; for the
+80 actors attached to an `InterpActor` in AG-ParadiseCave they are within 1.3 uu and 0.05°
+of what the two actors' placements give, so taking the relative transform from the placements (ours) and
+from the stored values (the original) is the same to that precision.
+
 **Attached actors.** `UWorld::MoveActor @ 0x1008E94A0` ends, on every path that moved or turned the actor,
 with a loop over the actor's attached list (from `0x1008E9E9B`). A move with a zero translation and a new
 rotation runs it; no move flag skips it; an attached entry is skipped only when it is null or attached to
@@ -1806,3 +1844,9 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   `AActor::physicsRotation` and when `AActor::performPhysics` calls it, and that a Matinee's actor moves in
   `AActor::physInterpolating`, which only the interpolating physics reaches); the flags and fields it uses
   added to 7.1.
+- 2026-10-12 (the same, adversarial pass): 10.5 re-read by another route (call sites of `setPhysics`,
+  `performPhysics`, `physInterpolating` and `MoveWithInterpMoveTrack` in the whole text, the stores to the
+  physics byte, `USeqAct_Interp::Activated` and `SetPosition`, the script handlers by name, the levels'
+  action classes and stored properties). No claim changed; added: nothing switches an actor's physics when
+  its Matinee starts, the three static mesh actors a Matinee names without moving them (one measured), and
+  the stored relative transforms of attached actors against their placements.
