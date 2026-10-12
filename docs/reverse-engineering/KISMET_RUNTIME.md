@@ -391,6 +391,29 @@ The host: the blocking volumes in the script's actor table get dynamic collision
 `SeqAct_ChangeCollision`, `SeqAct_Destroy` and the follow-collision actors turn on a mover body, so each
 instance keeps what it blocks (a mesh's triangles the bullet traces, its simple body the pawn).
 
+**Every target of an action (found by the second-wave verification of the game layer).** An action acts on
+every object on its `Target` variable link: `SequenceAction.Targets` is declared `array<Object>`
+[CONFIRMED: class model of the user's `Engine.u`, `asamu-inspect class Engine.u SequenceAction`], and the
+engine fills an array property with one element per linked variable before the action runs (§4,
+CONFIRMED there; not re-read for this). The converted graphs store **no**
+value for `Targets` (an empty array is not serialised): 318 variable links feed it in the shipped graphs,
+65 of them with two or more variables, none with a stored value. The runtime decides "array or single
+object" from the stored value, so without one it took the first linked object only, and every action
+with several targets reached one of them: toggles of blocking volumes (AG-BeautifulCity 2 actions,
+AG-Darkcave 2, AG-IceCave 1, AG-StarHaven 1; 10 of the 22 volumes the scripts toggle were never reached),
+of three dynamic kill zones (AG-IceCave) and of lights, `SeqAct_Destroy` of collectibles and movers,
+`SeqAct_ToggleHidden`, `SeqAct_ChangeCollision` (AG-StarHaven) and `SeqAct_PlaySound`.
+The host now gives the property its declared type when it binds a script (`declare_target_arrays` in
+`crates/asamu-game/src/kismet_host.rs`); the rule belongs in the runtime's own loading (`asamu-kismet`),
+which is an open item below.
+Measured for one case [CONFIRMED]: the cutscene that AG-BeautifulCity's `Trigger_14` starts pulses "Turn
+On" of a toggle with five volumes linked (`_6`, `_0`, `_5`, `_4`, `_1`, in that order) and its end pulses
+"Turn Off". In the recording (PLAY2 segment 4) that cutscene ends at tick 2470 (story mode goes off) and
+the pawn then walks at (9827.79, 788.72, 38198.68) at tick 2597, inside `DynamicBlockingVolume_5`, the
+third linked volume, which starts colliding: the original switched it off. Gated test
+`the_beautiful_city_cutscene_switches_all_its_blocking_volumes` (`crates/asamu-game/tests/parity_converted.rs`);
+without the declaration only `_6` is switched.
+
 **Console commands (PARITY_FINDINGS P6).** After the Kismet update the host hands every console-command
 line to `Game::console_command`, in emission order. Two are run, both stock cheat-manager commands, the
 command word matched without regard to case:
@@ -500,6 +523,13 @@ queued activations per sequence (4,096), pending attractor pads (1,024) and narr
   `changesize 1.4`, need a recording of that level (§8).
 - Console commands are applied after the Kismet update, not at the point of the update where their action
   runs (§8); no shipped graph depends on the difference.
+- `SequenceAction.Targets` gets its array type from the game's host (§8, "Every target of an action"), not
+  from the runtime: a `Runtime` built directly from a converted graph still acts on the first target only,
+  and the crate's own tests write `"Targets": []` into their fixtures, which the converted graphs never
+  contain. The declaration belongs in the graph loading of `asamu-kismet`. Not checked: whether another
+  array property fed by a variable link exists in a class the maps do not use with several variables
+  (in the shipped graphs `Targets` is the only fed property without a stored value besides the
+  single-object `inputActor`).
 
 - Behavioural parity: traces of the original running the same sequences (the order of same-frame events, the
   first frames of a level).
