@@ -85,7 +85,7 @@
 //! |---|---|---|---|---|---|
 //! | `_51` | rotating, yaw −9102, no Matinee | 2,252 | 261,135 | −2.2 to +12.9 | 1,483 short |
 //! | `_25`/`_101` | rotating, roll −4551, in a Matinee group (−359° in 14.4 s) | 1,828 | 105,968 | −3.5 to +0.8 | 611 short (318 short of the track) |
-//! | eight stretches on six wheels | interpolating, rates 4551 to 9102, tracks of one turn | 11,624 | 27,473 to 296,038 | up to 735 ahead | 3 short to 64 ahead of the track's length |
+//! | eight stretches on seven rocks | interpolating, rates 4551 to 9102, tracks of one turn | 11,624 | 27,473 to 296,038 | 37 to 735 ahead | 3 short to 64 ahead of one turn per track length |
 //!
 //! `_51` turned 116 units in 2,249 of its 2,251 single frames. The rocks in
 //! the interpolating physics follow their tracks: each loop of a track that
@@ -550,6 +550,11 @@ fn host_driven(
 /// in a 12.82 ms frame (module docs, "Turning actors").
 #[must_use]
 pub fn rotation_step(rate: [i32; 3], dt: f32) -> [i32; 3] {
+    // No turn in a tick without time (the original's routine returns at
+    // once for a time of 0 or less).
+    if dt.is_nan() || dt <= 0.0 {
+        return [0; 3];
+    }
     rate.map(|r| {
         let step = r as f32 * dt;
         // Truncation; a product that is not a number is no step.
@@ -561,7 +566,7 @@ pub fn rotation_step(rate: [i32; 3], dt: f32) -> [i32; 3] {
 /// a `RotationRate` of which the low 16 bits of a member are not zero
 /// (module docs, "Turning actors").
 fn turns_by_itself(a: &PlacedActor) -> bool {
-    a.physics == PlacedPhysics::Rotating && a.rotation_rate.iter().any(|r| r & 0xFFFF != 0)
+    a.physics == PlacedPhysics::Rotating && a.rotation_rate.iter().any(|r| (r & 0xFFFF) != 0)
 }
 
 /// The actors of `map` the engine turns by itself and everything attached
@@ -1396,10 +1401,7 @@ impl LevelScript {
     /// [`rotation_step`] of its `RotationRate` about its location, and what
     /// is attached to it rides along.
     fn turn_actors(&mut self, game: &mut Game, dt: f32) {
-        for i in 0..self.spinners.len() {
-            let Some(spinner) = self.spinners.get(i).copied() else {
-                break;
-            };
+        for spinner in self.spinners.clone() {
             let Some(body) = self.movers.get(&spinner.actor) else {
                 continue;
             };
@@ -4610,6 +4612,8 @@ mod tests {
         assert_eq!(rotation_step([59, -59, 60], tick), [0, 0, 1]);
         assert_eq!(rotation_step([1, 2, 3], f32::NAN), [0; 3]);
         assert_eq!(rotation_step([1, 2, 3], 0.0), [0; 3]);
+        // No turn back in a tick of negative time.
+        assert_eq!(rotation_step([9102, 0, 0], -tick), [0; 3]);
     }
 
     #[test]

@@ -23,7 +23,10 @@
 //! static-mesh component placed by its `LocalToWorld` (as its triangles, as
 //! the shapes of its simple body, or both: see below), the BSP and the
 //! convex hulls of blocking volumes; the moving actors' collision as dynamic
-//! instances; and the gameplay actors ([`crate::gameplay::SceneActors`]).
+//! instances; the gameplay actors ([`crate::gameplay::SceneActors`]); and
+//! the actors that are attached to another, carry one, or are turned by the
+//! engine itself ([`PlacedActor`]: `Base`, `bHardAttach`, `Physics`,
+//! `RotationRate`), for the game layer that moves them.
 //!
 //! The JSON structures here are our own, independent of `asamu-ue3`; unknown
 //! fields are ignored. Everything read is treated as untrusted: file sizes,

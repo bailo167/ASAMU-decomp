@@ -200,6 +200,7 @@ fn grapple_and_ride(
     let base0 = script.mover_transform(base).expect("the base is a mover");
     let anchor0 = game.player().script.gun.grapple_location.as_dvec3();
     let mut last = (base0, anchor0);
+    let mut furthest = 0.0_f64;
     for tick in 1..=HOLD_TICKS {
         script.tick(game, &fire).expect("the game is playing");
         let gun = game.player().script.gun;
@@ -213,6 +214,7 @@ fn grapple_and_ride(
         // G-AT-8: the anchor is the helper's location, and the helper rides
         // its base rigidly.
         let expected = rigid(anchor0, base0, pose);
+        furthest = furthest.max((anchor - expected).length());
         assert!(
             (anchor - expected).length() <= tolerance,
             "tick {tick}: the anchor is at {anchor}, the rock took its place to {expected} \
@@ -230,6 +232,13 @@ fn grapple_and_ride(
         );
         last = (pose, anchor);
     }
+    // Not asserted beyond the tolerance above: how close ours stays.
+    eprintln!(
+        "actor {target} (base {base}): the anchor went {:.1} uu in {HOLD_TICKS} ticks, at most \
+         {furthest:.4} uu from its base's rigid motion; the pawn ended {:.0} uu from it",
+        (last.1 - anchor0).length(),
+        game.player().script.gun.distance
+    );
     (base0, last.0, anchor0, last.1)
 }
 
