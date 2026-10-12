@@ -1498,8 +1498,97 @@ kinds and both sorts of trace; `bsp_checked_fraction` and `reported_time` are "B
 (`crates/asamu-player/src/ue3_movement.rs`: moves, the floor check, the air-control probe, and through
 them step-up, step-down, slides, landings and flying). The port's former 0.05 uu skin is gone. Open on
 our side: a world that mixes kinds has to return the hit that is first by reported time and the
-shortened fraction after a BSP hit; the test worlds here have one kind each, and the game's world
-reports what its scene query finds first by exact time.
+shortened fraction after a BSP hit; the test worlds here have one kind each. The game's world does both
+(`asamu_game::world::reported_first`): it takes the first contact of all, asks the level's BSP alone when
+that is not BSP, and asks a group of kinds that share one rule (brushes and simple bodies; mesh triangles;
+pawn cylinders) separately, on the shortened trace, only when a contact of that group at the same time
+would be reported before the best so far. On equal reported times BSP is kept, then the contact touched
+first (ours: the original's order among equal times was not read).
+
+### 10.3 Placement: where a spawn or a teleport puts a pawn
+
+Read in the user's macOS executable (2026-10-12; CONFIRMED for the code, constants read from the file's
+bytes; measured on five recorded respawns, below). In our own words.
+
+**Who runs it.** `UWorld::SpawnActor @ 0x1008E5650` (call at 0x1008E5AE6) and `UWorld::FarMoveActor @
+0x1008E90D0` (call at 0x1008E9205; the teleport behind a script's `SetLocation`) both call
+`UWorld::FindSpot @ 0x1008E6570` with the actor's **unscaled** cylinder extent
+(`AActor::GetCylinderExtent`: radius, radius, half height; the player's (21, 21, 44)) when the actor's
+flag word at +0xE8 has bit 0x3C set, or bit 0x3A and the game is not a network client; `SpawnActor` not
+when its "no collision fail" argument is set, `FarMoveActor` not when its "no check" argument is. Bit 0x3D
+of the same word is passed on as the "complex collision" flag. When the search finds no place, the spawn
+or teleport fails and nothing moves.
+
+**"Encroaches"** (`UWorld::EncroachingWorldGeometry @ 0x1008E8D30`): a point check of the box at the
+location (`UWorld::MultiPointCheck`, trace flags 0x22C6, or 0x222C6 with the complex flag) that returns
+anything the test actor is blocked by. The primitives' point-check routines were not read.
+
+**`FindSpot(extent, location)`:**
+
+1. If the box does not encroach at the location: found, location unchanged.
+2. If the extent is zero: not found.
+3. The slice step (below). If it finds a place: found. If it reports that the slice fits but no place was
+   found from it: not found.
+4. Otherwise (the slice does not fit at the location) four slices of **half** the box's X and Y half sizes
+   (vector (0.5, 0.5) at 0x101662F80) and 1 uu half height are tested at the wanted location ± 0.55 half
+   sizes in X and Y (0x10171DA70), X negative first, each with Y negative first, until two fit. Each one
+   that fits moves the location by 1.1 of its offset (0x1016844A8; −1.1 at 0x10171DA74 for the mirrored
+   Y). None: not found. Exactly one: the move is doubled. Then a zero-extent line check (flags 0x2086)
+   from the wanted location to the new one must hit nothing; the box must not encroach there, or the
+   slice step run from there must find a place; and at last the box is traced (flags 0x2086) from there to
+   the point 0.2 of the move beyond the wanted location (0x1016825B8) and, on a hit, stops at the
+   reported hit location. Found.
+
+**The slice step** (`UWorld::CheckSlice @ 0x1008E8A00`):
+
+1. A slice with the box's X and Y half sizes and 1 uu half height (immediate at 0x1008E8A8E) is tested at
+   the location. If it encroaches, the step ends and tells the caller to keep trying.
+2. The slice is traced straight down by 2 × the half height (−2.0 at 0x1016457D0; an extent trace with
+   flags 0x2086, so its hit is reported pulled back, 10.2). With a hit at the reported time `t` the
+   location's height becomes `z − (2t − 1) × half height + 1` (the 1.0 at 0x101633D88; the two branches
+   for `t` above and below 0.5 compute the same value): the box's bottom 2 uu above the slice's bottom at
+   the reported hit. Without a hit the location goes down by one half height.
+3. If the box does not encroach there: found (when `t` was above 0.5, or there was no hit, the box is
+   first traced up by one half height and stops at the reported hit location of what it meets). If it
+   encroaches, the location is pushed sideways by the floor hit's normal's X and Y times the box's X half
+   size and tested once more: found if it fits, else not found.
+
+**What the teleport does besides** (`FarMoveActor`): on success it sets the actor's "just teleported" bit
+(byte +0xF1, 0x10), drops its base (virtual +0x3C0 with a floor normal of (0, 0, 1)) unless the move is
+that of an attached actor, moves the attached actors along, writes the location and updates the touching
+actors. It does not write the physics mode: a pawn keeps the mode it had (all five recorded respawns
+were falling before and after).
+
+**Consequence for a spawn point whose box is `p` uu inside a floor** (the slice at the centre is free):
+the 88 uu slice trace is reported a tenth of its length short, at most 1.0 uu on BSP, brushes and simple
+bodies and 4.0 uu on mesh triangles, so the pawn is put with its bottom **3.0 uu** (or 6.0 uu) above the
+floor, `p + 3.0` above the spawn point, in whatever physics mode it had.
+
+**Measured** (five recorded respawns; all falling, so the first record after the teleport is one frame
+of free fall below the place, `v²/2g` with the recorded `v` and `g` = 1040):
+
+| Record | Checkpoint spawn height | Place (first record + one frame of fall) | Above the spawn point | Rest after the landing | Rest below the place |
+|---|---|---|---|---|---|
+| DC1 997 (AG-ParadiseCave) | 96932.5 | 96932.499 | 0.00 | (floor lower) | |
+| PLAY2 25183 (AG-BeautifulCity) | 37430.484 | 37430.486 | 0.00 | (floor lower) | |
+| DC1 5746 (AG-ParadiseCave) | 110847.625 | 110853.712 | 6.09 | 110853.000 | 0.712 |
+| PLAY2 9084 (AG-BeautifulCity) | 47441.03 | 47449.829 | 8.80 | 47449.105 | 0.724 |
+| PLAY2 20797 (AG-BeautifulCity) | 37217.293 | 37224.900 | 7.61 | 37224.176 | 0.724 |
+
+The three lifted ones come to rest 0.71 to 0.72 uu below where they were put, four frames after the first
+record. That is the rule: from 3.0 uu above a simple-collision floor the fall meets the floor in its fifth
+frame, a move of about 1.3 uu reported a tenth of itself short (4.4), and the landing frame's floor check
+adds 2.15 (3.3): 0.13 + 2.15 = 2.28 uu above the floor, 0.72 below the place. On mesh triangles (6.0 uu)
+the difference would be about 3.4 uu. With the converted levels' simple bodies our placement gives
+110853.72, 47449.832 and 37224.90 for the three places (differences +0.007, +0.003 and −0.002 uu, the
+recording's resolution there being 0.008 and 0.004) and the two free spots unchanged
+(`crates/asamu-game/tests/parity_converted.rs`).
+
+**Ours** (`find_spot` and `check_slice` in `crates/asamu-game/src/converted.rs`): the steps above, with
+the traces answered by the game's world check and their hits pulled back by the one pull-back function.
+Not the original's: "encroaches" is the exact overlap test of the pawn's collision
+(`GameWorld::overlaps_box`), where the original runs its point checks (not read); and ours counts NPC
+pawn cylinders, which the original's flags leave out.
 
 ## 11. Verification log
 
@@ -1575,3 +1664,7 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   cosine of the approach), the Workshop height, five landings and the standing gaps on triangle floors
   recomputed from the raw recordings. Corrected: two of the four low standing gaps are landing rests,
   not candidates for "BSP first".
+- 2026-10-12 (game layer, second wave): section 10.3 (the placement search of spawns and teleports,
+  `UWorld::FindSpot` and `UWorld::CheckSlice`, with what `UWorld::FarMoveActor` does besides; measured on
+  the five recorded respawns), and the last paragraph of 10.2 (how the game's world picks the hit that is
+  reported first).

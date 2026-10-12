@@ -228,13 +228,13 @@ instigator (or the world). No match is an error in the log. CONFIRMED
 | `SeqAct_SetFloat` | `Target` = sum of the "Value" floats | native |
 | `SeqAct_SetObject` | `Value` (or `DefaultValue` when null) goes into every target object variable | native |
 | `SeqAct_SetInt`, `SeqAct_SetString`, `SeqAct_Gate`, `SeqAct_Log`, `SeqCond_CompareObject` | stock semantics; not used by the maps | TENTATIVE |
-| `SeqAct_Toggle` | per input (on / off / toggle): the "Bool" variables, the `bEnabled` of the events on its first event link, and `OnToggle` on target actors (host: triggers and trigger volumes switch collision; others are output events) | native (the actor handler is the stock dispatch; actor reactions TENTATIVE) |
+| `SeqAct_Toggle` | per input (on / off / toggle): the "Bool" variables, the `bEnabled` of the events on its first event link, and `OnToggle` on target actors (host: triggers and trigger volumes switch collision, **blocking volumes switch their collision, §8**; others are output events) | native (the actor handler is the stock dispatch; the volume classes' handler CONFIRMED (src); other actor reactions TENTATIVE) |
 | `SeqAct_ToggleHidden` | a toggle (bools and events as above) plus hide/unhide of target actors | native (class derives from `SeqAct_Toggle`) |
 | `SeqAct_Delay` | starts with `Duration` (from its variable; `DefaultDuration` when unlinked, TENTATIVE). The activation frame does not count down. Start restarts it (`bStartWillRestart`), Stop finishes it silently, and Pause halts it. When the time is up it marks "Finished". | native |
 | `SeqAct_PlaySound` | Play starts the sound (after `ExtraDelay`; at once when `|ExtraDelay|` < 1e-8, the float the decompiled code reads at 0x10163FED4) and marks "Out" at once. It runs for the first wave's duration plus the delay, marks "BeforeEnd" at `BeforeEndTime`, and finishes with "Finished", or "Stopped" after Stop. Emits `PlaySound` / `StopSound`. | native |
 | `SeqAct_CameraFade` | emits the fade, marks "Out", and after `FadeTime` marks "Finished" | native |
 | `SeqAct_MultiLevelStreaming` | loads or unloads the named levels (host), attaches a level's scripts when it becomes visible, then "Finished" | native (ours completes at once) |
-| `SeqAct_ConsoleCommand` | runs only with a player target. `open <map>[?options]` emits a level transition; other commands are emitted as console-command outputs (KISMET.md lists which have handlers) | native dispatch; command effects per KISMET.md |
+| `SeqAct_ConsoleCommand` | runs only with a player target. `open <map>[?options]` emits a level transition; other commands are emitted as console-command outputs (KISMET.md lists which have handlers); the host runs `SetSpeed F` and `ChangeSize F` on the game, §8 | native dispatch; command effects per KISMET.md; the two stock cheat-manager commands CONFIRMED (src) |
 | `SeqAct_Teleport`, `SeqAct_SetVelocity` | player target: teleport to the destination actor (rotation with `bUpdateRotation`); velocity = normalized `VelocityDir` × `VelocityMag` | stock; TENTATIVE details |
 | `SeqAct_Destroy`, `SeqAct_ChangeCollision` | host: the actor's collision is removed / switched (such actors are made dynamic at load) | stock; TENTATIVE (actor removal is not modelled beyond collision) |
 | `SeqAct_PlayCameraAnim` | runs only with an animation and a player target. "Play" (wins over "Stop") plays `CameraAnim` on the player's camera with `Rate`, `IntensityScale`, the blend times, `bLoop` and `bRandomStartTime`; "Stop" stops every instance of that animation with its blend-out. Emitted as an output the game host applies to the camera-animation pool in the same frame (MATINEE.md "Camera animations"). 5 actions in the maps (Darkcave 2, StarHaven 3), all targeting the player and naming a converted animation (gated test `shipped_camera_anim_actions_play_on_the_player`). | native (`USeqAct_PlayCameraAnim::Activated`) |
@@ -374,6 +374,39 @@ and worm control, actor toggled/hidden/destroyed. `LevelScript::tick` returns th
 `SeqAct_ToggleFollowCollision` and `SeqAct_PlayCameraAnim` act on the game inside the same tick
 (`LevelScript::apply_game_outputs`); where every other output goes in the app: `docs/INTEGRATION.md` §4.
 
+**Blocking volumes (PARITY_FINDINGS P5).** A `SeqAct_Toggle` on a blocking volume switches the volume's
+collision: "Turn On" makes the volume collide (if it does not), "Turn Off" stops it (if it does), "Toggle"
+flips it, each keeping the volume's block flag, and the collision component follows the actor's flag
+[CONFIRMED (src): the toggle handler of `Engine.Volume`, which the blocking volumes inherit]. An
+`Engine.DynamicBlockingVolume` starts colliding or not by its `bEnabled` [CONFIRMED (src): its start
+function sets "collides" from `bEnabled` and keeps the stored block flag]. The shipped level scripts
+refer to 24 blocking volumes in five levels (AG-BeautifulCity 7, AG-Darkcave 6, AG-IceCave 3,
+AG-StarHaven 7, TheCore 1), every one a `DynamicBlockingVolume`, every one the target of `SeqAct_Toggle`
+actions and of no other action; 15 start switched off (PARITY_FINDINGS V14). In the recordings the pawn
+flies through `DynamicBlockingVolume_6` of AG-BeautifulCity (off from the start, V13) and, after the
+level script's changes, stands inside `_2` and `_5` (on at the start; 81 recorded positions).
+The host: the blocking volumes in the script's actor table get dynamic collision instances before play
+(`prepare_switchable_volumes`), and `Host::toggle_actor` on one sets the switch of all its instances
+(`Game::set_actor_collision`; `asamu_world::collision::Instance::enabled`). The same switch is what
+`SeqAct_ChangeCollision`, `SeqAct_Destroy` and the follow-collision actors turn on a mover body, so each
+instance keeps what it blocks (a mesh's triangles the bullet traces, its simple body the pawn).
+
+**Console commands (PARITY_FINDINGS P6).** After the Kismet update the host hands every console-command
+line to `Game::console_command`, in emission order. Two are run, both stock cheat-manager commands, the
+command word matched without regard to case:
+
+| Command | Effect | In the maps | Confidence |
+|---|---|---|---|
+| `SetSpeed F` | `GroundSpeed` = the pawn class's default 440 × `F` (ABILITIES.md A-WK-3) | AG-Workshop `setspeed 0.3` (132); AG-Epilogue `SetSpeed 0.15` (66) and `setspeed 0.3` (132) | CONFIRMED (src); measured: `GroundSpeed` 132.0 on 3,001 of 3,001 recorded Workshop frames |
+| `ChangeSize F` | collision cylinder = the class default × `F`, then the pawn is re-placed where it stands by the engine's placement search (ABILITIES.md §14, NATIVE_PHYSICS.md 10.3) | AG-Epilogue `changesize 1.4` (29.4 × 61.6) | CONFIRMED (src, native); not measured (AG-Epilogue is in no recording) |
+
+The lines are applied after the update's host calls, not between them. A story-mode toggle also writes
+`GroundSpeed`; in both maps the last speed command of the level-loaded update comes after the story-mode
+toggle in the graph, so the final value is the same either way. AG-Epilogue's two speed commands hang off
+two different level-loaded events; which the original runs last is not established (the level is in no
+recording): ours runs `SetSpeed 0.15` last, so its pawn walks at 66 uu/s. `LevelScript::console_commands`
+lists what was issued and what was done; every line still reaches the app as an output.
+
 The level script also owns the player camera's animation pool (`LevelScript::camera_anims`): after the game
 tick the frame's gameplay events become the script's `PlayCameraAnim` / `StopCameraAnim` calls and the pool
 advances by the tick (MATINEE.md "Camera animations"). Before the Kismet update the NPC pawns' collision
@@ -462,6 +495,11 @@ Also: re-triggering an activated checkpoint no longer logs a false "checkpoint n
 queued activations per sequence (4,096), pending attractor pads (1,024) and narrator lines (1,024).
 
 ## Open items
+
+- AG-Epilogue: the order of its two speed commands in the original (66 or 132 uu/s), and the effect of
+  `changesize 1.4`, need a recording of that level (§8).
+- Console commands are applied after the Kismet update, not at the point of the update where their action
+  runs (§8); no shipped graph depends on the difference.
 
 - Behavioural parity: traces of the original running the same sequences (the order of same-frame events, the
   first frames of a level).

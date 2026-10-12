@@ -90,7 +90,7 @@ After the tick the app writes `ui::GameTick(report)` (checkpoint snapshot saves,
 | Output | Destination |
 |---|---|
 | `LevelTransition { map, options }` | `ui::OpenMap` → the flow loads the next map with the current snapshot (§7); `ASAMUFrontEndMap` ends the game |
-| `ConsoleCommand` | `ToggleCrosshair [bool]` → crosshair; the rest are logged (KISMET.md: `SetSpeed`/`ChangeSize` UNKNOWN in a shipping build, several have no handler) |
+| `ConsoleCommand` | `ToggleCrosshair [bool]` → crosshair. `SetSpeed F` and `ChangeSize F` are run on the game by the level script itself before the app sees the output (KISMET_RUNTIME.md §8); the app only logs them, with the rest (several have no handler) |
 | `PlaySound { node, cue, targets, volume, pitch, fade_in }` | `AudioCommand::PlaySound` with `node`, at the first target actor's current location (2-D without one) |
 | `StopSound { node, fade_out }` | `AudioCommand::StopSound` of that node's sounds |
 | `NarratorLine { id, cue, volume }` / `NarratorStop` | `AudioCommand::NarratorPlay` / `NarratorStop` (the Kismet runtime runs the narrator queue; subtitles come from the cue's waves) |

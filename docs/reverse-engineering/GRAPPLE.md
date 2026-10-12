@@ -170,6 +170,13 @@ returns, the gun has traced, decided and — on success — switched the pawn to
   and the boost aim use the same conversion.
 - End `E = S + 16384·dir`. One zero-extent trace that reports actors, flag `TRACEFLAG_Bullet`, issued by the
   pawn (weapon trace owner = instigator), so the pawn itself is not hit [STRONG].
+- **What answers the trace** [CONFIRMED (native: the bullet flag is native trace flag 0x20000, which sends
+  a static mesh's check to its triangles; PARITY_FINDINGS V3)]: a static mesh's **triangles**, whatever its
+  simple-collision switches and whether or not it has a simple body. So the grapple attaches to meshes the
+  pawn walks through (the 515 meshes without a body) and to the triangles of a mesh whose pawn collision
+  is a coarser body. The level's BSP is asked first and everything else only up to 5 uu beyond the BSP hit
+  (NATIVE_PHYSICS.md 10.2).
+- **The hit is reported short of the surface** [CONFIRMED (native); measured for triangles]: see G-AT-4.
 - The stock instant-hit routine builds an **ordered impact list**: a first hit that is a non-blocking
   `Trigger`/`TriggerVolume` (or an `InteractiveFoliageActor`) is recorded and the trace continues behind it;
   portals are traced through. **Every impact in the list is evaluated in order** (§5) [CONFIRMED (src)].
@@ -188,7 +195,9 @@ negative when out of range, out of grapples or `NotGrappleAble`; **a hit on a no
 (e.g. BSP) within range leaves it unchanged**. In story mode it is positive within `interactRange` (200 uu,
 from the eye) of an `ASAMUInteractable_Actor` that still accepts interactions. The crosshair never gates the
 real grapple: BSP and non-static-mesh geometry are grappled although the crosshair may say no.
-→ Rust: HUD predicate only.
+The crosshair's trace is a zero-extent bullet trace like the fire trace [CONFIRMED (src): the same flag
+argument], so its hit is reported short of the surface in the same way (G-AT-4).
+→ Rust: HUD predicate only. It still measures to the exact contact: up to 4 uu off at the 5000 uu limit.
 
 ## 5. Acceptance (what is grapple-able)
 
@@ -229,7 +238,28 @@ Gameplay state:
   ends a power-leap or rocket-boost lock early (ABILITIES.md §8).
 - **G-AT-6 Modes**: pawn physics → Flying, controller → `Grappling`, gun "attached" flag set. For a
   release-instant target the one-shot 0.05 s gun timer `ReleaseInstantTimed` is started right after (G-RL-3).
-- **G-AT-4 Anchor point**: `A` = the impact's world hit location.
+- **G-AT-4 Anchor point**: `A` = the impact's world hit location, and that is **not on the surface**: every
+  line check of the original reports its hit moved back along the trace by an amount that depends on the
+  routine that answered and on the trace's length (16 384 uu here), and the hit location is the trace's
+  start plus that reported fraction of the trace (NATIVE_PHYSICS.md 10.2; constants read in the user's
+  executable):
+
+  | What was hit | Anchor before the surface, along the trace | Confidence |
+  |---|---|---|
+  | a static mesh's triangles | the smaller of a tenth of the trace and 4.0 uu: **4.0 uu** | CONFIRMED (native); measured: 3.9967 uu (median 3.9988, 3.892 to 4.088) at 47 recorded airborne anchors, ranges 691 to 4,939 uu (PARITY_FINDINGS V16) |
+  | BSP | a flat **0.5 uu** | CONFIRMED (native); not measured (no recorded anchor on BSP) |
+  | a brush (a volume that blocks the trace) | the smaller of a tenth and 1.0 uu: **1.0 uu** | CONFIRMED (native: one computation for both extents); not measured |
+
+  Everything measured from the anchor follows: the range check (G-AC-5) passes for a surface up to 4 uu
+  beyond `fMaxDistance`, and the pull's distance and the proximity release (G-PH-2, G-RL-2) see the anchor
+  4 uu nearer than the surface. The original's presses whose first measured distance was 197.0 to 199.9 uu
+  released in the press frame (PARITY_FINDINGS P3); with the anchor on the surface they measure 200 to 203
+  and stay attached.
+  → Rust: `grapple_gun::fire_trace` asks `CollisionWorld::trace_line` (a bullet trace: triangles) and
+  places the impact at the reported time (`TraceHit::reported_time` with `TraceExtent::Zero`); the game's
+  world answers as the original's world check does (`asamu_game::world`). Tests:
+  `crates/asamu-game/tests/parity_world_check.rs` (the anchor 4.0 uu before triangles, and a press 202 uu
+  from the surface that releases at once).
 - **G-AT-3 Grapple-able targets**: if the target implements `ASAMUGrappleAbleInterface` or carries tag
   `grappleInteractable`, its `Grappled` handler runs (crystals, falling rocks react, §12).
 - **G-AT-7 Anchor mode (decided last)**: the anchor follows the target **iff it is an `InterpActor`** (helper
@@ -665,3 +695,7 @@ bytecode literal search and native re-reads, as in §0. Outcome per item:
 - 2026-10-10 (first recordings, docs/PARITY_FINDINGS.md P7): G-TG-1: the aim direction is the engine's
   table-based `vector(rotation)` (angles floored to 4 rotator units), read natively and measured on 52
   recorded anchors.
+- 2026-10-12 (game layer, second wave; docs/PARITY_FINDINGS.md P1, P3): G-TG-1: what answers the fire trace
+  (a mesh's triangles, always); G-AT-4: the anchor is the reported hit, 4.0 uu before mesh triangles (0.5
+  before BSP, 1.0 before a brush), with what follows for the range check and the proximity release; G-TG-2:
+  the crosshair's trace is a bullet trace too.
