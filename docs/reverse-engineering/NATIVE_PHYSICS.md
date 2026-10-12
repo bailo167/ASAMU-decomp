@@ -1625,7 +1625,9 @@ reads 0.400 s when the second tick starts:
   extrapolated back by its velocity over 1040 uu/s², begins at game time 0.4001, 0.4000 and 0.4000 s, at
   the height of the `PlayerStart` (to 0.015, 0.004 and 0.0005 uu).
 
-The pawn exists and is possessed before that tick (the player is restarted at login). It is walking and
+The pawn exists and is possessed before that tick: the stock game info restarts the player in its
+post-login unless the game has a delayed start, and ASAMU's game info (a `FrameworkGame`) has none
+(CONFIRMED (src)). It is walking and
 has no base (ABILITIES.md A-CP-5), so the 0.4 s tick is one walking step without a move, which is the
 floor check of 3.3 and nothing else: a floor in reach takes the pawn to its standing height, and with no
 floor in reach the pawn is set falling without having moved and without time carried over (3.1 and 1.4:
