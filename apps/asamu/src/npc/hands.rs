@@ -42,6 +42,20 @@
 //! counts of the level script's toggle actions (see [`toggle_actions`] for
 //! the one case that cannot be told apart).
 //!
+//! Before the simulation has run its first tick nothing is known yet: the
+//! level script's start (the Workshop's switch to story mode) is applied in
+//! that tick. A level waiting for the click that starts it (`--level`), and
+//! the frame or two between a load and the first tick, therefore show no
+//! hand either (ours: the original has no such waiting state).
+//!
+//! The gun also marks its mesh as seen by its owner only, every time it
+//! shows or hides the hand (CONFIRMED (src)). In the stock engine such a mesh
+//! is drawn only in a view whose view actor is that owner (STRONG: the
+//! engine's rule for the flag, not observed in this game), so the hand is not
+//! drawn while a Matinee director cut or a camera-target action has the view
+//! on another actor ([`own_view`]): AG-ParadiseCave's opening flight, where
+//! the level script has the hand raised from the first frame.
+//!
 //! PLACEHOLDER (presentation): a lowered hand is not drawn at all, where the
 //! original blends to the `HandsDown` pose over 0.3 s (or at once); and
 //! during the suit-on one-shot the hand is drawn with its ordinary animation
@@ -50,7 +64,7 @@
 //! state yet.
 
 use asamu_core::coords::ue_dir_to_bevy;
-use asamu_game::asamu_kismet::{Graph, OpClass, Output};
+use asamu_game::asamu_kismet::{Graph, OpClass, Output, Runtime};
 use asamu_game::npc::{HAND_MESH, HAND_MESH_FOV, HandAnim, hand_bob_offset};
 use bevy::camera::ClearColorConfig;
 use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
@@ -150,6 +164,10 @@ pub(super) fn toggle_actions(graph: &Graph) -> Vec<(usize, ToggleWiring)> {
 /// What one frame sees of the simulation, for [`HandPose`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct HandObservation {
+    /// The simulation has run at least one tick, so the level script's start
+    /// has been applied (story mode in the Workshop). Until then the other
+    /// fields say nothing about the hand.
+    pub ran: bool,
     /// The pawn is in story mode (`StoryState` or `Zooming`).
     pub story: bool,
     /// The gun's "hand hidden" flag (G-AC-3): the mesh itself is off.
@@ -167,6 +185,8 @@ pub(super) struct HandObservation {
 /// Whether the first-person hand is on screen (see the module docs).
 #[derive(Resource, Debug, Default)]
 pub(crate) struct HandPose {
+    /// The simulation has run its first tick (see [`HandObservation::ran`]).
+    ran: bool,
     /// The tree's `bHidden` list is on its lowered branch.
     lowered: bool,
     /// Story mode at the last observation (`None`: nothing observed yet).
@@ -186,6 +206,7 @@ impl HandPose {
     /// flag's edges, then Kismet's toggles: a toggle is the most direct
     /// order to the hand, so it wins a frame in which several happen.
     pub(super) fn observe(&mut self, o: HandObservation) {
+        self.ran = o.ran;
         if self.story != Some(o.story) {
             // Entering story mode lowers the hand, leaving it raises it; a
             // game first seen outside story mode starts raised.
@@ -218,12 +239,70 @@ impl HandPose {
         self.suit_on_until.is_some_and(|until| self.tick < until)
     }
 
-    /// The hand is drawn: the mesh is not switched off, and the hand is
-    /// either raised or showing the suit-on one-shot of the lowered branch.
+    /// The hand is drawn: the simulation has run (the level's start is
+    /// known), the mesh is not switched off, and the hand is either raised or
+    /// showing the suit-on one-shot of the lowered branch.
     #[must_use]
     pub(crate) fn shown(&self) -> bool {
-        !self.hard_hidden && (!self.lowered || self.suit_on())
+        self.ran && !self.hard_hidden && (!self.lowered || self.suit_on())
     }
+
+    /// The pose of a new game: nothing observed yet, and the level script's
+    /// toggle actions with the activation counts they have now.
+    pub(super) fn for_script(runtime: Option<&Runtime>) -> Self {
+        Self {
+            toggles: runtime.map_or_else(Vec::new, |rt| {
+                toggle_actions(rt.graph())
+                    .into_iter()
+                    .map(|(op, wiring)| (op, wiring, rt.activate_count(op)))
+                    .collect()
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Applies one frame of `game` and its level script: story mode, the
+    /// gun's flag, the new activations of the script's toggle actions, and
+    /// `suit_on` (the length in ticks of the suit-on one-shot when Kismet
+    /// started it this frame).
+    pub(super) fn follow(
+        &mut self,
+        game: &asamu_game::Game,
+        runtime: Option<&Runtime>,
+        suit_on: Option<u64>,
+    ) {
+        let (mut hides, mut shows) = (0u32, 0u32);
+        if let Some(rt) = runtime {
+            for (op, wiring, seen) in &mut self.toggles {
+                let count = rt.activate_count(*op);
+                let new = count.saturating_sub(*seen);
+                *seen = count;
+                match wiring {
+                    ToggleWiring::Hide => hides = hides.saturating_add(new),
+                    ToggleWiring::Show => shows = shows.saturating_add(new),
+                    ToggleWiring::Both => {}
+                }
+            }
+        }
+        let tick = game.clock().tick();
+        self.observe(HandObservation {
+            ran: tick > 0,
+            story: game.in_story_mode(),
+            hard_hidden: game.player().script.gun.hand_hidden,
+            hides,
+            shows,
+            suit_on,
+            tick,
+        });
+    }
+}
+
+/// Whether the view is the pawn's own, so that a mesh only its owner sees is
+/// drawn: no Matinee director cut (`director_cut`) and no other view target
+/// (`other_target`, `SeqAct_SetCameraTarget`). See the module docs (STRONG).
+#[must_use]
+pub(super) fn own_view(director_cut: bool, other_target: bool) -> bool {
+    !director_cut && !other_target
 }
 
 /// Length of the suit-on one-shot in simulation ticks (at least one), from
@@ -359,26 +438,7 @@ pub(super) fn observe_hand(
     let runtime = sim.script.as_ref().map(asamu_game::LevelScript::runtime);
     if sim.is_added() {
         // A new game (level start, level change): nothing carries over.
-        *pose = HandPose::default();
-        if let Some(rt) = runtime {
-            pose.toggles = toggle_actions(rt.graph())
-                .into_iter()
-                .map(|(op, wiring)| (op, wiring, rt.activate_count(op)))
-                .collect();
-        }
-    }
-    let (mut hides, mut shows) = (0u32, 0u32);
-    if let Some(rt) = runtime {
-        for (op, wiring, seen) in &mut pose.toggles {
-            let count = rt.activate_count(*op);
-            let new = count.saturating_sub(*seen);
-            *seen = count;
-            match wiring {
-                ToggleWiring::Hide => hides = hides.saturating_add(new),
-                ToggleWiring::Show => shows = shows.saturating_add(new),
-                ToggleWiring::Both => {}
-            }
-        }
+        *pose = HandPose::for_script(runtime);
     }
     let started = frames
         .read()
@@ -392,23 +452,17 @@ pub(super) fn observe_hand(
             suit_on_ticks(anim.length, anim.rate_scale, game.clock().tick_rate_hz())
         })
         .flatten();
-    let gun = &game.player().script.gun;
-    pose.observe(HandObservation {
-        story: game.in_story_mode(),
-        hard_hidden: gun.hand_hidden,
-        hides,
-        shows,
-        suit_on,
-        tick: game.clock().tick(),
-    });
+    pose.follow(game, runtime, suit_on);
 }
 
 /// Overlay FOV (70° horizontal for the window's aspect), hand bob, and
-/// visibility: only while the simulation drives the camera, and only while
-/// [`HandPose`] says the hand is on screen.
+/// visibility: only while the simulation drives the camera, only while
+/// [`HandPose`] says the hand is on screen, and only in the pawn's own view
+/// ([`own_view`]).
 pub(super) fn update_hands(
     sim: Option<Res<Sim>>,
     pose: Option<Res<HandPose>>,
+    presentation: Option<Res<crate::kismet::Presentation>>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut cams: Query<&mut Projection, With<HandCamera>>,
     mut hands: Query<(&HandRoot, &mut Transform, &mut Visibility)>,
@@ -421,7 +475,10 @@ pub(super) fn update_hands(
             }
         }
     }
-    let shown = pose.as_ref().is_none_or(|p| p.shown());
+    let shown = pose.as_ref().is_none_or(|p| p.shown())
+        && presentation
+            .as_ref()
+            .is_none_or(|p| own_view(p.cut.is_some(), p.view_target.is_some()));
     for (root, mut transform, mut visibility) in &mut hands {
         let Some(sim) = &sim else {
             *visibility = Visibility::Hidden;
@@ -452,6 +509,7 @@ mod tests {
 
     fn seen(story: bool, hard_hidden: bool, tick: u64) -> HandObservation {
         HandObservation {
+            ran: true,
             story,
             hard_hidden,
             tick,
@@ -635,5 +693,284 @@ mod tests {
         let json = graph_json(&[(gate, &[(0, 0)], false)]);
         let graph = Graph::from_json_slice(json.as_bytes()).unwrap();
         assert!(toggle_actions(&graph).is_empty());
+    }
+    /// A level waiting for the click that starts it (`--level`), and the
+    /// frames between a load and the first tick: the level script has not
+    /// run, so the Workshop still looks like a gameplay level there.
+    #[test]
+    fn the_hand_waits_for_the_first_tick() {
+        let waiting = HandObservation {
+            ran: false,
+            ..seen(false, false, 0)
+        };
+        assert!(!HandPose::default().shown(), "nothing observed yet");
+        // The Workshop: no hand while waiting, none after the first tick
+        // switched story mode on.
+        let mut pose = HandPose::default();
+        pose.observe(waiting);
+        assert!(!pose.shown());
+        pose.observe(waiting);
+        assert!(!pose.shown());
+        pose.observe(seen(true, false, 1));
+        assert!(!pose.shown());
+        // A gameplay level: no hand while waiting, the hand from the first
+        // tick on.
+        let mut pose = HandPose::default();
+        pose.observe(waiting);
+        assert!(!pose.shown());
+        pose.observe(seen(false, false, 1));
+        assert!(pose.shown());
+        // The suit-on one-shot does not show a hand before the first tick
+        // either.
+        let mut pose = HandPose::default();
+        pose.observe(HandObservation {
+            suit_on: Some(100),
+            ..waiting
+        });
+        assert!(!pose.shown());
+    }
+
+    /// `follow` reads a real game: the graybox game (never in story mode, no
+    /// level script) shows the hand from its first tick, hides it in story
+    /// mode and shows it again afterwards.
+    #[test]
+    fn follow_reads_the_game() {
+        let mut game = asamu_game::Game::graybox().unwrap();
+        let mut pose = HandPose::for_script(None);
+        pose.follow(&game, None, None);
+        assert!(!pose.shown(), "not started: nothing has run");
+        game.start();
+        pose.follow(&game, None, None);
+        assert!(!pose.shown(), "started, no tick yet");
+        game.tick(&asamu_player::InputFrame::default()).unwrap();
+        pose.follow(&game, None, None);
+        assert!(pose.shown());
+        assert!(game.toggle_story_mode());
+        pose.follow(&game, None, None);
+        assert!(!pose.shown());
+        assert!(!game.toggle_story_mode());
+        pose.follow(&game, None, None);
+        assert!(pose.shown());
+    }
+
+    /// The system that draws the hand: hidden while the game waits for its
+    /// start, drawn once it runs, hidden under a Matinee director cut and
+    /// under another view target, hidden in story mode, hidden without a
+    /// game.
+    #[test]
+    fn the_hand_is_drawn_in_the_pawns_own_view_of_a_running_game() {
+        use crate::kismet::Presentation;
+        assert!(own_view(false, false));
+        assert!(!own_view(true, false) && !own_view(false, true) && !own_view(true, true));
+        let mut app = App::new();
+        app.init_resource::<HandPose>()
+            .init_resource::<Presentation>()
+            .add_message::<crate::kismet::KismetFrame>()
+            .add_systems(Update, (observe_hand, update_hands).chain());
+        let hand = app
+            .world_mut()
+            .spawn((
+                HandRoot { scale: 1.0 },
+                Transform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let shown = |app: &mut App| {
+            app.update();
+            *app.world().get::<Visibility>(hand).unwrap() == Visibility::Inherited
+        };
+        assert!(!shown(&mut app), "no game");
+        // `--level` before the click that starts the game.
+        app.insert_resource(Sim::new(
+            asamu_game::Game::graybox().unwrap(),
+            String::new(),
+        ));
+        assert!(!shown(&mut app), "the game waits for its start");
+        let tick = |app: &mut App| {
+            let mut sim = app.world_mut().resource_mut::<Sim>();
+            sim.game
+                .tick(&asamu_player::InputFrame::default())
+                .expect("the game runs");
+        };
+        app.world_mut().resource_mut::<Sim>().game.start();
+        assert!(!shown(&mut app), "started, no tick yet");
+        tick(&mut app);
+        assert!(shown(&mut app), "gameplay");
+        // A Matinee director cut, then the view back on the pawn.
+        app.world_mut().resource_mut::<Presentation>().cut = Some((7, "Map.Camera".to_owned()));
+        assert!(!shown(&mut app), "director cut");
+        app.world_mut().resource_mut::<Presentation>().cut = None;
+        assert!(shown(&mut app));
+        // A camera-target action on another actor.
+        app.world_mut().resource_mut::<Presentation>().view_target = Some("Map.Pad".to_owned());
+        assert!(!shown(&mut app), "another view target");
+        app.world_mut().resource_mut::<Presentation>().view_target = None;
+        assert!(shown(&mut app));
+        // Story mode lowers it; a new game starts from nothing again.
+        app.world_mut()
+            .resource_mut::<Sim>()
+            .game
+            .toggle_story_mode();
+        assert!(!shown(&mut app), "story mode");
+        app.world_mut().remove_resource::<Sim>();
+        assert!(!shown(&mut app), "no game");
+        let mut next = asamu_game::Game::graybox().unwrap();
+        next.start();
+        app.insert_resource(Sim::new(next, String::new()));
+        assert!(!shown(&mut app), "the next level before its first tick");
+        tick(&mut app);
+        assert!(shown(&mut app), "the next level");
+    }
+
+    /// Nodes of `graph` from which an enabled link chain reaches `target`.
+    fn upstream(graph: &Graph, target: usize) -> Vec<usize> {
+        let mut found = vec![target];
+        let mut next = 0;
+        while let Some(&at) = found.get(next) {
+            next += 1;
+            for node in &graph.nodes {
+                let feeds = node
+                    .outputs
+                    .iter()
+                    .filter(|o| !o.disabled)
+                    .any(|o| o.links.iter().any(|&(op, _)| op == at));
+                if feeds && !found.contains(&node.id) {
+                    found.push(node.id);
+                }
+            }
+        }
+        found
+    }
+
+    /// Real-data check (skipped unless `ASAMU_CONVERTED_DIR` names a
+    /// conversion with AG-Workshop's level, Kismet, Matinee and skeletal
+    /// data): the Workshop's own level script, tick by tick. No hand from the
+    /// first tick to the suit; the hand for the suit-on one-shot, which the
+    /// script starts when the suit's Matinee completes; no hand afterwards,
+    /// through the hide the script has wired 15 s after the fade-in; and none
+    /// once the launch switches the mesh off. The interactions are sent to
+    /// Kismet directly (no player is steered here).
+    #[test]
+    fn the_converted_workshop_keeps_the_hand_down_except_for_the_suit_on() {
+        let Some(root) = std::env::var_os("ASAMU_CONVERTED_DIR").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: ASAMU_CONVERTED_DIR is not set");
+            return;
+        };
+        let Ok((mut game, Some(mut script))) =
+            asamu_game::load_level_with_kismet(&root, "AG-Workshop")
+        else {
+            eprintln!("skipped: AG-Workshop (levels, kismet, matinee) is not converted");
+            return;
+        };
+        let Some(length) = asamu_game::npc::load_skeletal_index(&root)
+            .ok()
+            .and_then(|index| {
+                let anim = index.get(HAND_MESH)?.animation(SUIT_ON_SEQUENCE)?;
+                suit_on_ticks(anim.length, anim.rate_scale, game.clock().tick_rate_hz())
+            })
+        else {
+            eprintln!("skipped: the hand's SuitOn sequence is not converted");
+            return;
+        };
+        let hz = game.clock().tick_rate_hz();
+        let idle = asamu_player::InputFrame::default();
+        let mut pose = HandPose::for_script(Some(script.runtime()));
+        let wirings: Vec<ToggleWiring> = pose.toggles.iter().map(|t| t.1).collect();
+        assert_eq!(wirings, [ToggleWiring::Hide, ToggleWiring::Hide]);
+        pose.follow(&game, Some(script.runtime()), None);
+        assert!(!pose.shown(), "before the first tick");
+        game.start();
+        // One frame as `observe_hand` sees it; `true` when Kismet started
+        // the suit-on one-shot in it.
+        let frame = |game: &mut asamu_game::Game,
+                     script: &mut asamu_game::LevelScript,
+                     pose: &mut HandPose| {
+            let tick = script.tick(game, &idle).expect("the game runs");
+            let started = tick
+                .outputs
+                .iter()
+                .any(|o| matches!(o, Output::SuitOnAnimation));
+            pose.follow(game, Some(script.runtime()), started.then_some(length));
+            started
+        };
+        // Level start: story mode from the first tick, and a minute of the
+        // level (its opening included) without a hand.
+        assert!(!frame(&mut game, &mut script, &mut pose));
+        assert!(game.in_story_mode(), "story mode from the first tick");
+        for _ in 0..(60.0 * hz) as u32 {
+            assert!(!frame(&mut game, &mut script, &mut pose));
+            assert!(!pose.shown(), "tick {}", game.clock().tick());
+        }
+        // The suit: the interaction whose links lead to the suit-on action.
+        let graph = script.runtime().graph().clone();
+        let suit_on_action = graph
+            .nodes
+            .iter()
+            .find(|n| n.class == OpClass::PlaySuitOnAnimation)
+            .expect("the Workshop plays the suit-on animation")
+            .id;
+        let suit = upstream(&graph, suit_on_action)
+            .into_iter()
+            .filter_map(|id| graph.nodes.get(id))
+            .filter(|n| n.class == OpClass::ActorInteractedWith)
+            .find_map(|n| graph.actor_by_path(n.event.as_ref()?.originator.as_deref()?))
+            .expect("an interaction leads to the suit-on action");
+        script.runtime_mut().actor_interacted_with(suit);
+        let taken = game.clock().tick();
+        let mut started_at = None;
+        for _ in 0..(20.0 * hz) as u32 {
+            if frame(&mut game, &mut script, &mut pose) {
+                started_at = Some(game.clock().tick());
+                break;
+            }
+            assert!(!pose.shown(), "no hand during the suit's Matinee");
+        }
+        let started_at = started_at.expect("the suit-on animation starts");
+        let wait = (started_at - taken) as f64 / hz;
+        eprintln!(
+            "suit taken at tick {taken}; suit-on from tick {started_at} ({wait:.2} s later) \
+             for {length} ticks ({:.2} s)",
+            length as f64 / hz
+        );
+        // The suit's Matinee is 7.51 s long (NPCS.md §11).
+        assert!((7.3..7.8).contains(&wait), "{wait}");
+        assert_eq!(game.player().script.gun.max_grapples, 0);
+        assert!(pose.shown() && pose.suit_on());
+        while game.clock().tick() + 1 < started_at + length {
+            frame(&mut game, &mut script, &mut pose);
+            assert!(pose.shown(), "tick {}", game.clock().tick());
+        }
+        // Lowered again when the one-shot ends, and through the 15 s hide.
+        let hides = |script: &asamu_game::LevelScript, pose: &HandPose| -> u32 {
+            pose.toggles
+                .iter()
+                .map(|t| script.runtime().activate_count(t.0))
+                .sum()
+        };
+        assert_eq!(hides(&script, &pose), 0);
+        for _ in 0..(30.0 * hz) as u32 {
+            frame(&mut game, &mut script, &mut pose);
+            assert!(!pose.shown(), "tick {}", game.clock().tick());
+        }
+        assert_eq!(hides(&script, &pose), 1, "the hide that keeps the mesh ran");
+        assert!(!game.player().script.gun.hand_hidden);
+        assert!(game.in_story_mode());
+        // The launch: its hide switches the mesh off (sent to the action's
+        // "Hide" input directly).
+        let launch_hide = graph
+            .nodes
+            .iter()
+            .filter(|n| n.class == OpClass::ToggleVisibleGrapple)
+            .map(|n| n.id)
+            .find(|&id| script.runtime().activate_count(id) == 0)
+            .expect("the launch's toggle action has not run yet");
+        script.runtime_mut().force_input(launch_hide, 0);
+        for _ in 0..(2.0 * hz) as u32 {
+            frame(&mut game, &mut script, &mut pose);
+            assert!(!pose.shown());
+        }
+        assert_eq!(hides(&script, &pose), 2);
+        assert!(game.player().script.gun.hand_hidden, "the mesh is off");
     }
 }
