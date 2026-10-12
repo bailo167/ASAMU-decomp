@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use asamu_game::save::Snapshot;
 use asamu_game::{ConsoleCommand, Game, load_level_with_kismet};
 use asamu_player::ue3_movement::PawnPhysicsState;
 use asamu_player::world::{PrimitiveKind, TraceExtent};
@@ -187,6 +188,21 @@ fn the_workshop_with_its_kismet_walks_at_132() {
     }
     assert!((top - 132.0).abs() < 0.01, "top speed {top}");
     assert_eq!(g.player().script.ground_speed, 132.0);
+    // The sprint key does not overwrite it: the level is in story mode,
+    // which ignores sprint presses (A-ST-1). Recorded (KM1, 2026-10-12): on
+    // 1,950 Workshop frames with the sprint key and forward held,
+    // `GroundSpeed` is 132.0 and the pawn's sprint flag clear on every one
+    // (132.0 on all 14,017 Workshop records). This was P6's open point.
+    let sprint = InputFrame {
+        sprint_held: true,
+        ..forward()
+    };
+    for _ in 0..60 {
+        script.tick(&mut g, &sprint).unwrap();
+        assert_eq!(g.player().script.ground_speed, 132.0);
+        assert!(!g.player().script.sprint.active);
+        assert!(g.player().horizontal_speed() < 132.01);
+    }
     assert!(
         script.runtime().errors().is_empty() && script.host_errors().is_empty(),
         "{:?} {:?}",
@@ -578,8 +594,12 @@ fn a_respawn_finds_a_place_at_every_checkpoint() {
             let respawns = g.respawn_count();
             g.respawn();
             let placed = g.player().position;
-            assert_ne!(
-                placed, before,
+            // A teleport that finds no place leaves the pawn where it was.
+            // (The first checkpoint of AG-BeautifulCity and of AG-Darkcave
+            // is the `PlayerStart`, where the pawn still is after its first
+            // tick: in place, at the free spawn point.)
+            assert!(
+                placed != before || placed == *spawn,
                 "{map} {name} (index {index}): no place at {spawn}"
             );
             assert!(
@@ -619,6 +639,118 @@ fn a_respawn_finds_a_place_at_every_checkpoint() {
 }
 
 #[test]
+fn a_new_game_stands_in_the_workshop_where_the_recorded_pawn_stands() {
+    let dir = converted_dir_or_skip!();
+    let (mut g, script) = load_level_with_kismet(&dir, "AG-Workshop").expect("loads");
+    let mut script = script.expect("AG-Workshop has Kismet");
+    // A new game writes a save with an empty checkpoint table and opens
+    // AG-Workshop; at the pawn's spawn that save loads and the player is
+    // reset to the level's latest checkpoint, the first one when the table
+    // names none (A-CP-5, A-CP-4). AG-Workshop's only checkpoint has no
+    // spawn point actor: the spawn point is its own location, (409.6443,
+    // −347.4434, 73.32102), 68 uu from the `PlayerStart`.
+    let applied = g.apply_snapshot(&Snapshot::fresh());
+    assert!(applied.reset_to_checkpoint);
+    // The box does not fit there (the BSP floor is at z = 72), so the
+    // placement search runs (NATIVE_PHYSICS.md 10.3): the 1 uu slice at the
+    // point has its bottom 0.321 uu above the floor; its 88 uu trace down
+    // reports that hit 1.0 uu short, so at time 0; the centre goes to
+    // 73.32102 − (2 × 0 − 1) × 44 + 1 = 118.32102.
+    let placed = g.player().position;
+    assert!(
+        (placed - Vec3::new(409.6443, -347.4434, 118.321_02)).length() < 1e-3,
+        "{placed}"
+    );
+    // The pawn is walking and has no base (a teleport drops it).
+    assert!(g.player().grounded && !g.player().pawn.based);
+    g.start();
+    // First tick: the walking floor check reports the floor at 2.321 − 1.0 =
+    // 1.321 uu and sets the reported distance to 2.15: the centre at 72 + 44
+    // + 2.15 + 1.0 = 119.15, with no landing. The level-loaded script sets
+    // the speed (P6).
+    //
+    // Recorded (KM1, a new game from the menu, record 1179, the first one
+    // of the level at world time 0.41343 s, two ticks after the load): the
+    // pawn walks at (409.6443, −347.4434, 119.15) with zero velocity, based
+    // on the world, `GroundSpeed` 132, `AirControl` 0.30. A pawn that had
+    // been falling from the placement would still be in the air then (2.3
+    // uu take 0.067 s) and would come to rest lower. WS1's first record
+    // (6869) is at the same place.
+    let r = script.tick(&mut g, &idle()).unwrap();
+    assert!(r.report.events.landing.is_none());
+    let p = g.player().position;
+    assert!(
+        (p - Vec3::new(409.6443, -347.4434, 119.15)).length() < 1e-4,
+        "{p}"
+    );
+    assert!(g.player().grounded && g.player().pawn.based);
+    assert_eq!(g.player().velocity, Vec3::ZERO);
+    assert_eq!(g.player().script.ground_speed, 132.0);
+    assert!((g.player().script.air_control - 0.30).abs() < 1e-6);
+    // It stays there (records 1179 to 1204 are all at that place).
+    for _ in 0..60 {
+        script.tick(&mut g, &idle()).unwrap();
+    }
+    assert_eq!(g.player().position, p);
+}
+
+#[test]
+fn the_paradise_cave_start_stands_on_its_floor_without_a_landing() {
+    let dir = converted_dir_or_skip!();
+    let mut g = Game::load_level(&dir, "AG-ParadiseCave").expect("AG-ParadiseCave loads");
+    // The level's first checkpoint has its own spawn point, 40 uu from the
+    // `PlayerStart`; a save without an entry for the level resets the player
+    // to it (A-CP-5). The box is free there: the pawn is put exactly at it.
+    let applied = g.apply_snapshot(&Snapshot::fresh());
+    assert!(applied.reset_to_checkpoint);
+    let spawn = g.scene_respawn_point().expect("a checkpoint").0;
+    assert_eq!(g.player().position, spawn);
+    assert!(g.player().grounded && !g.player().pawn.based);
+    g.start();
+    // Recorded (KM1 record 15199, the first one of the level, at world time
+    // 0.535 s): the pawn walks, with zero velocity, at (210583.4375,
+    // −97921.1562, 110826.6328) on a floor whose normal is (−0.04453021,
+    // −0.09869812, 0.99412054), with `AirControl` 0.30. That is 19.7 uu
+    // below the spawn point (110846.35) only 0.135 s after the original's
+    // first tick ended: a fall of 19.7 uu takes 0.195 s, and its landing
+    // would have switched `AirControl` to 0.35 (the level does not start in
+    // story mode). The pawn did not fall: its first walking floor check (a
+    // 28 uu trace) found the floor and put the pawn at the reported distance
+    // 2.15 above it (NATIVE_PHYSICS.md 3.3).
+    let r = g.tick(&idle()).unwrap();
+    assert!(r.events.landing.is_none());
+    assert!(g.player().grounded && g.player().pawn.based);
+    assert_eq!(g.player().velocity, Vec3::ZERO);
+    assert!((g.player().script.air_control - 0.30).abs() < 1e-6);
+    let p = g.player().position;
+    let recorded = [210_583.437_5_f64, -97_921.156_2, 110_826.632_8];
+    eprintln!(
+        "AG-ParadiseCave start: spawn point {spawn}, after the first tick [{:.4}, {:.4}, {:.4}] \
+         (recorded {recorded:?}), floor {}",
+        p.x,
+        p.y,
+        p.z,
+        g.player().pawn.floor
+    );
+    // Positions there are 1/64 uu apart in x and y and 1/128 uu in z; the
+    // recorded y is printed to four places. Two steps of each.
+    assert!((f64::from(p.x) - recorded[0]).abs() <= 1.0 / 32.0, "{p}");
+    assert!((f64::from(p.y) - recorded[1]).abs() <= 1.0 / 32.0, "{p}");
+    assert!((f64::from(p.z) - recorded[2]).abs() <= 1.0 / 64.0, "{p}");
+    let floor = g.player().pawn.floor;
+    assert!(
+        (floor - Vec3::new(-0.044_530_21, -0.098_698_12, 0.994_120_54)).length() < 1e-6,
+        "{floor}"
+    );
+    // It stays there while it stands (records 15199 to 15224 are all at
+    // that height).
+    for _ in 0..60 {
+        g.tick(&idle()).unwrap();
+    }
+    assert_eq!(g.player().position, p);
+}
+
+#[test]
 fn the_darkcave_start_falls_from_the_player_start_and_lands() {
     let dir = converted_dir_or_skip!();
     let mut g = Game::load_level(&dir, "AG-Darkcave").expect("AG-Darkcave loads");
@@ -628,11 +760,33 @@ fn the_darkcave_start_falls_from_the_player_start_and_lands() {
     // fall extrapolated back gives 4518.584), the pawn lands on mesh
     // triangles (`darkcavepart1`, box switch off) and that landing switches
     // `AirControl` from 0.30 to 0.35 (A-AC-2).
+    //
+    // The pawn starts walking, without a base (A-CP-5). The level's first
+    // checkpoint has the `PlayerStart` as its spawn point, so the reset of
+    // the save's load leaves it there.
     let start = g.player().position;
     assert!((start.z - 4518.5845).abs() < 1e-3, "{start}");
-    assert!(!g.player().grounded);
+    assert!(g.player().grounded && !g.player().pawn.based);
     assert_eq!(g.player().velocity, Vec3::ZERO);
     assert!((g.player().script.air_control - 0.30).abs() < 1e-6);
+    g.apply_snapshot(&Snapshot::fresh());
+    assert_eq!(
+        g.player().position,
+        start,
+        "the first checkpoint is the start"
+    );
+    assert!(g.player().grounded && !g.player().pawn.based);
+    // The first tick's floor check finds no floor within its 28 uu (the
+    // floor is 39 uu below the box): the pawn starts to fall where it is,
+    // with zero velocity. Recorded: record 25512 is at world time 0.45063 s
+    // with vz −52.623, that is 52.623/1040 = 0.0506 s of free fall, so the
+    // fall began at 0.4000 s, when the original's first tick (a long frame,
+    // clamped to 0.4 s) ended; the two recorded AG-BeautifulCity starts
+    // give 0.4001 and 0.4000 s.
+    let r = g.tick(&idle()).unwrap();
+    assert!(!g.player().grounded && r.events.landing.is_none());
+    assert_eq!(g.player().position, start);
+    assert_eq!(g.player().velocity, Vec3::ZERO);
     // The recorded landing: last falling record at vz −271.682 with a frame
     // of 16.62 ms, so the landing move was 271.682 × 0.01662 + 520 ×
     // 0.01662² = 4.659 uu; the first walking record is at 4482.1963. A
@@ -642,10 +796,11 @@ fn the_darkcave_start_falls_from_the_player_start_and_lands() {
     // 2.15 = 4479.5804, 39.004 uu below the start.
     let contact = 4_482.196_3_f32 - 0.1 * 4.659 - 2.15;
     // At 60 Hz the fall moves 520/3600 × (2k − 1) uu in step k: 36.98 uu
-    // after 16 steps, so step 17 (33 × 0.14444 = 4.767 uu) lands.
+    // after 16 steps, so step 17 (33 × 0.14444 = 4.767 uu) lands. The first
+    // tick did not fall: tick 18.
     let step = 520.0_f32 / 3600.0;
     let mut landed = None;
-    for tick in 1..=30 {
+    for tick in 2..=31 {
         let r = g.tick(&idle()).unwrap();
         if g.player().grounded {
             assert!(r.events.landing.is_some(), "the landing is a landing");
@@ -653,7 +808,7 @@ fn the_darkcave_start_falls_from_the_player_start_and_lands() {
             break;
         }
     }
-    assert_eq!(landed, Some(17));
+    assert_eq!(landed, Some(18));
     let rest = g.player().position.z;
     let expected = contact + 0.1 * 33.0 * step + 2.15;
     eprintln!(
@@ -681,7 +836,14 @@ fn the_beautiful_city_start_falls_from_the_player_start() {
     // `AirControl` at 0.30 (A-AC-2), as recorded.
     let start = g.player().position;
     assert!((start.z - 55_030.293).abs() < 0.01, "{start}");
-    assert!(!g.player().grounded);
+    // Walking, without a base (A-CP-5); the first checkpoint is the start.
+    assert!(g.player().grounded && !g.player().pawn.based);
+    g.apply_snapshot(&Snapshot::fresh());
+    assert_eq!(
+        g.player().position,
+        start,
+        "the first checkpoint is the start"
+    );
     let hit = g
         .world()
         .sweep_box(start, start - Vec3::Z * 100.0, BOX)
@@ -704,8 +866,9 @@ fn the_beautiful_city_start_falls_from_the_player_start() {
     );
     // The recorded pawn was still falling 35.84 uu below the start and its
     // next falling move was 4.82 uu. At 60 Hz the fall is 32.5 uu after 15
-    // steps and 36.98 after 16: the landing is in step 16 or 17.
-    assert!(matches!(landed, Some(16 | 17)), "{landed:?}");
+    // steps and 36.98 after 16: the landing is in step 16 or 17, and the
+    // first tick is the floor check that starts the fall: tick 17 or 18.
+    assert!(matches!(landed, Some(17 | 18)), "{landed:?}");
     assert!(g.in_story_mode());
     assert!((g.player().script.air_control - 0.30).abs() < 1e-6);
     // What the recording says about the contact there. Record 7801 (the

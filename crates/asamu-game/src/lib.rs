@@ -43,8 +43,9 @@
 //! trace ([`GameWorld`], [`world::SceneCollision`]), the streamed
 //! sub-levels, and
 //! the gameplay actors with the original's rules ([`asamu_world::gameplay`]):
-//! the player spawns at the `PlayerStart` in the air and falls onto the
-//! level (A-CP-5), checkpoints activate on
+//! the player spawns at the `PlayerStart` walking, without a base, and its
+//! first tick's floor check stands it on a floor in reach or starts its
+//! fall (A-CP-5), checkpoints activate on
 //! touch and respawns use the checkpoint list's lookup (A-CP-1..4), kill
 //! zones, dynamic kill zones and `KillZ` start the death sequence (A-DT-1/2:
 //! grapple released and story mode left at once, the pawn keeps simulating

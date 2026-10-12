@@ -370,23 +370,45 @@ impl Game {
     ///
     /// **Level start (A-CP-5, P10).** The original spawns the pawn at the
     /// `PlayerStart`'s location with only its yaw, and possessing it puts it
-    /// in falling physics unless it already is (CONFIRMED (src): the game
-    /// info's spawn and the stock pawn's start of movement). It therefore
-    /// **falls** from the `PlayerStart` and lands: in the first recordings
-    /// the first frames of AG-BeautifulCity and AG-Darkcave are falling
-    /// frames whose free fall, extrapolated back, starts at the
-    /// `PlayerStart`'s height to 0.015 uu and 0.0005 uu, and the landing is
-    /// a landing like any other (at the AG-Darkcave start it switched
-    /// `AirControl` to 0.35, A-AC-2). So the pawn starts here at the
-    /// `PlayerStart`, in the air, with zero velocity, and the first tick is
-    /// its first falling frame.
+    /// in **walking** physics: the player controller's start state sets the
+    /// pawn's walking physics unless the pawn is falling, and a new pawn is
+    /// not (CONFIRMED (src): the stock controller's restart and the begin
+    /// of its walking state; this build's pawn does nothing of its own at
+    /// a restart). It has no base, so its first tick checks the floor
+    /// (NATIVE_PHYSICS.md 3.3): a floor within the check's 28 uu takes the
+    /// pawn to its standing height at once, without a landing; with no
+    /// floor in reach the pawn starts to fall in that tick, with zero
+    /// velocity and without having moved, and lands like any other fall.
+    ///
+    /// Measured on six recorded level starts (`docs/PARITY_FINDINGS.md`
+    /// P10; ABILITIES.md A-CP-5 has the numbers): the AG-Workshop and
+    /// AG-ParadiseCave pawns stand at the floor check's height from their
+    /// first recorded frames, 13 ms and 135 ms after the first tick, where
+    /// a falling pawn would still be in the air (and, in AG-ParadiseCave,
+    /// would have switched `AirControl` to 0.35 by landing; it reads 0.30);
+    /// the AG-BeautifulCity and AG-Darkcave pawns, 33.7 and 36.4 uu above
+    /// their floors, fall from the start height from the end of the first
+    /// tick on, and the AG-Darkcave landing switched `AirControl` (A-AC-2).
+    /// So the pawn starts here at the `PlayerStart`, walking, with no base
+    /// and its floor check forced, and the first tick is that check.
     ///
     /// A `PlayerStart` at which the pawn's box is not free goes through the
     /// engine's placement search first (`find_spot`, the same routine the
-    /// spawn and the teleports run; neither recorded start needs it).
+    /// spawn and the teleports run; no recorded start needs it).
     ///
-    /// Not reproduced: the original's world clock reads 0.400 s when that
-    /// fall starts (origin UNKNOWN; ours reads 0).
+    /// **The save's reset.** In a story level the original then loads the
+    /// save and resets the player to the level's latest checkpoint (the
+    /// first one when the save names none), before the first tick:
+    /// [`Game::apply_snapshot`]. Every recorded start had a save (a new game
+    /// writes one), so the recorded pawns start at their level's first
+    /// checkpoint; in AG-BeautifulCity and AG-Darkcave that is the
+    /// `PlayerStart` itself. A game that is given no snapshot is the
+    /// original's failed load: the pawn stays at the `PlayerStart`.
+    ///
+    /// Not reproduced: the original's first tick after a level load is a
+    /// long frame that the engine clamps to 0.4 s (`UWorld::Tick`,
+    /// NATIVE_PHYSICS.md 10.3), so its world clock reads 0.400 s when the
+    /// second tick, and with it a fall, starts; ours reads one tick.
     ///
     /// Actors whose collision starts switched off (blocking volumes with
     /// `bEnabled` false, P5) get dynamic instances, so that
@@ -422,8 +444,11 @@ impl Game {
             half_height: params.movement.capsule_half_height.value,
         });
         let spot = find_spot(&world, start.location, extent).unwrap_or(start.location);
-        // `PlayerState::new` is in the air: falling physics, zero velocity.
         let mut player = PlayerState::new(spot, rotation::units_to_radians(start.rotation[1]));
+        // Walking physics without a base: the first tick's floor check
+        // stands the pawn on a floor in reach, or starts its fall.
+        player.grounded = true;
+        player.pawn.force_floor_check = true;
         pawn::start(&mut player, &params);
         apply_level_abilities(&mut player, &level);
         if level.abilities.story_mode == Some(true) {

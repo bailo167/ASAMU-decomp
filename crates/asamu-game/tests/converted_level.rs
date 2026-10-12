@@ -103,16 +103,34 @@ fn spawns_at_the_player_start_lands_and_walks_on_triangles() {
     s.player_start(Vec3::new(0.0, 0.0, 80.0), 0);
     s.write(&mut src);
     let mut g = game(&src, "AG-Flat");
-    // A-CP-5: the pawn's centre at the start, in the air: the original
-    // spawns the pawn there in falling physics (PARITY_FINDINGS P10), and
-    // it drops the 36 uu to the floor.
-    assert_eq!(g.player().position, Vec3::new(0.0, 0.0, 80.0));
-    assert!(!g.player().grounded && !g.player().pawn.flying);
+    // A-CP-5: the pawn's centre at the start, in walking physics and
+    // without a base, as the original's possession leaves a new pawn
+    // (PARITY_FINDINGS P10; six recorded level starts).
+    let start = Vec3::new(0.0, 0.0, 80.0);
+    assert_eq!(g.player().position, start);
+    assert!(g.player().grounded && !g.player().pawn.based && !g.player().pawn.flying);
     assert_eq!(g.player().velocity, Vec3::ZERO);
-    run_until(&mut g, idle(), 60, |_, g| {
-        g.player().velocity == Vec3::ZERO && g.player().grounded
-    })
-    .unwrap();
+    // The first tick is the walking floor check (NATIVE_PHYSICS.md 3.3): its
+    // 28 uu trace does not reach a floor 36 uu below the box, so the pawn
+    // starts to fall in that tick, where it is and with zero velocity (a
+    // pawn that did not move carries no time into the fall). That is the
+    // recorded start of AG-BeautifulCity and AG-Darkcave: free fall from the
+    // start's height, beginning when the first tick ends.
+    let r = g.tick(&idle()).unwrap();
+    assert!(!g.player().grounded && r.events.landing.is_none());
+    assert_eq!(g.player().position, start);
+    assert_eq!(g.player().velocity, Vec3::ZERO);
+    // It lands in the 16th falling tick (derived below): tick 17.
+    let mut landed = None;
+    for tick in 2..=60 {
+        let r = g.tick(&idle()).unwrap();
+        if g.player().grounded {
+            assert!(r.events.landing.is_some(), "the landing is a landing");
+            landed = Some(tick);
+            break;
+        }
+    }
+    assert_eq!(landed, Some(17));
     for _ in 0..30 {
         g.tick(&idle()).unwrap();
     }
@@ -147,6 +165,52 @@ fn spawns_at_the_player_start_lands_and_walks_on_triangles() {
         asamu_player::world::ActorClass::WorldGeometry
     );
     assert!(g.level().name.contains("converted"));
+}
+
+#[test]
+fn a_start_within_reach_of_its_floor_stands_without_a_landing() {
+    // The pawn starts walking and without a base (A-CP-5), so its first tick
+    // is the walking floor check (NATIVE_PHYSICS.md 3.3): a 28 uu trace of
+    // the box straight down, whose hit on BSP is reported 1.0 uu nearer than
+    // it is (a tenth of the trace, at most 1.0 uu, 10.2). A floor it finds
+    // is a new base, and the pawn is put at the reported distance 2.15: its
+    // bottom a true 3.15 uu above the floor, from above or from below, in
+    // that one tick and without a landing. Recorded: the AG-Workshop pawn
+    // stands at 72 + 44 + 3.15 = 119.15 and the AG-ParadiseCave pawn at its
+    // standing height, 19.7 uu below its start point, from their first
+    // recorded frames, with `AirControl` still 0.30.
+    let stands = |start_z: f32| {
+        let mut src = MemorySource::new();
+        let mut s = SceneFixture::new("AG-Reach", -10_000.0);
+        floor(&mut s, 5000.0, 0.0);
+        s.player_start(Vec3::new(0.0, 0.0, start_z), 0);
+        s.write(&mut src);
+        let mut g = game(&src, "AG-Reach");
+        assert_eq!(g.player().position.z, start_z);
+        assert!(g.player().grounded && !g.player().pawn.based);
+        let r = g.tick(&idle()).unwrap();
+        assert!(r.events.landing.is_none(), "from {start_z}: no landing");
+        assert!(g.player().grounded && g.player().pawn.based);
+        assert_eq!(g.player().velocity, Vec3::ZERO);
+        assert!((g.player().script.air_control - 0.30).abs() < 1e-6);
+        let z = g.player().position.z;
+        // It stays there while it stands.
+        for _ in 0..30 {
+            g.tick(&idle()).unwrap();
+        }
+        assert_eq!(g.player().position.z, z, "from {start_z}");
+        z
+    };
+    // 20 uu above the floor (reported 19): moved down to 44 + 3.15.
+    let z = stands(44.0 + 20.0);
+    assert!((z - 47.15).abs() < 1e-4, "{z}");
+    // 27.5 uu above (reported 26.5), still inside the 28 uu trace.
+    let z = stands(44.0 + 27.5);
+    assert!((z - 47.15).abs() < 1e-4, "{z}");
+    // 2.32 uu above (reported 1.32, as where the placement search puts the
+    // AG-Workshop pawn): moved up to the same height.
+    let z = stands(44.0 + 2.32);
+    assert!((z - 47.15).abs() < 1e-4, "{z}");
 }
 
 /// A platform at the respawn point, nothing under the start but a kill zone.
@@ -683,15 +747,24 @@ fn spawn_inside_geometry_is_lifted_out() {
     // `converted.rs`): a 1 uu slice at the centre (bottom at z = 9) traced
     // down 88 uu meets the BSP after 9 uu, reported 1.0 uu short: 8. The
     // centre goes to 10 − (2 × 8/88 − 1) × 44 + 1 = 47, the bottom 3.0 uu
-    // above the floor, in the air. (Our stand-in before the routine was read
-    // put the pawn 0.05 uu above the floor.)
+    // above the floor. (Our stand-in before the routine was read put the
+    // pawn 0.05 uu above the floor.) The pawn is walking there, without a
+    // base (A-CP-5).
+    let mut g = g;
     let z = g.player().position.z;
     assert!((z - 47.0).abs() < 1e-3, "{z}");
-    assert!(!g.player().grounded);
+    assert!(g.player().grounded && !g.player().pawn.based);
     assert!(
         !g.world()
             .overlaps_box(g.player().position, Vec3::new(21.0, 21.0, 44.0))
     );
+    // Its first floor check reports the floor at 3.0 − 1.0 = 2.0 uu, takes
+    // it as a new base and sets the reported distance to 2.15: 47.15.
+    let r = g.tick(&idle()).unwrap();
+    assert!(r.events.landing.is_none());
+    let z = g.player().position.z;
+    assert!((z - 47.15).abs() < 1e-4, "{z}");
+    assert!(g.player().grounded && g.player().pawn.based);
 }
 
 #[test]
