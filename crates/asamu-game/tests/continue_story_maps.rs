@@ -413,17 +413,16 @@ fn walk(dir: &Path, map: &str) -> Walk {
             }
             if game.latest_checkpoint_index().is_none_or(|l| l < c.index)
                 && game.trigger_checkpoint(c.id)
-            {
-                if !tick(
+                && !tick(
                     &mut game,
                     &mut script,
                     &mut out,
                     &mut all,
                     &mut previous,
                     true,
-                ) {
-                    break 'walk;
-                }
+                )
+            {
+                break 'walk;
             }
             for _ in 0..SETTLE {
                 if !tick(
