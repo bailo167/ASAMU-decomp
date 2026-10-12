@@ -34,7 +34,8 @@ cargo test -p asamu-ue3 --test decal_real_data -- --nocapture          # every (
 cargo run -p asamu-import -- decals --check                            # coverage table, writes nothing
 cargo run -p asamu-import -- --out <user-local dir> decals             # <out>/decals/: <map>.decals.json, masks/, manifest.json
 cargo test -p asamu-import decals                                      # document shape, decal masks
-cargo test -p asamu vfx                                                 # beam, cone, lights, crosshair, decal pool math
+cargo test -p asamu vfx                                                 # beam (socket mapping, ribbons, material), flash and impact, cone, lights, crosshair, decal pool
+cargo test -p asamu hands                                               # the hand's socket marker and what the beam is told about the hand
 asamu-inspect defaults <CookedMac>/Startup.upk asamu.GrappleGun --inherited   # CDO values quoted below
 asamu-inspect props <CookedMac>/Startup.upk AdventureSuitEffects.ParticleSystems.GrappleBeam.<module>   # content values
 asamu-inspect decompress <CookedMac>/RefShaderCache-PC-OpenGL.upk --out research/local/<dir>/gl.dec   # GLSL text (§8.4)
@@ -92,9 +93,37 @@ emitter order (§2).
 
 **Set-up** [CONFIRMED (src, cdo)]. The gun's `MyBeam` component (a `UDKParticleSystemComponent`, template
 `AdventureSuitEffects.ParticleSystems.GrappleBeam`, foreground depth group, not auto-activated) is attached to the
-hand mesh's socket `GrappleSocket` and given the hand mesh's FOV (70°). At start the gun creates a material instance
-of `AdventureSuitEffects.GrappleBeam_inst` and hands it to the particle system through the material parameter
-`beammaterial`; it sets the source tangent strength of emitter 0 to 1000.
+hand mesh's socket `GrappleSocket` (`BeamSocketName`) and given the hand mesh's FOV (70°). At start the gun creates
+a material instance of `AdventureSuitEffects.GrappleBeam_inst` and hands it to the particle system through the
+material parameter `beammaterial`; it sets the source tangent strength of emitter 0 to 1000.
+
+**Where the beam starts** (corrected 2026-10-13; before, the runtime started the beam at a fixed offset from the
+eye). The hand mesh `PlayerHand.Meshes.PlayerHand` has three sockets [CONFIRMED (data): the converted mesh's
+socket nodes]: `GrappleSocket` and `PowerJumpLight` on the bone `Hand_R`, `RootSocket` on `Root`. In the bone's own
+axes `GrappleSocket` is at (3.8, 4.7, −2.0) UU and `PowerJumpLight` at (2.7, 5.8, 2.0): the two sit on opposite
+faces of the hand, 4 UU apart through it. `GrappleSocket` is on the **palm** side [STRONG: in the converted
+`Grapple_Loop` pose, drawn by our runtime, the back plate with its round lens faces the camera and the hand hides
+the socket; the socket's X axis, along which the beam leaves, points away from the camera towards the target]. So
+the beam leaves the palm, which the raised hand holds towards the target, and a player sees it come out from
+behind the hand, not out of the lens on the back plate.
+
+**How a beam on the hand reaches a point in the world** [CONFIRMED (native); functions decompiled locally with
+`tools/ghidra-scripts/DecompileToLocal.java`, nothing quoted]. The hand mesh is drawn with its own field of view
+while the world keeps the player's: its scene proxy builds the mesh's matrix as local-to-view, times a perspective
+projection of the mesh's FOV, times the inverse of the view's projection, times view-to-world
+(`FUDKSkeletalMeshSceneProxy::GetWorldMatrices` @ 0x100F542D0; a FOV of 0 leaves the matrix alone). The beam
+component does the same to its own transform every time it is placed
+(`UUDKParticleSystemComponent::SetTransformedToWorld` @ 0x100F523E0): it walks up its owners to the player
+controller, asks it for the view point and the FOV angle, and passes its transform through a projection of its
+own FOV and back through one of the player's, both with the engine's near clipping plane.
+(`UUDKParticleSystemComponent::SetFOV` @ 0x100F531B0 stores the angle and marks the system's mesh emitters; this
+system has none enabled.) Two such projections that differ in the field of view only compose, in view space, to a
+scale of the two axes across the view by `tan(player FOV / 2) / tan(component FOV / 2)` and nothing along it. So:
+
+- the beam's **source** is the socket where the drawn hand shows it, re-expressed for the world's projection;
+- its **target** (`GrappleBeamEnd`, an absolute point) is untouched;
+- the beam between them is an ordinary world-space beam, drawn in the foreground depth group with the hand: the
+  world never hides it, the hand does where the hand is nearer.
 
 **Update** [CONFIRMED (src)]. Every gun tick the vector parameter `GrappleBeamEnd` is set to `vGrappleLocation` (the
 anchor, or the helper's location while following an `InterpActor`). The system is activated on attach and
@@ -105,15 +134,36 @@ hides the beam at once).
 sprite emitters. Only the first two (emitters 0 and 1 of the system's `Emitters` list) are enabled; the third beam
 emitter and both sprite emitters have `bEnabled` false on their LOD level **(V)**. Per enabled beam emitter:
 `ParticleModuleSize.StartSize` 4 (emitter 0) and 2 (emitter 1), constant — the beam widths in UU;
-`ParticleModuleTypeDataBeam2`: 40 interpolation points, 2 beams at most, speed 0; `ParticleModuleBeamTarget`:
-absolute target from the particle parameter `GrappleBeamEnd`, target tangent strength 20;
-`ParticleModuleBeamSource`: tangent from the emitter, strength 1250 in the asset — the script's call changes
-emitter 0 only, so the wide beam runs with 1000 and the narrow one with 1250 **(V)**; `ParticleModuleBeamNoise`:
-frequency 20, range ±1 on the wide emitter (the narrow emitter's range table differs and is scaled 1.3;
-distributions are not decoded here, TENTATIVE), speed 100, lock time 0.2 s, tessellation 5, tangent strength 35,
-smooth. Material `GrappleBeam_inst`: additive, unlit, texture
-`AdventureSuitEffects.BeamParticle.ThinBeam` through the UV window scale (1, 0.5) offset (0, 0.25), vector
-parameter `GrappleBeamColor` = (0.044, 0.191, 0.796) — the CDO's `DefaultBeamColor` rounded.
+`ParticleModuleTypeDataBeam2`: 40 interpolation points, at most 2 beams, speed 0, no sheets, the texture laid once
+along the beam (`TextureTile` 1), no taper (method none, factor and scale 1: as wide at the anchor as at the hand);
+spawn rate and bursts zero (an always-on beam emitter keeps its beams alive itself; the converted emitters' peak
+particle count is 4, STRONG that both beams of each emitter are alive at once); `ParticleModuleBeamTarget`:
+absolute target from the particle parameter `GrappleBeamEnd`, target tangent strength 20, target tangent zero and
+locked; `ParticleModuleBeamSource`: source at the emitter, tangent method "emitter" with tangent (1, 0, 0) (the
+component's own X axis, i.e. the socket's), strength 1250 in the asset — the script's call changes emitter 0 only,
+so the wide beam runs with 1000 and the narrow one with 1250 **(V)**; `ParticleModuleBeamNoise`: frequency 20
+(with a frequency distance of 20 UU), range ±1 on the wide emitter and −1 to 5 on the narrow one, range scale 1
+and 1.3, speed 100, lock time 0.2 s, smooth, tessellation 5, noise tangent strength 35. The lifetime (0.1 s on the
+wide emitter, 0.5 to 1 s on the narrow) and the colour modules (a colour over life from (37, 130, 255) to black)
+drive the particles' colour only, which the material does not read (below). The required module carries near and
+far fade and cull distances (150 / 10 and 2000 / 2100 UU) without the flags that would switch them on among its
+set properties: not applied [STRONG].
+
+**Material** [CONFIRMED (content): the expressions of `AdventureSuitEffects.MainBeam_Mat`, the parent of
+`GrappleBeam_inst`, read with `asamu-inspect props`; described, not transcribed]. Additive, unlit, two-sided. Its
+emissive output is the sum of three grey textures, times the colour parameter `GrappleBeamColor`, times 20:
+
+- `AdventureSuitEffects.BeamParticle.ThinBeam` through the UV window scale (1, 0.5) offset (0, 0.25): a soft line
+  along the middle of the ribbon (the texture is the same all along; across, it is black outside its middle half
+  and rises to about 0.9 on the centre line);
+- `AdventureSuitEffects.BeamParticle.MainBeam` over the whole ribbon: a wider core, fully white in its middle
+  fifth, with faint side bands;
+- `AdventureSuitEffects.BeamSphere`, a round soft spot, with its coordinate along the beam panned at −2 a second:
+  a pulse that runs from the hand to the anchor twice a second.
+
+There is no vertex-colour input. With the default colour (0.044, 0.191, 0.796 — the CDO's `DefaultBeamColor`
+rounded) the light on the centre line is about (2.5, 11, 44) times display white: a white-hot line that falls off
+through cyan to the beam's blue at the ribbon's edges, in an HDR scene that the level's post-process then blooms.
 
 **Colours** [CONFIRMED (src, cdo)] — `UpdateBeamVisuals`:
 
@@ -130,18 +180,65 @@ setting as hue in degrees, S 0.85, V 0.85) converted by the settings manager's o
 beam colour ≥ 10, goat ≥ 15, Midas ≥ 20 (parkour ≥ 25) (`CheckIfUnlocked`). Settings defaults
 (`DefaultSettings.ini`): `BeamColorActive` false, `BeamColor` 0, `SpeedlinesActive` true [CONFIRMED (config)].
 
-**Other attach effects** [CONFIRMED (src, cdo)]: `grappleBeginEffect` (`Sigge.Particles.Beam_Ignite_PS`, at the
-socket) is activated on attach; `ImpactParticleSystem` (`Sigge.Particles.Beam_Connect_PS`) is spawned through the
-emitter pool at the hit location, oriented along the hit normal and attached to the hit actor. Particle systems are
-the particle workstream's.
+**Other attach effects** [CONFIRMED (src, cdo, content)].
 
-**Runtime** (`apps/asamu/src/vfx/beam.rs`, `vfx.rs`): two camera-facing ribbons 4 and 2 UU wide, each through 41
-points of its own cubic Hermite curve (source tangent 1000 for the wide and 1250 for the narrow one along the view
-direction, target tangent 20 along the chord — the tangent *directions* are TENTATIVE: the socket's own axis is
-not exposed), displaced by 20 noise points of ±1 UU
-re-randomised every 0.2 s, additive, textured with the converted beam material's texture and UV window, coloured by
-the mode table. Deviations: the beam starts at a fixed eye-space offset instead of the hand socket and is drawn with
-the world FOV (ours); brightness is ours.
+- *At the hand*: the gun's `grappleBeginEffect` component (template `Sigge.Particles.Beam_Ignite_PS`) is attached
+  to the same socket and activated on every attach. It is a plain `ParticleSystemComponent`: no foreground depth
+  group and no FOV of its own are among its properties, and the script sets a FOV on the beam component only. So
+  it is drawn with the world, at the socket's real place rather than where the hand mesh (drawn with 70°) shows the
+  socket: with the player's FOV at 90° about 30 % nearer to the middle of the screen than the drawn hand, and
+  behind the hand [STRONG: from the properties; not observed in the original]. The system: 8 emitters, all in
+  local space, one loop of 0.2 or 0.3 s: an orb (8 UU, living 0.1 s), two emitters of velocity-aligned sparks
+  (3 × 10 UU at 150 UU/s), a ring of spikes (8 UU), three rings (20 UU, living 0.1 s), and a distortion emitter.
+- *At the anchor*: `ImpactParticleSystem` (`Sigge.Particles.Beam_Connect_PS`) is spawned through the emitter pool
+  at the hit location, turned to the hit normal and attached to the hit actor. The system: an orb (15 to 25 UU,
+  living 0.03 s), a star of spikes (15 to 25 UU, living 1 s, swelling to about 2.3 times and fading), a 200 UU
+  sprite that implodes within 0.2 s, a distortion emitter, four mesh emitters of
+  `Sigge.Meshes.particle_sphere_implosion_mesh` (0.5 to 0.6 scale, living 0.2 to 0.5 s), and a disabled sparks
+  emitter. (`Beam_Connect_Crystal_PS` and `Beam_connect_flower_PS` exist for the recharge crystal and the glow
+  flower; who spawns them was not read.)
+- *The hand* [CONFIRMED (src, data)]: on attach the hand's animation tree blends to its grappling branch over 0.3 s
+  and plays `Grapple` once, then `Grapple_Loop`; a release switches to `Grapple_Release` at once, and when that
+  has played the tree blends back over 0.3 s (NPCS.md §11). In `Grapple_Loop` the hand is raised with the palm
+  towards the target.
+
+**Runtime** (`apps/asamu/src/vfx/{emitter,beam,beam_material,bursts}.rs`, `vfx.rs`, `npc/hands.rs`).
+
+- *Start and end.* `npc/hands.rs` marks the socket's node of the converted hand mesh and the overlay camera that
+  draws the hand (70°, clears depth: this renderer's foreground depth group). Each frame, after the animation
+  and the transforms are known and before the meshes go to the renderer, the beam is computed in the world
+  camera's space with its source at the socket mapped there by the scale above and its tangent along the socket's
+  mapped X axis; every vertex is then mapped back into the overlay camera's space and drawn by that camera, with
+  the hand. The source vertex therefore is the socket, whatever the window, the FOV, the zoom and the hand's
+  pose, and the anchor keeps the pixel the world camera gives it (riding the helper on a moving actor). Tests pin
+  both with the renderer's own projection matrices (`vfx::emitter`: at most 0.05 pixel at the socket and 0.25 at
+  the anchor over five window shapes and five FOVs; `vfx::tests::the_beam_meets_the_socket_and_the_anchor_on_screen`
+  through the whole chain). The beam is hidden while the hand is not on screen (ours; the gun cannot fire then).
+  Without a converted hand the beam starts 24 UU ahead, 10 right and 12 below the eye and is drawn by the world
+  camera (PLACEHOLDER).
+- *Shape.* Four ribbons: two strands for each of the two emitters, 4 and 2 UU wide, each through 41 points of its
+  emitter's cubic Hermite curve (source tangent 1000 or 1250 along the socket's axis, target tangent 20 along the
+  chord; TENTATIVE: that the engine normalises the source tangent, and the target's direction), displaced across
+  the beam by 20 noise points drawn from the emitter's range, which glide to new places every 0.2 s (TENTATIVE:
+  how the engine uses the three components of the range and what its smoothing does). No taper, as the data says.
+  Ours: a ribbon is never drawn thinner than 1.5 pixels; where the beam is thinner it is drawn that wide and
+  dimmer by the same factor, so a long beam thins out to a fine line instead of breaking up.
+- *Material.* A material of its own with the three textures, the UV window, the pan and the factor 20 as above,
+  and the mode table's colour. PLACEHOLDER: the result is mapped to the display range per channel
+  (`1 − exp(−light)`) instead of being added to an HDR scene and bloomed, and it covers what is behind it by 55 %
+  of its own brightness, so that the blue edge still shows against a white background where the original's bloom
+  halo would; no halo is drawn. Without the converted textures the ribbon gets a soft procedural line. The beam is
+  drawn after the world's post-process: fog does not dim it (the original's foreground group is not fogged either
+  [TENTATIVE]).
+- *Flash and impact.* The two systems run on the particle simulator of the placed effects
+  (`asamu_assets::particles`, 1/60 s steps) and their additive sprite emitters are drawn as camera-facing quads
+  with the converted textures: the impact by the world camera at the anchor (riding a moving anchor by
+  translation while the gun holds it), the flash at the socket's real place, by the overlay camera, pushed far
+  behind the hand along the view rays so that it keeps its pixels (drawn by the world camera it would be fogged
+  as if it were as far as the wall behind it). PLACEHOLDER: the mesh emitters and the distortion emitters are not
+  drawn, flip-book textures are shown whole, and the impact does not turn with its actor.
+- *Hand.* `npc/skins.rs` plays `Grapple`, `Grapple_Loop` and `Grapple_Release` from the gun's state with Bevy's
+  clip transitions (PLACEHOLDER for the tree's two nested 0.3 s blends).
 
 ## 3. Speed lines (`ASAMUVelocityCone`)
 
@@ -623,14 +720,40 @@ Local check by the verification pass (same day, two other maps, same hygiene):
   painting on the wall beside it is a line drawing. AG-BeautifulCity starts in story mode: the self-test's fire
   is a story interaction there, not a grapple.
 
+Local check of the beam (2026-10-13; hidden, silent runs on the Windows build machine with the full conversion,
+window read-backs kept outside every checkout). The owner's play session of 2026-10-12 showed the beam as a flat
+opaque blue wedge that started at the bottom edge of the screen under the wrist and ran behind the hand. After the
+change, with `ASAMU_VFX_SELFTEST=17 asamu --level AG-ParadiseCave --hidden-window --screenshot … --screenshot-window`
+and the self-test's options (`vfx/selftest.rs`: `_RANGE`, `_HOLD`, `_PIN`, `_TARGET=turning,…`):
+
+- a pinned grapple held for 1.5 s on a wall 450 UU away and one on a rock face 1,148 UU away: the hand is in the
+  `Grapple_Loop` pose (raised, open, the back plate with its lens towards the camera), and the beam comes out from
+  behind the hand at the gap between thumb and fingers, a white-hot line with a blue edge about a finger wide at
+  the hand, bends gently towards the anchor and thins to a fine line there; thin side strands wander around it;
+  the hit decal sits at its end. Against the pale stone of the near wall the blue edge still shows.
+- a recording of the same grapple, frame by frame: no beam in the frame before the attach; 0.2 s after it the
+  hand is opening, the beam is there from the palm to the anchor, a faint star of the attach flash shows beside
+  the hand (nearer the middle of the screen than the hand, as the data has it) and a small glow at the anchor.
+- a pinned grapple on a rock of a turning wheel (`InterpActor_64`), 1,865 UU away, two seconds into the hold: the
+  anchor has turned from the middle of the view to its top edge and the beam's end is on it; and the same rock
+  from 4,350 UU: the beam reaches the anchor as a hair-thin line. Both are in the level's dense teal fog, which
+  the beam is not dimmed by.
+- the log's one line per grapple puts the socket, in the idle pose at the attach, at 58 % of the screen's half
+  width to the right and 70 % of its half height below the middle, 33 UU ahead of the eye.
+
 Not checked by eye: the HUD parts (crosshair ring, hand lamps, lens overlay) — the screenshot camera does not
 draw the HUD — and Kismet hiding, unhiding or moving a decal in play.
 
 ## 11. UNKNOWN / not done
 
-- The beam's exact look: the tangent directions, the noise scaling (the narrow emitter's range table), whether
-  beam particles linger after release; the goat-mode tongue systems. (The system's sprite emitters are disabled:
-  nothing to draw.)
+- The beam's exact look: whether the engine normalises the source tangent, the target tangent's direction, how
+  the noise range's three components and the smoothing are applied, whether beam particles linger after release;
+  the original's bloom around the beam (ours has a display mapping and a coverage term instead, §2); the
+  goat-mode tongue systems. (The system's sprite emitters are disabled: nothing to draw.) NEEDS EVIDENCE: a
+  frame of the original with a held grapple would settle the palm-side start, the beam's width at the hand and
+  the place of the flash.
+- The flash and the impact: mesh and distortion emitters are not drawn; the impact does not turn with its actor;
+  `Beam_Connect_Crystal_PS` / `Beam_connect_flower_PS` are not spawned.
 - The crosshair movie's art and fade timing; the pause menu's re-show of the crosshair (§5); the hand plate
   material's lamp parameters are shown as HUD dots.
 - `BlendRange` fading; decal light maps; the uniform layout of the decal shaders beyond the coordinate sequence.
@@ -644,5 +767,5 @@ draw the HUD — and Kismet hiding, unhiding or moving a decal in play.
 - Extras settings (beam colour, goat, Midas) are modelled (`ExtrasSettings`) but not wired to the settings menu
   or the collectibles count.
 - The checkpoint markers' effect mesh is drawn permanently by the level renderer (§8.6).
-- Emitter-pool effects named here (ignite, connect, power-jump charged/takeoff/land, checkpoint particles) belong
-  to the particle workstream; camera animations and rumble to theirs.
+- Emitter-pool effects named here other than the grapple's two (power-jump charged/takeoff/land, checkpoint
+  particles) belong to the particle workstream; camera animations and rumble to theirs.

@@ -389,6 +389,16 @@ A-CM-5. The tree switches between sequences named `Idle`/`Idle_02..04` (random),
 `powerJump`, `PowerJumpIdle`, `PowerJumpLand`, `HandsDown`, `SuitOn` (CONFIRMED (data)); which of the gameplay
 blend nodes the gun drives at which moment is only mapped approximately here (TENTATIVE).
 
+**The grapple pose and the hand's sockets** (CONFIRMED (src, data); 2026-10-13). On attach the gun sets the tree's
+`IsGrappling` blend to 1 over 0.3 s and its `GrapplingState` list to the begin sequence (`Grapple`, 0.3 s blend);
+the animation-end handler moves the list on to the loop (`Grapple_Loop`, 0.3 s) when the begin sequence ends. A
+release puts the list on the release sequence (`Grapple_Release`) at once, and when that ends with the list still
+there the handler takes `IsGrappling` back to 0 over 0.3 s. The mesh has three sockets: `GrappleSocket` and
+`PowerJumpLight` on `Hand_R`, on opposite faces of the hand (palm and back plate), and `RootSocket` on `Root`. The
+beam and the attach flash are attached to `GrappleSocket` (VFX_DECALS.md §2). The runtime plays the three
+sequences in that order (`skins.rs`) and draws the beam from the socket's node, which follows the animation
+(`hands.rs` marks it for `crate::vfx`).
+
 **When the hand is on screen** (CONFIRMED (data, src) unless noted; `asamu-inspect props Startup.upk
 PlayerHand.PlayerHand_AnimTree` and its children, followed through each node's `Children[i].Anim`: 47 node
 objects). The gun and its hand mesh exist from the first frame of every level (the owner's recording of the

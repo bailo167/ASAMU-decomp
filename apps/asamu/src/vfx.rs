@@ -2066,15 +2066,19 @@ mod tests {
                             assert_eq!(rb.positions.len(), 2 * (beam::INTERPOLATION_POINTS + 1));
                             // The ribbon is in world space; the hand camera
                             // (at the world camera's place) draws it.
-                            let drawn = |k: usize| {
-                                let local = camera_from_world
-                                    .transform_point3(Vec3::from_array(rb.positions[k]));
+                            let pixel = |world: Vec3| {
+                                let local = camera_from_world.transform_point3(world);
                                 emitter::pixel_of(hand.get_clip_from_view(), local, viewport)
                                     .expect("in view")
                             };
-                            let first = (drawn(0) + drawn(1)) * 0.5;
+                            let at = |k: usize| Vec3::from_array(rb.positions[k]);
+                            let drawn = |k: usize| pixel(at(k));
+                            // The middle of a row is the beam's centre line
+                            // there (the two edges are not at one depth, so
+                            // the middle is taken before the projection).
+                            let first = pixel((at(0) + at(1)) * 0.5);
                             let n = rb.positions.len();
-                            let last = (drawn(n - 2) + drawn(n - 1)) * 0.5;
+                            let last = pixel((at(n - 2) + at(n - 1)) * 0.5);
                             let (es, ea) =
                                 (first.distance(socket_pixel), last.distance(anchor_pixel));
                             worst = (worst.0.max(es), worst.1.max(ea));

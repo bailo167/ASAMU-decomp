@@ -595,6 +595,14 @@ cone ticks after the pawn's physics and before the gun, so it sees the capped sp
 **G-FX-3** Rumble `RUMBLE_GRAPPLE` from attach until the `ReleaseGrapple` begin code. Beam audio parameter
 `5000 − d`. Hand animation-tree blends are cosmetic.
 
+**G-FX-4 Beam, flash, impact and the hand** (cosmetic; detail and evidence in VFX_DECALS.md §2). The beam
+component is attached to the hand mesh's socket `GrappleSocket` (bone `Hand_R`, on the palm side) with the hand
+mesh's 70° FOV and drawn in the foreground depth group: it starts at the socket as the drawn hand shows it and ends
+at `vGrappleLocation`, the anchor (the helper's place on a moving actor) [CONFIRMED (src, cdo, native)]. On attach
+the gun also activates a flash at the socket (`Beam_Ignite_PS`) and spawns an impact at the hit location
+(`Beam_Connect_PS`, attached to the hit actor), and the hand's animation tree plays `Grapple`, then loops
+`Grapple_Loop`, then `Grapple_Release` on release [CONFIRMED (src)].
+
 ## 14. Kismet events and actions
 
 | Event | When | Originator / outputs | Confidence |
