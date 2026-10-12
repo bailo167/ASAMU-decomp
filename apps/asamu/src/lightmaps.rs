@@ -31,7 +31,10 @@
 //!    the level and its merged sub-levels (same triangle count): surfaces the
 //!    original drew without a light map are part of the replacement, drawn
 //!    without one; a light map file from an importer that left them out
-//!    keeps the flat BSP.
+//!    keeps the flat BSP;
+//! 6. reads the level's precomputed light volume (the baked light for
+//!    objects without a light map) and hands it to
+//!    [`crate::light_volume`], which lights those objects with it.
 //!
 //! Approximation: the original renders directional light maps (two
 //! coefficient textures combined with the per-pixel normal); the importer
@@ -44,6 +47,7 @@
 
 use std::collections::HashMap;
 
+use asamu_assets::lighting::LightVolume;
 use asamu_assets::lightmaps::{
     BspLightmapMesh, LevelLightmaps, LightBaking, LightmapKind, lightmap_exposure,
 };
@@ -59,6 +63,7 @@ use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 
 use crate::converted::{ConvertedLevel, LevelBsp, LevelEntity, LevelLight, LevelPhase, SOURCE};
+use crate::light_volume::{LightVolumePlugin, VolumeAmbient};
 use crate::{bevy_vec, to_render};
 
 /// Baked lighting settings.
@@ -131,6 +136,11 @@ struct Prepared {
     missing: Vec<String>,
     rejected: usize,
     bsp_dropped: usize,
+    /// The precomputed light volume of the level and its merged sub-levels
+    /// (`None`: not converted, or the level has none).
+    volume: Option<LightVolume>,
+    /// Ambient of the level's sky lights (render units).
+    sky_ambient: f32,
 }
 
 #[derive(Resource, Default)]
@@ -183,6 +193,7 @@ impl Plugin for LightmapPlugin {
             .init_resource::<LightmapStatus>()
             .init_resource::<LightmapState>()
             .init_resource::<LightmapImages>()
+            .add_plugins(LightVolumePlugin)
             .add_systems(
                 Update,
                 (
@@ -308,17 +319,7 @@ fn prepare(plan: &LevelPlan, lm: &LevelLightmaps, mapping: &LightMapping) -> Pre
     // Light-mapped BSP of the persistent level and every merged sub-level
     // (moved by its streaming offset, as `LevelPlan::load` moves the flat
     // BSP).
-    let levels = std::iter::once((scene.package.as_str(), UeVec3::ZERO)).chain(
-        scene.merged_levels.iter().map(|name| {
-            let offset = scene
-                .streaming_levels
-                .iter()
-                .find(|s| s.package.eq_ignore_ascii_case(name))
-                .map_or(UeVec3::ZERO, |s| s.offset);
-            (name.as_str(), offset)
-        }),
-    );
-    for (package, offset) in levels {
+    for (package, offset) in plan_levels(plan) {
         if !lm.has_bsp(package) {
             continue;
         }
@@ -349,6 +350,39 @@ fn prepare(plan: &LevelPlan, lm: &LevelLightmaps, mapping: &LightMapping) -> Pre
     prep
 }
 
+/// The persistent level and every merged sub-level of `plan`, each with its
+/// streaming offset (UE3 units; zero for the persistent level).
+fn plan_levels(plan: &LevelPlan) -> Vec<(&str, UeVec3)> {
+    let scene = &plan.scene;
+    std::iter::once((scene.package.as_str(), UeVec3::ZERO))
+        .chain(scene.merged_levels.iter().map(|name| {
+            let offset = scene
+                .streaming_levels
+                .iter()
+                .find(|s| s.package.eq_ignore_ascii_case(name))
+                .map_or(UeVec3::ZERO, |s| s.offset);
+            (name.as_str(), offset)
+        }))
+        .collect()
+}
+
+/// The precomputed light volume of the plan's levels, from the files their
+/// light map files name (runs on the async pool). A file that cannot be
+/// read is left out with a warning; `None` when nothing usable was found.
+fn load_volume(plan: &LevelPlan, lm: &LevelLightmaps) -> Option<LightVolume> {
+    let mut volume = LightVolume::default();
+    for (package, offset) in plan_levels(plan) {
+        let Some(path) = lm.light_volume_file(package) else {
+            continue;
+        };
+        if let Err(e) = volume.add_file(path, offset) {
+            warn!("light volume of {package}: {e}");
+        }
+    }
+    volume.finish();
+    (!volume.is_empty()).then_some(volume)
+}
+
 /// Starts over when another level is planned (chapter select, story flow):
 /// the prepared pairs, light keys and BSP belong to the previous level, and
 /// the new one needs its own light maps.
@@ -357,6 +391,7 @@ fn reset_on_level_change(
     mut state: ResMut<LightmapState>,
     mut images: ResMut<LightmapImages>,
     mut status: ResMut<LightmapStatus>,
+    mut volume: ResMut<VolumeAmbient>,
     mut current: Local<Option<String>>,
 ) {
     let Some(level) = level else {
@@ -371,6 +406,8 @@ fn reset_on_level_change(
         *state = LightmapState::Idle;
         *images = LightmapImages::default();
         status.line.clear();
+        // The next level's own ambient value was set when it was spawned.
+        volume.clear();
     }
     if current.as_deref() != Some(level.level.as_str()) {
         *current = Some(level.level.clone());
@@ -412,13 +449,22 @@ fn start_planning(
         let mut packages = vec![plan.scene.package.clone()];
         packages.extend(plan.scene.merged_levels.iter().cloned());
         let lm = LevelLightmaps::load(&dir, &packages).map_err(|e| e.to_string())?;
-        Ok(prepare(&plan, &lm, &options.lights))
+        let mut prep = prepare(&plan, &lm, &options.lights);
+        if crate::light_volume::enabled() {
+            prep.volume = load_volume(&plan, &lm);
+        }
+        prep.sky_ambient = (plan.ambient - options.lights.base_ambient).max(0.0);
+        Ok(prep)
     });
     status.line = "lightmaps: preparing".to_owned();
     *state = LightmapState::Planning(task);
 }
 
-fn poll_planning(mut state: ResMut<LightmapState>, mut status: ResMut<LightmapStatus>) {
+fn poll_planning(
+    mut state: ResMut<LightmapState>,
+    mut status: ResMut<LightmapStatus>,
+    mut volume: ResMut<VolumeAmbient>,
+) {
     let LightmapState::Planning(task) = &mut *state else {
         return;
     };
@@ -426,7 +472,11 @@ fn poll_planning(mut state: ResMut<LightmapState>, mut status: ResMut<LightmapSt
         return;
     };
     match result {
-        Ok(prep) => {
+        Ok(mut prep) => {
+            // The light volume lights the objects without a light map,
+            // whether or not any light map was converted.
+            volume.set(prep.volume.take(), prep.exposure, prep.sky_ambient);
+            info!("{}", volume.line);
             if prep.packages.is_empty() {
                 status.line = format!(
                     "lightmaps: none converted for {:?} (run `asamu-import lightmaps`)",

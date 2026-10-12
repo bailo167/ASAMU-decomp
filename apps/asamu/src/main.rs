@@ -78,6 +78,7 @@ mod fly;
 mod gamepad;
 mod hud;
 mod kismet;
+mod light_volume;
 mod lightmaps;
 mod material_pictures;
 mod npc;
