@@ -31,7 +31,9 @@
 //! `ASAMU_POST=off` disables the plugin (Bevy's default look, no fog), for
 //! before/after comparisons; `ASAMU_POST=no-fog,no-bloom,no-lut,no-tonemap`
 //! leaves out single parts ([`PostSwitches`]). `--no-fog` disables the
-//! height fog and the fog volumes. The graybox level is not affected.
+//! height fog and the fog volumes; `ASAMU_POST=no-height-fog` or
+//! `no-fog-volumes` leaves out one of the two (to see which of them a
+//! mist is). The graybox level is not affected.
 
 mod dds;
 mod render;
@@ -119,12 +121,18 @@ struct LevelAtmosphere {
 
 /// `ASAMU_POST`: `off` (or `0`) disables the plugin; otherwise a
 /// comma-separated list of parts to leave out (`no-fog`, `no-bloom`,
-/// `no-lut`, `no-tonemap`), for comparisons.
+/// `no-lut`, `no-tonemap`; `no-height-fog` and `no-fog-volumes` for one
+/// kind of fog only), for comparisons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct PostSwitches {
     pub enabled: bool,
+    /// Both kinds of fog (`no-fog`).
     pub fog: bool,
+    /// The exponential height fog (`no-height-fog`).
+    pub height_fog: bool,
+    /// The fog volumes (`no-fog-volumes`).
+    pub fog_volumes: bool,
     pub bloom: bool,
     pub lut: bool,
     pub tonemap: bool,
@@ -135,6 +143,8 @@ impl Default for PostSwitches {
         Self {
             enabled: true,
             fog: true,
+            height_fog: true,
+            fog_volumes: true,
             bloom: true,
             lut: true,
             tonemap: true,
@@ -151,6 +161,8 @@ impl PostSwitches {
             match word.to_ascii_lowercase().as_str() {
                 "off" | "0" | "false" => s.enabled = false,
                 "no-fog" => s.fog = false,
+                "no-height-fog" => s.height_fog = false,
+                "no-fog-volumes" => s.fog_volumes = false,
                 "no-bloom" => s.bloom = false,
                 "no-lut" => s.lut = false,
                 "no-tonemap" => s.tonemap = false,
@@ -506,6 +518,21 @@ fn uniform_for(
     u
 }
 
+/// Which kinds of fog are drawn: (height fog, fog volumes). `allowed` is
+/// `--no-fog` and `ASAMU_POST=no-fog` together; the level must have the
+/// kind, and its own comparison switch must not leave it out.
+fn fog_parts(
+    allowed: bool,
+    sw: PostSwitches,
+    has_height_fog: bool,
+    has_volumes: bool,
+) -> (bool, bool) {
+    (
+        allowed && sw.height_fog && has_height_fog,
+        allowed && sw.fog_volumes && has_volumes,
+    )
+}
+
 /// Puts the level's fog volumes into the uniform, in blending order for
 /// this camera position.
 fn set_fog_volumes(
@@ -663,8 +690,8 @@ fn apply_atmosphere(
     // `--no-fog` and `ASAMU_POST=no-fog` turn off the height fog and the
     // fog volumes alike.
     let fog_allowed = sw.fog && level.settings.fog;
-    let fog_on = fog_allowed && a.fog.is_some();
-    let volumes_on = fog_allowed && !a.fog_volumes.is_empty();
+    let (fog_on, volumes_on) =
+        fog_parts(fog_allowed, sw, a.fog.is_some(), !a.fog_volumes.is_empty());
     let mut uniform = uniform_for(a, uber.as_ref(), camera_ue, scale, fog_on, lut_on);
     if volumes_on {
         set_fog_volumes(&mut uniform, &a.fog_volumes, camera_ue, scale);
@@ -791,6 +818,32 @@ mod tests {
         let s = PostSwitches::parse("no-fog, no-LUT,unknown");
         assert!(s.enabled && !s.fog && !s.lut && s.bloom && s.tonemap);
         assert!(!PostSwitches::parse("no-bloom,no-tonemap").tonemap);
+        // One kind of fog only; `no-fog` stays the switch for both.
+        let s = PostSwitches::parse("no-height-fog");
+        assert!(s.fog && !s.height_fog && s.fog_volumes);
+        let s = PostSwitches::parse("No-Fog-Volumes");
+        assert!(s.fog && s.height_fog && !s.fog_volumes);
+        let s = PostSwitches::parse("no-fog");
+        assert!(!s.fog && s.height_fog && s.fog_volumes);
+    }
+
+    #[test]
+    fn each_kind_of_fog_has_its_own_switch() {
+        let all = PostSwitches::default();
+        // A level with both kinds draws both; one it lacks is never drawn.
+        assert_eq!(fog_parts(true, all, true, true), (true, true));
+        assert_eq!(fog_parts(true, all, false, true), (false, true));
+        assert_eq!(fog_parts(true, all, true, false), (true, false));
+        assert_eq!(fog_parts(true, all, false, false), (false, false));
+        // `--no-fog` / `no-fog` (not allowed): neither, whatever else is set.
+        assert_eq!(fog_parts(false, all, true, true), (false, false));
+        // The comparison switches leave out one kind and keep the other.
+        let no_height = PostSwitches::parse("no-height-fog");
+        assert_eq!(fog_parts(true, no_height, true, true), (false, true));
+        let no_volumes = PostSwitches::parse("no-fog-volumes");
+        assert_eq!(fog_parts(true, no_volumes, true, true), (true, false));
+        let neither = PostSwitches::parse("no-height-fog,no-fog-volumes");
+        assert_eq!(fog_parts(true, neither, true, true), (false, false));
     }
 
     #[test]

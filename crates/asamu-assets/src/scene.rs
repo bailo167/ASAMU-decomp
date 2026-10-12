@@ -2505,4 +2505,63 @@ pub(crate) mod tests {
                 .all(|m| !is_fog_volume_actor_class(&m.actor_class))
         );
     }
+
+    /// A scene converted before the `atmosphere` block existed, and one
+    /// whose block lists a fog volume without the material and mesh values
+    /// (the block's first shape): both load. The volume's cube is not a
+    /// surface in either, and what the block does not say is absent, not an
+    /// error (the renderer then draws no fog for that volume and says so).
+    #[test]
+    fn conversions_without_the_fog_volume_values_still_load() {
+        let ident = "[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]";
+        let actors = format!(
+            r#""actors": [
+                 {{"slot": 1, "name": "FogVolumeConstantDensityInfo_1",
+                   "class": "Engine.FogVolumeConstantDensityInfo", "kind": "other", "hidden": false,
+                   "components": [
+                     {{"name": "Auto", "class": "Engine.StaticMeshComponent", "kind": "static_mesh",
+                       "local_to_world": {ident}, "static_mesh": "EngineMeshes.Cube",
+                       "materials": ["Map.FogVolumeMI_0"]}}]}},
+                 {{"slot": 2, "name": "ExponentialHeightFog_0",
+                   "class": "Engine.ExponentialHeightFog", "kind": "other", "hidden": true,
+                   "components": []}}]"#
+        );
+        // No block at all.
+        let old = format!(r#"{{"format": "asamu-scene", "version": 1, "package": "M", {actors}}}"#);
+        let s = LevelScene::from_json(Path::new("x"), old.as_bytes()).unwrap();
+        assert_eq!(s.atmosphere.block_version, None);
+        assert_eq!(s.atmosphere.block_error, None);
+        assert!(s.atmosphere.fog_volumes.is_empty());
+        assert!(s.atmosphere.height_fogs.is_empty());
+        assert!(s.meshes.is_empty(), "the cube is never a surface");
+        assert_eq!(s.stats.fog_volume_meshes, 1);
+        // The actors are still counted, which is how a reader can tell
+        // that fog data is missing rather than absent from the level.
+        assert_eq!(
+            s.stats.atmosphere_actors.get("ExponentialHeightFog"),
+            Some(&1)
+        );
+        // A block whose volume has only the component values.
+        let partial = format!(
+            r#"{{"format": "asamu-scene", "version": 1, "package": "M", {actors},
+                 "atmosphere": {{"version": 1, "fog_volumes": [
+                   {{"slot": 1, "actor": "FogVolumeConstantDensityInfo_1",
+                     "actor_class": "Engine.FogVolumeConstantDensityInfo",
+                     "location": [1, 2, 3], "component": "C",
+                     "class": "Engine.FogVolumeConstantDensityComponent",
+                     "params": {{"Density": 0.001}}}}]}}}}"#
+        );
+        let s = LevelScene::from_json(Path::new("x"), partial.as_bytes()).unwrap();
+        assert_eq!(s.atmosphere.block_version, Some(1));
+        assert_eq!(s.atmosphere.block_error, None);
+        assert_eq!(s.atmosphere.fog_volumes.len(), 1);
+        let v = &s.atmosphere.fog_volumes[0];
+        assert_eq!(v.density.class_name(), "FogVolumeConstantDensityComponent");
+        assert_eq!(v.density.params.f32("Density"), Some(0.001));
+        assert_eq!(v.material, None);
+        assert!(v.material_vectors.is_empty());
+        assert_eq!(v.mesh, None);
+        assert_eq!(v.ue_mesh_to_world, None);
+        assert!(s.meshes.is_empty());
+    }
 }
