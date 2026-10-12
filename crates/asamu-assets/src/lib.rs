@@ -10,6 +10,9 @@
 //!   (converted data is treated as untrusted input; nothing here panics).
 //! - [`manifest`]: texture and mesh manifests (`asamu-import textures` /
 //!   `meshes`).
+//! - [`simple_collision`]: the simple-collision shapes of a mesh
+//!   (`<Name>.collision.json`, written beside the glTF files since mesh
+//!   manifest version 2).
 //! - [`material_manifest`]: `materials/materials.json` (`asamu-import
 //!   materials`), and [`materials`]: the render material model with a
 //!   graceful fallback when no converted description exists.
@@ -44,6 +47,7 @@ pub mod material_manifest;
 pub mod materials;
 pub mod particles;
 pub mod scene;
+pub mod simple_collision;
 pub mod transform;
 
 pub use error::{AssetError, AssetResult};

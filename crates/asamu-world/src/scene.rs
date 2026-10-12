@@ -47,9 +47,11 @@
 //! zero-extent traces (grapple) with `BlockZeroExtent` (TENTATIVE: stock
 //! trace rules).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
+use asamu_assets::manifest::{MESH_MANIFEST_VERSION, MeshManifest, SimpleCollisionEntry};
+use asamu_assets::simple_collision::{MAX_SIMPLE_COLLISION_BYTES, SimpleCollision};
 use glam::Vec3;
 use serde::Deserialize;
 use serde_json::Value;
@@ -58,8 +60,10 @@ use thiserror::Error;
 use crate::SurfaceTag;
 use crate::collision::{
     Affine, CollisionClass, CollisionScene, CollisionSceneBuilder, Instance, InstanceInfo,
+    InstanceOptions, PrimitiveKind,
 };
 use crate::gameplay::{self, SceneActors};
+use crate::simple_body::{self, Body};
 
 /// `format` of a scene file.
 pub const SCENE_FORMAT: &str = "asamu-scene";
@@ -800,6 +804,28 @@ pub struct LoadStats {
     pub bsp_triangles: usize,
     /// Convex hulls of blocking volumes.
     pub blocking_hulls: usize,
+    /// Static-mesh components that would block the pawn by their flags ...
+    pub pawn_components: usize,
+    /// ... which the pawn collides with at the simple body of their mesh
+    /// (box switch on, a body with a convex element or a box).
+    pub pawn_simple: usize,
+    /// ... at the mesh's triangles, because the mesh stores the box switch
+    /// `false`.
+    pub pawn_triangles: usize,
+    /// ... and not at all: the box switch is on and the mesh has no body, or
+    /// a body without a shape a swept trace can hit.
+    pub pawn_none: usize,
+    /// ... at the mesh's triangles only because the simple-collision data is
+    /// missing (a mesh manifest older than version 2, or an unreadable
+    /// shapes file): approximate.
+    pub pawn_approximate: usize,
+    /// Simple-body shapes placed (instances).
+    pub simple_parts: usize,
+    /// Volumes with a `bEnabled` switch (`DynamicBlockingVolume`) that have
+    /// blocking hulls ...
+    pub switchable_volumes: usize,
+    /// ... of which start with their collision switched off.
+    pub disabled_volumes: usize,
 }
 
 /// A converted map ready for play.
@@ -1338,14 +1364,174 @@ pub fn is_dynamic_kind(kind: &str) -> bool {
     matches!(kind, "falling_rock" | "falling_when_grappled_rock")
 }
 
+/// What a trace against a static mesh is tested against (MESHES.md, "Simple
+/// collision").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceRoute {
+    /// The mesh's collision triangles.
+    Triangles,
+    /// The shapes of the mesh's simple body.
+    Body,
+    /// Nothing: the switch sends the trace to a body the mesh does not have.
+    Nothing,
+}
+
+/// Where a mesh's switches send the original's traces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeshRoutes {
+    /// Swept (non-zero-extent) traces: the pawn's moves.
+    pub pawn: TraceRoute,
+    /// Zero-extent traces that are not bullet traces. (Bullet traces, the
+    /// grapple's among them, always go to the triangles.)
+    pub line: TraceRoute,
+    /// The routes come from the mesh's record. `false`: the converted data
+    /// has none (a mesh manifest older than version 2) and both routes are
+    /// the triangles, which is what this loader did before the simple
+    /// collision was known and is approximate for the pawn.
+    pub recorded: bool,
+}
+
+/// The routes of a mesh with the simple-collision record `record`
+/// (`docs/PARITY_FINDINGS.md` V3, P1, P2): a trace goes to the simple body
+/// when its switch is on (`UseSimpleBoxCollision` for swept traces,
+/// `UseSimpleLineCollision` for line traces), and then a mesh without a body
+/// is not hit at all; with the switch stored `false` it goes to the
+/// triangles.
+#[must_use]
+pub fn mesh_routes(record: Option<&SimpleCollisionEntry>) -> MeshRoutes {
+    let Some(r) = record else {
+        return MeshRoutes {
+            pawn: TraceRoute::Triangles,
+            line: TraceRoute::Triangles,
+            recorded: false,
+        };
+    };
+    let route = |switch: bool| {
+        if !switch {
+            TraceRoute::Triangles
+        } else if r.has_body_setup {
+            TraceRoute::Body
+        } else {
+            TraceRoute::Nothing
+        }
+    };
+    MeshRoutes {
+        pawn: route(r.use_simple_box_collision),
+        line: route(r.use_simple_line_collision),
+        recorded: true,
+    }
+}
+
+/// `bEnabled` of a volume that has that switch (`Engine.DynamicBlockingVolume`
+/// and anything derived from it: the only blocking volumes with the
+/// property), else `None`.
+///
+/// At the start of play such a volume sets whether it collides at all from
+/// `bEnabled` and keeps its stored `bBlockActors` (CONFIRMED: the two
+/// arguments of the one call its start function makes, read locally from the
+/// user's `Engine.u`), so one with `bEnabled = false` blocks nothing until
+/// level script switches it (`docs/PARITY_FINDINGS.md` P5).
+#[must_use]
+pub fn switchable_volume(actor: &ActorJson) -> Option<bool> {
+    (actor.kind == "blocking_volume")
+        .then(|| param(&actor.params, "bEnabled").and_then(Value::as_bool))
+        .flatten()
+}
+
+/// Switches the collision of the actor `actor` on or off: every one of its
+/// instances, static or in `dynamic` (see [`Instance::enabled`]). Returns how
+/// many instances the actor has; 0 means it has no collision here.
+///
+/// This is what level script does to a volume: a Kismet toggle action's
+/// "turn on" input makes the actor collide, "turn off" stops it and "toggle"
+/// flips it, each keeping the actor's block flag (CONFIRMED for the volume
+/// classes: the handler of `Engine.Volume`, read locally from the user's
+/// `Engine.u`). Use [`actor_collision`] for the present state when flipping.
+pub fn set_actor_collision(
+    collision: &mut CollisionScene,
+    dynamic: &mut [Instance],
+    actor: u32,
+    enabled: bool,
+) -> usize {
+    let mut n = collision.set_actor_enabled(actor, enabled);
+    for inst in dynamic.iter_mut().filter(|i| i.info.actor == Some(actor)) {
+        inst.enabled = enabled;
+        n += 1;
+    }
+    n
+}
+
+/// Whether the collision of the actor `actor` is switched on: the switch of
+/// its first instance (they are switched together). `None` when the actor
+/// has no instance.
+#[must_use]
+pub fn actor_collision(
+    collision: &CollisionScene,
+    dynamic: &[Instance],
+    actor: u32,
+) -> Option<bool> {
+    collision
+        .statics()
+        .iter()
+        .chain(dynamic)
+        .find(|i| i.info.actor == Some(actor))
+        .map(|i| i.enabled)
+}
+
+impl LoadedMap {
+    /// [`set_actor_collision`] on this map's own static and dynamic
+    /// instances. A game layer that keeps the dynamic instances elsewhere
+    /// calls the free function with its list.
+    pub fn set_actor_collision(&mut self, actor: u32, enabled: bool) -> usize {
+        set_actor_collision(&mut self.collision, &mut self.dynamic, actor, enabled)
+    }
+
+    /// [`actor_collision`] on this map's own instances.
+    #[must_use]
+    pub fn actor_collision(&self, actor: u32) -> Option<bool> {
+        actor_collision(&self.collision, &self.dynamic, actor)
+    }
+
+    /// The actors whose collision is switched off (volumes that start with
+    /// `bEnabled = false`, and whatever was switched since).
+    #[must_use]
+    pub fn actors_without_collision(&self) -> BTreeSet<u32> {
+        self.collision
+            .statics()
+            .iter()
+            .chain(&self.dynamic)
+            .filter(|i| !i.enabled)
+            .filter_map(|i| i.info.actor)
+            .collect()
+    }
+}
+
+/// One instance a component is placed as.
+#[derive(Clone, Copy, Debug)]
+struct Placement {
+    mesh: u32,
+    to_world: Affine,
+    info: InstanceInfo,
+    kind: PrimitiveKind,
+    /// [`Instance::blocks_lines`].
+    lines: bool,
+    /// Swept with the original's axis rule ([`crate::collision::NativeRule`]).
+    native: bool,
+}
+
 /// Mesh cache: resolved manifest key → mesh index (or failure).
 struct MeshCache<'a> {
     source: &'a dyn DataSource,
     manifest: Option<MeshManifestJson>,
+    /// The simple-collision records of the same manifest.
+    records: Option<MeshManifest>,
     /// Lower-case manifest key → the first key (in key order) with that
     /// spelling (variant lookups ignore case without scanning the manifest).
     lower_keys: BTreeMap<String, String>,
     loaded: BTreeMap<String, Option<u32>>,
+    /// Resolved key → index into `bodies` (or failure).
+    body_index: BTreeMap<String, Option<usize>>,
+    bodies: Vec<Body>,
     total_triangles: usize,
 }
 
@@ -1384,32 +1570,47 @@ impl MeshCache<'_> {
         Some(path.to_owned())
     }
 
-    fn mesh(
+    /// [`Self::key`], with a warning (once per path) for a mesh the manifest
+    /// does not have.
+    fn resolve(
         &mut self,
-        builder: &mut CollisionSceneBuilder,
         path: &str,
         package: &str,
+        stats: &mut LoadStats,
+        warnings: &mut Vec<String>,
+    ) -> Option<String> {
+        let key = self.key(path, package);
+        if key.is_none() && self.manifest.is_some() && !self.loaded.contains_key(path) {
+            stats.meshes_failed += 1;
+            warnings.push(format!("static mesh {path} is not in the mesh manifest"));
+            self.loaded.insert(path.to_owned(), None);
+        }
+        key
+    }
+
+    /// The simple-collision record of the mesh `key`.
+    fn record(&self, key: &str) -> Option<&SimpleCollisionEntry> {
+        self.records.as_ref()?.simple_collision.get(key)
+    }
+
+    /// The collision triangles of the mesh `key` as a mesh of the builder.
+    fn triangles(
+        &mut self,
+        builder: &mut CollisionSceneBuilder,
+        key: &str,
         opts: &LoadOptions,
         stats: &mut LoadStats,
         warnings: &mut Vec<String>,
     ) -> Option<u32> {
-        let Some(key) = self.key(path, package) else {
-            if self.manifest.is_some() && !self.loaded.contains_key(path) {
-                stats.meshes_failed += 1;
-                warnings.push(format!("static mesh {path} is not in the mesh manifest"));
-                self.loaded.insert(path.to_owned(), None);
-            }
-            return None;
-        };
-        if let Some(r) = self.loaded.get(&key) {
+        if let Some(r) = self.loaded.get(key) {
             return *r;
         }
         let m = self.manifest.as_ref()?;
-        let entry = m.meshes.get(&key)?;
+        let entry = m.meshes.get(key)?;
         let result = match load_mesh(self.source, entry, m.scale, opts) {
             Ok((_, t)) if t.is_empty() => {
                 stats.meshes_without_collision += 1;
-                self.loaded.insert(key, None);
+                self.loaded.insert(key.to_owned(), None);
                 return None;
             }
             Ok((v, t)) if self.charge(t.len(), opts) => builder.add_mesh(v, t),
@@ -1426,9 +1627,172 @@ impl MeshCache<'_> {
             Some(_) => stats.meshes_loaded += 1,
             None => stats.meshes_failed += 1,
         }
-        self.loaded.insert(key, result);
+        self.loaded.insert(key.to_owned(), result);
         result
     }
+
+    /// Reads and builds the simple body of the mesh `key`.
+    fn load_body(
+        &mut self,
+        builder: &mut CollisionSceneBuilder,
+        key: &str,
+        opts: &LoadOptions,
+    ) -> Result<Body, String> {
+        let record = self.record(key).ok_or("no simple-collision record")?;
+        let rel = record
+            .safe_shapes()
+            .map_err(|e| e.to_string())?
+            .ok_or("the record names no shapes file")?;
+        let path = format!("meshes/{rel}");
+        let limit = opts.max_file_bytes.min(MAX_SIMPLE_COLLISION_BYTES);
+        let data = self.source.read(&path, limit).map_err(|e| e.to_string())?;
+        let shapes =
+            SimpleCollision::from_json(Path::new(&path), &data).map_err(|e| e.to_string())?;
+        let mut total = self.total_triangles;
+        let max = opts.max_total_triangles;
+        let body =
+            simple_body::build_body(builder, &shapes, &mut |n| match total.checked_add(n) {
+                Some(t) if t <= max => {
+                    total = t;
+                    true
+                }
+                _ => false,
+            })?;
+        self.total_triangles = total;
+        Ok(body)
+    }
+
+    /// The simple body of the mesh `key` (an index into `self.bodies`), or
+    /// `None` with a warning (once) when its shapes cannot be used.
+    fn body(
+        &mut self,
+        builder: &mut CollisionSceneBuilder,
+        key: &str,
+        opts: &LoadOptions,
+        warnings: &mut Vec<String>,
+    ) -> Option<usize> {
+        if let Some(r) = self.body_index.get(key) {
+            return *r;
+        }
+        let result = match self.load_body(builder, key, opts) {
+            Ok(body) => {
+                if body.skipped > 0 {
+                    warnings.push(format!(
+                        "{key}: {} simple-collision shapes are unusable and were left out",
+                        body.skipped
+                    ));
+                }
+                self.bodies.push(body);
+                Some(self.bodies.len() - 1)
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "{key}: simple collision unusable ({e}); its triangles are used instead, \
+                     which is approximate"
+                ));
+                None
+            }
+        };
+        self.body_index.insert(key.to_owned(), result);
+        result
+    }
+}
+
+/// The instances a blocking static-mesh component is placed as, by the
+/// routes of its mesh (see [`mesh_routes`]): the triangles for whatever goes
+/// to them, and the shapes of the simple body for the rest. Bullet traces
+/// (`traces`) always go to the triangles.
+#[allow(clippy::too_many_arguments)]
+fn component_placements(
+    cache: &mut MeshCache<'_>,
+    builder: &mut CollisionSceneBuilder,
+    key: &str,
+    to_world: Affine,
+    base: InstanceInfo,
+    opts: &LoadOptions,
+    stats: &mut LoadStats,
+    warnings: &mut Vec<String>,
+) -> Vec<Placement> {
+    let (pawn, traces) = (base.blocks_pawn, base.blocks_traces);
+    let mut routes = mesh_routes(cache.record(key));
+    let needs_body =
+        (pawn && routes.pawn == TraceRoute::Body) || (traces && routes.line == TraceRoute::Body);
+    let body = if needs_body {
+        cache.body(builder, key, opts, warnings)
+    } else {
+        None
+    };
+    if needs_body && body.is_none() {
+        // Unusable shapes: fall back to the triangles rather than to nothing.
+        if routes.pawn == TraceRoute::Body {
+            routes.pawn = TraceRoute::Triangles;
+        }
+        if routes.line == TraceRoute::Body {
+            routes.line = TraceRoute::Triangles;
+        }
+        routes.recorded = false;
+    }
+    let parts: &[simple_body::BodyPart] = body
+        .and_then(|b| cache.bodies.get(b))
+        .map_or(&[], |b| b.parts.as_slice());
+    let parts = parts.to_vec();
+    if pawn {
+        stats.pawn_components += 1;
+        match routes.pawn {
+            TraceRoute::Body if !parts.is_empty() => stats.pawn_simple += 1,
+            TraceRoute::Body | TraceRoute::Nothing => stats.pawn_none += 1,
+            TraceRoute::Triangles if routes.recorded => stats.pawn_triangles += 1,
+            TraceRoute::Triangles => stats.pawn_approximate += 1,
+        }
+    }
+    if traces
+        && routes.line == TraceRoute::Body
+        && body
+            .and_then(|b| cache.bodies.get(b))
+            .is_some_and(|b| b.untraced > 0)
+    {
+        warnings.push(format!(
+            "{key}: line traces go to a simple body with spheres or capsules, which are not traced"
+        ));
+    }
+    let mut out = Vec::new();
+    let tri_pawn = pawn && routes.pawn == TraceRoute::Triangles;
+    let tri_lines = traces && routes.line == TraceRoute::Triangles;
+    if (tri_pawn || traces)
+        && let Some(mesh) = cache.triangles(builder, key, opts, stats, warnings)
+    {
+        out.push(Placement {
+            mesh,
+            to_world,
+            info: InstanceInfo {
+                blocks_pawn: tri_pawn,
+                blocks_traces: traces,
+                ..base
+            },
+            kind: PrimitiveKind::TriangleMesh,
+            lines: tri_lines,
+            native: true,
+        });
+    }
+    let body_pawn = pawn && routes.pawn == TraceRoute::Body;
+    let body_lines = traces && routes.line == TraceRoute::Body;
+    if body_pawn || body_lines {
+        for part in parts {
+            out.push(Placement {
+                mesh: part.mesh,
+                to_world: part.local.then(&to_world),
+                info: InstanceInfo {
+                    blocks_pawn: body_pawn,
+                    blocks_traces: false,
+                    ..base
+                },
+                kind: PrimitiveKind::SimpleHull,
+                lines: body_lines,
+                native: part.convex,
+            });
+        }
+    }
+    out
 }
 
 /// Loads `map` (case-insensitive) and its streamed sub-levels from `source`.
@@ -1515,9 +1879,34 @@ pub fn load_map(
         }
     };
 
+    let mut records: Option<MeshManifest> = None;
     let manifest = match source.read("meshes/manifest.json", opts.max_file_bytes) {
         Ok(data) => match parse_json::<MeshManifestJson>("meshes/manifest.json", &data) {
-            Ok(m) => Some(m),
+            Ok(m) => {
+                // The same file through the asset crate's reader, for the
+                // simple-collision records (mesh manifest version 2).
+                match MeshManifest::from_json(Path::new("meshes/manifest.json"), &data) {
+                    Ok(r) => {
+                        if r.version < MESH_MANIFEST_VERSION
+                            || (r.simple_collision.is_empty() && !r.is_empty())
+                        {
+                            warnings.push(format!(
+                                "meshes/manifest.json (version {}) has no simple-collision data: \
+                                 the pawn collides with every mesh's triangles, which is \
+                                 approximate (the original collides it with the meshes' simple \
+                                 bodies, and not at all with a mesh that has none); convert the \
+                                 meshes again with the current `asamu-import`",
+                                r.version
+                            ));
+                        }
+                        records = Some(r);
+                    }
+                    Err(e) => warnings.push(format!(
+                        "no simple-collision data ({e}): pawn collision is approximate"
+                    )),
+                }
+                Some(m)
+            }
             Err(e) => {
                 warnings.push(e.to_string());
                 None
@@ -1539,12 +1928,15 @@ pub fn load_map(
     let mut cache = MeshCache {
         source,
         manifest,
+        records,
         lower_keys,
         loaded: BTreeMap::new(),
+        body_index: BTreeMap::new(),
+        bodies: Vec::new(),
         total_triangles: 0,
     };
     let mut builder = CollisionSceneBuilder::new();
-    let mut pending_dynamic: Vec<(u32, u32, Affine, InstanceInfo)> = Vec::new();
+    let mut pending_dynamic: Vec<Placement> = Vec::new();
     let mut bodies: Vec<DynamicBody> = Vec::new();
     let mut actors = SceneActors::default();
 
@@ -1616,31 +2008,12 @@ pub fn load_map(
                     stats.components_without_mesh += 1;
                     continue;
                 };
-                let Some(mesh) = cache.mesh(
-                    &mut builder,
-                    path,
-                    &scene.package,
-                    opts,
-                    &mut stats,
-                    &mut warnings,
-                ) else {
+                let Some(key) = cache.resolve(path, &scene.package, &mut stats, &mut warnings)
+                else {
                     continue;
                 };
                 let to_world = Affine::from_row_matrix(&comp.local_to_world).then(&offset);
-                // A placement without an inverse is baked into a world-space
-                // copy of the mesh (see `CollisionSceneBuilder::instance`),
-                // which costs its triangles again.
-                if !dynamic
-                    && to_world.inverse().is_none()
-                    && !cache.charge(builder.mesh(mesh).map_or(0, |m| m.triangles().len()), opts)
-                {
-                    warnings.push(format!(
-                        "{}.{}: triangle budget exhausted",
-                        actor.name, comp.name
-                    ));
-                    continue;
-                }
-                let inst_info = InstanceInfo {
+                let base = InstanceInfo {
                     actor: Some(id),
                     class,
                     tag,
@@ -1649,19 +2022,67 @@ pub fn load_map(
                     blocks_traces: traces,
                     sublevel: level,
                 };
+                let placements = component_placements(
+                    &mut cache,
+                    &mut builder,
+                    &key,
+                    to_world,
+                    base,
+                    opts,
+                    &mut stats,
+                    &mut warnings,
+                );
                 if dynamic {
                     match actor_affine.inverse() {
                         Some(inv) => {
-                            let relative = to_world.then(&inv);
-                            pending_dynamic.push((id, mesh, to_world, inst_info));
-                            body.parts.push((usize::MAX, relative));
+                            for p in placements {
+                                body.parts.push((usize::MAX, p.to_world.then(&inv)));
+                                pending_dynamic.push(p);
+                            }
                         }
                         None => warnings.push(format!("{}: singular actor transform", actor.name)),
                     }
-                } else if builder.add_static(mesh, to_world, inst_info).is_some() {
+                    continue;
+                }
+                let mut placed = false;
+                for p in placements {
+                    // A placement without an inverse is baked into a
+                    // world-space copy of the mesh (see
+                    // `CollisionSceneBuilder::instance`), which costs its
+                    // triangles again.
+                    let invertible = p.to_world.inverse().is_some();
+                    if !invertible
+                        && !cache.charge(
+                            builder.mesh(p.mesh).map_or(0, |m| m.triangles().len()),
+                            opts,
+                        )
+                    {
+                        warnings.push(format!(
+                            "{}.{}: triangle budget exhausted",
+                            actor.name, comp.name
+                        ));
+                        continue;
+                    }
+                    let options = InstanceOptions::of_kind(p.kind);
+                    match builder.add_static_with(p.mesh, p.to_world, p.info, options) {
+                        Some(index) => {
+                            if let Some(inst) = builder.static_mut(index) {
+                                inst.blocks_lines = p.lines;
+                            }
+                            if p.native && invertible {
+                                builder.set_static_native(index, None);
+                            }
+                            if p.kind == PrimitiveKind::SimpleHull {
+                                stats.simple_parts += 1;
+                            }
+                            placed = true;
+                        }
+                        None => warnings
+                            .push(format!("{}.{}: unusable transform", actor.name, comp.name)),
+                    }
+                }
+                if placed {
                     stats.placed_components += 1;
-                } else {
-                    warnings.push(format!("{}.{}: unusable transform", actor.name, comp.name));
                 }
             }
             if dynamic && !body.parts.is_empty() {
@@ -1671,10 +2092,31 @@ pub fn load_map(
             // Blocking brush collision (blocking volumes).
             if let Some(vol) = &actor.volume {
                 let brush = actor.components.iter().find(|c| c.kind == "brush");
-                let blocking = brush.map(|c| component_blocking(actor, &eff, c));
+                // A volume with the `bEnabled` switch collides or not by that
+                // switch, whatever its stored actor flag says; its hulls are
+                // placed either way and start switched off when it is false.
+                let switch = switchable_volume(actor);
+                let flags = if switch.is_some() {
+                    EffectiveCollision {
+                        collide: true,
+                        ..eff
+                    }
+                } else {
+                    eff
+                };
+                let blocking = brush.map(|c| component_blocking(actor, &flags, c));
                 if let Some((pawn, traces)) = blocking
                     && (pawn || traces)
                 {
+                    let options = InstanceOptions {
+                        kind: Some(PrimitiveKind::BrushHull),
+                        enabled: switch.unwrap_or(true),
+                    };
+                    // The space the original sweeps the hulls in: the brush
+                    // component's own (the hulls are stored in world space).
+                    let element_to_world =
+                        brush.map(|c| Affine::from_row_matrix(&c.local_to_world).then(&offset));
+                    let mut hulls = 0usize;
                     for hull in &vol.hulls {
                         if !cache.charge(hull.triangles.len(), opts) {
                             warnings.push(format!("{}: triangle budget exhausted", actor.name));
@@ -1683,8 +2125,7 @@ pub fn load_map(
                         let verts: Vec<Vec3> =
                             hull.vertices.iter().map(|v| v3(*v) + info.offset).collect();
                         if let Some(m) = builder.add_convex_mesh(verts, hull.triangles.clone()) {
-                            stats.blocking_hulls += 1;
-                            builder.add_static(
+                            let index = builder.add_static_with(
                                 m,
                                 Affine::IDENTITY,
                                 InstanceInfo {
@@ -1696,7 +2137,23 @@ pub fn load_map(
                                     blocks_traces: traces,
                                     sublevel: level,
                                 },
+                                options,
                             );
+                            if let Some(index) = index {
+                                stats.blocking_hulls += 1;
+                                hulls += 1;
+                                if element_to_world.is_some_and(|t| t.inverse().is_some()) {
+                                    builder.set_static_native(index, element_to_world);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(enabled) = switch
+                        && hulls > 0
+                    {
+                        stats.switchable_volumes += 1;
+                        if !enabled {
+                            stats.disabled_volumes += 1;
                         }
                     }
                 }
@@ -1711,11 +2168,19 @@ pub fn load_map(
     let mut next = pending_dynamic.into_iter();
     for body in &mut bodies {
         for part in &mut body.parts {
-            let Some((_, mesh, to_world, info)) = next.next() else {
+            let Some(p) = next.next() else {
                 break;
             };
-            match collision.dynamic_instance(mesh, to_world, info) {
-                Some(inst) => {
+            let options = InstanceOptions::of_kind(p.kind);
+            match collision.dynamic_instance_with(p.mesh, p.to_world, p.info, options) {
+                Some(mut inst) => {
+                    inst.blocks_lines = p.lines;
+                    if p.native {
+                        collision.set_native(&mut inst, None);
+                    }
+                    if p.kind == PrimitiveKind::SimpleHull {
+                        stats.simple_parts += 1;
+                    }
                     part.0 = dynamic.len();
                     dynamic.push(inst);
                 }
@@ -1724,7 +2189,27 @@ pub fn load_map(
         }
         body.parts.retain(|p| p.0 != usize::MAX);
     }
-    gameplay::finish_actors(&mut actors, &collision, &dynamic, &bodies);
+    // The sizes of gameplay actors come from the geometry that is drawn and
+    // traced (triangles, hulls of volumes), as before simple bodies were
+    // placed; an actor that has nothing but simple-body shapes is sized by
+    // those.
+    let sized: BTreeSet<u32> = collision
+        .statics()
+        .iter()
+        .chain(&dynamic)
+        .filter(|i| i.kind != PrimitiveKind::SimpleHull)
+        .filter_map(|i| i.info.actor)
+        .collect();
+    let sizing: Vec<Instance> = collision
+        .statics()
+        .iter()
+        .chain(&dynamic)
+        .filter(|i| {
+            i.kind != PrimitiveKind::SimpleHull || i.info.actor.is_some_and(|a| !sized.contains(&a))
+        })
+        .cloned()
+        .collect();
+    gameplay::finish_actors(&mut actors, &CollisionScene::empty(), &sizing, &bodies);
 
     Ok(LoadedMap {
         map: main_name,

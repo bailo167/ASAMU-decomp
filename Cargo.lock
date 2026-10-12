@@ -474,6 +474,7 @@ dependencies = [
 name = "asamu-world"
 version = "0.0.1"
 dependencies = [
+ "asamu-assets",
  "asamu-core",
  "glam 0.34.1",
  "serde",

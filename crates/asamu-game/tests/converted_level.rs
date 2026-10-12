@@ -109,9 +109,22 @@ fn spawns_at_the_player_start_lands_and_walks_on_triangles() {
     for _ in 0..30 {
         g.tick(&idle()).unwrap();
     }
-    // Native walking hovers 2.15 uu above the floor (NATIVE_PHYSICS.md 3.x).
+    // Where the drop leaves the pawn (NATIVE_PHYSICS.md 3.3, 4.4, 10.2). Its
+    // bottom starts 36 uu above the floor and falls from rest at 60 Hz:
+    // falling step k moves it (2k − 1)·520/3600 uu, n steps n²·0.14444 uu,
+    // so it meets the floor in step 16 (15 steps: 32.5 uu), a move of
+    // 31 × 0.14444 = 4.478 uu. The original reports that hit a tenth of the
+    // move short (the pull-back of a trace between 1 and 10 uu), so the pawn
+    // lands 0.4478 uu above the floor. The forced walking floor check then
+    // reports the floor 1.0 uu nearer, clamped to a distance of 0, and moves
+    // the pawn up by the whole 2.15: 2.5978 uu, where it stays while it
+    // stands still. (Before the port applied the pull-back: 2.15.)
     let hover = g.player().position.z - 44.0;
-    assert!((hover - 2.15).abs() < 1e-3, "hover {hover}");
+    let landing_move = 31.0 * 520.0 / 3600.0;
+    assert!(
+        (hover - (2.15 + 0.1 * landing_move)).abs() < 1e-3,
+        "hover {hover}"
+    );
     for _ in 0..60 {
         g.tick(&forward()).unwrap();
     }
@@ -449,7 +462,12 @@ fn streamed_sub_level_brings_its_collision() {
     assert!(g.is_level_streamed("TheCore"));
     run_until(&mut g, idle(), 120, |_, g| g.player().grounded)
         .expect("lands on the streamed floor");
-    assert!((g.player().position.z - 46.15).abs() < 0.5);
+    // The fall from 500 ends with a move longer than 10 uu (about 970 uu/s),
+    // so the landing is reported the capped 1.0 uu short of the floor
+    // (NATIVE_PHYSICS.md 10.2); the walking floor check of the same tick
+    // reports that as 0 and moves the pawn up 2.15: its centre is at
+    // 44 + 1.0 + 2.15 = 47.15 (46.15 before the port applied the pull-back).
+    assert!((g.player().position.z - 47.15).abs() < 0.5);
     assert!(!g.set_level_streamed("nope", true));
 }
 

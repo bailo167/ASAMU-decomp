@@ -1168,12 +1168,23 @@ mod tests {
             }
             let settled = *g.player();
             assert!(settled.grounded);
-            // Native walking hovers 2.15 uu above the floor.
+            // The start puts the pawn's bottom CONTACT_SKIN (0.05 uu) above
+            // the floor. The first walking floor check reports the floor
+            // 1.0 uu nearer than it is (the original's pull-back of a 20 uu
+            // trace against BSP-kind geometry: min(0.1 × 20, 1.0),
+            // NATIVE_PHYSICS.md 10.2), clamped to a distance of 0, and moves
+            // the pawn up by 2.15 less that: by the whole 2.15. Standing
+            // still it stays there, 2.20 uu above the floor (2.15 before the
+            // port applied the pull-back: 0.05 was reported as 0.05 and the
+            // rise was 2.10); walking takes it on to 3.15.
             let floor_z =
                 start.position.z - g.params().movement.capsule_half_height.value - CONTACT_SKIN;
             let hover =
                 settled.position.z - floor_z - g.params().movement.capsule_half_height.value;
-            assert!((hover - 2.15).abs() < 1e-3, "hover {hover}");
+            assert!(
+                (hover - (CONTACT_SKIN + 2.15)).abs() < 1e-3,
+                "hover {hover}"
+            );
             for i in 0..240 {
                 let mut input = forward();
                 input.jump_pressed = i % 60 == 0;

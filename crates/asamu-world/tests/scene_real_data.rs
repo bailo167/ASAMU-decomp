@@ -73,9 +73,11 @@ fn every_converted_map_loads() {
         if name.starts_with("AG-") {
             assert!(s.instance_triangles > 10_000, "{name}");
             assert_eq!(map.actors.player_starts.len(), 1, "{name}");
-            // Every placed mesh component was placed.
+            // Every placed mesh component was placed (a moving actor's
+            // component is one or more dynamic instances: its triangles and
+            // the shapes of its simple body).
             assert!(
-                map.stats.placed_components + map.dynamic.len() + map.stats.components_without_mesh
+                map.stats.placed_components + map.bodies.len() + map.stats.components_without_mesh
                     <= map.stats.blocking_components,
                 "{name}"
             );
