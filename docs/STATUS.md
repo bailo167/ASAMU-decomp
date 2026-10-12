@@ -2,7 +2,48 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-12 — Session 3: everything parked is merged, second wave of parity fixes running
+
+**Done**
+- The five branches parked at the end of Session 2 were each verified by an independent agent and merged into
+  `main` (`dcd3d3c`): the first wave of parity fixes (swept axis-aligned box, primitive kinds and an enabled
+  switch in the collision world; the engine's angle table, integer view angles and a `SetSpeed` entry point; the
+  reciprocal float form of the velocity update) and the four Windows-machine packages (hardened
+  `tools/dev/win_host.sh`, Windows test-suite fixes, the importer on the Windows build of the game with a
+  portable math module, the desk runner).
+- The whole suite now passes on Windows as well as on CI: 2,328 passed, 0 failed, 5 ignored, both with the game
+  install hidden (as on CI) and with the real install and a fresh conversion visible. The three "known and not
+  yet fixed" test failures of the previous entry are fixed.
+- A flaky recorder test (`test_markers`, timing-dependent) that turned one macOS CI run red was made sequential.
+- The Windows machine holds a complete, verified conversion made from the Windows install (12 of 12 stages,
+  13,407 files, mesh manifest version 2 with simple collision).
+
+**True now**
+- The first wave changed the collision *kernel* and the player's arithmetic, not yet what the simulation asks of
+  them: every comparison with the recordings still ends "diverged". No parity is claimed.
+- The second wave is in progress on the local branch `parity/wave2` (worktree
+  `.claude/worktrees/parity-wave2`, not pushed): the native hit pull-back and the box-shaped pawn in the movement
+  port, simple-collision bodies, per-mesh switches and switchable blocking volumes in the level world, the
+  bridge between them, `setspeed` from level script, the fall at level start, the Rust reader for the extended
+  recorder, and gated tests on the real recordings with a re-measurement. Nothing from it is merged until it is
+  verified.
+- The laptop's connection drops during long builds (Wi-Fi): long `win_host.sh` commands are simply repeated when
+  SSH exits 255, with `CARGO_BUILD_JOBS=16`.
+
+**Still open**
+- Needs the owner: a keyboard-and-mouse recording session on a quiet machine (`docs/PARITY_FINDINGS.md`
+  section 6), starting the desk runner once on the Windows machine, a short gameplay clip for the README, a try
+  of the Sandbox by hand, a real-controller test.
+- Rendering defects seen in screenshots (flat cyan surfaces, black boxes near some checkpoints, black cut-outs in
+  some foliage); actors hidden at level start are not drawn when shown later; on-screen text is ASCII-only.
+- The macOS recorder route has never recorded anything.
+
+**Next:** verify and merge the second wave; publish the first measured comparison table it produces, labelled
+exactly; then the next root causes that table names.
+
 ## 2026-10-10 — Session 2 wrap-up: where to pick up
+
+_Superseded by the entry above: the branches listed here are merged and the listed test failures are fixed._
 
 The session was stopped early (usage allowance), with two batches of agent work unfinished. `main` is clean,
 pushed and green in CI; nothing unverified was merged.
