@@ -129,12 +129,17 @@ fn native_step(rate: i32) -> i32 {
 /// 2^29 longer than 1/60 s); in whole numbers, so that nothing rounds here.
 /// Wrapped to 32 bits as a rotator's member is.
 fn designed_turn(rate: i32, ticks: i32) -> i32 {
-    assert_eq!(1.0_f32 / 60.0, 8_947_849.0 / 536_870_912.0);
     (i128::from(rate) * i128::from(ticks) * 8_947_849 / 536_870_912) as i32
 }
 
 #[test]
 fn the_designed_turns_of_the_level_s_rates() {
+    // The tick [`designed_turn`] counts with is the game's: the bits of the
+    // `f32` nearest 1/60 s are the exponent 121 (2^-6, so the 24 bits count
+    // in steps of 2^-29) and the 24 bits 8 947 849.
+    let bits = (1.0_f32 / 60.0).to_bits();
+    assert_eq!(bits >> 23, 121);
+    assert_eq!((bits & 0x7F_FFFF) | 0x80_0000, 8_947_849);
     // 2184 units/s are 36.4 units a tick: 36.4, 72.8, 109.2, 145.6, 182.0.
     let turns: Vec<i32> = (1..=5).map(|n| designed_turn(2184, n)).collect();
     assert_eq!(turns, [36, 72, 109, 145, 182]);

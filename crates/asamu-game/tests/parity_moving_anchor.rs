@@ -326,7 +326,6 @@ fn step(rate: i32) -> i32 {
 /// `f32` nearest 1/60 s, 8 947 849 / 2^29 (28 parts in 2^29 longer than
 /// 1/60 s); in whole numbers, so that nothing rounds here.
 fn designed_turn(rate: i32, ticks: i32) -> i32 {
-    assert_eq!(1.0_f32 / 60.0, 8_947_849.0 / 536_870_912.0);
     let turn = i128::from(rate) * i128::from(ticks) * 8_947_849 / 536_870_912;
     i32::try_from(turn).expect("a turn of these tests fits a rotator's member")
 }
@@ -340,6 +339,12 @@ fn the_steps_of_the_level_s_rates() {
 
 #[test]
 fn the_designed_turns_of_the_level_s_rates() {
+    // The tick [`designed_turn`] counts with is the game's: the bits of the
+    // `f32` nearest 1/60 s are the exponent 121 (2^-6, so the 24 bits count
+    // in steps of 2^-29) and the 24 bits 8 947 849.
+    let bits = (1.0_f32 / 60.0).to_bits();
+    assert_eq!(bits >> 23, 121);
+    assert_eq!((bits & 0x7F_FFFF) | 0x80_0000, 8_947_849);
     // 90 ticks, a second and a half: 9102 × 1.5 = 13 653, 4551 × 1.5 =
     // 6826.5 and 2184 × 1.5 = 3276 units (the `f32` tick adds less than a
     // thousandth of a unit), where 90 truncated steps are 13 590, 6750 and

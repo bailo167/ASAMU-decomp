@@ -124,7 +124,9 @@
 //! AG-ParadiseCave's merry-go-round, one on a track and one turned by its
 //! rate, part by 0.131 degrees a second, which the owner did not see in the
 //! original (at the recorded 78 frames a second that arm's step is 28.0002
-//! units and loses nothing). So the game turns each actor at the rate its
+//! units and loses nothing; what the level's own data leaves there, at any
+//! frame rate, is 16 units, 0.088 degrees, in each 30 s loop of the track:
+//! KISMET_RUNTIME.md §6). So the game turns each actor at the rate its
 //! level gives it ([`TurnRule::DesignedRate`], [`carried_rotation_step`]):
 //! a tick's step is the rate times the tick plus the fraction the ticks
 //! before left over, in whole units as before, and the fraction that is
@@ -5012,13 +5014,19 @@ mod tests {
         // The game's tick and the recording's frame of 12.8206 ms in turn,
         // at the rates of the level's rocks: the truncation of the rate
         // times the time that passed, whatever the ticks were.
-        let mixed = |n: usize| if n % 2 == 0 { TICK_60 } else { 0.012_820_6 };
+        let mixed = |n: usize| {
+            if n.is_multiple_of(2) {
+                TICK_60
+            } else {
+                0.012_820_6
+            }
+        };
         for rate in [9102, -4551, 2184, 59, -1] {
             let mut carry = [0.0; 3];
             let mut turned = 0;
             for n in 0..5000 {
                 turned += carried_rotation_step([rate, 0, 0], mixed(n), &mut carry)[0];
-                if n % 499 == 0 || n == 4999 {
+                if n.is_multiple_of(499) || n == 4999 {
                     let expected = designed_turn_over(rate, (0..=n).map(mixed));
                     assert_eq!(turned, expected, "{rate} units/s after {} ticks", n + 1);
                 }
