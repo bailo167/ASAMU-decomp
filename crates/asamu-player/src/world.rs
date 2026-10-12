@@ -519,6 +519,17 @@ pub trait CollisionWorld {
         None
     }
 
+    /// Current rotation of the tracked actor `id` as the original's integer
+    /// rotator `(pitch, yaw, roll)` (65 536 units per turn), if the world
+    /// knows it. An actor based on `id` turns about
+    /// [`Self::actor_location`] by the change of this rotation
+    /// ([`crate::grapple_gun::carried_by_base`]). The default knows no
+    /// rotation: such an actor only translates.
+    fn actor_rotation(&self, id: u32) -> Option<[i32; 3]> {
+        let _ = id;
+        None
+    }
+
     /// Sweeps the centre of the axis-aligned box with the half sizes
     /// `half_extents` from `start` to `end`: the original's pawn move and
     /// extent trace (`(21, 21, 44)` for the player's traces; a move widens X
@@ -1505,6 +1516,10 @@ impl<W: CollisionWorld> CollisionWorld for KindWorld<W> {
 
     fn actor_location(&self, id: u32) -> Option<Vec3> {
         self.world.actor_location(id)
+    }
+
+    fn actor_rotation(&self, id: u32) -> Option<[i32; 3]> {
+        self.world.actor_rotation(id)
     }
 
     fn sweep_box(&self, start: Vec3, end: Vec3, half_extents: Vec3) -> Option<TraceHit> {
