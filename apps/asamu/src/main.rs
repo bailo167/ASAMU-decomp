@@ -79,6 +79,7 @@ mod gamepad;
 mod hud;
 mod kismet;
 mod lightmaps;
+mod material_pictures;
 mod npc;
 mod particles;
 mod post;
