@@ -68,6 +68,8 @@ use asamu_world::scene::{self, DataSource, MemorySource};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use crate::command::TeleportTarget;
 use thiserror::Error;
 
 /// Id of the playground, as the stage list and the tools name it.
@@ -137,6 +139,9 @@ pub enum Look {
     /// The light on top of a landmark (no collision), one colour per
     /// direction from the hub: ahead, right, left, behind, the tower.
     Beacon(u8),
+    /// A mark set into the hub's floor (no collision) that points at a
+    /// landmark, in that landmark's colour.
+    Inlay(u8),
 }
 
 /// What a piece is to the simulation.
@@ -192,6 +197,18 @@ pub struct Station {
     pub yaw: f32,
     /// View pitch there, radians.
     pub pitch: f32,
+}
+
+impl Station {
+    /// The teleport that places a pawn here, looking the station's way.
+    #[must_use]
+    pub fn teleport(&self) -> TeleportTarget {
+        TeleportTarget::Position {
+            position: (self.feet + Vec3::Z * SPAWN_LIFT).to_array(),
+            yaw: Some(self.yaw),
+            pitch: Some(self.pitch),
+        }
+    }
 }
 
 /// An axis-aligned volume a timed route starts or ends in, UU.
@@ -1270,6 +1287,33 @@ fn build() -> Playground {
             foot + Vec3::Z * 360.0,
             34.0,
             Look::Lamp,
+        );
+    }
+    // The floor says where things are: a ring, and an arrow towards each
+    // landmark in that landmark's colour (ahead, right, left, behind, and
+    // the tower between ahead and right).
+    for (name, radius, lift, look) in [
+        ("hub ring", 640.0, 2.0, Look::Rock),
+        ("hub disc", 560.0, 4.0, Look::Paving),
+    ] {
+        let shape = b.shape(format!("disc {radius}"), || {
+            Shape::rings(28, radius, radius, 0.0, 0.0, 0, &[(lift, 1.0), (0.0, 1.0)])
+        });
+        b.add(name, shape, Vec3::ZERO, [0; 3], look, None);
+    }
+    let arrow = b.shape("arrow".to_owned(), || {
+        Shape::rings(3, 190.0, 110.0, 0.0, 0.0, 0, &[(5.0, 1.0), (0.0, 1.0)])
+    });
+    for (beacon, degrees) in [(0u8, 0.0f32), (1, 90.0), (2, -90.0), (3, 180.0), (4, 45.0)] {
+        let angle = degrees.to_radians();
+        let yaw = (degrees / 360.0 * TURN as f32).round() as i32;
+        b.add(
+            &format!("hub arrow {beacon}"),
+            arrow,
+            v(1000.0 * angle.cos(), 1000.0 * angle.sin(), 0.0),
+            [0, yaw, 0],
+            Look::Inlay(beacon),
+            None,
         );
     }
     b.scene.player_start(HUB_START + Vec3::Z * SPAWN_LIFT, 0);

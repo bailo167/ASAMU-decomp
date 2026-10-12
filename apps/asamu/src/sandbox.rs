@@ -60,6 +60,14 @@
 //! `control::carry_out` writes, in the same frame); `control::apply` takes
 //! `Do`, `OpenInspector` and `CloseInspector`.
 //!
+//! # What a session opens into
+//!
+//! `asamu --sandbox` starts in the playground ([`Stage::Playground`]),
+//! playing, with one line on screen. Everything else (the read-outs, the
+//! graphs, the lines drawn over the game, the inspector with its stage
+//! list) is off until the tools key asks for it (`input`), and H puts the
+//! screen back to that one line.
+//!
 //! Time as the view sees it: the session's model (`Session::time`) holds
 //! what the player asked for; the inspector's "freeze while open" is on top
 //! of it and is not in the model. Whether the fixed loop is actually held is
@@ -67,7 +75,7 @@
 //!
 //! Submodules: `cli`, `lifecycle`, `control`, `storage` (the runtime) and
 //! `input`, `panel`, `widgets`, `launcher`, `hud`, `viz`, `graphs`,
-//! `arena_view` (the view). Each one except `cli` (a pure check, called by
+//! `arena_view`, `playground_view` (the view). Each one except `cli` (a pure check, called by
 //! `parse_cli`) registers its own systems from a
 //! `pub(super) fn build(app: &mut App)`; that call is the only coupling
 //! between this file and a submodule.
@@ -84,6 +92,7 @@ mod input;
 mod launcher;
 mod lifecycle;
 mod panel;
+mod playground_view;
 mod storage;
 mod viz;
 mod widgets;
@@ -113,6 +122,9 @@ pub(crate) enum Phase {
 /// What a session plays on.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Stage {
+    /// The playground (`asamu_sandbox::playground`): the level of ours the
+    /// Sandbox opens into, in every composition.
+    Playground,
     /// The stock hand-made graybox test level.
     Graybox,
     /// A built-in hand-made arena (`asamu_sandbox::arena`), by id.
@@ -126,6 +138,14 @@ pub(crate) enum Stage {
 struct ClassicKeep {
     game: Game,
     banner: String,
+}
+
+/// What a start on the playground hands to `control`: the game the game's
+/// own loader built from the playground's generated data, and its level
+/// script (which turns the wheels and moves the ferry).
+pub(crate) struct PlaygroundStart {
+    game: Game,
+    script: asamu_game::LevelScript,
 }
 
 /// The Sandbox's state.
@@ -409,5 +429,6 @@ impl Plugin for SandboxPlugin {
         viz::build(app);
         graphs::build(app);
         arena_view::build(app);
+        playground_view::build(app);
     }
 }

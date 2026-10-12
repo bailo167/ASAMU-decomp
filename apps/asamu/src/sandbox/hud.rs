@@ -4,9 +4,12 @@
 //!
 //! Non-interactive text in the left half of the window (so it never reaches
 //! the crosshair), placed under the developer read-out while that is shown
-//! (F1). The watermark and the state line are always there while a session
-//! runs; H hides the rest. While the inspector is open the HUD is hidden and
-//! the panel's header is the watermark.
+//! (F1). A session starts with the clean screen: the watermark line alone,
+//! which then also names the tools key and says what a session changed (a
+//! tuned session never looks like a plain one). On the playground a timed
+//! route adds its clock under it. The tools key, or H, shows the rest; H
+//! hides it again. While the inspector is open the HUD is hidden and the
+//! panel's header is the watermark.
 //!
 //! The read-outs describe this recreation as it runs in the session. They
 //! are not measurements of the original.
@@ -93,6 +96,8 @@ pub(super) fn quick_view(session: &Session, panel: &PanelState) -> Option<QuickV
 pub(super) enum HudLine {
     /// The permanent watermark.
     Watermark,
+    /// The clock of a timed route of the playground.
+    Course,
     /// Profile, overrides, time state, recording.
     State,
     /// The quick tuner.
@@ -115,8 +120,9 @@ pub(super) enum HudLine {
 
 impl HudLine {
     /// Every line, top to bottom.
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Watermark,
+        Self::Course,
         Self::State,
         Self::Quick,
         Self::Speed,
@@ -128,14 +134,15 @@ impl HudLine {
         Self::MoreKeys,
     ];
 
-    /// Shown even when the read-outs are hidden (H).
+    /// Shown even when the read-outs are hidden (H): the clean screen.
     fn permanent(self) -> bool {
-        matches!(self, Self::Watermark | Self::State)
+        matches!(self, Self::Watermark | Self::Course)
     }
 
     fn tone(self) -> Tone {
         match self {
             Self::Watermark | Self::Notice => Tone::Notice,
+            Self::Course => Tone::Good,
             Self::State | Self::Quick | Self::Speed | Self::Jump | Self::Swing | Self::Slots => {
                 Tone::Normal
             }
@@ -161,13 +168,71 @@ pub(super) struct HudData {
     pub notice: Option<String>,
     /// The mouse is captured (the hotkeys work).
     pub grabbed: bool,
+    /// The clock of a timed route of the playground, when it has something
+    /// to say.
+    pub course: Option<String>,
+    /// The read-outs are shown (`false`: the clean screen, on which the
+    /// watermark line says what the other lines would).
+    pub tools: bool,
+}
+
+/// The key that opens the tools, as the watermark line names it.
+pub(super) const TOOLS_KEY: &str = "F5";
+
+/// What a session has changed, in a few words (`None`: nothing: the Classic
+/// set, the level's rules, normal time).
+fn changes(s: &SessionSummary) -> Option<String> {
+    let mut parts = Vec::new();
+    match s.label {
+        ParamSetLabel::Classic => {}
+        ParamSetLabel::Placeholder => parts.push("placeholder parameters".to_owned()),
+        ParamSetLabel::Modified { overrides: 1 } => parts.push("1 override".to_owned()),
+        ParamSetLabel::Modified { overrides } => parts.push(format!("{overrides} overrides")),
+    }
+    if !s.rules.is_default() {
+        parts.push("rules on".to_owned());
+    }
+    if s.frozen {
+        parts.push("time FROZEN".to_owned());
+    } else if s.speed != 1.0 {
+        parts.push(format!("time {}", speed_factor(s.speed)));
+    }
+    if s.recording {
+        parts.push("REC".to_owned());
+    }
+    if s.flying {
+        parts.push("FLY placement".to_owned());
+    }
+    (!parts.is_empty()).then(|| {
+        format!(
+            "profile {}{}: {}",
+            s.profile,
+            if s.profile_modified { "*" } else { "" },
+            parts.join(", ")
+        )
+    })
 }
 
 /// The text of a HUD line (`None`: the line is not shown).
 pub(super) fn hud_line(line: HudLine, d: &HudData) -> Option<String> {
     let s = &d.summary;
     Some(match line {
-        HudLine::Watermark => WATERMARK.to_owned(),
+        HudLine::Watermark => {
+            let mut out = WATERMARK.to_owned();
+            if !d.tools {
+                // The clean screen: this line is all there is, so it says
+                // what a session changed, and how to get the rest.
+                if let Some(changed) = changes(s) {
+                    out.push_str(&format!(" | {changed}"));
+                }
+                if !d.grabbed {
+                    out.push_str(" | click to play");
+                }
+                out.push_str(&format!(" | {TOOLS_KEY} tools"));
+            }
+            out
+        }
+        HudLine::Course => return d.course.clone(),
         HudLine::State => {
             let set = match s.label {
                 ParamSetLabel::Classic => "Classic parameter set, unchanged".to_owned(),
@@ -240,7 +305,7 @@ pub(super) fn hud_line(line: HudLine, d: &HudData) -> Option<String> {
         HudLine::Notice => return d.notice.as_ref().map(|n| format!("> {n}")),
         HudLine::Keys => {
             let keys = if d.grabbed {
-                "` inspector | [ ] pick  - = step  Backspace reset | P freeze | O step"
+                "` or F5 inspector | [ ] pick  - = step  Backspace reset | P freeze | O step"
             } else {
                 "click to capture the mouse: the Sandbox keys work in play | ` inspector"
             };
@@ -318,8 +383,8 @@ fn sync(
     let shown = sim
         .as_deref()
         .filter(|_| active)
-        .and_then(|sim| Some((inspection(sim, &lab)?, lab.session.as_ref()?)));
-    let Some((inspection, session)) = shown else {
+        .and_then(|sim| Some((sim, inspection(sim, &lab)?, lab.session.as_ref()?)));
+    let Some((sim, inspection, session)) = shown else {
         for (root, ..) in &roots {
             commands.entity(root).despawn();
         }
@@ -340,6 +405,12 @@ fn sync(
     };
     if *visibility != wanted {
         *visibility = wanted;
+    }
+    // The clean screen's one line may run across the top; the read-outs
+    // keep to the left half, clear of the crosshair.
+    let width = Val::Percent(if view.hud { 48.0 } else { 86.0 });
+    if root.width != width {
+        root.width = width;
     }
     // Under the developer read-out while it is shown.
     let read_out = debug.is_none_or(|d| d.0);
@@ -365,6 +436,8 @@ fn sync(
             .iter()
             .next()
             .is_some_and(|c| c.grab_mode != CursorGrabMode::None),
+        course: session.course().line(&sim.game),
+        tools: view.hud,
     };
     for (line, mut text, mut node) in &mut lines {
         let content = hud_line(*line, &data).filter(|_| view.hud || line.permanent());
@@ -421,6 +494,8 @@ mod tests {
             quick: quick_view(lab.session.as_ref().unwrap(), panel),
             notice: lab.notice.clone(),
             grabbed: true,
+            course: None,
+            tools: true,
         }
     }
 
@@ -533,6 +608,64 @@ mod tests {
     }
 
     #[test]
+    fn the_clean_screen_is_one_line_that_still_says_what_a_session_changed() {
+        let (mut lab, mut sim) = lab_and_sim();
+        let panel = PanelState::default();
+        let clean = |lab: &Lab, sim: &Sim, grabbed: bool| {
+            let mut d = data(lab, sim, &panel);
+            d.tools = false;
+            d.grabbed = grabbed;
+            hud_line(HudLine::Watermark, &d).unwrap()
+        };
+        // A plain session: the watermark and the tools key, nothing else.
+        assert_eq!(
+            clean(&lab, &sim, true),
+            format!("{WATERMARK} | {TOOLS_KEY} tools")
+        );
+        assert_eq!(
+            clean(&lab, &sim, false),
+            format!("{WATERMARK} | click to play | {TOOLS_KEY} tools")
+        );
+        // A tuned, slowed one never looks plain.
+        run(
+            &mut lab,
+            &mut sim,
+            Command::SetParam {
+                key: "movement.jump_velocity".to_owned(),
+                value: TuneValue::Float(1234.0),
+            },
+        );
+        run(
+            &mut lab,
+            &mut sim,
+            Command::Time {
+                op: TimeOp::Scale { value: 0.5 },
+            },
+        );
+        let line = clean(&lab, &sim, true);
+        assert!(line.starts_with(WATERMARK), "{line}");
+        assert!(
+            line.contains("1 override") && line.contains("time 0.5x"),
+            "{line}"
+        );
+        assert!(line.ends_with(&format!("{TOOLS_KEY} tools")), "{line}");
+        assert!(line.is_ascii());
+        // With the tools on, the state line says it and the watermark is
+        // just the watermark.
+        let d = data(&lab, &sim, &panel);
+        assert_eq!(hud_line(HudLine::Watermark, &d).unwrap(), WATERMARK);
+        // The timed route's line is whatever its clock says, and nothing
+        // without one.
+        assert_eq!(hud_line(HudLine::Course, &d), None);
+        let mut d = d;
+        d.course = Some("Near chain: 12.34 s".to_owned());
+        assert_eq!(
+            hud_line(HudLine::Course, &d).unwrap(),
+            "Near chain: 12.34 s"
+        );
+    }
+
+    #[test]
     fn an_empty_quick_tuner_and_a_free_mouse_say_what_to_do() {
         let (mut lab, sim) = lab_and_sim();
         lab.notice = Some("teleport refused: the grapple is attached".to_owned());
@@ -598,21 +731,43 @@ mod tests {
                 .cloned()
                 .unwrap()
         };
-        assert_eq!(watermark(&shown).1, WATERMARK);
+        // A session starts with the clean screen: one line, which is the
+        // watermark and the way to the tools (the mouse is not captured in
+        // this app, so it also says how to start playing).
+        assert!(!app.world().resource::<ViewState>().hud);
+        let visible: Vec<&(HudLine, String, Display)> = shown
+            .iter()
+            .filter(|(_, _, display)| *display == Display::Flex)
+            .collect();
+        assert_eq!(visible.len(), 1, "{visible:?}");
+        assert_eq!(
+            watermark(&shown).1,
+            format!("{WATERMARK} | click to play | {TOOLS_KEY} tools")
+        );
         assert_eq!(watermark(&shown).2, Display::Flex);
         assert_eq!(root_visibility(&mut app), Some(Visibility::Inherited));
-        // H hides the read-outs, never the watermark or the state line.
+        // The tools: every line that has something to say (the timed
+        // route's has not: this is not the playground).
+        app.world_mut().resource_mut::<ViewState>().hud = true;
+        app.update();
+        let shown = lines(&mut app);
+        assert_eq!(watermark(&shown).1, WATERMARK);
+        for (line, _, display) in &shown {
+            let hidden = matches!(line, HudLine::Course | HudLine::Notice | HudLine::MoreKeys);
+            assert_eq!(*display == Display::Flex, !hidden, "{line:?}");
+        }
+        // H hides the read-outs again, never the watermark.
         app.world_mut().resource_mut::<ViewState>().hud = false;
         app.update();
         let shown = lines(&mut app);
         for (line, _, display) in &shown {
             assert_eq!(
                 *display == Display::Flex,
-                line.permanent(),
+                *line == HudLine::Watermark,
                 "{line:?}: {display:?}"
             );
         }
-        assert_eq!(watermark(&shown).1, WATERMARK);
+        assert!(watermark(&shown).1.starts_with(WATERMARK));
         // The inspector covers the HUD; its header is the watermark then.
         app.world_mut().resource_mut::<PanelState>().open = true;
         app.update();

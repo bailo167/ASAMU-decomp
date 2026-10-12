@@ -73,7 +73,10 @@ pub(super) struct KeepClear;
 /// The view's own state, beside `PanelState` and `VizSettings`.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub(super) struct ViewState {
-    /// The HUD read-outs are shown (H). The watermark line always is.
+    /// The tools are on screen (H; the tools key switches them on): the HUD
+    /// read-outs, the graphs, the lines drawn over the game, the marker
+    /// labels. Off is the clean screen a session starts with: the watermark
+    /// line alone.
     pub hud: bool,
     /// Page of the teleport-target list.
     pub teleport_page: usize,
@@ -91,7 +94,7 @@ pub(super) struct ViewState {
 impl Default for ViewState {
     fn default() -> Self {
         Self {
-            hud: true,
+            hud: false,
             teleport_page: 0,
             stage_page: 0,
             profile_page: 0,
@@ -266,6 +269,8 @@ pub(super) enum Act {
     },
     /// End the session, or leave the launcher.
     End,
+    /// Open the stage launcher (a running session ends first).
+    Launcher,
     /// Quit the program (the launcher of a `--sandbox` process).
     Quit,
     /// Close the inspector.
@@ -355,6 +360,7 @@ pub(super) fn perform(
             profile: profile.clone(),
         }),
         Act::End => out.push(LabRequest::End),
+        Act::Launcher => out.push(LabRequest::OpenLauncher),
         Act::Quit => out.push(LabRequest::Quit),
         Act::Close => out.push(LabRequest::CloseInspector),
         Act::Tab(tab) => panel.tab = *tab,
@@ -924,6 +930,10 @@ mod tests {
         assert!(matches!(
             run(&Act::Quit, &mut panel, &mut viz).as_slice(),
             [LabRequest::Quit]
+        ));
+        assert!(matches!(
+            run(&Act::Launcher, &mut panel, &mut viz).as_slice(),
+            [LabRequest::OpenLauncher]
         ));
         let out = run(
             &Act::Start {

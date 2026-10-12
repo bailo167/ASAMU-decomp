@@ -57,12 +57,16 @@ use asamu_core::glam as sim_glam;
 use asamu_game::asamu_kismet::Output;
 use asamu_game::save::PlayMode;
 use asamu_game::{Game, GameState};
+use asamu_sandbox::playground::{is_playground, level_label};
 use asamu_sandbox::session::{Session, SimCx};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use super::{ClassicKeep, Lab, LabRequest, LabSet, PanelState, Phase, Stage, lab_active, storage};
+use super::{
+    ClassicKeep, Lab, LabRequest, LabSet, PanelState, Phase, PlaygroundStart, Stage, lab_active,
+    storage,
+};
 use crate::ui::{self, FlowRequest, Play, Screen, UiLaunch, UiState};
 use crate::{PendingInput, Sim, kismet};
 
@@ -97,6 +101,19 @@ pub(super) enum SimOp {
         /// menu's "New Game" does). `false` for a start from the command
         /// line: the window has just opened, and a click captures the mouse
         /// as in every run that skips the menu.
+        capture: bool,
+    },
+    /// Start a session on the playground: `start` holds the game the game's
+    /// own loader built from the playground's generated data. In the
+    /// graybox composition it takes the place of the Classic graybox game
+    /// (kept, and put back at the end); in a run on converted data, where
+    /// no simulation exists outside a level, it becomes the simulation.
+    StartPlayground {
+        /// The session.
+        session: Box<Session>,
+        /// The playground's game and level script.
+        start: Box<PlaygroundStart>,
+        /// Capture the mouse at once (as for a hand-made stage).
         capture: bool,
     },
     /// Start a session on a converted map through the unchanged load flow.
@@ -320,6 +337,11 @@ impl Writer<'_, '_> {
                 stage,
                 capture,
             } => self.start_hand_made(*session, *game, stage, capture, lines),
+            SimOp::StartPlayground {
+                session,
+                start,
+                capture,
+            } => self.start_playground(*session, *start, capture, lines),
             SimOp::StartMap { session, map } => self.start_map(*session, map, true, lines),
             SimOp::AwaitLevel { session, map } => self.start_map(*session, map, false, lines),
             SimOp::AwaitNext => {
@@ -421,6 +443,104 @@ impl Writer<'_, '_> {
         lab.classic = Some(Box::new(keep));
         lab.session = Some(session);
         lab.stage = Some(stage);
+        lab.phase = Phase::Active;
+        lab.pending_snap = false;
+        // Play on: no screen, no stale input.
+        if self.panel.open {
+            self.panel.open = false;
+        }
+        self.state.close();
+        if capture {
+            set_grab(&mut self.cursor, true);
+        }
+        drop_input(&mut self.pending);
+    }
+
+    /// A session on the playground.
+    fn start_playground(
+        &mut self,
+        session: Session,
+        start: PlaygroundStart,
+        capture: bool,
+        lines: &mut Vec<String>,
+    ) {
+        if self.saves_on_disk(lines) {
+            return;
+        }
+        let converted = self.launch.converted.is_some();
+        if !converted {
+            // As for a hand-made stage: what it replaces is the Classic
+            // graybox game (the one a running session set aside, else the
+            // one in the simulation), and nothing else.
+            let classic = match (&self.lab.classic, &self.sim) {
+                (Some(keep), _) => Some((&keep.game, false)),
+                (None, Some(sim)) => Some((&sim.game, sim.script.is_some())),
+                (None, None) => None,
+            };
+            let refusal = match classic {
+                None => Some("there is no simulation to start the playground on"),
+                Some((game, scripted)) if scripted || game.scene_map().is_some() => {
+                    Some("the playground replaces the graybox game only")
+                }
+                Some((game, _)) if game.params().pawn.is_none() => Some(
+                    "the Sandbox tunes the Classic parameter set: this run uses the placeholder \
+                     parameters",
+                ),
+                Some(_) => None,
+            };
+            if let Some(why) = refusal {
+                lines.push(why.to_owned());
+                return;
+            }
+        }
+        self.end_session(lines);
+        let PlaygroundStart { mut game, script } = start;
+        game.start();
+        let banner = session.banner(&game);
+        lines.push(format!(
+            "Sandbox session on {} with the profile {}",
+            level_label(&game),
+            session.profile().name
+        ));
+        if converted {
+            // A run on converted data has no simulation outside a level: a
+            // game left behind the menu, or a load still in flight, would
+            // not be the session's.
+            if self.sim.is_some() {
+                self.commands.remove_resource::<Sim>();
+            }
+            if let Some(load) = self.game_load.as_mut()
+                && (load.request.is_some() || load.task.is_some())
+            {
+                load.request = None;
+                load.task = None;
+            }
+            if self.state.screen == Screen::Loading {
+                self.flow.write(FlowRequest::CancelLoad);
+            }
+            self.commands
+                .insert_resource(Time::<Fixed>::from_hz(game.clock().tick_rate_hz()));
+            self.commands
+                .insert_resource(Sim::new(game, banner.clone()).with_script(Some(script)));
+        } else {
+            let Some(sim) = self.sim.as_mut() else {
+                return;
+            };
+            let keep = ClassicKeep {
+                game: std::mem::replace(&mut sim.game, game),
+                banner: std::mem::replace(&mut sim.banner, banner.clone()),
+            };
+            sim.script = Some(script);
+            sim.snap_interpolation();
+            self.lab.classic = Some(Box::new(keep));
+        }
+        self.book.banner = banner;
+        if *self.play != Play::default() {
+            *self.play = Play::default();
+        }
+        let lab = &mut *self.lab;
+        lab.session = Some(session);
+        lab.stage = Some(Stage::Playground);
         lab.phase = Phase::Active;
         lab.pending_snap = false;
         // Play on: no screen, no stale input.
@@ -706,11 +826,15 @@ fn apply(
     if *phase == Phase::Loading {
         *phase = Phase::Active;
         if let Some(map) = sim.game.map_name() {
-            *stage = Some(Stage::Map(map.to_owned()));
+            *stage = Some(if is_playground(&sim.game) {
+                Stage::Playground
+            } else {
+                Stage::Map(map.to_owned())
+            });
         }
         let line = format!(
             "Sandbox session on {} with the profile {}",
-            sim.game.level().name,
+            level_label(&sim.game),
             session.profile().name
         );
         info!("sandbox: {line}");

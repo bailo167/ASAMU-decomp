@@ -29,11 +29,12 @@
 
 use asamu_game::asamu_world::graybox_test_level;
 use asamu_sandbox::arena::{build_arena, builtin_arenas};
+use asamu_sandbox::playground::load_playground;
 use asamu_sandbox::session::Session;
 use bevy::prelude::*;
 
 use super::control::{self, ON_DISK_SAVES, SimOp, SimOps};
-use super::{Lab, LabLaunch, LabRequest, Phase, Stage, storage};
+use super::{Lab, LabLaunch, LabRequest, Phase, PlaygroundStart, Stage, storage};
 use crate::Sim;
 use crate::ui::{self, Screen, UiAction, UiLaunch, UiState};
 
@@ -51,8 +52,10 @@ pub(super) fn build(app: &mut App) {
     );
 }
 
-/// In a `--sandbox` process: opens the launcher, or starts straight on the
-/// stage the command line named (`--arena`, `--level`, `--no-menu`).
+/// In a `--sandbox` process: starts in the playground, or on the stage the
+/// command line named (`--arena`, `--level`; `--no-menu` without converted
+/// data is the stock graybox test level, as it was before the playground
+/// existed). The launcher is what a session that ends returns to.
 fn startup(
     lab: Res<Lab>,
     launch: Res<LabLaunch>,
@@ -91,16 +94,22 @@ fn startup(
                 });
             }
             None => {
-                requests.write(LabRequest::OpenLauncher);
+                requests.write(LabRequest::Start {
+                    stage: Stage::Playground,
+                    profile,
+                });
             }
         }
-    } else if launch.no_menu || !ui_launch.show_menu {
+    } else if launch.no_menu {
         requests.write(LabRequest::Start {
             stage: Stage::Graybox,
             profile,
         });
     } else {
-        requests.write(LabRequest::OpenLauncher);
+        requests.write(LabRequest::Start {
+            stage: Stage::Playground,
+            profile,
+        });
     }
 }
 
@@ -144,6 +153,31 @@ fn plan_start(
             return Ok(SimOp::StartMap {
                 session: Box::new(session),
                 map: map.to_owned(),
+            });
+        }
+        Stage::Playground => {
+            // In the graybox composition it replaces the Classic graybox
+            // game, which must be one the Sandbox can tune.
+            if ui_launch.converted.is_none() {
+                let classic = lab
+                    .classic
+                    .as_ref()
+                    .map(|keep| &keep.game)
+                    .or(sim.map(|sim| &sim.game));
+                if classic.is_some_and(|game| game.params().pawn.is_none()) {
+                    return Err(
+                        "the Sandbox tunes the Classic parameter set: this run uses the \
+                         placeholder parameters"
+                            .to_owned(),
+                    );
+                }
+            }
+            let (game, script) =
+                load_playground().map_err(|e| format!("the playground could not be built: {e}"))?;
+            return Ok(SimOp::StartPlayground {
+                session: Box::new(session),
+                start: Box::new(PlaygroundStart { game, script }),
+                capture: lab.phase != Phase::Idle,
             });
         }
         Stage::Graybox => graybox_test_level(),

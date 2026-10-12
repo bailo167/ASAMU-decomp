@@ -30,24 +30,28 @@ pub(super) struct StageEntry {
     pub summary: String,
 }
 
-/// The stages this launch offers.
+/// The stages this launch offers: the playground first, in every launch.
 pub(super) fn stages(launch: &UiLaunch) -> Vec<StageEntry> {
-    if launch.converted.is_some() {
-        return launch
-            .levels
-            .iter()
-            .map(|name| StageEntry {
-                stage: Stage::Map(name.clone()),
-                title: name.clone(),
-                summary: "converted map (local data from your own install)".to_owned(),
-            })
-            .collect();
-    }
     let mut out = vec![StageEntry {
+        stage: Stage::Playground,
+        title: "Playground".to_owned(),
+        summary: "the Sandbox's own level: a hub, chains of islands, a carousel, a wheel, a \
+                  ferry, a tower with a long drop, a runway, timed routes (hand-made)"
+            .to_owned(),
+    }];
+    if launch.converted.is_some() {
+        out.extend(launch.levels.iter().map(|name| StageEntry {
+            stage: Stage::Map(name.clone()),
+            title: name.clone(),
+            summary: "converted map (local data from your own install)".to_owned(),
+        }));
+        return out;
+    }
+    out.push(StageEntry {
         stage: Stage::Graybox,
         title: "Graybox test level".to_owned(),
         summary: "the stock hand-made test level".to_owned(),
-    }];
+    });
     out.extend(builtin_arenas().iter().map(|arena| StageEntry {
         stage: Stage::Arena(arena.id.to_owned()),
         title: format!("{} ({})", arena.title, arena.id),
@@ -156,7 +160,8 @@ fn launcher_items(d: &LauncherData) -> Vec<Item> {
     out.push(Item::dim(clip(&describe_profile(profile), 200)));
     out.push(Item::Rule);
     out.push(Item::dim(if d.converted {
-        "Stage: a converted map of this launch (it loads as a story level; saves stay in memory)."
+        "Stage: the playground (ours), or a converted map of this launch (it loads as a story \
+         level; saves stay in memory). The lab arenas need a launch without converted data."
     } else {
         "Stage: hand-made levels, written by us (no original content)."
     }));
@@ -176,7 +181,7 @@ fn launcher_items(d: &LauncherData) -> Vec<Item> {
         ]));
         // A hand-made stage says what it holds (a line of its own: it
         // wraps); the converted maps all read the same.
-        if !d.converted {
+        if !matches!(entry.stage, Stage::Map(_)) {
             out.push(Item::dim(clip(&entry.summary, 200)));
         }
     }

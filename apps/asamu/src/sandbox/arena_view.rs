@@ -20,7 +20,7 @@ use bevy::ecs::schedule::common_conditions::any_with_component;
 use bevy::prelude::*;
 use bevy::ui::UiGlobalTransform;
 
-use super::widgets::{FONT, KeepClear, LabUi, TEXT, clip, text};
+use super::widgets::{FONT, KeepClear, LabUi, TEXT, ViewState, clip, text};
 use super::{Lab, LabSet, PanelState, Phase, Stage, VizSettings, lab_active};
 use crate::{LevelVisual, MoverVisual, PlayerCamera, SCALE, Sim, bevy_vec, to_render};
 
@@ -434,6 +434,7 @@ fn labels(
     lab: Res<Lab>,
     sim: Option<Res<Sim>>,
     viz: Res<VizSettings>,
+    view: Res<ViewState>,
     panel: Res<PanelState>,
     scene: Res<ArenaScene>,
     camera: Query<(&Camera, &Transform), With<PlayerCamera>>,
@@ -449,8 +450,11 @@ fn labels(
     mut boxes: Query<(&MarkerLabel, &mut Node, &mut Visibility), Without<KeepClear>>,
     mut texts: Query<(&MarkerText, &mut Text)>,
 ) {
-    let wanted =
-        lab.phase == Phase::Active && viz.markers && !panel.open && !scene.markers().is_empty();
+    let wanted = lab.phase == Phase::Active
+        && viz.markers
+        && view.hud
+        && !panel.open
+        && !scene.markers().is_empty();
     let (Some(sim), true) = (sim.as_deref(), wanted) else {
         for root in &roots {
             commands.entity(root).despawn();

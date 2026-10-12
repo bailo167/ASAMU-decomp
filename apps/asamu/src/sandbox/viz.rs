@@ -21,6 +21,7 @@ use asamu_sandbox::predict::predict;
 use bevy::prelude::*;
 
 use super::arena_view::ArenaScene;
+use super::widgets::ViewState;
 use super::{Lab, LabSet, SandboxGizmos, VizSettings, inspection, lab_active};
 use crate::{PlayerCamera, ROPE_HAND_DOWN_UU, ROPE_HAND_RIGHT_UU, Sim, to_render};
 
@@ -241,12 +242,17 @@ fn draw(
     lab: Res<Lab>,
     sim: Option<Res<Sim>>,
     viz: Res<VizSettings>,
+    view: Res<ViewState>,
     scene: Res<ArenaScene>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
     camera: Query<&Transform, With<PlayerCamera>>,
     mut arc: Local<ArcCache>,
     mut gizmos: Gizmos<SandboxGizmos>,
 ) {
+    // Nothing is drawn over the game until the tools are asked for.
+    if !view.hud {
+        return;
+    }
     let Some(sim) = sim.as_deref() else {
         return;
     };

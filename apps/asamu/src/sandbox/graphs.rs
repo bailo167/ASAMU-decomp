@@ -11,7 +11,7 @@ use asamu_sandbox::telemetry::TELEMETRY_SAMPLES;
 use bevy::ecs::schedule::common_conditions::any_with_component;
 use bevy::prelude::*;
 
-use super::widgets::{FONT, KeepClear, LabUi, STRIP_BG, TEXT_HINT, text};
+use super::widgets::{FONT, KeepClear, LabUi, STRIP_BG, TEXT_HINT, ViewState, text};
 use super::{Lab, LabSet, PanelState, Phase, VizSettings, lab_active};
 
 /// Bars per graph.
@@ -176,6 +176,7 @@ fn sync(
     mut commands: Commands,
     lab: Res<Lab>,
     viz: Res<VizSettings>,
+    view: Res<ViewState>,
     panel: Res<PanelState>,
     roots: Query<Entity, With<GraphRoot>>,
     mut captions: Query<(&Graph, &mut Text)>,
@@ -184,7 +185,7 @@ fn sync(
     let session = lab
         .session
         .as_ref()
-        .filter(|_| lab.phase == Phase::Active && viz.graphs && !panel.open);
+        .filter(|_| lab.phase == Phase::Active && viz.graphs && view.hud && !panel.open);
     let Some(session) = session else {
         for root in &roots {
             commands.entity(root).despawn();

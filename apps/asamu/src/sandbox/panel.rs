@@ -710,9 +710,9 @@ fn view(d: &PanelData, out: &mut Vec<Item>) {
     }
     out.push(Item::Row(vec![
         switch(d.hud, Act::Hud),
-        Cell::label("HUD read-outs", 170.0, Tone::Normal),
+        Cell::label("Read-outs and drawings", 170.0, Tone::Normal),
         Cell::label(
-            "the lines under the watermark [H]; the watermark itself stays",
+            "everything over the game but the watermark line: off is the clean screen [H]",
             0.0,
             Tone::Dim,
         ),
@@ -821,6 +821,7 @@ fn profiles(d: &PanelData, out: &mut Vec<Item>) {
 
 fn stage_title(stage: Option<&Stage>) -> String {
     match stage {
+        Some(Stage::Playground) => "playground".to_owned(),
         Some(Stage::Graybox) => "graybox test level".to_owned(),
         Some(Stage::Arena(id)) => format!("arena {id}"),
         Some(Stage::Map(name)) => format!("map {name}"),
@@ -861,9 +862,11 @@ fn stage(d: &PanelData, out: &mut Vec<Item>) {
     out.extend(page_row(PageList::Stage, page, pages, d.stages.len()));
     out.push(Item::Rule);
     out.push(Item::Row(vec![
+        Btn::new("stage launcher", Act::Launcher).into(),
         Btn::new("end the session", Act::End).into(),
         Cell::label(
-            "back to the launcher or the main menu; nothing of it is kept",
+            "both end this session (nothing of it is kept): to the launcher, or to where it \
+             was started from",
             0.0,
             Tone::Dim,
         ),
