@@ -38,7 +38,13 @@
 //!   in the interpolating physics at once, and tears the instances down
 //!   again (CONFIRMED (native): `USeqAct_Interp::SetPosition @ 0x1008A8170`),
 //!   which also gives the view and the fade back, so a director track
-//!   leaves nothing on screen.
+//!   leaves nothing on screen, and stops the sounds its sound tracks had
+//!   just started ([`Runtime::drop_director_outputs`]). The event track's
+//!   keys between the two positions fire as in any update that is not a
+//!   jump: their output impulses stay on the action and are delivered when
+//!   it is next processed, for a Matinee that was playing in the first
+//!   update after the load (KISMET_RUNTIME.md §12, "What a continued game
+//!   does not have").
 //!
 //! After that the pawn is put at the latest checkpoint and every
 //! `SavedGameStateLoaded` event is told the checkpoint index
@@ -325,14 +331,23 @@ impl Runtime {
     /// Outputs a `SetPosition` on an action that is not active must not
     /// leave behind: the engine's teardown of the temporary group instances
     /// restores the view target and the fade, so the director track's cut
-    /// and the fade track's amount of that update never reach the screen.
+    /// and the fade track's amount of that update never reach the screen;
+    /// and it stops the audio component a sound track's instance started in
+    /// that update (STRONG: the stock sound track instance stops its sound
+    /// when it is torn down, unless the track is set to let the sound
+    /// outlive its Matinee; not re-read natively), so a sound key between
+    /// the action's position and the new one is not heard. PLACEHOLDER for
+    /// the tracks with that setting, which the converted Matinee data does
+    /// not hold: their sound would be heard in the original.
     pub(crate) fn drop_director_outputs(&mut self, from: usize, node: usize) {
         let mut index = 0;
         self.outputs.retain(|o| {
             let keep = index < from
                 || !matches!(
                     o,
-                    Output::MatineeCut { node: n, .. } | Output::MatineeFade { node: n, .. }
+                    Output::MatineeCut { node: n, .. }
+                        | Output::MatineeFade { node: n, .. }
+                        | Output::MatineeSound { node: n, .. }
                         if *n == node
                 );
             index += 1;

@@ -712,3 +712,98 @@ fn a_position_beyond_the_matinee_is_an_ordinary_set_position() {
         }
     }
 }
+
+/// The lift of [`mover`] on a Matinee of four seconds that is not looping,
+/// with a sound track: a key at half a second and one at two and a half.
+fn sounding_lift() -> (Graph, MatineeSet) {
+    let (g, _) = mover();
+    let key = |t: f32, z: f32| json!({"in": t, "out": [0.0, 0.0, z], "arrive": [0.0, 0.0, 0.0], "leave": [0.0, 0.0, 0.0], "mode": "linear"});
+    let mut m = MatineeSet::default();
+    m.add_json(
+        &serde_json::to_vec(&json!({
+            "format": "asamu-matinee", "version": 1, "package": "T",
+            "actions": [{"path": "T.I", "node": 2, "scope": "level", "interp_data": "T.Data",
+                "settings": {},
+                "bindings": [{"link": 1, "label": "Door", "group": "Door",
+                              "targets": [{"variable": "T.V", "object": path("Door")}]}]}],
+            "interp_data": [{"path": "T.Data", "length": 4.0, "groups": [
+                {"kind": "group", "name": "Door", "tracks": [
+                    {"class": "Engine.InterpTrackMove", "data": {"type": "move", "move_frame": "relative_to_initial",
+                        "pos": {"points": [key(0.0, 0.0), key(4.0, 400.0)]},
+                        "euler": {"points": [key(0.0, 0.0)]}}},
+                    {"class": "Engine.InterpTrackSound", "data": {"type": "sound", "keys": [
+                        {"time": 0.5, "sound": "T.Early", "volume": 1.0, "pitch": 1.0},
+                        {"time": 2.5, "sound": "T.Late", "volume": 1.0, "pitch": 1.0}]}}]}]}]
+        }))
+        .unwrap(),
+        0,
+    )
+    .unwrap();
+    (g, m)
+}
+
+fn cues(outputs: &[Output]) -> Vec<String> {
+    outputs
+        .iter()
+        .filter_map(|o| match o {
+            Output::MatineeSound { cue, .. } => cue.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A Matinee that was playing at the save is put at its saved position
+/// without a jump, from the start of the freshly loaded action. The sound
+/// keys in between are not heard again (the engine stops what the temporary
+/// track instances started when it tears them down); a key after the saved
+/// position plays when the Matinee gets there. The same for a Matinee that
+/// was not playing, which is put in place as a jump.
+#[test]
+fn the_sound_keys_before_a_saved_position_are_not_heard_again() {
+    let (g, m) = sounding_lift();
+    let mut r = runtime(g.clone(), m.clone());
+    let mut h = Rec::default();
+    let heard = ticks(&mut r, &mut h, 90);
+    assert_eq!(cues(&heard), vec!["T.Early"], "the fresh start, 1.5 s");
+    let state = r.capture_state();
+    let saved = state.matinees["T.Seq.Lift"];
+    assert!(
+        saved.playing && (saved.position - 1.5).abs() < 0.02,
+        "{saved:?}"
+    );
+
+    let mut loaded = runtime(g.clone(), m.clone());
+    loaded.set_start_state(Some(state));
+    let mut h = Rec::default();
+    let first = ticks(&mut loaded, &mut h, 1);
+    assert_eq!(
+        cues(&first),
+        Vec::<String>::new(),
+        "the load and its first update"
+    );
+    let z = h.door.unwrap()[2];
+    assert!(
+        (z - 100.0 * (saved.position + DT)).abs() < 0.01,
+        "door at {z}"
+    );
+    let later = ticks(&mut loaded, &mut h, 89);
+    assert_eq!(cues(&later), vec!["T.Late"], "played on to 3 s");
+
+    // Finished before the save: put at its end as a jump, nothing heard;
+    // level loaded plays it from there and it ends at once.
+    let mut done = ScriptState::default();
+    done.matinees.insert(
+        "T.Seq.Lift".into(),
+        MatineeState {
+            position: 4.0,
+            playing: false,
+            paused: false,
+        },
+    );
+    let mut loaded = runtime(g, m);
+    loaded.set_start_state(Some(done));
+    let mut h = Rec::default();
+    let heard = ticks(&mut loaded, &mut h, 120);
+    assert_eq!(cues(&heard), Vec::<String>::new());
+    assert!((h.door.unwrap()[2] - 400.0).abs() < 0.01);
+}

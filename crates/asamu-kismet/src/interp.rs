@@ -247,9 +247,9 @@ impl Runtime {
     /// updated to the position (as a jump or not, which decides the event
     /// keys in between), and the bound actors in the interpolating physics
     /// are moved at once, which is how ours moves them in any case. The
-    /// teardown gives the view target and the fade back
-    /// (`Runtime::drop_director_outputs`). `false` when the node has no
-    /// Matinee data.
+    /// teardown gives the view target and the fade back and stops the
+    /// sounds the update started (`Runtime::drop_director_outputs`).
+    /// `false` when the node has no Matinee data.
     pub(crate) fn interp_set_position(
         &mut self,
         op: usize,
