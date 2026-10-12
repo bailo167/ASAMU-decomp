@@ -128,9 +128,24 @@ Back restart from the checkpoint, Start pause (the menus need keyboard or mouse;
 tried with a real controller yet). Click into the window to capture the mouse; Esc pauses and
 releases it.
 
-Developer keys (not in the original): F1 shows a read-out of the simulation's state and the key list, R respawn,
+**The screen.** A level started from the main menu or with `--level` shows the game and nothing else: the
+view, subtitles, the level's own prompts, notices, and in the chapters that have collectibles their counter. The
+window title names the level being played (`ASAMU-decomp - AG-Workshop (converted, pre-alpha)`; `main menu`
+while you are in the menu) and follows every level change. The gloved hand and the grapple crosshair appear when
+the original shows them: not in the Workshop before the suit is taken (there, and in every story section, only
+a small ring marks the centre of the view), and not while a menu is open. The four small circles at the bottom
+right stand in for the lights on the glove.
+
+Developer keys (not in the original): F1 shows the developer drawings (a read-out of the simulation's state with
+the key list, a line with the grapple count and ability states at the bottom left, and a wire marker where you
+aim); it works in the menus and over the title card too, and the drawings are off until you press it. R respawn,
 F2 story mode, F3 grapple count, F4 rocket boots, F6 attractor pad, F9 start/stop recording a movement trace,
-F10 show the level objects' volumes.
+F10 show the level objects' volumes. The built-in graybox test level starts with the developer drawings on.
+
+**Text in other languages.** The built-in font only has the basic Latin letters, so for the accented letters of
+the game's other languages the runtime uses a font that is already on your computer (Consolas on Windows, Menlo
+on macOS, DejaVu Sans Mono or a similar font on Linux; it looks for it at start-up and says in its log which
+file it took). No font is shipped. To choose the font yourself, set `ASAMU_FONT` to a `.ttf` or `.otf` file.
 
 Sandbox (experimental, not in the original): `./asamu --sandbox` opens a lab for experimenting with the movement
 and game systems (live parameter tuning, time control, save states, two hand-made arenas such as
@@ -138,7 +153,8 @@ and game systems (live parameter tuning, time control, save states, two hand-mad
 saves, progress or time-trial records. `docs/SANDBOX.md` in the repository describes it.
 
 Other options: `--fly` (free camera, no collision), `--all-sublevels`, `--light-scale F`, `--no-shadows`,
-`--no-fog`, `--normal-maps`, `--debug-info` (start with the F1 read-out shown), `--help` for the full list.
+`--no-fog`, `--normal-maps`, `--debug-info` (start with the F1 developer drawings shown), `--help` for the full
+list.
 
 ## What works today
 
@@ -156,7 +172,7 @@ is done, expect the feel to differ in places.
 | Lighting and effects | The original's baked lightmaps, approximate materials, particles, decals, water, height fog, colour grading and bloom. An approximation: colour and brightness can differ visibly from the original, and a few materials still show as flat placeholders. |
 | Characters | Maddie, the villagers and the Dark Cave worm with their animations; collectibles and story items; the first-person hand. |
 | Sound, music, narration, subtitles | Sound cues, ambient sound, narration with subtitles and the adaptive music play. |
-| Menus, saving, languages | Main menu, chapter select, pause and settings; saves and progression in the recreation's own format; time trial with medals (it unlocks when the game is finished, as in the original); the game's text in the 14 languages of your install (a functional replacement of the original's menus, not a visual copy; some characters outside basic Latin may not display yet). |
+| Menus, saving, languages | Main menu, chapter select, pause and settings; saves and progression in the recreation's own format; time trial with medals (it unlocks when the game is finished, as in the original); the game's text in the 14 languages of your install, accented letters included when a suitable font is found on your computer (a functional replacement of the original's menus, not a visual copy). |
 
 ## Troubleshooting
 
@@ -172,6 +188,7 @@ is done, expect the feel to differ in places.
 | `no converted levels in ...` | The `levels` stage has not run in that folder: `asamu-import all` (or `--only levels`). |
 | macOS: "cannot be opened because the developer cannot be verified" | The binaries are not code-signed. Right-click > Open once, or run `xattr -d com.apple.quarantine asamu asamu-import` in the unzipped folder. |
 | Windows: "Windows protected your PC" | The binaries are not signed. Click "More info" > "Run anyway". |
+| Translated text shows gaps where accented letters should be | The runtime found no font with those letters (its log says `no system font for characters outside ASCII`). Install a common font (for example DejaVu Sans Mono) or set `ASAMU_FONT` to a `.ttf` / `.otf` file. |
 | Linux: the runtime fails to start | Install the ALSA, udev and Vulkan runtime libraries (`libasound2`, `libudev1`, a Vulkan driver such as `mesa-vulkan-drivers`). |
 | Out of disk space during an import | Free about 2.5 GB, or delete `<out>/.package-cache` if you used `--package-cache`. Rerun; finished stages are kept. |
 | Windows: a stage fails with "moving the old ... aside" | Another program (often the runtime itself) has files of that folder open. Close it and rerun. |

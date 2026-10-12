@@ -323,6 +323,38 @@ with gameplay and the hands; images stay local and were deleted. No render valid
   Bevy's tonemapper desaturated); bloom halos appear around bright islands over darker backgrounds and fade on
   the bright surfaces themselves. The sky dome renders too dark (unlit-material scale, section 5).
 
+**AG-Workshop brightness (2026-10-12).** The owner found the Workshop very dark away from its lamps. Checked on
+the Windows machine with the converted data (`--level AG-Workshop --fly --screenshot`, offscreen 1600 x 900, the
+view from the player start down the corridor; mean sRGB values of image regions; images stay local):
+
+| Run | Corridor wall (left / right) | Ceiling | Lit floor of the room beyond |
+|---|---|---|---|
+| default (light maps, uber effect) | (10, 4, 3) / (11, 4, 3) | (7, 3, 2) | (35, 16, 9) |
+| `ASAMU_POST=off` (Bevy's tonemapper on render radiance) | (25, 4, 2) / (29, 4, 2) | (17, 3, 1) | (83, 37, 10) |
+| `ASAMU_LIGHTMAPS=0` (dynamic lights and the ambient stand-in) | (21, 14, 13) / (21, 14, 13) | (17, 15, 13) | (20, 15, 12) |
+
+- The level's data is exported and applied: light maps on 1,078 of 1,107 draws (13 atlases), 57 of 61 lights
+  recognised as baked; 2 post-process volumes and the uber effect (`Scene_TonemapperScale` 1, shadows 0, midtones 1;
+  highlights (1, 1, 1) with desaturation 0.2 in the volume around the start, (1, 0.6, 0.4) in the other).
+- The baked light is dim away from the lamps in the data itself: over the 1,286 light-mapped BSP vertices the
+  light map's brightest channel is 0.014 at the median and 0.26 at the 90th percentile (1.0 = a light of
+  brightness 1 at normal incidence); the lamps are small (38 baked point lights, e.g. brightness 0.66, radius
+  179 uu). Where one baked point light dominates and no spot light reaches (51 vertices), light map over analytic
+  direct light (`brightness x N.L x (1 - (d/R)^2)^exponent`, no occlusion) is 1.2 at the 75th and 1.9 at the 90th
+  percentile: in lit spots the decoded light map has the expected size (TENTATIVE, small sample; supports the
+  sRGB decoding of LIGHTMAPS.md).
+- The uber effect's tonemapper then halves such shadows on screen: at scene value 0.003 the gamma term alone gives
+  0.071 (18 of 255), the curve term 0.014, and the toe factor 0.5 blends them to 0.043 (11 of 255), which is what
+  the default run shows. `ASAMU_POST=off` looks brighter because Bevy's tonemapper is then fed render radiance
+  (3.2 per scene unit, section 5), not because an exposure setting of the level is missed.
+- So no presentation default of ours (exposure, tone mapping) explains it, and none was changed. Open, in order of
+  how much they could matter: (1) the original sets a display gamma at start from its own `Gamma` setting
+  (`ASAMUSettingsManager`, config default 0.5, DEFAULTS.md) through a native controller function whose mapping to
+  the engine's display gamma is not recovered (UNKNOWN; the script's fallback for other controllers issues the
+  `Gamma` console command with four times the setting); we use 2.2; (2) the tonemapper variant is STRONG, not
+  CONFIRMED (above), and the toe blend is what crushes these shadows; (3) the light map's per-pixel combination
+  with the normal is approximated (LIGHTMAPS.md). A reference capture of the original's Workshop would settle it.
+
 Independent re-check (verification pass, 2026-10-10; throwaway scripts under ignored `research/local/`, deleted):
 
 - A separate Python decoder (its own tagged-property and prelude decoding following `OBJECT_FORMAT.md`; only the

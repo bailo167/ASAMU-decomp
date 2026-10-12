@@ -156,6 +156,15 @@ Functional replacement of the Scaleform menus; the look is ours. Screens are des
 - **Loading**: render-plan progress and gameplay load state; Cancel.
 - Keys: Esc = back (pause: resume); Tab / Shift-Tab + Enter / Space through the buttons; F8 restarts a
   running time trial (the original's `TimeTrialRestart`, ABILITIES.md A-TT-2).
+- Developer drawings are off on converted levels however the level was started (menu or `--level`): the
+  read-out (top left), the ability line (bottom left: grapple count, gun, power jump, boots) and the aim and
+  anchor gizmos. F1 toggles them in every state of the app (menus, loading, the title card); `--debug-info`
+  starts with them on; the graybox starts with them on. The ability line's box (`hud::DevReadout`) wraps the
+  panel Kismet's HUD switch acts on, so that switch cannot bring it back.
+- The window title names the played map and follows level changes (`main menu` while only the menu's backdrop
+  level is loaded); it keeps the "pre-alpha" wording.
+- Text: a system font is used behind the built-in ASCII-only one for the translated texts
+  (`ui::fonts`, LOCALIZATION.md §9 "Fonts").
 - HUD additions: notices (top centre), collectibles counter in collectible chapters (top right), time-trial
   stopwatch (game time in simulation ticks). A death before any checkpoint restarts it at the player
   reset 0.3 s into the death sequence, where the original runs its game-level death hook
