@@ -912,6 +912,15 @@ fn update_grapple(
 /// with no hit at all the hit location stays the zero vector (UnrealScript
 /// locals start zeroed), so the range test then measures the eye's distance
 /// from the world origin.
+///
+/// The trace is a zero-extent bullet trace like the fire trace (CONFIRMED
+/// (src): the call passes the same bullet flag), so the world answers it
+/// with a mesh's triangles and its hit location is the reported one, short
+/// of the surface (G-AT-4; [`crate::world::pull_back`] with
+/// [`TraceExtent::Zero`] on this trace's own length, `fMaxDistance` + 1000:
+/// 4.0 uu before mesh triangles, 0.5 uu before BSP, 1.0 uu before a brush).
+/// The range tests below therefore pass for a surface up to that much
+/// beyond their limit. Not measured: no recording has the crosshair's state.
 fn crosshair<W: CollisionWorld + ?Sized>(
     state: &PlayerState,
     params: &PlayerParams,
@@ -921,8 +930,15 @@ fn crosshair<W: CollisionWorld + ?Sized>(
     let previous = state.script.gun.crosshair;
     let start = state.view_location(params);
     let dir = state.aim_direction();
-    let hit = world.raycast(start, dir, gun.max_distance.value + CROSSHAIR_EXTRA_RANGE);
-    let location = hit.map_or(Vec3::ZERO, |h| h.position);
+    let range = gun.max_distance.value + CROSSHAIR_EXTRA_RANGE;
+    let trace = world.trace_line(start, dir, range);
+    let hit = trace.map(|t| t.hit);
+    // The original's hit location: the reported time along the trace from
+    // its start to its end (as in `fire_trace_along`).
+    let location = trace.map_or(Vec3::ZERO, |t| {
+        let end = start + dir * range;
+        start + (end - start) * t.reported_time(TraceExtent::Zero, range)
+    });
     let distance = (location - start).length();
     let g = &state.script.gun;
     if state.script.is_story() {

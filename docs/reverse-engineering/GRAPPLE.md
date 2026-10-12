@@ -197,7 +197,10 @@ from the eye) of an `ASAMUInteractable_Actor` that still accepts interactions. T
 real grapple: BSP and non-static-mesh geometry are grappled although the crosshair may say no.
 The crosshair's trace is a zero-extent bullet trace like the fire trace [CONFIRMED (src): the same flag
 argument], so its hit is reported short of the surface in the same way (G-AT-4).
-→ Rust: HUD predicate only. It still measures to the exact contact: up to 4 uu off at the 5000 uu limit.
+→ Rust: HUD predicate only (`grapple_gun::crosshair`). It asks `CollisionWorld::trace_line` and measures to
+the reported hit (`TraceExtent::Zero` on this trace's own 6000 uu: 4.0 uu before mesh triangles), so a
+surface 5002 uu from the eye is in range and one 5006 uu away is not
+(`crates/asamu-game/tests/parity_world_check.rs`). Not measured: no recording has the crosshair's state.
 
 ## 5. Acceptance (what is grapple-able)
 
@@ -698,4 +701,5 @@ bytecode literal search and native re-reads, as in §0. Outcome per item:
 - 2026-10-12 (game layer, second wave; docs/PARITY_FINDINGS.md P1, P3): G-TG-1: what answers the fire trace
   (a mesh's triangles, always); G-AT-4: the anchor is the reported hit, 4.0 uu before mesh triangles (0.5
   before BSP, 1.0 before a brush), with what follows for the range check and the proximity release; G-TG-2:
-  the crosshair's trace is a bullet trace too.
+  the crosshair's trace is a bullet trace too (and, later the same day, `grapple_gun::crosshair` measures
+  to its reported hit).

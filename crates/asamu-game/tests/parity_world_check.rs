@@ -651,3 +651,36 @@ fn the_anchor_is_four_units_before_the_triangles_and_decides_the_release() {
     assert!(g.player().is_grapple_attached());
     assert!(close(g.player().script.gun.distance, 201.07, 0.01));
 }
+
+#[test]
+fn the_crosshair_measures_to_the_reported_hit() {
+    // G-TG-2: every gun tick a second bullet trace, `fMaxDistance` + 1000 =
+    // 6000 uu long, decides the HUD crosshair; outside story mode it is
+    // positive when the hit location is closer than `fMaxDistance` (5000 uu)
+    // to the eye, grapples remain and the hit is an acceptable static mesh.
+    // The hit location is the reported one: on the wall's triangles a tenth
+    // of the 6000 uu trace is far above the cap, so 4.0 uu before the
+    // surface (the same rule as the anchor's, G-AT-4).
+    //
+    // The view is level and the eye straight above the centre, so the trace
+    // meets the wall's face (x = 6000) `distance` uu from the eye.
+    let m = mixed();
+    let crosshair_at = |distance: f32| {
+        let mut g = game(&m);
+        g.set_max_grapples(3);
+        let p = g.player_mut();
+        p.position = Vec3::new(6000.0 - distance, 0.0, 1000.0);
+        p.velocity = Vec3::ZERO;
+        p.grounded = false;
+        p.pawn = PawnPhysicsState::default();
+        g.tick(&idle()).expect("playing");
+        g.crosshair()
+    };
+    // Well inside the range.
+    assert!(crosshair_at(4000.0));
+    // The surface 5002 uu away is reported at 4998: in range (the exact
+    // contact, 5002, would not be).
+    assert!(crosshair_at(5002.0));
+    // The surface 5006 uu away is reported at 5002: out of range.
+    assert!(!crosshair_at(5006.0));
+}
