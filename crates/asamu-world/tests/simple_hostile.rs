@@ -463,7 +463,7 @@ fn enormous_coordinates_do_not_poison_the_scene() {
 
 /// Counts far beyond what the original has (its largest element has 79
 /// vertices, 83 face directions and 148 edge directions; the largest body
-/// 114 elements): an element with thousands of vertices and directions, a
+/// 191 elements): an element with thousands of vertices and directions, a
 /// body of thousands of elements, and a triangle budget that ends in the
 /// middle of a body. Each loads in bounded time and memory and answers
 /// queries.

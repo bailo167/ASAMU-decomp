@@ -1303,7 +1303,15 @@ more than 100), which is 31,944 of the 89,412 convex elements placed for them (7
 one element each, than first counted: those too small to have a simple body, above): AG-ParadiseCave 486
 placements, AG-Darkcave 418, AG-IceCave 941, AG-BeautifulCity 188, AG-StarHaven 123, AG-Workshop 3,
 AG-Epilogue 3. They are the large rocks and platforms the levels are built from (`Rocks.Mesh.Rock_Huge_1`
-and `_2`, `Platforms.Meshes.Platform_Medium_1`, the icicles of AG-IceCave). No volume hull loses one. Of
+and `_2`, `Platforms.Meshes.Platform_Medium_1`, the icicles of AG-IceCave). No volume hull loses one.
+13 pawn-blocking placements sit on the threshold itself: they are scaled by exactly 10 on two axes
+(`Rocks.Mesh.Rock_Huge_2` and `Platforms.Meshes.Platform_Medium_1`: 9 in AG-Darkcave, 3 in
+AG-ParadiseCave, 1 in AG-BeautifulCity), so the squared length of a face axis of the box is 1e-4 to
+within 2 parts in 10 million, which is the rounding of single precision. Which side the original's `f32`
+arithmetic in the element's space puts each of them on is UNKNOWN (it would take that arithmetic
+operation by operation); ours decides in `f64` from the stored matrix, and a recount in `f64` made
+without this repository's code already differs from the loader on one of them (2,163 placements against
+2,162; counted 2026-10-12 by the third verification). Of
 the 637 placements the pawn meets at triangles (meshes that store the box switch `false`), 20 are placed
 so that two scales multiply to more than 10,000 (13 in AG-ParadiseCave, 7 in AG-BeautifulCity:
 `Platforms.Meshes.Platform_Medium_2` and `Village.rock2`). The earlier figure of 127 counted meshes
