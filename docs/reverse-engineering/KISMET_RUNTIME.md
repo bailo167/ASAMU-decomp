@@ -381,8 +381,9 @@ flips it, each keeping the volume's block flag, and the collision component foll
 `Engine.DynamicBlockingVolume` starts colliding or not by its `bEnabled` [CONFIRMED (src): its start
 function sets "collides" from `bEnabled` and keeps the stored block flag]. The shipped level scripts
 refer to 24 blocking volumes in five levels (AG-BeautifulCity 7, AG-Darkcave 6, AG-IceCave 3,
-AG-StarHaven 7, TheCore 1), every one a `DynamicBlockingVolume`, every one the target of `SeqAct_Toggle`
-actions and of no other action; 15 start switched off (PARITY_FINDINGS V14). In the recordings the pawn
+AG-StarHaven 7, TheCore 1), every one a `DynamicBlockingVolume`; 22 are targets of `SeqAct_Toggle`
+actions and of no other action (AG-StarHaven's `_2` and `_3` are in the actor table and the target of no
+action); 15 start switched off (PARITY_FINDINGS V14). In the recordings the pawn
 flies through `DynamicBlockingVolume_6` of AG-BeautifulCity (off from the start, V13) and, after the
 level script's changes, stands inside `_2` and `_5` (on at the start; 81 recorded positions).
 The host: the blocking volumes in the script's actor table get dynamic collision instances before play

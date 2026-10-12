@@ -87,7 +87,8 @@
 //! `Engine.Volume`, which the blocking volumes inherit; read locally from
 //! the user's `Engine.u`). Every blocking volume the shipped level scripts
 //! refer to is an `Engine.DynamicBlockingVolume` (24 of them in five
-//! levels), each the target of toggle actions and of nothing else; such a
+//! levels; 22 are targets of toggle actions and of nothing else, and
+//! AG-StarHaven's `_2` and `_3` are the target of no action); such a
 //! volume starts colliding or not by its `bEnabled`
 //! (`asamu_world::scene::switchable_volume`). The blocking volumes in the
 //! script's actor table get dynamic collision instances before play, and
