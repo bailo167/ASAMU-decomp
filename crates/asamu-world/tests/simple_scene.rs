@@ -24,7 +24,7 @@ fn load(scene: &SceneFixture, meshes: &MeshFixtures) -> LoadedMap {
     let mut src = MemorySource::new();
     scene.write(&mut src);
     meshes.write_v2(&mut src, true);
-    scene::load_map(&src, MAP, &LoadOptions::default()).unwrap()
+    scene::load_map(&src, MAP, &LoadOptions::default()).expect("the fixture loads")
 }
 
 fn sweep(map: &LoadedMap, start: Vec3, end: Vec3) -> Option<SceneHit> {
@@ -1004,6 +1004,22 @@ fn unusable_shapes_fall_back_to_the_triangles() {
     let map = scene::load_map(&good, MAP, &opts).unwrap();
     assert!(!map.warnings.is_empty());
     assert_eq!(map.stats.pawn_simple, 0);
+    // One mesh of a version 2 manifest without a record: that mesh alone is
+    // approximate, and the warning names it.
+    let mut edited = manifest.clone();
+    edited["meshes"]["Pkg.Meshes.Stairs"]
+        .as_object_mut()
+        .unwrap()
+        .remove("simple_collision");
+    edited["meshes"]["Pkg.Meshes.Other"] = manifest["meshes"]["Pkg.Meshes.Stairs"].clone();
+    let mut src = MemorySource::new();
+    s.write(&mut src);
+    m.write_v2(&mut src, true);
+    src.insert(manifest_path, edited.to_string().into_bytes());
+    let map = scene::load_map(&src, MAP, &LoadOptions::default()).unwrap();
+    assert_eq!(map.warnings.len(), 1, "{:?}", map.warnings);
+    assert!(map.warnings[0].contains("Pkg.Meshes.Stairs: no simple-collision record"));
+    assert_eq!(map.stats.pawn_approximate, 2);
     // A record of the wrong shape makes the whole manifest's records
     // unreadable: the map still loads, approximately.
     let mut edited = manifest.clone();

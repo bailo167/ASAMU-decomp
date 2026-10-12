@@ -21,14 +21,19 @@ const DT: f32 = 1.0 / 60.0;
 
 fn game(src: &MemorySource, map: &str) -> Game {
     let loaded = scene::load_map(src, map, &LoadOptions::default()).expect("fixture loads");
-    // Only the original's own warning (rotate to a missing spawn actor) and
-    // the missing mesh manifest of mesh-less fixtures.
+    // Only the original's own warning (rotate to a missing spawn actor), the
+    // missing mesh manifest of mesh-less fixtures, and the loader's notice
+    // that a mesh manifest of version 1 (which `MeshFixtures::write` writes:
+    // a conversion from before the simple collision) makes the pawn collide
+    // with every mesh's triangles. The loader has said that since it reads
+    // the meshes' simple collision; the worlds of these tests are unchanged.
     assert!(
         loaded
             .warnings
             .iter()
             .all(|w| w.contains("without a spawn point actor")
-                || w.contains("no static-mesh collision")),
+                || w.contains("no static-mesh collision")
+                || w.contains("has no simple-collision data")),
         "{:?}",
         loaded.warnings
     );

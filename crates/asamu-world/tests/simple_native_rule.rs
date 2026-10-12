@@ -102,7 +102,9 @@ fn octahedron_scene(to_world: Affine, with_edges: bool) -> CollisionScene {
     let (v, t) = octahedron();
     let (faces, edges) = octahedron_directions();
     let edges = if with_edges { edges } else { Vec::new() };
-    let m = b.add_convex_hull(v, t, &faces, &edges).unwrap();
+    let m = b
+        .add_convex_hull(v, t, &faces, &edges)
+        .expect("the octahedron is a mesh");
     let i = b
         .add_static_with(
             m,
@@ -110,7 +112,7 @@ fn octahedron_scene(to_world: Affine, with_edges: bool) -> CollisionScene {
             info(1),
             InstanceOptions::of_kind(PrimitiveKind::SimpleHull),
         )
-        .unwrap();
+        .expect("the placement is usable");
     assert!(b.set_static_native(i, None));
     b.build()
 }

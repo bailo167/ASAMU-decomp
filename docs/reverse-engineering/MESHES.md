@@ -599,8 +599,8 @@ flowers have no body and their box switch is on: by this table the pawn passes t
   (recorded standing height 119.15 = 116.0 + 2.15 + 1.0, V18); a bullet trace ends on the rug at z = 72.193.
 
 **A conversion without simple collision** (mesh manifest version 1) still loads. Every blocking mesh then stops
-the pawn at its triangles, as before this work, and the loader's first warning says that pawn collision is
-approximate and that the meshes should be converted again. A mesh whose shapes file is missing or malformed
+the pawn at its triangles, as before this work, and the loader warns once, before any warning about a single
+mesh, that pawn collision is approximate and that the meshes should be converted again. A mesh whose shapes file is missing or malformed
 falls back to its triangles in the same way, with a warning naming it.
 
 Open:

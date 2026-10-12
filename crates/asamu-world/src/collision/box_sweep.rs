@@ -344,8 +344,7 @@ impl AxisSkip {
         let j = (axis + 1) % 3;
         let k = (axis + 2) % 3;
         match (self.box_edges.get(j), self.box_edges.get(k)) {
-            // Written so that a NaN counts as "left out".
-            (Some(a), Some(b)) => !(a.cross(*b).length_squared() >= self.min_length2),
+            (Some(a), Some(b)) => self.too_short(a.cross(*b)),
             _ => true,
         }
     }
@@ -361,7 +360,14 @@ impl AxisSkip {
         let (Some(unit), Some(b)) = (local.try_normalize(), self.box_edges.get(box_edge)) else {
             return true;
         };
-        !(unit.cross(*b).length_squared() >= self.min_length2)
+        self.too_short(unit.cross(*b))
+    }
+
+    /// `true` when the axis `v` is left out: its squared length is under the
+    /// threshold (a vector that is not a number counts as left out).
+    fn too_short(&self, v: DVec3) -> bool {
+        let l2 = v.length_squared();
+        l2.is_nan() || l2 < self.min_length2
     }
 }
 

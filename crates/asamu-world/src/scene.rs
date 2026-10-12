@@ -66,10 +66,10 @@
 //! depends on the placement's scale (NATIVE_PHYSICS.md 10.1). The BSP and
 //! box elements are swept as exact geometry.
 //!
-//! **Converted data without simple collision** (a mesh manifest of version
-//! 1) still loads: every blocking mesh then stops the pawn at its triangles,
-//! as this loader did before, `LoadStats::pawn_approximate` counts them and
-//! one warning says that pawn collision is approximate and that the meshes
+//! **Converted data without simple collision** (a version 1 mesh manifest)
+//! still loads: every blocking mesh then stops the pawn at its triangles, as
+//! this loader did before, `LoadStats::pawn_approximate` counts them and one
+//! warning says that pawn collision is approximate and that the meshes
 //! should be converted again. A mesh whose shapes file is missing or
 //! malformed falls back the same way, with a warning naming it.
 //!
@@ -1591,6 +1591,9 @@ struct MeshCache<'a> {
     /// Resolved key → index into `bodies` (or failure).
     body_index: BTreeMap<String, Option<usize>>,
     bodies: Vec<Body>,
+    /// Meshes of a manifest with records that have none themselves (warned
+    /// about once each).
+    unrecorded: BTreeSet<String>,
     total_triangles: usize,
 }
 
@@ -1774,6 +1777,18 @@ fn component_placements(
 ) -> Vec<Placement> {
     let (pawn, traces) = (base.blocks_pawn, base.blocks_traces);
     let mut routes = mesh_routes(cache.record(key));
+    if !routes.recorded
+        && cache
+            .records
+            .as_ref()
+            .is_some_and(|r| !r.simple_collision.is_empty())
+        && cache.unrecorded.insert(key.to_owned())
+    {
+        warnings.push(format!(
+            "{key}: no simple-collision record in the mesh manifest; its triangles are used for \
+             the pawn, which is approximate"
+        ));
+    }
     let needs_body =
         (pawn && routes.pawn == TraceRoute::Body) || (traces && routes.line == TraceRoute::Body);
     let body = if needs_body {
@@ -1992,6 +2007,7 @@ pub fn load_map(
         loaded: BTreeMap::new(),
         body_index: BTreeMap::new(),
         bodies: Vec::new(),
+        unrecorded: BTreeSet::new(),
         total_triangles: 0,
     };
     let mut builder = CollisionSceneBuilder::new();
