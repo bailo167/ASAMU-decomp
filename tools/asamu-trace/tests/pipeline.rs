@@ -2304,6 +2304,137 @@ fn command_line_zoom_markers_and_dropped_frames() {
     }
 }
 
+/// The header notes of a real recording made with recorder 0.2.0, as the
+/// recorder's session command writes them (`tools/trace-recorder/
+/// win_remote.sh session NAME TEXT`: `--note "session: TEXT"` and `--note
+/// "markers: see the stats file (set with win_remote.sh mark)"`; the first
+/// such recording, 2026-10-12, has both in each of its 7 runs). The second
+/// begins with the word the converter's own JSON line begins with, and the
+/// header notes follow that line in a trace's notes. `starts` must list the
+/// markers of the sidecar all the same, and list a run without markers
+/// instead of failing on the person's note (it failed with "invalid
+/// markers: note" on every run of that recording).
+#[test]
+fn the_session_note_of_a_real_recording_is_not_the_markers_line() {
+    use asamu_trace::segments::markers_of;
+
+    const SESSION_NOTES: [&str; 2] = [
+        "session: keyboard and mouse, section 6 scenarios",
+        "markers: see the stats file (set with win_remote.sh mark)",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let (mut raw, _) = common::scripted_recording(90, 1_000);
+    // Two frames are missing after record 60: frames 1000..=1060, 1063..=1092.
+    for r in raw.records.iter_mut().skip(61) {
+        r.frame += 2;
+    }
+    raw.header.recorder = "asamu_win 0.2.0".into();
+    raw.header.notes.extend(SESSION_NOTES.map(str::to_owned));
+    let raw_path = d.join("km.raw.jsonl");
+    write_raw(&raw, &raw_path);
+    // One marker, in the first run: frame 1020 is its record 20.
+    let stats = r#"{"recorder":"asamu_win 0.2.0","records":91,"first_frame":1000,"last_frame":1092,
+        "stats":{"drops":[
+          {"frame":1061,"last":1062,"count":2,"reason":"unconfirmed","detail":"the tick start of the frame was not seen"}],
+          "drops_omitted":0},
+        "markers":[
+          {"name":"wall 45","id":"a","frame":1020,"records":21,"state":"recording","utc":"2026-10-12T06:30:00Z"}],
+        "markers_omitted":0}"#;
+    std::fs::write(d.join("km.stats.json"), stats).unwrap();
+    run_ok(bin().arg("convert").arg(&raw_path));
+
+    let seg0 = asamu_trace::read_trace(&d.join("km.seg0.trace.jsonl")).unwrap();
+    let seg1 = asamu_trace::read_trace(&d.join("km.seg1.trace.jsonl")).unwrap();
+    for t in [&seg0, &seg1] {
+        // The person's notes are in the trace as they were written, after
+        // the converter's own lines about the run.
+        for note in SESSION_NOTES {
+            assert_eq!(
+                t.meta.notes.iter().filter(|n| *n == note).count(),
+                1,
+                "{note}"
+            );
+        }
+    }
+    let at = |t: &Trace, start: &str| t.meta.notes.iter().position(|n| n.starts_with(start));
+    assert!(
+        at(&seg0, "markers: {").unwrap() < at(&seg0, "markers: see").unwrap(),
+        "the case the reader must get right: {:?}",
+        seg0.meta.notes
+    );
+    // The first run has the sidecar's marker at tick 1020 - 1000 = 20; the
+    // second has none, and no converter's line.
+    let m0 = markers_of(&seg0.meta.notes).unwrap();
+    assert_eq!(
+        m0.iter()
+            .map(|m| (m.tick, m.name.as_str(), m.frame))
+            .collect::<Vec<_>>(),
+        [(20, "wall 45", Some(1020))]
+    );
+    assert_eq!(at(&seg1, "markers: {"), None);
+    assert!(markers_of(&seg1.meta.notes).unwrap().is_empty());
+
+    let starts = |name: &str| run_ok(bin().arg("starts").arg(d.join(name)).arg("--events"));
+    let l0 = starts("km.seg0.trace.jsonl");
+    assert!(l0.contains(", 1 marker(s)\n"), "{l0}");
+    assert!(l0.contains("\n        20 marker \"wall 45\"\n"), "{l0}");
+    let l1 = starts("km.seg1.trace.jsonl");
+    assert!(!l1.contains("marker"), "{l1}");
+    // The same listing as without the person's notes, apart from the marker.
+    let plain_dir = d.join("plain");
+    std::fs::create_dir_all(&plain_dir).unwrap();
+    let mut plain = raw.clone();
+    plain
+        .header
+        .notes
+        .retain(|n| !SESSION_NOTES.contains(&n.as_str()));
+    let plain_path = plain_dir.join("km.raw.jsonl");
+    write_raw(&plain, &plain_path);
+    run_ok(bin().args(["convert", "--no-stats"]).arg(&plain_path));
+    let p1 = run_ok(
+        bin()
+            .arg("starts")
+            .arg(plain_dir.join("km.seg1.trace.jsonl"))
+            .arg("--events"),
+    );
+    let body = |text: &str| text.split_once('\n').map(|(_, rest)| rest.to_owned());
+    assert_eq!(body(&l1), body(&p1), "the listing below the file's line");
+
+    // A replay of such a run starts as it would without the notes.
+    let out = d.join("ours.jsonl");
+    let replayed = run_ok(
+        bin()
+            .arg("replay")
+            .arg(d.join("km.seg0.trace.jsonl"))
+            .arg("--out")
+            .arg(&out)
+            .args(["--compare", "--tol-angle", "1e-6"]),
+    );
+    assert!(
+        replayed.contains("61 samples") && out.is_file(),
+        "{replayed}"
+    );
+
+    // The Python converter writes the same notes (it copies the header's
+    // too), and the comparison of the two takes the person's line as text.
+    let Some(py) = common::python() else {
+        eprintln!("skipped (the Python part): no python3");
+        return;
+    };
+    let python = common::python_convert(py, &raw_path, &d.join("py"), &[], 2);
+    let rust = asamu_trace::convert::convert(
+        &raw,
+        &asamu_trace::convert::ConvertOptions {
+            log: Some(asamu_trace::sidecar::RecorderLog::from_json_str(stats).unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(rust[0].trace, seg0);
+    common::same_traces(&python, &rust);
+}
+
 /// The weapon's firing state and refire timer of a recording of recorder
 /// 0.2.0 are compared with ours after every tick: a fake original of our
 /// own run agrees on every tick, and one altered at a single record shows

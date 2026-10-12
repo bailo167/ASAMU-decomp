@@ -71,6 +71,16 @@
 //! of a run into a `markers:` notes line ([`markers_note`], JSON), each with
 //! the tick of the last record written when it was taken, and
 //! [`markers_of`] reads them back. [`describe`] lists them among the events.
+//!
+//! A trace's notes also hold the recording's own header notes, which are
+//! what a person typed, and one of them may begin with the same word: the
+//! recorder's session command (`tools/trace-recorder/win_remote.sh
+//! session`) gives every recording the note `markers: see the stats file
+//! (set with win_remote.sh mark)`, and the first recording made with
+//! recorder 0.2.0 (2026-10-12, 52,266 records, 7 runs) has it in every run.
+//! The converter's line is therefore the one that goes on with a JSON
+//! object ([`MARKERS_NOTE_OBJECT`]); a `markers:` line that goes on with
+//! anything else is a person's note and is not read.
 
 use std::fmt::Write as _;
 
@@ -622,6 +632,10 @@ pub fn event_notes(all: &[Event]) -> Vec<String> {
 /// Prefix of the converter's notes line with a run's markers, as JSON:
 /// `markers: {"markers":[{"frame":F,"name":"…","tick":T,"where":"at"}],"v":1}`.
 pub const MARKERS_NOTE_PREFIX: &str = "markers: ";
+/// What the converter's line goes on with after the prefix: the start of
+/// its JSON object. A notes line with the prefix and anything else after it
+/// is not the converter's (see the module docs, "Markers").
+pub const MARKERS_NOTE_OBJECT: char = '{';
 /// Version of that line's encoding.
 pub const MARKERS_NOTE_VERSION: u64 = 1;
 /// Most markers a line may hold (the recorder keeps at most 500).
@@ -723,18 +737,19 @@ struct EncodedMarkers {
     markers: Vec<EncodedMarker>,
 }
 
-/// The markers in a trace's notes (the last `markers:` line), in tick
-/// order; empty without one.
+/// The markers in a trace's notes, in tick order: those of the last
+/// `markers:` line that holds a JSON object ([`MARKERS_NOTE_OBJECT`]: the
+/// converter's line; a recording's own header note that begins with the
+/// same word is a person's text and is passed over). Empty without one.
 ///
 /// # Errors
-/// A `markers:` line that is not valid, has another version, too many
-/// entries, an unknown placement or ticks out of order.
+/// A converter's `markers:` line that is not valid, has another version,
+/// too many entries, an unknown placement or ticks out of order.
 pub fn markers_of(notes: &[String]) -> Result<Vec<TraceMarker>> {
-    let Some(json) = notes
-        .iter()
-        .rev()
-        .find_map(|n| n.strip_prefix(MARKERS_NOTE_PREFIX))
-    else {
+    let Some(json) = notes.iter().rev().find_map(|n| {
+        n.strip_prefix(MARKERS_NOTE_PREFIX)
+            .filter(|rest| rest.starts_with(MARKERS_NOTE_OBJECT))
+    }) else {
         return Ok(Vec::new());
     };
     let e: EncodedMarkers = serde_json::from_str(json).context("invalid markers: note")?;
@@ -1352,9 +1367,40 @@ mod tests {
         );
         assert!(markers_of(&[]).unwrap().is_empty());
         assert!(markers_of(&["state: {}".into()]).unwrap().is_empty());
+        // A recording's own header note that begins with the same word is
+        // not the converter's line. This is the note the recorder's session
+        // command gives every recording (tools/trace-recorder/win_remote.sh,
+        // cmd_session), as the first recording of recorder 0.2.0 has it in
+        // the notes of each of its 7 runs: alone it means "no markers", and
+        // it hides the converter's line neither before nor after it.
+        let session = "markers: see the stats file (set with win_remote.sh mark)".to_owned();
+        assert!(markers_of(&[session.clone()]).unwrap().is_empty());
+        assert_eq!(
+            markers_of(&[note.clone(), session.clone()]).unwrap(),
+            markers,
+            "the header notes follow the converter's line in a trace"
+        );
+        assert_eq!(
+            markers_of(&[session.clone(), note.clone()]).unwrap(),
+            markers
+        );
+        // Neither is any other text after the prefix that is no JSON object
+        // (the converter writes an object, sorted and compact, so its line
+        // always goes on with a brace).
+        for person in ["markers: ", "markers: []", "markers: none", "markers:  {}"] {
+            assert!(markers_of(&[person.into()]).unwrap().is_empty(), "{person}");
+            assert_eq!(
+                markers_of(&[note.clone(), person.into()]).unwrap(),
+                markers,
+                "{person}"
+            );
+        }
+        // A line that does hold an object is the converter's, and a broken
+        // one is an error: also when a valid one comes before it.
         for bad in [
-            "markers: ",
-            "markers: []",
+            "markers: {",
+            "markers: {}",
+            "markers: {see the stats file}",
             "markers: {\"v\":2,\"markers\":[]}",
             "markers: {\"v\":1,\"markers\":[{\"frame\":1,\"name\":\"a\",\"tick\":0,\"where\":\"near\"}]}",
             "markers: {\"v\":1,\"markers\":[{\"frame\":1,\"name\":\"a\",\"tick\":0}]}",
@@ -1363,6 +1409,7 @@ mod tests {
              {\"frame\":1,\"name\":\"b\",\"tick\":4,\"where\":\"at\"}]}",
         ] {
             assert!(markers_of(&[bad.into()]).is_err(), "{bad}");
+            assert!(markers_of(&[note.clone(), bad.into()]).is_err(), "{bad}");
         }
 
         // In a listing: twelve standing samples with a walk on ticks 5..=7.
@@ -1424,6 +1471,15 @@ mod tests {
             every.contains("\n        5 marker \"walk\"\n        5 move\n"),
             "{every}"
         );
+        // The session note of a real recording changes nothing in a
+        // listing (`asamu-trace starts` failed on every run of the first
+        // recording of recorder 0.2.0 before the reader told the two apart).
+        t.meta.notes.push(session.clone());
+        assert_eq!(describe(&t, false).unwrap(), text);
+        let mut bare = t.clone();
+        bare.meta.notes.retain(|n| !n.starts_with("markers: {"));
+        assert!(bare.meta.notes.contains(&session));
+        assert_eq!(describe(&bare, false).unwrap(), plain);
         // A broken markers line is an error, not an empty listing.
         t.meta.notes.push("markers: {}".into());
         assert!(describe(&t, false).is_err());

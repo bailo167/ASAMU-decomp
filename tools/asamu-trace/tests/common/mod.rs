@@ -1080,7 +1080,10 @@ pub fn run_python(py: &str, args: &[&std::ffi::OsStr]) -> String {
 
 /// The notes of the two converters agree: text for text, and the JSON notes
 /// (the state timeline, the older `init:` note, the markers) value for
-/// value.
+/// value. A line that begins like one of those and holds no JSON object is
+/// a note of the recording's header (a person's text, such as the session
+/// note `markers: see the stats file …` of every real recording made with
+/// recorder 0.2.0) and is compared as text.
 pub fn same_notes(py: &[String], rs: &[String]) {
     assert_eq!(py.len(), rs.len(), "notes differ:\n{py:#?}\n{rs:#?}");
     for (a, b) in py.iter().zip(rs) {
@@ -1090,7 +1093,8 @@ pub fn same_notes(py: &[String], rs: &[String]) {
             asamu_trace::segments::MARKERS_NOTE_PREFIX,
         ]
         .into_iter()
-        .find_map(|p| Some((a.strip_prefix(p)?, b.strip_prefix(p)?)));
+        .find_map(|p| Some((a.strip_prefix(p)?, b.strip_prefix(p)?)))
+        .filter(|(ja, jb)| ja.starts_with('{') && jb.starts_with('{'));
         match json {
             Some((ja, jb)) => {
                 let va: serde_json::Value = serde_json::from_str(ja).expect("JSON note");
