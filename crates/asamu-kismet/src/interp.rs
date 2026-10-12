@@ -241,6 +241,56 @@ impl Runtime {
         }
     }
 
+    /// `USeqAct_Interp::SetPosition(position, jump)` (CONFIRMED (native),
+    /// `0x1008A8170`): an action that is not active builds its group
+    /// instances for the call and tears them down after it; every track is
+    /// updated to the position (as a jump or not, which decides the event
+    /// keys in between), and the bound actors in the interpolating physics
+    /// are moved at once, which is how ours moves them in any case. The
+    /// teardown gives the view target and the fade back and stops the
+    /// sounds the update started (`Runtime::drop_director_outputs`).
+    /// `false` when the node has no Matinee data.
+    pub(crate) fn interp_set_position(
+        &mut self,
+        op: usize,
+        position: f32,
+        jump: bool,
+        host: &mut dyn Host,
+    ) -> bool {
+        let Some((action, data)) = self.interp_data(op) else {
+            return false;
+        };
+        let active = self.ops.get(op).is_some_and(|o| o.active);
+        let mut run = self.take_run(op).unwrap_or_else(|| {
+            Box::new(InterpRun {
+                playback: Playback::new(data.length, action.settings.clone()),
+                groups: Vec::new(),
+                cut: None,
+                fade: None,
+            })
+        });
+        let outputs_before = self.outputs.len();
+        if !active {
+            self.init_interp(&mut run, &action, &data, host);
+        }
+        self.update_interp(op, &mut run, &data, position, jump, host);
+        if !active {
+            run.groups.clear();
+            run.cut = None;
+            run.fade = None;
+            self.drop_director_outputs(outputs_before, op);
+        }
+        self.put_run(op, run);
+        true
+    }
+
+    /// Sets `bPaused` of a Matinee that has playback state.
+    pub(crate) fn interp_set_paused(&mut self, op: usize, paused: bool) {
+        if let Some(Latent::Interp(run)) = self.ops.get_mut(op).map(|o| &mut o.latent) {
+            run.playback.paused = paused;
+        }
+    }
+
     pub(crate) fn interp_activated(&mut self, op: usize, host: &mut dyn Host) {
         let Some((action, data)) = self.interp_data(op) else {
             self.error(format!("SeqAct_Interp {op}: no Matinee data"));

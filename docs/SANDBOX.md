@@ -1,17 +1,19 @@
 # Sandbox (experimental)
 
-The Sandbox is a lab inside the `asamu` app: live tuning of the movement and ability parameters, cheats, time
-control, in-memory save states, read-outs, visualisers and two hand-made arenas, all on top of the unchanged
-simulation.
+The Sandbox is a playground and a lab inside the `asamu` app. It opens into a level of its own, built for this
+game's movement (section 9), and behind one key it has the tools: live tuning of the movement and ability
+parameters, cheats, time control, in-memory save states, read-outs, visualisers and two hand-made lab arenas, all
+on top of the unchanged simulation.
 
 **It is ours. It is not the original's behaviour, and nothing it shows or records is evidence of parity with the
 original.** The faithful game ("Classic": the recreation's own parameter set and tick order, its saves and time
 trial, and the parity tooling) stays the authoritative target and is not changed by it. How closely Classic itself
 matches the original is a separate question, answered in [PARITY.md](PARITY.md), not here.
 
-This document describes the first version as it is built. It has been exercised by automated tests and by
-unattended runs that take screenshots. Nobody has yet driven a session with real keys and a real mouse; see
-[Known limitations](#12-known-limitations-and-what-comes-later).
+This document describes it as it is built. It has been exercised by automated tests (which play every route of
+the playground with a simple pilot) and by unattended runs that take screenshots. The owner has opened it once, on
+a converted map, before the playground existed; nobody has yet played the playground with real keys and a real
+mouse. See [Known limitations](#12-known-limitations-and-what-comes-later).
 
 ## 1. What it is, and what it is not
 
@@ -19,7 +21,7 @@ unattended runs that take screenshots. Nobody has yet driven a session with real
 |---|---|
 | A way to change the recreation's parameters while playing, and to see what changes | A mode of the original game, or a statement about how the original behaves |
 | A set of tools around the simulation (freeze, step, save states, teleport, read-outs) | A second implementation of physics, grapple or world logic: it calls the same code Classic runs |
-| Hand-made test arenas, written by us | Original content, or data derived from it |
+| A playground and test arenas, hand-made by us | Original content, or data derived from it |
 | An optional part of the app that can be compiled out | Something Classic depends on |
 
 Every number the Sandbox prints (speeds, jump heights, swing times, the arena rulers that are measured rather
@@ -31,15 +33,25 @@ measured elsewhere, by replaying recordings of the original ([PARITY.md](PARITY.
 
 | Launch | What you get |
 |---|---|
-| `asamu --sandbox` | The stage launcher, offering the graybox test level and the two arenas |
-| `asamu --sandbox --arena movement-lab` (or `grapple-lab`) | Straight into that arena |
-| `asamu --sandbox --no-menu` | Straight into the graybox test level |
-| `asamu --sandbox --converted DIR` | The launcher, offering the converted maps of that folder |
+| `asamu --sandbox` | **The playground, playing.** One line on screen; F5 opens the tools |
+| `asamu --sandbox --converted DIR` | The same playground (with the game's own hand, beam and sounds from your data); the tools' stage list offers the converted maps of that folder |
+| `asamu --sandbox --arena movement-lab` (or `grapple-lab`) | Straight into that lab arena (without `--converted`) |
+| `asamu --sandbox --no-menu` | Straight into the stock graybox test level (without `--converted`) |
 | `asamu --sandbox --level AG-Workshop` | Straight into that converted map |
-| `asamu`, then **Sandbox (experimental)** in the main menu | The launcher (graybox test level and arenas) |
+| `asamu`, then **Sandbox (experimental)** in the main menu | The stage launcher (playground, graybox test level and arenas) |
+
+A session starts with a clean screen: the watermark line, which also names the tools key (and says "click to
+play" until the mouse is captured: a start from the command line leaves the mouse free, as every run that skips
+the menu does). Everything else is off until it is asked for (section 8).
+
+The stage launcher is where a session that ends returns to, and the inspector's Stage tab has a button for it.
 
 In a source checkout, `asamu` stands for `cargo run -p asamu --`, for example
 `cargo run -p asamu -- --sandbox --arena movement-lab`.
+
+The playground gives the full suit by itself (three grapples, the highest budget a shipped map sets, and the
+rocket boots), so a session there starts on the Classic set with nothing changed; the profile `infinite-grapple`
+is one click away in the tools.
 
 `--sandbox-profile NAME` starts with a tuning profile. `NAME` is a profile's name, not a file path: one of the
 built-in presets (section 4) or a profile saved under `<root>/sandbox/profiles/` (section 10). To try the example
@@ -53,8 +65,8 @@ Converted maps need your own imported data, exactly as in Classic ([PLAYING.md](
 `asamu` launch (the graybox). On a launch whose saves are on disk (`asamu --converted DIR` with the main menu) the
 button is disabled and says to start with `--sandbox` instead.
 
-A `--sandbox` process never opens the saves on disk and has no Classic menus: without a session it shows the
-launcher, and the launcher has a Quit button. Classic is a separate launch.
+A `--sandbox` process never opens the saves on disk and has no Classic menus: it starts in the playground, without
+a session it shows the launcher, and the launcher has a Quit button. Classic is a separate launch.
 
 A session ends through the pause menu's "Main menu" entry or the inspector's Stage tab ("end the session"). It
 returns to the launcher in a `--sandbox` process, and to the main menu otherwise.
@@ -65,7 +77,8 @@ Combinations that are refused at start-up, with a message:
   characters of `a-z`, `0-9`, `_` and `-`.
 - `--sandbox` with `--placeholder` or `ASAMU_MOVEMENT=placeholder` (a session tunes the Classic set), with `--fly`
   or with `--walk`.
-- `--arena` together with `--converted` or `--level` (arenas run in the graybox composition).
+- `--arena` together with `--converted` or `--level` (the lab arenas run in the graybox composition; the playground
+  runs in both).
 - `--sandbox --screenshot` without `--screenshot-window`: the offscreen screenshot has no UI, so it would lack the
   Sandbox watermark.
 - `--sandbox` while `ASAMU_MENU_ACTION` is set (that variable drives the Classic main menu in unattended checks).
@@ -82,7 +95,7 @@ What a session cannot do:
 | The Classic parameter set | A session runs a **copy** with overrides applied. `PlayerParams::asamu_original()` is not edited and gains no field |
 | Tick order | Nothing hooks into the app's tick, its input gathering or its pause handling, and the Sandbox never ticks the running game. The app ticks it exactly as in Classic; a session acts between ticks. (Two things run simulation code on their own copies: the arena builder measures its jump rulers on a throwaway game, and the predicted arc steps a copy of the player) |
 | Parity traces | A Sandbox recording is its own file kind in its own directory. The parity trace reader rejects it. F9 makes a Sandbox recording while a session runs, never a parity trace |
-| Labels | A session writes its own banner and a permanent on-screen watermark; a modified parameter set is never called original |
+| Labels | A session writes its own banner and a permanent on-screen watermark; a modified parameter set is never called original, and on the clean screen the watermark line itself says what a session changed |
 | `settings.json` | The Sandbox writes only under its own directory. The Settings screen still stores your own preferences, as in Classic |
 
 A session that changes nothing (no override, default rules, no command, time control never used) is called
@@ -123,8 +136,12 @@ hundreds of files into the profile directory; and runs a session on every parame
 parameter validation accepts. Nothing may panic, hang or leave the Sandbox's own directory. It asserts nothing
 about what the simulation does with such values.
 
+`crates/asamu-sandbox/tests/playground.rs` plays the playground (section 9) and, among the rest, holds a pristine
+session around every tick of it against no session at all: the same inputs give the same game, tick for tick.
+
 The app's own tests (`cargo test -p asamu -- sandbox`) run the plugin's runtime headless with the real tick: a
-session cannot start next to saves on disk and the save files are byte-identical afterwards; ending a session
+session cannot start next to saves on disk and the save files are byte-identical afterwards; a `--sandbox`
+process starts in the playground in both compositions and leaves nothing of it behind; ending a session
 puts the Classic graybox game and the clocks back; an idle plugin never writes the simulation; 400 frames under
 an idle plugin, and under a pristine session, equal a bare `Game::graybox()` given the same held keys. One test
 (`a_classic_process_is_the_same_with_and_without_the_plugin`) plays the same script of key presses, the
@@ -288,8 +305,10 @@ disk, and they have nothing to do with the game's save system.
   script-driven interface are not part of it and are not rewound. The slot list says so.
 
 **Rewind** steps back through keyframes taken every 30 ticks (half a second), 120 of them (one minute). It is
-available on hand-made levels only and is not an exact per-tick rewind. No keyframes are taken while a recording
-runs.
+available on the hand-made levels (the playground, the graybox test level and the lab arenas), not on converted
+maps, and is not an exact per-tick rewind. No keyframes are taken while a recording runs. On the playground a
+keyframe holds the pawn and everything that turns and moves (the map data itself is shared between the
+keyframes, so a keyframe copies only the state of the run).
 
 ## 7. Hotkeys
 
@@ -298,7 +317,7 @@ window). The inspector key also works with the mouse free.
 
 | Key | Action |
 |---|---|
-| `` ` `` or F5 | Open or close the inspector (Esc also closes it) |
+| F5 or `` ` `` | **The tools**: open or close the inspector (Esc also closes it). Opening it also switches the read-outs and drawings on |
 | `[` / `]` | Previous / next parameter of the quick tuner |
 | `-` / `=` | Step the selected parameter down / up (Left Alt x10, Left Ctrl x0.1) |
 | Backspace | Reset the selected parameter (with Left Alt: reset all) |
@@ -307,11 +326,11 @@ window). The inspector key also works with the mouse free.
 | `,` / `.` / `/` | Slower / faster / back to 1x |
 | 1 to 4 | Select a save-state slot |
 | K / L | Save to / load from the selected slot |
-| Z | Rewind one keyframe (hand-made levels) |
+| Z | Rewind one keyframe (the playground, the graybox and the lab arenas) |
 | T / G | Teleport to the crosshair hit / to the next teleport target |
 | B / V | Set the "quick" bookmark / return to it |
 | N | Fly placement on/off |
-| H | HUD read-outs on/off (the watermark and the state line stay) |
+| H | Read-outs and drawings on/off. Off is the clean screen a session starts with: the watermark line alone |
 | F9 | Start/stop a Sandbox recording |
 | F2, F3, F4, F6 | Story mode, grapple capacity, rocket boots, attractor pads: the same effects as Classic's developer keys, run as logged commands |
 | F7, R | Quick load on a converted level, respawn on a hand-made one, as a logged command |
@@ -337,15 +356,26 @@ mouse look and the grapple are off, and time is held unless you switch "freeze w
 | Time & states | Freeze, step, speed, the four slots with their ticks, rewind, recording |
 | View | Visualiser switches, HUD read-outs, the quick tuner's pinned keys |
 | Profiles | Built-in presets and saved profiles; save the current tuning |
-| Stage | The stages of this launch; starting one ends the session and starts a new one |
+| Stage | The stages of this launch (the playground, and the lab arenas or the converted maps); starting one ends the session and starts a new one. Buttons for the stage launcher and for ending the session |
 
-**The HUD** is non-interactive text in the left half of the window: the watermark
-`SANDBOX - experimental - not the original's behaviour - saves off`, then the profile, override count and time
-state, the quick tuner, speed with its peak and height, the last jump, the last swing, the slots and rewind
-length, the latest outcome or refusal, and two lines of key help. Two small bar graphs at the bottom right show
-speed and height over the last 600 ticks.
+**The clean screen.** A session starts with one line at the top of the window: the watermark
+`SANDBOX - experimental - not the original's behaviour - saves off`, followed by what the session has changed, if
+anything (`profile moon: 1 override`, `rules on`, `time 0.5x`, `REC`), by `click to play` while the mouse is free,
+and by `F5 tools`. On the playground a timed route adds its clock under it while you are on one (section 9).
+Nothing else of the Sandbox is on screen, and in the playground the developer read-out (F1) and the level gizmos
+(F10) start switched off too.
 
-**Visualisers** are lines drawn over the game. They change nothing.
+**The tools** come with F5 (or the back-quote): the inspector opens, and the read-outs and drawings are on from
+then on, also after the inspector is closed, so you can tune and watch while you play. H switches them off again
+(and on).
+
+**The HUD read-outs** are non-interactive text in the left half of the window, under the watermark: the profile,
+override count and time state, the quick tuner, speed with its peak and height, the last jump, the last swing, the
+slots and rewind length, the latest outcome or refusal, and two lines of key help. Two small bar graphs at the
+bottom right show speed and height over the last 600 ticks.
+
+**Visualisers** are lines drawn over the game. They change nothing, and none is drawn while the read-outs are off
+(the "Default" column is what the switches are set to when the tools first come on).
 
 | Visualiser | Default | Shows |
 |---|---|---|
@@ -368,7 +398,130 @@ How the read-outs are measured, all in whole ticks of this recreation:
 - The **predicted arc** steps a copy of the player with the game's own step function. The world is taken as it is
   now: movers, crystals, attractor pads and the level script do not advance in the prediction.
 
-## 9. Arenas
+## 9. Stages: the playground and the lab arenas
+
+### The playground
+
+The level the Sandbox opens into: one level of ours, built for this game's movement and large enough to stay in.
+**It contains no original content and no data derived from it**: every shape is generated by
+`crates/asamu-sandbox/src/playground.rs` from a few numbers, every position, size and count is ours, and it needs
+no game data to load or to be drawn. The only values it takes from the game are Classic *parameter* values read
+when it is built (the grapple's reach, for the shots that are at the edge of it). It is not a level of the
+original, and nothing measured on it says anything about the original.
+
+From the start, facing ahead:
+
+| Where | What | For |
+|---|---|---|
+| Around you | **The hub**: a wide paved island with lamps, a ring in the floor and an arrow towards each landmark in that landmark's colour | The start, the only checkpoint, where every fall ends |
+| Ahead | **The near chain**: five islands, each higher than the last. Three gaps a walking jump crosses, one wide gap for the power leap, one tall step for the power jump; a hook hangs over every landing | The warm-up, with or without the grapple |
+| To the right | **The medium chain**: five islands 3,700 to 4,250 uu apart as the grapple flies, going down and up by as much as 1,000 uu | Grapple runs: every gap is far beyond a jump |
+| To the left, past the runway | **The far chain**: two shots at 93 % of the Classic grapple range, then a stretch of five hooks without a landing, where two recharge crystals hang beside the line | Long pulls, and the budget: five hooks, three grapples |
+| Left | **The runway**: a straight of 9,000 uu between two launch ramps; a sprint up either ramp lands on the island beyond it | Speed, the sprint, the ramps |
+| Behind | **The ferry** to **the yard** (walk onto it from the hub's pier while it waits; it crosses in 9 s and waits 3 s at each end), **the carousel** (six rocks on a hub that turns once in 40 s, at two heights) and **the wheel** (six gondolas that stay level, once round in 48 s), with **a pier** from the yard along the wheel: at its far end a gondola passes the pier's edge every 8 s, a short step below it. A hook rides over every rock and every gondola, all the way round | Things that move: ride them, grapple them, be carried |
+| Ahead and to the right | **The tower**: seven ledges a jump apart, the top a power jump above the last (or one pull from the bridge to the hook beside the top), a board, and under it **the catch** | Height, and a drop of more than 6,000 uu that ends at the hub |
+
+Reading it at a glance (the colours are the view's; the roles are the level's):
+
+| Looks like | Is |
+|---|---|
+| Pale paving | Built ground: the hub, piers, bridges, the runway, the tower's top |
+| Green-topped brown rock | An island to land on |
+| Grey rock | Spires, the tower's column and ledges |
+| Teal rocks hanging in the air | Hooks: something to pull to. One hangs 1,000 uu over every landing of a chain |
+| Magenta | Whatever moves: the ferry, the carousel's rocks, the gondolas (on dark machinery) |
+| Cyan, glowing | A recharge crystal (grey while it is used up) |
+| Orange | A launch ramp, the tower's board |
+| A red sheet far below | The catch |
+| A white arch | The start of a timed route |
+| A gold frame with a light on top | Its finish |
+| A tall spire with a coloured light | A landmark: gold ahead, cyan right, violet left, pink behind, green on the tower |
+
+The rules behind the picture are the game's own, unchanged:
+
+- **Every solid surface takes the grapple** (nothing in the playground is tagged otherwise). The hooks are not
+  special; they hang where a route needs something to pull to.
+- **The suit**: the playground's own level script gives three grapples and the rocket boots at level start, the
+  way a level's start events do. A landing gives the grapples back.
+- **A pull ends just short of what it holds, and a pull into a wall ends at the wall.** A pull to the top of an
+  island you look up at ends against its side. That is why a hook hangs over every landing: hold the button on
+  the hook until the gun lets go under it, and drop onto the landing. In the air, let go early and take the next
+  thing: from under a hook, the next one may be hidden behind it.
+- **A recharge crystal gives the grapples back and does not pull**: the gun lets go of it at once. On the far
+  chain the crystals hang beside the line, to be taken in passing.
+- **Only the hub is a checkpoint.** The catch under the tower and the depths below the level kill, and you wake
+  at the hub. The other places worth going to are teleport targets of the tools (G steps through them; the Rules
+  tab lists them by these names): `near`, `medium`, `far`, `crystals`, `runway`, `ferry`, `yard`, `carousel`,
+  `wheel` (the end of the wheel's pier, where a gondola is boarded), `tower`.
+- **What moves, moves by the game layer's rules**: the hubs are placed in the rotating physics with a rate, the
+  rocks, their hooks and the gondolas are attached to them (the gondolas with the flag that keeps their own rotation),
+  each gondola's hook is attached to its gondola (attached to the hub it would go round the gondola once a turn),
+  the ferry is moved by a Matinee of ours, and a grapple's anchor rides all of them (section 11 says how the
+  level reaches the simulation).
+- **What moves carries whoever stands on it and pushes nobody** (the game layer does not model pushing or
+  crushing by a mover). So nothing that moves passes through a place to stand (a test holds the level to that),
+  and boarding is always level or a step down: the ferry's deck is level with both piers while it waits, and a
+  gondola passes the wheel's pier 14 uu below its edge. A floor that rises past a pawn is not stepped onto: with
+  a gondola level with the pier at its lowest point, the pawn was dragged along the pier's edge instead (measured
+  while the level was checked).
+- **A fall off the level lasts about four seconds** before the pawn wakes at the hub (3.7 to 4.3 s measured, from
+  the hub, the last landing of each chain, the yard and the tower's island).
+
+**Timed routes.** Four routes have a clock: the near chain, the medium chain and the far chain, each from its arch
+at the hub (or the runway's edge) to the frame on its last island, and the runway sprint between its two gates. The
+clock of a route starts on the last tick you are under its arch (standing there does not run it) and stops on the
+first tick you are inside its frame; its line appears under the watermark while it runs and after a finish, with
+the best time of the session. A death, a respawn, a teleport or a loaded save state ends the attempt without a
+time. Times are simulated time, so freezing or slowing a session does not change them; a session that changed the
+rules or the parameters times what it changed. They are measurements of this recreation in this session, never of
+the original, and they are not kept: there is no record on disk.
+
+**What the tests show** (`crates/asamu-sandbox/tests/playground.rs`; the pilot only aims, holds, lets go and
+steers at the landing, so a route it finishes is one a player can):
+
+| Test | What it plays |
+|---|---|
+| `it_loads_through_the_games_loader_without_game_data` | The generated data loads through the game's loader without a warning; two hubs turn; nothing stays on disk |
+| `the_pawn_starts_on_the_hub_with_the_full_suit` | Standing at the start with three grapples and the boots, from the level's own script |
+| `the_layout_fits_what_the_classic_set_does` | The jumps the layout was fitted to, measured and printed; a ledge is less than a jump apart, the wide gap more than a walking jump |
+| `the_near_chain_can_be_done_on_foot_and_is_timed` | Three walking jumps, the leap, the power jump; the route's clock times it, and a teleport ends an attempt |
+| `the_chains_can_be_done_by_grapple` | Every landing of the near and the medium chain by a pull to its hook and the drop; a landing gives the budget back |
+| `the_far_chain_needs_its_crystals_and_can_be_done` | Both long shots (over 90 % of the reach), the stretch in the air with the budget at 1, 2, 0, 1, 2, 0, 1, the landing at the end |
+| `the_tower_is_climbed_and_the_long_drop_ends_at_the_hub` | Up by seven jumps and a power jump; up by the hook from the bridge; off the board, more than 5,000 uu down into the catch, awake at the hub |
+| `the_runway_is_timed_and_its_ramps_reach_their_landings` | The sprint between the gates is timed (about six seconds); a sprint up each ramp ends on its landing |
+| `the_wheels_turn_and_the_ferry_keeps_its_timetable` | The hubs turn by their rate times the time; rocks keep their height and arm; gondolas keep level; the ferry is across after a crossing and home after the timetable |
+| `a_pawn_rides_the_ferry_the_carousel_and_the_wheel` | A pawn stands on each of them for 24 s |
+| `a_grapple_takes_a_moving_hook_and_the_pawn_ends_on_what_carries_it` | The anchor rides the hook; the pull ends over the rock or the gondola; the pawn rides on |
+| `what_moves_keeps_clear_of_the_places_to_stand` | For a minute of the level's time, nothing that moves enters the room a pawn takes on any paving, island or ramp |
+| `the_landing_behind_the_runway_is_left_alone_by_the_carousel` | A pawn stands under the carousel's circle on that landing for a whole turn, undisturbed |
+| `every_station_is_a_place_to_stand` | Every station: the pawn is put there, stays and looks the station's way |
+| `the_tools_list_the_stations_by_name` | The teleport list names the stations, in order, and each entry puts the pawn at its station |
+| `the_grapple_routes_are_timed_from_the_arch_to_the_frame` | The medium and the far route by grapple from under the arch into the frame, with a time |
+| `a_fall_from_anywhere_soon_ends_at_the_hub` | Walking off the hub, the last landing of each chain, the yard and the tower's island: awake at the hub within six seconds, never at rest on the way |
+| `a_hook_stays_over_its_gondola_all_the_way_round` | Every gondola's hook is right over it for a whole turn of the wheel |
+| `the_wheel_is_taken_from_the_yard_and_ridden_all_the_way_round` | From the yard: a pull to a gondola's hook, the drop onto the gondola, a whole turn on it |
+| `the_wheel_is_boarded_on_foot_from_its_pier` | From the pier's edge: a few steps onto the passing gondola, a whole turn, and off onto the pier again |
+| `the_ferry_is_walked_onto_and_off_at_both_ends` | From the hub's pier onto the ferry when it comes in, across, and off to the yard, walking |
+| `the_keyframe_rewind_works_on_the_playground` | A rewind goes back to a keyframe exactly (the pawn and everything that moves), and the run goes on from there as if it had never been further |
+| `a_session_on_the_playground_keeps_its_promises` | The level's name everywhere, save states with what moves, and a pristine session against none, tick for tick |
+
+What the Classic set does there, measured in this recreation (not the original's numbers, and they move if the
+recreation's physics is corrected): a jump rises 481 uu and covers 851 uu walking and 1,096 uu sprinting; a power
+jump rises 1,231 uu; a power leap covers 2,563 uu. The layout was fitted to these, and
+`cargo test -p asamu-sandbox --test playground the_layout_fits -- --nocapture` prints them (the lines starting with
+`MEASURE`); the test asserts only the relations the level relies on (a ledge is less than a jump, the tower's top
+more, and so on). A pull arrives under its hook at about 1,430 uu/s (one measurement, made while the level was
+laid out).
+
+**How it looks** is ours as well (`apps/asamu/src/sandbox/playground_view.rs`): flat-shaded meshes of the level's
+own solids, an evening sky, a low sun with shadows, a light haze, lamps on the hub. Nothing of it imitates the
+original, and nothing of it needs game data. In a run on converted data the game's own hand and grapple beam are
+drawn as in any level, since they come from your data (so, presumably, are its hit mark and sounds: the unattended
+runs made for this document were silent, and none of their frames shows a hit); without it the app's fallbacks
+are used (no hand, a plain beam, and a flat blue patch where the grapple hits: the app's stand-in for the hit
+mark, PLACEHOLDER for the original's glowing decal, not something the Sandbox draws).
+
+### The lab arenas
 
 Two built-in arenas, both hand-made box levels written by us. They contain no original content and no data
 derived from it. Each has the level name `sandbox arena: <id> (hand-made, not original content)`.
@@ -399,6 +552,9 @@ to the left, the tagged surfaces to the right, the beam straight behind, the cry
 to the left, the attractor pad behind to the right. Turn around, or press G to step through the teleport targets
 (the start, then the checkpoints at the start, on the close-range pad and facing the tagged surfaces).
 
+The arenas run in a launch without converted data (`asamu --sandbox --arena ID`, or the stage list there). The
+playground runs in every launch.
+
 ## 10. File formats and where files live
 
 Everything the Sandbox writes is under `<root>/sandbox/`, where `<root>` is the user data folder that also holds
@@ -413,6 +569,12 @@ Everything the Sandbox writes is under `<root>/sandbox/`, where `<root>` is the 
 
 Nothing is created until something is saved. Nothing is written to `<root>/saves/`, to `$ASAMU_TRACE_DIR`, into
 the converted data or into the repository. Without a user data folder nothing can be saved.
+
+One thing is written outside that folder, and removed again at once: each start on the playground writes the
+playground's generated data (a few hundred small files, under 1 MB, all produced by this program) into a new directory
+`asamu-sandbox-playground-<pid>-<n>` under the system's temporary directory, loads it with the game's loader and
+deletes the directory before the session begins (section 11). The directory is created by that start and refused
+if the name already exists, so nothing that was there before is written through.
 
 ### Profile, version 1
 
@@ -494,14 +656,14 @@ asamu-core <- asamu-player <- asamu-world <- asamu-kismet <- asamu-game <- asamu
 
 - **`crates/asamu-sandbox`** is the model, without Bevy: the key catalogue and overlay, re-latching, rules,
   profiles, the command enum and the session, time control, save states, telemetry, prediction, the recording
-  container, the arenas and read-only inspection views. It depends on the simulation crates; none of them depends
+  container, the playground with its timed routes, the arenas and read-only inspection views. It depends on the simulation crates; none of them depends
   on it. It reaches a running game through public APIs only.
 - **`crates/asamu-game/src/tooling.rs`** is the one addition to a simulation crate: `Game::set_params`, which
   replaces the parameters between ticks after validating them. Classic code never calls it, and calling it with
   the set already in use writes nothing.
 - **`apps/asamu/src/sandbox.rs` and `src/sandbox/`** are the Bevy plugin: `cli`, `lifecycle`, `control`,
-  `storage` (the runtime) and `input`, `panel`, `widgets`, `launcher`, `hud`, `viz`, `graphs`, `arena_view` (the
-  view).
+  `storage` (the runtime) and `input`, `panel`, `widgets`, `launcher`, `hud`, `viz`, `graphs`, `arena_view`,
+  `playground_view` (the view).
 - **Single writer.** Only `sandbox/control.rs` takes the simulation or the virtual and fixed clocks mutably. The
   view reads through `Inspection` and asks for changes with a request message; `lifecycle` decides what a
   lifecycle request means and hands the writing to `control`.
@@ -511,7 +673,31 @@ asamu-core <- asamu-player <- asamu-world <- asamu-kismet <- asamu-game <- asamu
   and two read-only lifecycle systems run (besides the run conditions of the others, and a click observer that
   returns at once for any button that is not the Sandbox's). It never writes the simulation or a clock there.
 
-Hooks in existing files, all additive:
+**How the playground reaches the simulation.** The game layer's support for actors that turn, for what is
+attached to them and for Matinee-moved platforms lives in the level script, which only the loader of converted
+levels builds. The playground therefore does not fork or patch any of it: `playground.rs` writes the level **in
+the converted-data layout** (a scene file, a mesh manifest with one convex simple body per solid, a level script
+of ours that gives the suit and starts the ferry's Matinee, and that Matinee's data), using the workspace's own
+writer for synthetic converted data (`asamu_world::fixtures`); the files go into a fresh temporary directory, the
+game's public loader (`load_level_with_kismet_options`, the one Classic uses) loads them, and the directory is
+removed. From there on it is a level like any other to the simulation: the carousel turns because its hub is
+placed in the rotating physics with a rate, and so on. The app runs it with the unchanged tick (`fixed_tick`
+ticks a level script when the simulation has one) and draws it itself.
+
+Two things follow from that route, and the Sandbox handles both in its own code:
+
+- The loader names every level it builds "... (converted locally from the original)" and gives it that origin.
+  The playground is not converted from anything, so the Sandbox prints it as `sandbox playground (hand-made, not
+  original content)` wherever it prints a level's name (the banner, the inspector, a recording's header and
+  embedded trace). The game's own level record still carries the loader's label. **What is missing in the game
+  layer is a constructor for a hand-made scene level**, with its own origin; adding one is a change to a Classic
+  crate and was not made here.
+- In a run on converted data the app has no simulation outside a level and shows a converted level behind its
+  menu. A session on the playground there makes the playground's game the simulation, and its view removes that
+  level's entities and gives the level a name no converted level has, so that none of its lights, light maps or
+  atmosphere applies. The menu flow plans a level again when a map is started from the stage list.
+
+Hooks in existing files, all additive (the playground added none):
 
 | File | Hook |
 |---|---|
@@ -536,17 +722,43 @@ Nothing under `crates/` or `tools/` is compiled differently by the feature.
 `crates/asamu-game/src/tooling.rs`, then take out the hooks listed above.
 
 **Unattended looks.** For layout checks and screenshots, the environment variable `ASAMU_LAB_VIEW` plays a
-comma-separated list of steps of 180 frames each in a running session: the tab names (`tune`, `rules`, `time`,
-`view`, `profiles`, `stage`; `tune:<group index>` picks a parameter group), `play`, `show` (every visualiser on),
-`walk` (forward held) and `respawn`. It cannot start a session and does nothing without one.
+comma-separated list of steps in a running session: the tab names (`tune`, `rules`, `time`, `view`, `profiles`,
+`stage`; `tune:<group index>` picks a parameter group), `play`, `show` (the read-outs and every visualiser on),
+`walk` (forward held), `respawn`, and for the playground `at:<station>` (the pawn placed at a station, section 9)
+and `pull:<piece>` (the view turned to a piece, such as `near hook 1` or `carousel hook 1`, and the grapple held),
+and `go:<stage>` (what a click on that entry of the stage list does: `playground`, `graybox`, an arena's id, or a
+converted map's name). A step lasts 180 frames, or the seconds written after an `@` (`pull:far hook 1@4`). It
+cannot start the first session and does nothing without one; the two playground steps act through the session's
+teleport command, which is logged like any other. A developer's tool, for example:
+
+```sh
+ASAMU_LAB_VIEW="play@4,at:near@3,pull:near hook 1@4,at:wheel@4,stage@4" \
+  asamu --sandbox --hidden-window --watch-window DIR --exit-after 20
+```
+
+In a run on converted data the playground shows no converted level, and the app's unattended captures wait for a
+converted level's assets: there `--screenshot` is taken at its deadline (two seconds before `--exit-after`), and
+`--record-frames` does not start by itself (F12 starts it). Without converted data both work as in any run.
 
 ## 12. Known limitations, and what comes later
 
 Limitations of this version:
 
-- **Not yet used by hand.** The checks so far are the automated tests and unattended runs with screenshots. Real
-  key presses, mouse clicks on the panel, starting a converted map from the launcher, and saving and loading a
-  profile from disk in the running app have not been exercised by a person.
+- **The playground has not been played by a person.** Its routes are done by the tests' pilot, which is not a
+  player: how the jumps, the pulls and the stretch in the air feel in the hand, whether the hooks sit where the
+  eye expects them, and whether the level is fun, is for someone with a mouse to say. The same goes for mouse
+  clicks on the panel, starting a converted map from the stage list, and saving and loading a profile from disk.
+- **The playground's look is plain**: flat colours on its own generated solids, no textures. Dressing it with the
+  user's own converted meshes and materials (floating rocks, crystals, lamps), on top of the same collision, was
+  left for later.
+- **Only the hub is a checkpoint**, because the game's checkpoints only move forward. A fall from the end of a
+  long chain is a walk back, or a teleport to a station (G).
+- **The lab arenas are not offered in a run on converted data** (they are built for the graybox composition; the
+  playground runs in both).
+- **A hand-made scene level is labelled as converted by the game layer** (section 11); the Sandbox corrects the
+  name where it prints it.
+- **A start from the command line leaves the mouse free** until a click, as every run that skips the menu does;
+  the screen says "click to play".
 - **The new CI steps have not run yet** (the clippy pass without the feature, the app's Sandbox tests on Linux).
 - **37 of the 67 keys are unclassified**: whether a change reaches the running pawn at once is not established
   for them.
@@ -554,7 +766,9 @@ Limitations of this version:
 - **Spawn-only keys do not follow** on a level the loader built; the level's own ability state wins.
 - **Save states on scripted levels restore the simulation only**, and are in memory only. There are no save
   states on disk.
-- **Rewind** exists on hand-made levels only and steps by keyframe, not by tick.
+- **Rewind** exists on the hand-made levels only (the playground, the graybox and the lab arenas; not on
+  converted maps, where the cost of a keyframe is unmeasured) and steps by keyframe, not by tick. Save states work
+  everywhere.
 - **Time control scales everything on the virtual clock**, including presentation timers and audio timing.
 - **The predicted arc assumes a static world.**
 - **A shared in-memory save session.** In a run that is not a `--sandbox` process but keeps its saves in memory
@@ -564,7 +778,7 @@ Limitations of this version:
 - **No text input, sliders or scroll areas.** Profiles are saved under generated names; long lists are paged.
 - **With the inspector open and "freeze while open" off**, you can still move, but the grapple cannot fire, and the
   right mouse button still charges the power jump.
-- **Arenas are box levels**: no slopes. Their jump rulers are measurements of this recreation.
+- **The lab arenas are box levels**: no slopes. Their jump rulers are measurements of this recreation.
 - **Release builds would include the Sandbox**, because the feature is on by default. Whether packaged releases
   should carry it is an open maintainer decision.
 
@@ -572,13 +786,15 @@ Later, in rough priority order. None of this exists yet:
 
 1. Hardening that needs sign-off because it touches Classic code: keep Classic's developer keys from reaching a
    save on disk; label a tuned parameter set at the source in the game's trace recorder; make the parity tool
-   refuse a `sandbox:` note.
-2. Lab depth: an input tap for exact per-tick rewind and deterministic replay of recordings; restoring
+   refuse a `sandbox:` note; a constructor for hand-made scene levels, so the playground carries its own origin.
+2. The playground, after someone has played it: its distances and heights tuned by hand, checkpoints of its own
+   kind at the ends of the chains, the user's converted meshes and materials as dressing, more routes.
+3. Lab depth: an input tap for exact per-tick rewind and deterministic replay of recordings; restoring
    presentation state on scripted levels; ghost playback; a text console; sliders.
-3. Switching between Classic and the Sandbox in one process, with a unified stage picker.
-4. World inspection: collision-mesh rendering, hit details, a level-script panel.
-5. Authoring on hand-made levels: arena files, placed boxes and hooks.
-6. Triangle arenas with slopes.
-7. Overlays on converted maps.
-8. A foundation for mods: overlay directories merged at load, script constants as parameters (a Classic change
+4. Switching between Classic and the Sandbox in one process, with a unified stage picker.
+5. World inspection: collision-mesh rendering, hit details, a level-script panel.
+6. Authoring on hand-made levels: arena files, placed boxes and hooks.
+7. Triangle arenas with slopes (the playground has slopes: its ramps).
+8. Overlays on converted maps.
+9. A foundation for mods: overlay directories merged at load, script constants as parameters (a Classic change
    with its own guard), editor gizmos.

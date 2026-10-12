@@ -30,24 +30,28 @@ pub(super) struct StageEntry {
     pub summary: String,
 }
 
-/// The stages this launch offers.
+/// The stages this launch offers: the playground first, in every launch.
 pub(super) fn stages(launch: &UiLaunch) -> Vec<StageEntry> {
-    if launch.converted.is_some() {
-        return launch
-            .levels
-            .iter()
-            .map(|name| StageEntry {
-                stage: Stage::Map(name.clone()),
-                title: name.clone(),
-                summary: "converted map (local data from your own install)".to_owned(),
-            })
-            .collect();
-    }
     let mut out = vec![StageEntry {
+        stage: Stage::Playground,
+        title: "Playground".to_owned(),
+        summary: "the Sandbox's own level: a hub, chains of islands, a carousel, a wheel, a \
+                  ferry, a tower with a long drop, a runway, timed routes (hand-made)"
+            .to_owned(),
+    }];
+    if launch.converted.is_some() {
+        out.extend(launch.levels.iter().map(|name| StageEntry {
+            stage: Stage::Map(name.clone()),
+            title: name.clone(),
+            summary: "converted map (local data from your own install)".to_owned(),
+        }));
+        return out;
+    }
+    out.push(StageEntry {
         stage: Stage::Graybox,
         title: "Graybox test level".to_owned(),
         summary: "the stock hand-made test level".to_owned(),
-    }];
+    });
     out.extend(builtin_arenas().iter().map(|arena| StageEntry {
         stage: Stage::Arena(arena.id.to_owned()),
         title: format!("{} ({})", arena.title, arena.id),
@@ -156,7 +160,8 @@ fn launcher_items(d: &LauncherData) -> Vec<Item> {
     out.push(Item::dim(clip(&describe_profile(profile), 200)));
     out.push(Item::Rule);
     out.push(Item::dim(if d.converted {
-        "Stage: a converted map of this launch (it loads as a story level; saves stay in memory)."
+        "Stage: the playground (ours), or a converted map of this launch (it loads as a story \
+         level; saves stay in memory). The lab arenas need a launch without converted data."
     } else {
         "Stage: hand-made levels, written by us (no original content)."
     }));
@@ -176,7 +181,7 @@ fn launcher_items(d: &LauncherData) -> Vec<Item> {
         ]));
         // A hand-made stage says what it holds (a line of its own: it
         // wraps); the converted maps all read the same.
-        if !d.converted {
+        if !matches!(entry.stage, Stage::Map(_)) {
             out.push(Item::dim(clip(&entry.summary, 200)));
         }
     }
@@ -337,8 +342,10 @@ mod tests {
     #[test]
     fn a_graybox_launch_offers_the_hand_made_stages() {
         let all = stages(&UiLaunch::default());
-        assert_eq!(all[0].stage, Stage::Graybox);
-        let arenas: Vec<&Stage> = all[1..].iter().map(|s| &s.stage).collect();
+        // The playground first: it is what the Sandbox opens into.
+        assert_eq!(all[0].stage, Stage::Playground);
+        assert_eq!(all[1].stage, Stage::Graybox);
+        let arenas: Vec<&Stage> = all[2..].iter().map(|s| &s.stage).collect();
         assert_eq!(
             arenas,
             [
@@ -346,7 +353,13 @@ mod tests {
                 &Stage::Arena("grapple-lab".to_owned())
             ]
         );
-        assert_eq!(all.len(), 1 + builtin_arenas().len());
+        assert_eq!(all.len(), 2 + builtin_arenas().len());
+        // Every hand-made stage says what it holds.
+        let items = launcher_items(&data(&UiLaunch::default(), true));
+        let said = format!("{items:?}");
+        for entry in &all {
+            assert!(said.contains(&clip(&entry.summary, 200)), "{}", entry.title);
+        }
     }
 
     #[test]
@@ -360,10 +373,16 @@ mod tests {
         assert_eq!(
             all.iter().map(|s| s.stage.clone()).collect::<Vec<_>>(),
             [
+                Stage::Playground,
                 Stage::Map("AG-Workshop".to_owned()),
                 Stage::Map("AG-IceCave".to_owned())
             ]
         );
+        // The playground says what it is; the maps all read the same and
+        // say nothing.
+        let said = format!("{:?}", launcher_items(&data(&launch, true)));
+        assert!(said.contains(&clip(&all[0].summary, 200)));
+        assert!(!said.contains(&all[1].summary));
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //!
 //! 1. **Height fog** (`height_fog.wgsl`), after the main pass and before
 //!    Bevy's bloom: the original applies its fog to the HDR scene before
-//!    bloom and tonemapping. Reads the view's depth buffer.
+//!    bloom and tonemapping. Reads the view's depth buffer. The level's
+//!    **fog volumes** are blended in the same pass, after the height fog
+//!    (`crate::fog_volumes`, whose shader text is prefixed to this one).
 //! 2. **Uber blend** (`uber.wgsl`), after bloom and before Bevy's
 //!    tonemapping (which the plugin turns off on these cameras): the
 //!    original's tonemapper and colour-grading LUT.
@@ -46,6 +48,8 @@ use bevy::render::view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarge
 use bevy::render::{GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 
+use crate::fog_volumes::{FogVolumeGpu, MAX_GPU_VOLUMES};
+
 /// The fog shader template (see [`fog_shader_source`]).
 const HEIGHT_FOG_WGSL: &str = include_str!("height_fog.wgsl");
 /// The uber blend shader.
@@ -59,7 +63,9 @@ pub fn fog_shader_source(multisampled: bool) -> String {
     } else {
         "texture_2d<f32>"
     };
-    HEIGHT_FOG_WGSL.replace("DEPTH_TEXTURE_TYPE", ty)
+    let mut source = String::from(crate::fog_volumes::WGSL);
+    source.push_str(&HEIGHT_FOG_WGSL.replace("DEPTH_TEXTURE_TYPE", ty));
+    source
 }
 
 /// Per-camera values of both passes (layout shared with the WGSL `PostFx`
@@ -76,6 +82,11 @@ pub struct PostFxUniform {
     pub tonemap2: Vec4,
     pub grade: Vec4,
     pub bloom: Vec4,
+    /// `xyz`: the unit view axis (render space, filled at extraction);
+    /// `w`: how many of `fog_volumes` are set.
+    pub fog_view: Vec4,
+    /// The level's fog volumes in blending order (`crate::fog_volumes::pack`).
+    pub fog_volumes: [FogVolumeGpu; MAX_GPU_VOLUMES],
 }
 
 /// Main-world settings of the atmosphere passes on one camera (written by
@@ -120,6 +131,7 @@ impl ExtractComponent<RenderApp> for PostFx {
         let mut uniform = fx.uniform;
         uniform.world_from_clip = world_from_clip;
         uniform.camera = transform.translation().extend(uniform.camera.w);
+        uniform.fog_view = transform.forward().extend(uniform.fog_view.w);
         Some((
             uniform,
             PostFxPasses {
@@ -558,6 +570,10 @@ mod tests {
             single.replace("var depth_texture: texture_2d<f32>;", "X"),
             multi.replace("var depth_texture: texture_multisampled_2d<f32>;", "X")
         );
+        // The fog volume code comes first: the uniform struct uses its type.
+        let volume = single.find("struct FogVolume {").unwrap();
+        assert!(volume < single.find("struct PostFx {").unwrap());
+        assert_eq!(single.matches("struct FogVolume {").count(), 1);
     }
 
     #[test]
@@ -573,11 +589,22 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let fog = fields(HEIGHT_FOG_WGSL);
-        assert_eq!(fog, fields(UBER_WGSL));
-        // Ten fields, as in `PostFxUniform`.
-        assert_eq!(fog.len(), 10);
+        let uber = fields(UBER_WGSL);
+        // The uber pass reads the first ten fields; the fog pass also the
+        // fog volumes behind them, as in `PostFxUniform`.
+        assert_eq!(uber.len(), 10);
+        assert_eq!(fog[..10], uber[..]);
+        assert_eq!(fog.len(), 12);
         assert_eq!(fog[0], "world_from_clip: mat4x4<f32>,");
         assert_eq!(fog[9], "bloom: vec4<f32>,");
-        assert_eq!(PostFxUniform::min_size().get(), 64 + 9 * 16);
+        assert_eq!(fog[10], "fog_view: vec4<f32>,");
+        assert_eq!(
+            fog[11],
+            format!("fog_volumes: array<FogVolume, {MAX_GPU_VOLUMES}>,")
+        );
+        assert_eq!(
+            PostFxUniform::min_size().get(),
+            64 + 10 * 16 + MAX_GPU_VOLUMES as u64 * FogVolumeGpu::min_size().get()
+        );
     }
 }

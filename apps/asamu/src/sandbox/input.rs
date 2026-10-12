@@ -10,7 +10,7 @@
 //!
 //! | Key | Action |
 //! |---|---|
-//! | `` ` `` or F5 | open or close the inspector (Esc closes it too) |
+//! | `` ` `` or F5 | the tools: open or close the inspector (Esc closes it too); opening it also switches the read-outs and drawings on |
 //! | `[` / `]` | previous / next pinned parameter (quick tuner) |
 //! | `-` / `=` | step the selected parameter (Left Alt x10, Left Ctrl x0.1) |
 //! | Backspace | reset the selected parameter (Left Alt: reset all) |
@@ -21,7 +21,7 @@
 //! | T / G | teleport to the crosshair hit / next teleport target |
 //! | B / V | set the "quick" bookmark / return to it |
 //! | N | freeze-and-fly placement |
-//! | H | HUD read-outs on or off |
+//! | H | read-outs and drawings on or off (off is the clean screen a session starts with) |
 //! | F9 | Sandbox recording |
 //! | F2, F3, F4, F6 | story mode, grapple capacity, rocket boots, attractor pads: as today, as logged commands |
 //! | F7, R | quick load / respawn: as today, as a logged command |
@@ -35,14 +35,18 @@
 //! in for the inspector key, the tab buttons and the forward key. It cannot
 //! start a session and does nothing without one.
 
+use asamu_core::glam as sim_glam;
+use asamu_sandbox::arena::builtin_arenas;
 use asamu_sandbox::command::{Command, SlotOp, TeleportTarget, TimeOp, Toggle};
+use asamu_sandbox::playground::playground;
 use asamu_sandbox::snapshot::SLOT_COUNT;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use super::widgets::{Modifiers, QUICK_MARK, ViewState};
-use super::{Lab, LabRequest, LabSet, PanelState, PanelTab, VizSettings, lab_active};
+use super::{Lab, LabRequest, LabSet, PanelState, PanelTab, Stage, VizSettings, lab_active};
 use crate::ui::{Screen, UiState};
+use crate::{PendingInput, Sim};
 
 /// The keys `cursor_and_pause` gives a debug meaning in Classic. While a
 /// session runs they are taken away from it (their "just pressed" state is
@@ -265,85 +269,135 @@ fn wrapped(index: usize, steps: i32, count: usize) -> usize {
 
 /// Environment variable for unattended looks at the Sandbox (layout checks,
 /// screenshots), in the way `ASAMU_MENU_ACTION` drives the Classic menu: a
-/// comma-separated list of steps, each lasting [`VIEW_FRAMES`] frames, played
-/// once the first session of the process is running.
+/// comma-separated list of steps, played once the first session of the
+/// process is running. A step lasts [`VIEW_FRAMES`] frames, or the seconds
+/// of real time written after an `@` (`at:wheel@4`).
 ///
 /// | Step | What it does |
 /// |---|---|
 /// | `tune`, `rules`, `time`, `view`, `profiles`, `stage` | the inspector on that tab (`tune:<group index>` picks a parameter group) |
 /// | `play` | the inspector closed |
-/// | `show` | the inspector closed, every visualiser switched on |
+/// | `show` | the inspector closed, the read-outs and every visualiser switched on |
 /// | `walk` | the inspector closed, forward held for the step |
 /// | `respawn` | the inspector closed, one `respawn` command |
+/// | `at:<station>` | the inspector closed, the pawn placed at a station of the playground (`hub`, `near`, `medium`, `far`, `crystals`, `runway`, `ferry`, `yard`, `carousel`, `wheel`, `tower`) |
+/// | `pull:<piece>` | the inspector closed, the view turned to a piece of the playground (`near hook 1`, `carousel hook 1`, ...) and the grapple held for the step |
+/// | `go:<stage>` | what a click on that entry of the inspector's stage list does: this session ends and one starts on `playground`, `graybox`, an arena's id, or (anything else) the converted map of that name |
 ///
-/// It stands in for the inspector key, the tab buttons, the W key and one
-/// command, all inside a session: it does nothing without a session and
-/// cannot start one.
+/// It stands in for the inspector key, the tab and stage buttons, the W
+/// key, the mouse button and a few commands, all inside a session: it does
+/// nothing without a session and cannot start the first one. A developer's
+/// tool: the two playground steps place the pawn and turn its view through
+/// the session's own teleport command, which is logged like any other.
 pub(super) const VIEW_ENV: &str = "ASAMU_LAB_VIEW";
 
-/// Frames each step of [`VIEW_ENV`] lasts.
+/// Frames a step of [`VIEW_ENV`] lasts when it names no time.
 const VIEW_FRAMES: u32 = 180;
+/// Longest a step may ask to last, seconds.
+const VIEW_SECONDS_MAX: f32 = 600.0;
 
 /// A step of [`VIEW_ENV`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum View {
     /// The inspector on a tab (and, for Tune, a parameter group).
     Tab(PanelTab, Option<usize>),
     /// The inspector closed.
     Play,
-    /// The inspector closed, every visualiser on.
+    /// The inspector closed, the read-outs and every visualiser on.
     Show,
     /// The inspector closed, forward held.
     Walk,
     /// The inspector closed, one respawn.
     Respawn,
+    /// The inspector closed, the pawn at a station of the playground.
+    At(String),
+    /// The inspector closed, the view on a piece of the playground and the
+    /// grapple held.
+    Pull(String),
+    /// The inspector closed, a new session on another stage.
+    Go(String),
 }
 
+/// A step and how long it lasts (`None`: [`VIEW_FRAMES`] frames).
+type TimedView = (View, Option<f32>);
+
 /// Parses a [`VIEW_ENV`] value (`None`: not understood, nothing is played).
-fn parse_views(value: &str) -> Option<Vec<View>> {
+fn parse_views(value: &str) -> Option<Vec<TimedView>> {
     value.split(',').map(parse_view).collect()
 }
 
-fn parse_view(value: &str) -> Option<View> {
+fn parse_view(value: &str) -> Option<TimedView> {
     let value = value.trim();
-    match value {
-        "play" => return Some(View::Play),
-        "show" => return Some(View::Show),
-        "walk" => return Some(View::Walk),
-        "respawn" => return Some(View::Respawn),
-        _ => {}
-    }
-    let (name, group) = match value.split_once(':') {
-        Some((name, group)) => (name, Some(group.trim().parse::<usize>().ok()?)),
+    let (value, seconds) = match value.rsplit_once('@') {
+        Some((step, seconds)) => {
+            let seconds = seconds
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|s| s.is_finite() && *s > 0.0 && *s <= VIEW_SECONDS_MAX)?;
+            (step.trim(), Some(seconds))
+        }
         None => (value, None),
     };
-    let tab = match name.trim() {
-        "tune" => PanelTab::Tune,
-        "rules" => PanelTab::Rules,
-        "time" => PanelTab::Time,
-        "view" => PanelTab::View,
-        "profiles" => PanelTab::Profiles,
-        "stage" => PanelTab::Stage,
-        _ => return None,
+    let named = |name: &str| {
+        let name = name.trim();
+        (!name.is_empty() && name.len() <= 64).then(|| name.to_owned())
     };
-    // Only the Tune tab has groups.
-    (group.is_none() || tab == PanelTab::Tune).then_some(View::Tab(tab, group))
+    let view = match value {
+        "play" => View::Play,
+        "show" => View::Show,
+        "walk" => View::Walk,
+        "respawn" => View::Respawn,
+        _ => {
+            if let Some(station) = value.strip_prefix("at:") {
+                View::At(named(station)?)
+            } else if let Some(piece) = value.strip_prefix("pull:") {
+                View::Pull(named(piece)?)
+            } else if let Some(stage) = value.strip_prefix("go:") {
+                View::Go(named(stage)?)
+            } else {
+                let (name, group) = match value.split_once(':') {
+                    Some((name, group)) => (name, Some(group.trim().parse::<usize>().ok()?)),
+                    None => (value, None),
+                };
+                let tab = match name.trim() {
+                    "tune" => PanelTab::Tune,
+                    "rules" => PanelTab::Rules,
+                    "time" => PanelTab::Time,
+                    "view" => PanelTab::View,
+                    "profiles" => PanelTab::Profiles,
+                    "stage" => PanelTab::Stage,
+                    _ => return None,
+                };
+                // Only the Tune tab has groups.
+                if group.is_some() && tab != PanelTab::Tune {
+                    return None;
+                }
+                View::Tab(tab, group)
+            }
+        }
+    };
+    Some((view, seconds))
 }
 
 /// The unattended steps still to play.
 #[derive(Default)]
 struct Tour {
     read: bool,
-    views: Vec<View>,
+    views: Vec<TimedView>,
     next: usize,
     frames: u32,
+    seconds: f32,
     /// The tour holds the forward key.
     walking: bool,
+    /// The tour holds the grapple button.
+    pulling: bool,
 }
 
 impl Tour {
     /// The step this frame belongs to, and whether this is its first frame.
-    fn step(&mut self) -> Option<(View, bool)> {
+    /// `delta`: the frame's real time, seconds.
+    fn step(&mut self, delta: f32) -> Option<(View, bool)> {
         if !self.read {
             self.read = true;
             if let Ok(value) = std::env::var(VIEW_ENV) {
@@ -356,14 +410,57 @@ impl Tour {
                 }
             }
         }
-        let view = *self.views.get(self.next)?;
+        let (view, length) = self.views.get(self.next)?.clone();
         let first = self.frames == 0;
-        self.frames += 1;
-        if self.frames >= VIEW_FRAMES {
+        self.frames = self.frames.saturating_add(1);
+        if delta.is_finite() && delta > 0.0 {
+            self.seconds += delta;
+        }
+        let over = match length {
+            Some(seconds) => self.seconds >= seconds,
+            None => self.frames >= VIEW_FRAMES,
+        };
+        if over {
             self.frames = 0;
+            self.seconds = 0.0;
             self.next += 1;
         }
         Some((view, first))
+    }
+}
+
+/// The stage a `go:` step names: the playground, the graybox test level, a
+/// built-in arena by its id, or else a converted map of that name.
+fn stage_named(name: &str) -> Stage {
+    match name {
+        "playground" => Stage::Playground,
+        "graybox" => Stage::Graybox,
+        id if builtin_arenas().iter().any(|arena| arena.id == id) => Stage::Arena(id.to_owned()),
+        map => Stage::Map(map.to_owned()),
+    }
+}
+
+/// Where the piece `name` of the playground is now: where the level script
+/// has it, if it moves.
+fn piece_now(sim: &Sim, name: &str) -> Option<sim_glam::Vec3> {
+    let piece = playground().piece(name)?;
+    let moved = piece
+        .actor
+        .zip(sim.script.as_ref())
+        .and_then(|(actor, script)| script.mover_location(actor));
+    Some(moved.unwrap_or(piece.location))
+}
+
+/// The teleport that leaves the pawn where it is and turns its view to
+/// `target`.
+fn look_at(sim: &Sim, target: sim_glam::Vec3) -> Command {
+    let d = target - sim.game.eye_position();
+    Command::Teleport {
+        to: TeleportTarget::Position {
+            position: sim.game.player().position.to_array(),
+            yaw: Some(d.y.atan2(d.x)),
+            pitch: Some((d.z / d.length().max(1.0)).clamp(-1.0, 1.0).asin()),
+        },
     }
 }
 
@@ -371,9 +468,13 @@ impl Tour {
 #[allow(clippy::too_many_arguments)]
 fn hotkeys(
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: Option<ResMut<ButtonInput<MouseButton>>>,
+    mut pending: Option<ResMut<PendingInput>>,
     state: Option<Res<UiState>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     lab: Res<Lab>,
+    sim: Option<Res<Sim>>,
+    real: Option<Res<Time<Real>>>,
     mut panel: ResMut<PanelState>,
     mut view: ResMut<ViewState>,
     mut viz: ResMut<VizSettings>,
@@ -381,38 +482,83 @@ fn hotkeys(
     mut tour: Local<Tour>,
 ) {
     // Unattended looks at the Sandbox (`VIEW_ENV`; nothing without it).
-    let step = tour.step();
-    if let Some((view, true)) = step {
-        match view {
+    let step = tour.step(real.as_ref().map_or(0.0, |real| real.delta_secs()));
+    if let Some((shown, true)) = &step {
+        match shown {
             View::Tab(tab, group) => {
-                panel.tab = tab;
+                panel.tab = *tab;
                 if let Some(group) = group {
-                    panel.group = group;
+                    panel.group = *group;
                 }
                 if !panel.open {
                     requests.write(LabRequest::OpenInspector);
                 }
+                // As the tools key does.
+                if !view.hud {
+                    view.hud = true;
+                }
             }
-            View::Play | View::Show | View::Walk | View::Respawn => {
+            View::Play
+            | View::Show
+            | View::Walk
+            | View::Respawn
+            | View::At(_)
+            | View::Pull(_)
+            | View::Go(_) => {
                 if panel.open {
                     requests.write(LabRequest::CloseInspector);
                 }
-                if view == View::Show {
-                    viz.set_if_neq(VizSettings {
-                        velocity: true,
-                        cylinder: true,
-                        aim: true,
-                        trail: true,
-                        attempts: true,
-                        prediction: true,
-                        markers: true,
-                        graphs: true,
-                    });
+            }
+        }
+        match shown {
+            View::Show => {
+                if !view.hud {
+                    view.hud = true;
                 }
-                if view == View::Respawn {
-                    requests.write(LabRequest::Do(Command::Respawn));
+                viz.set_if_neq(VizSettings {
+                    velocity: true,
+                    cylinder: true,
+                    aim: true,
+                    trail: true,
+                    attempts: true,
+                    prediction: true,
+                    markers: true,
+                    graphs: true,
+                });
+            }
+            View::Respawn => {
+                requests.write(LabRequest::Do(Command::Respawn));
+            }
+            View::At(id) => match playground().station(id) {
+                Some(station) => {
+                    requests.write(LabRequest::Do(Command::Teleport {
+                        to: station.teleport(),
+                    }));
+                }
+                None => warn!("{VIEW_ENV}: the playground has no station {id:?}"),
+            },
+            View::Pull(name) => {
+                match sim
+                    .as_deref()
+                    .and_then(|sim| Some((sim, piece_now(sim, name)?)))
+                {
+                    Some((sim, target)) => {
+                        requests.write(LabRequest::Do(look_at(sim, target)));
+                    }
+                    None => warn!("{VIEW_ENV}: the playground has no piece {name:?}"),
                 }
             }
+            View::Go(stage) => {
+                requests.write(LabRequest::Start {
+                    stage: stage_named(stage),
+                    profile: lab
+                        .session
+                        .as_ref()
+                        .map(|session| session.profile().name.clone())
+                        .filter(|name| name != "classic"),
+                });
+            }
+            View::Tab(..) | View::Play | View::Walk => {}
         }
     }
     // Forward is held exactly for the frames of a `walk` step.
@@ -424,6 +570,27 @@ fn hotkeys(
         } else {
             keys.release(KeyCode::KeyW);
         }
+    }
+    // The grapple button is held for a `pull` step, from its second frame
+    // on (the first one turns the view, and lets go of an earlier pull). It
+    // is never "just pressed": `cursor_and_pause` would take that for the
+    // click that captures the mouse.
+    let pull = matches!(step, Some((View::Pull(_), false)));
+    if (pull || tour.pulling)
+        && let Some(mouse) = mouse.as_mut()
+    {
+        if pull {
+            mouse.press(MouseButton::Left);
+            mouse.clear_just_pressed(MouseButton::Left);
+            if let Some(pending) = pending.as_mut()
+                && !pending.grapple_armed
+            {
+                pending.grapple_armed = true;
+            }
+        } else {
+            mouse.release(MouseButton::Left);
+        }
+        tour.pulling = pull;
     }
 
     let screen = state.as_ref().map_or(Screen::None, |s| s.screen);
@@ -455,6 +622,11 @@ fn hotkeys(
             }
             KeyAct::OpenInspector => {
                 requests.write(LabRequest::OpenInspector);
+                // The tools were asked for: the read-outs and the drawings
+                // come with the inspector (H puts the clean screen back).
+                if !view.hud {
+                    view.hud = true;
+                }
             }
             KeyAct::CloseInspector => {
                 requests.write(LabRequest::CloseInspector);
@@ -674,44 +846,80 @@ mod tests {
 
     #[test]
     fn the_unattended_steps_parse() {
-        let tab = |tab| View::Tab(tab, None);
+        let tab = |tab| (View::Tab(tab, None), None);
         assert_eq!(parse_views("tune"), Some(vec![tab(PanelTab::Tune)]));
         assert_eq!(
             parse_views(" tune:3 , rules,time, view ,profiles,stage,play,show,walk,respawn"),
             Some(vec![
-                View::Tab(PanelTab::Tune, Some(3)),
+                (View::Tab(PanelTab::Tune, Some(3)), None),
                 tab(PanelTab::Rules),
                 tab(PanelTab::Time),
                 tab(PanelTab::View),
                 tab(PanelTab::Profiles),
                 tab(PanelTab::Stage),
-                View::Play,
-                View::Show,
-                View::Walk,
-                View::Respawn,
+                (View::Play, None),
+                (View::Show, None),
+                (View::Walk, None),
+                (View::Respawn, None),
             ])
         );
+        // The playground's steps, and a step with its own length.
+        assert_eq!(
+            parse_views("at:wheel@4, pull: carousel hook 1 @2.5,play@0.5,stage@3,go:AG-Workshop@9"),
+            Some(vec![
+                (View::At("wheel".to_owned()), Some(4.0)),
+                (View::Pull("carousel hook 1".to_owned()), Some(2.5)),
+                (View::Play, Some(0.5)),
+                (View::Tab(PanelTab::Stage, None), Some(3.0)),
+                (View::Go("AG-Workshop".to_owned()), Some(9.0)),
+            ])
+        );
+        assert_eq!(stage_named("playground"), Stage::Playground);
+        assert_eq!(stage_named("graybox"), Stage::Graybox);
+        assert_eq!(
+            stage_named("grapple-lab"),
+            Stage::Arena("grapple-lab".to_owned())
+        );
+        assert_eq!(
+            stage_named("AG-Workshop"),
+            Stage::Map("AG-Workshop".to_owned())
+        );
         for bad in [
-            "", "on", "1", "tune:x", "rules:1", "sandbox", "tune:-1", "tune,", "play:1", "walk:2",
+            "",
+            "tune,",
+            "nothing",
+            "rules:1",
+            "tune:x",
+            "tune:-1",
+            "play:2",
+            "at:",
+            "pull:  ",
+            "go:",
+            "play@",
+            "play@0",
+            "play@-1",
+            "play@nan",
+            "play@inf",
+            "play@9999",
         ] {
             assert_eq!(parse_views(bad), None, "{bad:?}");
         }
     }
 
     #[test]
-    fn each_unattended_step_lasts_its_frames_and_starts_once() {
+    fn a_tour_plays_each_step_for_its_frames_and_then_ends() {
         let mut tour = Tour {
             read: true,
-            views: vec![View::Tab(PanelTab::Time, None), View::Walk],
+            views: vec![(View::Tab(PanelTab::Time, None), None), (View::Walk, None)],
             ..Tour::default()
         };
-        let mut starts = Vec::new();
+        let mut firsts = Vec::new();
         let mut walk_frames = 0;
         for frame in 0..3 * VIEW_FRAMES {
-            match tour.step() {
+            match tour.step(0.0) {
                 Some((view, first)) => {
                     if first {
-                        starts.push((frame, view));
+                        firsts.push((frame, view.clone()));
                     }
                     if view == View::Walk {
                         walk_frames += 1;
@@ -721,19 +929,34 @@ mod tests {
             }
         }
         assert_eq!(
-            starts,
-            [
+            firsts,
+            vec![
                 (0, View::Tab(PanelTab::Time, None)),
                 (VIEW_FRAMES, View::Walk)
             ]
         );
         assert_eq!(walk_frames, VIEW_FRAMES);
-        // Without the variable nothing is ever played.
+        // Nothing asked for: nothing is played.
         let mut none = Tour {
             read: true,
             ..Tour::default()
         };
-        assert!((0..10).all(|_| none.step().is_none()));
+        assert!((0..10).all(|_| none.step(0.0).is_none()));
+        // A step with a length lasts that long in real time, whatever the
+        // frame rate: half a second is 5 frames of 0.1 s, or 50 of 0.01 s.
+        for (delta, frames) in [(0.1f32, 5i32), (0.01, 50)] {
+            let mut timed = Tour {
+                read: true,
+                views: vec![(View::Play, Some(0.5)), (View::Show, None)],
+                ..Tour::default()
+            };
+            let mut played = 0i32;
+            while matches!(timed.step(delta), Some((View::Play, _))) {
+                played += 1;
+                assert!(played < 1000);
+            }
+            assert!((played - frames).abs() <= 1, "{delta}: {played}");
+        }
     }
 
     /// An app with the hotkey layer under its real run condition and a
@@ -937,7 +1160,19 @@ mod tests {
         let panel = app.world().resource::<PanelState>();
         assert_eq!(panel.pinned_index, pinned - 1);
         assert!(!panel.open, "only the runtime opens the inspector");
-        assert!(!app.world().resource::<ViewState>().hud);
+        // H switches the read-outs and drawings on (a session starts with
+        // the clean screen) ...
+        assert!(app.world().resource::<ViewState>().hud);
         assert!(written(&app).is_empty());
+        // ... and off again.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyH);
+        press(&mut app, &[KeyCode::KeyH]);
+        app.update();
+        assert!(!app.world().resource::<ViewState>().hud);
     }
 }

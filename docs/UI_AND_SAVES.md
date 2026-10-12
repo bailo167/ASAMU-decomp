@@ -12,7 +12,8 @@ counterpart.
 | Area | State |
 |---|---|
 | Save model + format (progression, general, snapshot, time trial, settings) | implemented, unit-tested (round trip, corruption, quarantine, migration chain, lifecycle) |
-| Snapshot capture / apply on a running `Game` | implemented (checkpoint table, grapple capacity, boots, grapple latch, reset to the latest checkpoint); actor and Kismet entries are opaque slots for the world / Kismet workstreams |
+| Snapshot capture / apply on a running `Game` | implemented (checkpoint table, grapple capacity, boots, grapple latch, collectibles, reset to the latest checkpoint) |
+| The level script through a save and a load (Continue does not replay a level's opening) | implemented: events, variables and Matinees saved at every checkpoint and put back at the level start ("What a load from a checkpoint restores"); recharge crystals and falling rocks are not saved yet |
 | Main menu, chapter select, time-trial select, settings, pause menu, confirmation, loading screen | implemented (Bevy UI, `bevy_ui_widgets` buttons, Tab / Enter, Esc = back) |
 | New Game / Continue / chapter select loading converted maps | implemented and checked on a local conversion (see "Verification") |
 | Checkpoint snapshot saves from the simulation | implemented (`GameTick` message after every tick; real-data test) |
@@ -41,7 +42,7 @@ time trial reset exactly what the original resets (SAVE.md §2, §5); settings a
 |---|---|---|
 | `progression.json` | `PlayerProgression.bin` (§4.2) | `unlocked_chapters` (chapter enum names, first-entry order), `collectibles` (chapter → actor paths relative to the map), `story_items` (`<level file><parent path or None>` keys, Q5), `achievements` (`EASAMUAchievements` names), `finished_game` |
 | `general.json` | `GeneralSave.bin` (§4.1) | `current_chapter` (Continue target, `null` after New Game), `saved_strings` (Kismet flag id → int) |
-| `snapshot.json` | `SaveGame.bin` (§4.3) | `map`, `checkpoints` (chapter → latest checkpoint index), `abilities` (`max_grapples`, `rocket_boots`, `grapple_enabled`, or `null` when written from the menu), `actors`, `kismet` (opaque objects keyed by object path) |
+| `snapshot.json` | `SaveGame.bin` (§4.3) | `map`, `checkpoints` (chapter → latest checkpoint index), `abilities` (`max_grapples`, `rocket_boots`, `grapple_enabled`, or `null` when written from the menu), `actors` (path relative to the map → `{"kind": "collectible", "collected": bool}`), `kismet` (object path → an event `{"kind": "event", "retrigger_left", "trigger_count", "enabled"}`, a variable `{"kind": "bool" / "int" / "float" / "object" / "string", "value"}` or a Matinee `{"kind": "matinee", "position", "playing", "paused"}`), `script_saved` (the `kismet` entries are the level script's state at the save; absent, and so false, in snapshots written up to 2026-10-12) |
 | `time_trial.json` | `TTS.bin` (§4.4) | `best_seconds` (collectible chapter → best time) |
 | `settings.json` | user ini files (§7) | see "Settings" |
 
@@ -83,18 +84,21 @@ reads back as the identical `f32`.
 | Level select: fresh snapshot; open the chapter's map | `start_chapter` | locked chapters refused; Workshop always unlocked (§6.2) |
 | Continue: open `LevelFileNames[currentLevelIndex]` | `continue_game` / `continue_target` | needs a legible save **and** a chapter pointer (our Q6 fix) |
 | Story map start: unlock the chapter (progression written every time), set the pointer (general) | `begin_level` / `begin_level_lossy` | chapter from `WorldInfo.Title` (case-insensitive), else the map name; the front end (`ASAMUFrontEndMap`, title also `Workshop`) is never a chapter; time trial changes nothing |
-| Pawn spawn: load the snapshot, restore table + abilities, reset to the latest checkpoint, fire "save loaded" with the index; on a failed load fire it with −1 | `Game::apply_snapshot` (returns `SnapshotApplied`); app: `ui::flow::level_start` | see below; story play without a snapshot still sends `SnapshotLoaded` with −1 (the player stays at the `PlayerStart`); time trial loads nothing and sends nothing (A-TT-2) |
-| New latest checkpoint: write the snapshot | `checkpoint_saved(&TickReport)` + `Game::capture_snapshot` + `on_checkpoint_saved` | not in time trial |
+| Pawn spawn: load the snapshot, restore table + abilities, the savable actors and the level's Kismet (events, variables, Matinees), reset to the latest checkpoint, fire "save loaded" with the index; on a failed load fire it with −1 | `Game::apply_snapshot` (returns `SnapshotApplied`) + `LevelScript::start_from_save`; app: `ui::flow::level_start`, `prepare_script` | see below; story play without a snapshot still fires the event with −1 (the player stays at the `PlayerStart`); time trial loads nothing and fires nothing (A-TT-2) |
+| New latest checkpoint: write the snapshot | `checkpoint_saved(&TickReport)` + `Game::capture_snapshot` + `LevelScript::save_into` + `on_checkpoint_saved` | not in time trial |
 | New collectible / story item / achievement: write progression | `on_collectible`, `on_story_item`, `on_achievement` | extras notice at exactly 10/15/20/25; `ALL_COLLECTIBLES_FOUND` at 5 here + 25 total; `INTERACT_ALL_STORY` at 11 keys (§6.2–6.4) |
 | `SeqAct_EditOrAddSaveString`: write general | `on_save_string` | reads: `General::save_string` |
 | `SeqAct_SetGameFinished`: finished flag | `on_game_finished` | unlocks time trial |
 | Time-trial end: store if faster or first, file written every finish; five golds → `ALL_GOLD_MEDALS` | `on_time_trial_end` | medals from the CDO targets (§6.5, CONFIRMED (cdo)) |
-| Death / quick restart | — | no disk access, as in the original |
+| Death / quick restart | — | no disk access and nothing loaded, as in the original: the level script runs on |
+| Pause menu's restart | `ui::flow` `FlowRequest::Restart` | the death sequence; in Workshop and Epilogue the level is loaded again (the original's `restartlevel`), through the same level start as Continue. Our pause menu does not offer the button in those two chapters yet (below) |
 
 **Snapshot apply order** (`Game::apply_snapshot`): (1) grapple capacity (`SetMaxGrapples`), boots enabled,
-grapple latch from the snapshot; (2) the level's own start abilities on top (our stand-in for the level
-Kismet, which in the original runs after the save load and sets its chapter's values — SAVE.md §5
-"chapter-to-chapter carry-over", STRONG); (3) this chapter's latest checkpoint from the table; (4) on
+grapple latch from the snapshot; (2) on a map without a converted Kismet graph only, the level's own
+start abilities on top (our stand-in for the level Kismet, which in the original runs after the save load
+and sets its chapter's values — SAVE.md §5 "chapter-to-chapter carry-over", STRONG; with a level script
+that table is dropped and the script's first update does it); (2b) the collectibles' `bCollected`, from a
+snapshot this map wrote; (3) this chapter's latest checkpoint from the table; (4) on
 converted levels the player reset at the checkpoint the respawn lookup returns — the first checkpoint when
 the table has no entry (ABILITIES.md A-CP-4/5, CONFIRMED (src)). A load does not count as a respawn (no
 `PlayerRespawned`, respawn count unchanged); what the teleport touches — trigger volumes, the checkpoint at
@@ -105,8 +109,60 @@ converted `AG-ParadiseCave` (Continue at checkpoint 5).
 
 **Capture** (`Game::capture_snapshot(previous)`): map name; the checkpoint table carried from the previous
 snapshot with this chapter's latest index updated (one shared snapshot, SAVE.md Q1); abilities from the
-pawn's gun and boots (`None` without the script layer); actor and Kismet entries carried only when the
-previous snapshot came from the same map (entries of another map would not resolve, as in the original).
+pawn's gun and boots (`None` without the script layer); every collectible of the map with its
+`bCollected`. `LevelScript::save_into` then adds the level script's state and sets `script_saved`. Nothing
+of the previous snapshot's actors or script is carried: the original writes every savable object anew at
+each save.
+
+### What a load from a checkpoint restores
+
+The owner's Continue of 2026-10-12 played AG-ParadiseCave's opening camera flight and only then stood at
+the checkpoint (play-test defect 14). Our save held nothing of the level script, so every load started
+the script from nothing, and the script's own "is this the first time here" flag was false again. The
+original saves the script's events, variables and Matinees at every checkpoint and puts them back in the
+load at the level start; the rule, its evidence and how the shipped levels rely on it are in
+KISMET_RUNTIME.md §12. Ours now does the same.
+
+A level start from a snapshot (New Game, chapter select, Continue, a chapter change, the restart of
+Workshop and Epilogue), in order:
+
+1. `Game::apply_snapshot`: abilities, this chapter's latest checkpoint, the collectibles (only from a
+   snapshot this map wrote), the pawn at the checkpoint.
+2. `LevelScript::start_from_save`: the checkpoint index for the "save loaded" events and the script state
+   for the level start, which puts it back after the level-loaded events of begin play were activated and
+   before the "save loaded" events fire (the original's order).
+3. The first tick: the level-loaded events run as on any start; the "save loaded" events find their
+   variables as saved.
+
+| After Continue | Ours | Original (KISMET_RUNTIME.md §12, SAVE.md §4.3) |
+|---|---|---|
+| The level's opening (camera flight, cinematic mode, opening narration) | does not play: the script's flag is restored | same, by the same flag |
+| One-time prompts, music cues and cutscenes on touch events | do not repeat: trigger counts and `bEnabled` restored | same |
+| A cutscene whose Matinee was still playing at the save (AG-BeautifulCity's first checkpoint is triggered by its first cutscene's own `End` key) | plays on from the saved position, and its event keys up to there fire again at once: the cutscene's narrator lines are queued again | same by the rule as read (KISMET_RUNTIME.md §12, "What a continued game does not have"); NEEDS EVIDENCE |
+| Script variables (bool, int, float, object, string) | restored | same; plus vector variables (none in the shipped levels) |
+| Doors, lifts and other Matinee-moved actors | at their saved Matinee position; a Matinee that was playing plays on | same |
+| Grapple capacity, grapple latch, rocket boots | restored, then whatever the level-loaded script sets | same |
+| Collectibles taken | restored (of the map that wrote the save) | same |
+| What hangs off the level-loaded events (ambient sound, the looping movers' start, per-level setup) | runs again | same |
+| Actors an action hid, destroyed, toggled or re-collided (pickup crystals, lights, blocking volumes) | as at a fresh start, unless the level's script re-applies them on a load (AG-Darkcave does for three actors) | same: the save does not hold them |
+| Delays and sounds in mid-run, the narrator's queue | gone | same |
+| Story mode | as the level's script sets it at its start | same: not in the save |
+| Recharge crystals (charged or not), falling rocks (place and state) | **not restored**: as at a fresh start | restored |
+| Checkpoints' "activated" marks | fresh | fresh (the flag is not saved) |
+
+After a death, the quick-load key and the pause menu's restart nothing is loaded, in the original and
+here: the pawn is put at the latest checkpoint, the level's death event runs, the script carries on.
+
+**A save without script state** (ours; the original has no such file). Snapshots our builds wrote up to
+2026-10-12 hold none. When such a snapshot was written by the map being started, the script takes the
+variables its own level start produces (`Runtime::level_start_variables`): the flags behind which the
+levels put their openings. So Continue from an older save does not play the opening either; one-time
+prompts on touch events can come once more, and Matinee-moved actors start from their placements, until
+the next checkpoint writes a whole save.
+
+**Differences that remain.** The save is taken at the end of the tick in which the checkpoint became the
+latest; the original takes it inside the checkpoint's activation, which for a checkpoint a Kismet action
+triggers is in the middle of the sequence update. Recharge crystals and falling rocks are not saved.
 
 ### Deliberate differences from the original
 
@@ -116,7 +172,8 @@ previous snapshot came from the same map (entries of another map would not resol
 | A missing snapshot at a story map's start triggers the same "reset all" | no reset: the level starts at its `PlayerStart` |
 | Q3: achievement indices appended on every load | a set |
 | Q6: Continue can open the front end after a reset | Continue needs a chapter pointer |
-| Q4: checkpoint visuals saved without a name | not modelled (actor entries are the world workstream's) |
+| Q4: checkpoint visuals saved without a name | not modelled |
+| (no counterpart) | a snapshot of the started map without script state takes the level's own start variables ("What a load from a checkpoint restores") |
 | Q1 (one snapshot for all chapters), Q7 (index-as-position lookup), Q8 (abilities as at the last checkpoint) | kept |
 
 ## Settings
@@ -152,7 +209,12 @@ Functional replacement of the Scaleform menus; the look is ours. Screens are des
 - **Settings**: steppers / toggles for every setting above, reset to defaults.
 - **Pause** (Esc while playing): Resume · Restart from checkpoint · Settings · Main menu, with the chapter
   and the collectibles counter. Restart runs the death sequence and respawns at the latest checkpoint (the
-  original's quick load); it is disabled in Workshop and Epilogue as in the original (SAVE.md §5).
+  original's pause-menu rule outside Workshop and Epilogue; nothing is loaded). The button is off in
+  Workshop and Epilogue, which is **not** the original's rule (PLACEHOLDER): there the button follows a HUD
+  switch that Kismet's `SeqAct_ToggleRestartFromCheckpointOption` sets (each of the two levels has such an
+  action) and, pressed in those two levels, loads the level again (SAVE.md §5, corrected 2026-10-13). The
+  flow already does that reload when asked (`FlowRequest::Restart`); wiring the button to the Kismet
+  switch (`Presentation::restart_option`) is open.
 - **Loading**: render-plan progress and gameplay load state; Cancel.
 - Keys: Esc = back (pause: resume); Tab / Shift-Tab + Enter / Space through the buttons; F8 restarts a
   running time trial (the original's `TimeTrialRestart`, ABILITIES.md A-TT-2).
@@ -177,7 +239,7 @@ Functional replacement of the Scaleform menus; the look is ours. Screens are des
   front end `ASAMUFrontEndMap` when converted, else the first converted chapter); saves in the user data
   directory.
 - `asamu --converted DIR --level MAP`: starts straight in the map as before; saves stay in memory for that
-  run (the level start still runs on them: chapter, `SnapshotLoaded` with −1 — `ui::start_direct_level`);
+  run (the level start still runs on them: chapter, the "save loaded" event with −1 — `ui::start_direct_level`);
   Esc opens the pause menu, from which the main menu works normally.
 - Loading a chapter removes the running simulation, rebuilds the render plan when the map differs (level
   entities — `LevelEntity`, `LevelBsp`, `LevelLight` and the light-mapped `LightmappedBsp` meshes — are
@@ -187,6 +249,9 @@ Functional replacement of the Scaleform menus; the look is ours. Screens are des
   is re-planned or renamed (`reset_on_level_change`).
 - `ASAMU_MENU_ACTION` (unattended checks): `new-game`, `continue`, `chapter:<Name>`, `time-trial:<Name>`;
   a confirmation it raises is answered with yes.
+  `ASAMU_MENU_ACTION_DELAY=<seconds>` (up to 600) shows the main menu that long first, so that a frame
+  recording that starts by itself (`--record-frames` with `ASAMU_RECORD_AUTOSTART`) is already running
+  when the level loads and holds the level's first frames.
 
 ### Menu text
 
@@ -212,12 +277,13 @@ Messages (`apps/asamu/src/ui.rs`; register nothing, `UiPlugin` does):
 | `ui::GameFinished` | Kismet host (`SeqAct_SetGameFinished`) | finished flag |
 | `ui::TimeTrialStart` / `ui::TimeTrialEnd` | Kismet host (`SeqAct_StartTimeTrial` / `SeqAct_EndTimeTrial`) | stopwatch, best time, medal |
 | `ui::OpenMap { map }` | Kismet host (console `open <map>`; `Output::LevelTransition.map`) | `?options` are cut off; next chapter with the carried snapshot (story play only); `ASAMUFrontEndMap` ends the game: the simulation is dropped and the main menu opens (no "Return to game"). A map that is not converted leaves the game paused behind the main menu with a message |
-| `ui::SnapshotLoaded { checkpoint_index }` | flow, at every story level start (`level_start`): the applied index, or −1 without a snapshot | Kismet host fires `SaveGameState_SeqEvent_SavedGameStateLoaded` |
+| (no message: `flow::prepare_script` → `LevelScript::start_from_save`) | flow, at every story level start (`level_start`): the applied index, or −1 without a snapshot, and the snapshot's script state | the level start restores the script state and fires `SaveGameState_SeqEvent_SavedGameStateLoaded` |
 
 Pure API for code outside the app: `SaveSession` hooks above; `Game::capture_snapshot`,
 `Game::apply_snapshot`, `Game::chapter`, `Game::map_name`, `Game::latest_checkpoint_index`,
-`save::checkpoint_saved`; Kismet / actor state goes into `Snapshot::kismet` / `Snapshot::actors` before
-`on_checkpoint_saved` and is read back from the `LevelStart::snapshot` it returns.
+`save::checkpoint_saved`; the level script's state goes into the snapshot with `LevelScript::save_into`
+(`Snapshot::set_script_state`) before `on_checkpoint_saved`, and back with
+`LevelScript::start_from_save` from the `LevelStart::snapshot` the level start returns.
 
 Settings for the audio workstream: `Res<ui::UserSettings>` → `group_volume(AudioGroup::Music | Sfx | Voice)`
 (master included) and `settings.subtitles`.
@@ -248,6 +314,30 @@ Checked locally on a full user-local conversion: New Game (fresh snapshot, Works
 set), chapter select into `AG-ParadiseCave` after the confirmation, Continue from a snapshot at checkpoint
 5 (player reset there), and a checkpoint activated in a tick written as the snapshot (`Sanctuary: 1`).
 
+Continue without the opening (2026-10-13):
+
+```bash
+cargo test -p asamu-kismet --test save_state          # the rule, hand-made scripts
+cargo test -p asamu-game --lib kismet_host            # save, load, older saves, a death, hostile entries
+ASAMU_CONVERTED_DIR=<converted dir> cargo test -p asamu-game --test continue_from_checkpoint -- --nocapture
+ASAMU_CONVERTED_DIR=<converted dir> cargo test -p asamu continue_starts_in_the_player_s_view
+# every chapter: continued games against the game that played on, and the story chain from them (minutes)
+ASAMU_CONVERTED_DIR=<converted dir> cargo test -p asamu-game --release --test continue_story_maps -- --ignored --nocapture
+# the same Continue on screen: the gated test writes its save when asked to, the app continues from it
+ASAMU_CONVERTED_DIR=<converted dir> ASAMU_CONTINUE_SAVE_OUT=<scratch dir> \
+  cargo test -p asamu-game --test continue_from_checkpoint
+ASAMU_SAVE_DIR=<scratch dir> ASAMU_MENU_ACTION=continue \
+  cargo run -p asamu -- --converted <converted dir> --exit-after 30
+# the first seconds after Continue as frames (a folder outside the repository)
+ASAMU_SAVE_DIR=<scratch dir> ASAMU_MENU_ACTION=continue ASAMU_MENU_ACTION_DELAY=12 \
+  ASAMU_RECORD_AUTOSTART=1 cargo run -p asamu -- --converted <converted dir> --hidden-window \
+  --record-frames <frames dir> --exit-after 50
+```
+
+On AG-ParadiseCave the save at the fifth checkpoint holds 83 events, 150 variables, 35 Matinees and 5
+collectibles (51,069 bytes); the numbers of the fresh start and of the Continue are in KISMET_RUNTIME.md
+§12.
+
 Independent re-check (verification pass, a levels-only conversion of the twelve maps in a scratch
 directory, deleted afterwards): the same New Game / chapter select / Continue runs and an unreadable
 `general.json` set aside at start (Continue then off) behaved as described; the real-data test
@@ -270,7 +360,14 @@ first checkpoint — where New Game and chapter select put the player, as the or
 - The index the original passes to the "save loaded" event when the table has no entry for the chapter
   (we send −1, the value of a failed load) is not traced (TENTATIVE); all shipped instances use the default
   `Index` −1 ("any load"), so only Kismet that reads the index would notice.
-- Continue inside the same map applies the level's start abilities after the snapshot's (stand-in for the
-  level Kismet). For chapter transitions that is the documented order (STRONG); within one map a capacity
-  raised mid-level (e.g. Sanctuary's second `SetMaxGrapples`) is overridden until the Kismet host, with its
-  saved event state, replaces the stand-in.
+- Recharge crystals and falling rocks in the snapshot (the original saves a crystal's charged state and
+  a rock's place, rotation, fall state and visibility).
+- The pause menu's restart button: enabled by Kismet's switch, also in Workshop and Epilogue (above).
+  The quick-load key (`main.rs`, F7) still runs the death sequence in Workshop and Epilogue, where the
+  original's does nothing.
+- The save's moment for a checkpoint a Kismet action triggers (end of the tick here, inside the update in
+  the original).
+- AG-IceCave: a Continue from a checkpoint behind the one-time trigger that streams `TheCore` in
+  (KISMET_RUNTIME.md, open items): what the original does there is not established.
+- A map without a converted Kismet graph keeps the level-start ability table, which then is applied
+  after the snapshot's abilities (the stand-in for the missing level script).

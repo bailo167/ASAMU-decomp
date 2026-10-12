@@ -20,7 +20,7 @@ use bevy::ecs::schedule::common_conditions::any_with_component;
 use bevy::prelude::*;
 use bevy::ui::UiGlobalTransform;
 
-use super::widgets::{FONT, KeepClear, LabUi, TEXT, clip, text};
+use super::widgets::{FONT, KeepClear, LabUi, TEXT, ViewState, clip, text};
 use super::{Lab, LabSet, PanelState, Phase, Stage, VizSettings, lab_active};
 use crate::{LevelVisual, MoverVisual, PlayerCamera, SCALE, Sim, bevy_vec, to_render};
 
@@ -434,6 +434,7 @@ fn labels(
     lab: Res<Lab>,
     sim: Option<Res<Sim>>,
     viz: Res<VizSettings>,
+    view: Res<ViewState>,
     panel: Res<PanelState>,
     scene: Res<ArenaScene>,
     camera: Query<(&Camera, &Transform), With<PlayerCamera>>,
@@ -449,8 +450,11 @@ fn labels(
     mut boxes: Query<(&MarkerLabel, &mut Node, &mut Visibility), Without<KeepClear>>,
     mut texts: Query<(&MarkerText, &mut Text)>,
 ) {
-    let wanted =
-        lab.phase == Phase::Active && viz.markers && !panel.open && !scene.markers().is_empty();
+    let wanted = lab.phase == Phase::Active
+        && viz.markers
+        && view.hud
+        && !panel.open
+        && !scene.markers().is_empty();
     let (Some(sim), true) = (sim.as_deref(), wanted) else {
         for root in &roots {
             commands.entity(root).despawn();
@@ -816,7 +820,12 @@ mod tests {
         frames(&mut app, 4);
         assert_eq!(lab(&app).phase, Phase::Active, "{:?}", lab(&app).notice);
         let level = build_arena(GRAPPLE_LAB).unwrap();
-        // The arena's cuboids, the HUD, the graphs and the marker labels.
+        // The arena's cuboids and the HUD's one line: a session starts with
+        // the clean screen.
+        assert_eq!(view_entities(&mut app), visuals(&level).len() + 1);
+        // The tools: the graphs and the marker labels come too.
+        app.world_mut().resource_mut::<ViewState>().hud = true;
+        frames(&mut app, 3);
         assert_eq!(view_entities(&mut app), visuals(&level).len() + 3);
         assert_eq!(
             app.world().get::<Visibility>(stock),

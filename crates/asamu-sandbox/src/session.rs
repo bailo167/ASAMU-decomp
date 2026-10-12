@@ -59,6 +59,7 @@ use crate::command::{Command, CommandError, SlotOp, TeleportTarget, TimeOp, Togg
 use crate::inspect::{TeleportTargetInfo, format_value};
 use crate::keys::{Catalog, Effect, effect_of};
 use crate::overlay::{BASE_CLASSIC, Overlay, OverlayError, ParamSetLabel, param_set_label};
+use crate::playground::{CourseClock, is_playground, level_label, station_of_checkpoint};
 use crate::profile::{PROFILE_FORMAT, PROFILE_VERSION, Profile};
 use crate::recording::SandboxRecording;
 use crate::relatch::{RelatchReport, retune};
@@ -237,6 +238,8 @@ pub struct Session {
     next_target: usize,
     /// The running recording saw a parameter set other than Classic.
     recording_ran_modified: bool,
+    /// The clock of the playground's timed routes (idle on other levels).
+    course: CourseClock,
 }
 
 impl Session {
@@ -278,6 +281,7 @@ impl Session {
             marks: BTreeMap::new(),
             next_target: 0,
             recording_ran_modified: false,
+            course: CourseClock::default(),
         }
     }
 
@@ -370,8 +374,10 @@ impl Session {
         let outcome = self.run(&cmd, cx)?;
         self.log.push(tick, cmd);
         if outcome.discontinuity {
-            // What follows is a new attempt: its trail starts here.
+            // What follows is a new attempt: its trail starts here, and a
+            // timed route it was on is not timed.
             self.telemetry.archive_attempt();
+            self.course.cancel();
         }
         Ok(outcome)
     }
@@ -404,10 +410,12 @@ impl Session {
     }
 
     /// After every tick: telemetry, and rewind keyframes on hand-made levels
-    /// (not while recording). Never changes the game.
+    /// ([`keeps_keyframes`]; not while recording). Never changes the game.
     pub fn after_tick(&mut self, game: &Game, script: Option<&LevelScript>, report: &TickReport) {
         self.telemetry.observe(game, report);
-        if game.scene_map().is_some() {
+        self.course
+            .observe(game, report.respawned || game.is_dying());
+        if !keeps_keyframes(game) {
             // The clone cost on converted maps is unmeasured: no keyframes.
             self.rewind.clear();
         } else if !game.is_recording() {
@@ -419,6 +427,12 @@ impl Session {
     pub fn finish(&mut self, cx: &mut SimCx<'_>) -> Option<SandboxRecording> {
         let trace = cx.game.stop_recording()?;
         Some(self.wrap_recording(trace))
+    }
+
+    /// The clock of the playground's timed routes.
+    #[must_use]
+    pub fn course(&self) -> &CourseClock {
+        &self.course
     }
 
     /// The time-control model.
@@ -508,8 +522,14 @@ impl Session {
                     });
                 }
                 for checkpoint in &map.actors.checkpoints {
+                    // The playground's checkpoints are its stations, and
+                    // are listed by their names.
+                    let label = match station_of_checkpoint(game, checkpoint.index) {
+                        Some(station) => station.id.to_owned(),
+                        None => format!("checkpoint {} ({})", checkpoint.index, checkpoint.name),
+                    };
                     out.push(TeleportTargetInfo {
-                        label: format!("checkpoint {} ({})", checkpoint.index, checkpoint.name),
+                        label,
                         target: TeleportTarget::Checkpoint { id: checkpoint.id },
                     });
                 }
@@ -574,7 +594,7 @@ impl Session {
              profile {}{} | {}\n{set}\n{rules} | movement model: {}",
             self.profile.name,
             if self.profile_modified() { "*" } else { "" },
-            game.level().name,
+            level_label(game),
             game.movement_model().name(),
         )
     }
@@ -1208,7 +1228,7 @@ impl Session {
     }
 
     fn rewind_one(&mut self, cx: &mut SimCx<'_>) -> Result<Outcome, CommandError> {
-        if cx.game.scene_map().is_some() {
+        if !keeps_keyframes(cx.game) {
             return Err(refused(
                 "rewind is available on hand-made levels only (use a save-state slot here)",
             ));
@@ -1262,6 +1282,16 @@ impl Session {
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
+
+/// Whether the keyframe rewind runs on `game`'s level: on the hand-made
+/// levels, which are the box levels (the graybox, the lab arenas) and the
+/// playground. The playground is a scene level like a converted map, but a
+/// small one of ours whose map data is shared between the keyframes, so a
+/// keyframe copies only the state of the run.
+#[must_use]
+pub fn keeps_keyframes(game: &Game) -> bool {
+    game.scene_map().is_none() || is_playground(game)
+}
 
 fn refused(why: impl Into<String>) -> CommandError {
     CommandError::Refused(why.into())

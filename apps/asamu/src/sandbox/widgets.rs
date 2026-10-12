@@ -70,10 +70,14 @@ pub(super) struct LabUi;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub(super) struct KeepClear;
 
-/// The view's own state, beside `PanelState` and `VizSettings`.
-#[derive(Resource, Clone, Debug, PartialEq)]
+/// The view's own state, beside `PanelState` and `VizSettings`. A session
+/// starts with all of it off or at the first page.
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub(super) struct ViewState {
-    /// The HUD read-outs are shown (H). The watermark line always is.
+    /// The tools are on screen (H; the tools key switches them on): the HUD
+    /// read-outs, the graphs, the lines drawn over the game, the marker
+    /// labels. Off is the clean screen a session starts with: the watermark
+    /// line alone.
     pub hud: bool,
     /// Page of the teleport-target list.
     pub teleport_page: usize,
@@ -86,19 +90,6 @@ pub(super) struct ViewState {
     pub launcher_profile: Option<usize>,
     /// A line from the view itself (a profile that could not be read).
     pub message: Option<String>,
-}
-
-impl Default for ViewState {
-    fn default() -> Self {
-        Self {
-            hud: true,
-            teleport_page: 0,
-            stage_page: 0,
-            profile_page: 0,
-            launcher_profile: None,
-            message: None,
-        }
-    }
 }
 
 /// How a text is coloured.
@@ -266,6 +257,8 @@ pub(super) enum Act {
     },
     /// End the session, or leave the launcher.
     End,
+    /// Open the stage launcher (a running session ends first).
+    Launcher,
     /// Quit the program (the launcher of a `--sandbox` process).
     Quit,
     /// Close the inspector.
@@ -355,6 +348,7 @@ pub(super) fn perform(
             profile: profile.clone(),
         }),
         Act::End => out.push(LabRequest::End),
+        Act::Launcher => out.push(LabRequest::OpenLauncher),
         Act::Quit => out.push(LabRequest::Quit),
         Act::Close => out.push(LabRequest::CloseInspector),
         Act::Tab(tab) => panel.tab = *tab,
@@ -925,6 +919,10 @@ mod tests {
             run(&Act::Quit, &mut panel, &mut viz).as_slice(),
             [LabRequest::Quit]
         ));
+        assert!(matches!(
+            run(&Act::Launcher, &mut panel, &mut viz).as_slice(),
+            [LabRequest::OpenLauncher]
+        ));
         let out = run(
             &Act::Start {
                 stage: Stage::Arena("movement-lab".into()),
@@ -1135,7 +1133,9 @@ mod tests {
             &mut view,
         );
         assert!(view.message.is_none());
-        assert!(!view.hud);
+        // (The click itself switched the read-outs on: a session starts
+        // with them off.)
+        assert!(view.hud);
     }
 
     #[test]

@@ -75,6 +75,7 @@ mod audio;
 mod capture;
 mod converted;
 mod fly;
+mod fog_volumes;
 mod gamepad;
 mod hud;
 mod kismet;
@@ -212,7 +213,7 @@ const USAGE: &str = "usage: asamu [options]\n\
     --light-scale F         multiply converted light intensities (approximation, default 1)\n  \
     --light-shadows N       point/spot lights with shadow maps (default 4)\n  \
     --no-shadows            no directional light shadows\n  \
-    --no-fog                no placeholder fog\n  \
+    --no-fog                no height fog and no fog volumes\n  \
     --normal-maps           use converted normal maps (unverified convention)\n  \
     --debug-info            start with the developer drawings shown: the read-out, the ability\n                          \
     line and the aim marker (F1 toggles them; the graybox always starts with them)\n\

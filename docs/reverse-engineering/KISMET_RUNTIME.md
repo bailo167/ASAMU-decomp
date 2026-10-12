@@ -20,6 +20,10 @@ from the game's script, it was read locally and is restated, never quoted.
   loadable map for 3,000 ticks, drove every input of every op, compared Matinee movers with a direct
   `asamu_ue3::matinee` evaluation and checked that players and passengers ride movers; it found and fixed
   six behaviour bugs (§11).
+- A load from a checkpoint puts the script's saved events, variables and Matinees back before the "save
+  loaded" events fire, as the original's does (§12). CONFIRMED (src, native) for the rule; ours checked on
+  hand-made scripts and, gated, on AG-ParadiseCave continued at its fifth checkpoint: the opening does not
+  play again.
 
 ## Tooling and reproduction
 
@@ -28,6 +32,7 @@ from the game's script, it was read locally and is restated, never quoted.
 | Runtime graph export | `tools/asamu-import/src/kismet.rs` (`asamu-import kismet`) |
 | Interpreter | `crates/asamu-kismet` (`graph`, `runtime`, `classes`, `interp`, `matinee`, `narrator`, `host`) |
 | Game host, movers, frame order | `crates/asamu-game/src/kismet_host.rs` (`LevelScript`, `load_level_with_kismet`) |
+| Script state through a save and a load | `crates/asamu-kismet/src/save_state.rs`; `LevelScript::save_into`, `start_from_save` |
 | Moving collision | `CollisionScene::take_actor_statics` in `crates/asamu-world/src/collision/mod.rs` |
 
 ```sh
@@ -40,6 +45,10 @@ cargo run -p asamu-import -- --out $OUT kismet
 cargo test -p asamu-kismet                                   # synthetic + hostile tests
 ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-kismet --test real_data -- --nocapture
 ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-game --lib kismet_host -- --nocapture
+cargo test -p asamu-kismet --test save_state                 # §12 on hand-made scripts
+# §12 on every chapter: continued games against the game that played on, the story chain from them
+ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-game --release --test continue_story_maps -- --ignored --nocapture
+ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-game --test continue_from_checkpoint -- --nocapture
 ```
 
 The engine functions were decompiled with `tools/ghidra-scripts/DecompileToLocal.java` into the ignored
@@ -619,8 +628,146 @@ Also: re-triggering an activated checkpoint no longer logs a false "checkpoint n
 `LevelScript::moved_actors` adds the sub-level offset for every actor, not only collision movers; caps on the
 queued activations per sequence (4,096), pending attractor pads (1,024) and narrator lines (1,024).
 
+## 12. A load from a checkpoint
+
+What the original saves of a level's script at a checkpoint, what its load puts back and when, and how the
+shipped levels rely on it. Found for play-test defect 14 of 2026-10-12 (Continue played AG-ParadiseCave's
+opening again): ours saved nothing of the script, so every load started the script from nothing. The save
+file's layout is in [SAVE.md](SAVE.md) §4.3; this section is the script's side.
+
+**The original** (script read locally and restated; native where marked):
+
+| Fact | Evidence | Confidence |
+|---|---|---|
+| The save is written inside a checkpoint's activation, when that checkpoint becomes the level's latest (ABILITIES.md A-CP-3). For a checkpoint the pawn touches that is during the pawn's move, after the frame's sequence update; for one a `SeqAct_TriggerCheckpoint` activates it is inside the update, before the ops that run after that action. | the checkpoint manager's register function calls the game info's save | CONFIRMED (src) |
+| Of the level's Kismet it holds, for every root sequence: every **event** (the rest of its re-trigger delay: `max(ReTriggerDelay − (now − ActivationTime), 0)`; `TriggerCount`; `bEnabled`), every **variable** of the classes bool, float, int, object, string and vector (subclasses included; an object as its path), and every **Matinee** (`Position`, `bIsPlaying`, `bPaused`). | the save object's two Kismet functions | CONFIRMED (src) |
+| Nothing else of the script is in it: no active op, no delayed activation, no latent action in mid-wait, no output impulse, no narrator queue, and nothing an action did to an actor (hidden, destroyed, toggled, collision) beyond what a Matinee's position implies. | those functions write nothing else; the savable actors are the classes that implement the save interface (collectible, recharge crystal, the two falling rocks, the checkpoint visuals; SAVE.md §4.3) | CONFIRMED (src) |
+| A checkpoint's `activated` flag is not saved: the checkpoint class has save and load functions but does not implement the save interface, so the save never calls them. After a load every checkpoint is unactivated; the pawn's reset onto the latest one can activate it again, which registers nothing new (A-CP-3). | class declaration of `ASAMUCheckpoint` against the save loop's interface test | CONFIRMED (src) |
+| Floats are text with four decimals (SAVE.md §3.5), so a restored position, delay or float variable is the saved one rounded to 0.0001. | SAVE.md §3.5 | CONFIRMED (native) |
+| The load runs when the player's pawn receives its inventory at its spawn, in story play (not in play-in-editor, not under the time-trial game type). In the level start of §3 that is step 2: after `USequence::BeginPlay` activated the level-loaded events with a linked first output, before `NotifyMatchStarted`. So the level-loaded events fire on a load exactly as on a fresh start, and what hangs off them runs again. | the game info's inventory function; §3 | CONFIRMED (src) for the hook; STRONG for the stock order around it |
+| Per saved entry whose object is found by its full path (an entry of another map, or of a level that is not loaded, finds nothing and is skipped): an event gets `ActivationTime = now + saved rest`, the saved `bEnabled` and `TriggerCount`; a variable gets the saved value (an object that is not found becomes null). | the save object's Kismet load function | CONFIRMED (src) |
+| The activation check compares the time since `ActivationTime` with the whole `ReTriggerDelay` (§3), so an event saved in mid-delay can fire again only after its whole delay plus the saved rest. | consequence of the two rules | CONFIRMED (src, native) |
+| A Matinee that was not playing is moved to its saved position as a jump. One that was playing is moved there without a jump, then receives a forced Play (with the force-start-position properties set only around that call, so the Play that the next update runs follows the action's own flags: with `bRewindOnPlay` it starts over). Then `bPaused` is set. | the save object's Matinee load function | CONFIRMED (src) |
+| `SetPosition` on an action that is not active builds its group instances, updates every track to the position (a jump or not decides the event keys in between), moves each bound actor that is in the interpolating physics at once, and destroys the instances again. | decompiled `USeqAct_Interp::SetPosition @ 0x1008A8170` | CONFIRMED (native) |
+| The instances' teardown gives the view target and the camera fade back, so a director group of a Matinee that is only put in place shows nothing. | stock director and fade track instances | STRONG (not re-read natively) |
+| After the entries: the pawn is put at the latest checkpoint (A-CP-4/5) and every `SaveGameState_SeqEvent_SavedGameStateLoaded` is told the loaded checkpoint index (it forces its output when its `Index` is −1 or equals it). | the save object's load function | CONFIRMED (src) |
+| A death and the quick-load key load nothing: the death sequence's reset tells the game info (which resets the grapple rocks), fires the death event and puts the pawn at the latest checkpoint; the call that would load the save there is commented out. The pause menu's restart runs that death sequence, except in the levels with index 1 and 7 (Workshop, Epilogue), where it runs `restartlevel`: the map loads again and its level start loads the save as above. | the pawn's death functions, the pause menu's restart function | CONFIRMED (src) |
+
+**How the shipped levels use it** [CONFIRMED (map), converted graphs]. Seven `SavedGameStateLoaded` events
+exist (AG-ParadiseCave 1, AG-BeautifulCity 3, AG-Darkcave 2, AG-StarHaven 1; all with the default `Index`
+−1, so each fires on every load, also the load at a level's first start, which finds no entry of that
+level). Each leads, through `IsPIE` and `IsTimeTrial` where present, to a `SeqCond_CompareBool` on one
+bool variable that starts false:
+
+| Level | Sequence | "False" (the first start) | "True" (a load that restored the flag) |
+|---|---|---|---|
+| AG-ParadiseCave | `Intro_Sequence` | sets the flag, then the opening: cinematic mode on, the crosshair, the hand and the restart option switched, a sound and a sound mode, and a chain of three Matinees (2.0 s; 3.04 s at play rate 0.5 with the camera; 0.5 s) whose ends switch cinematic mode off and the crosshair, hand and restart option back, and start the narrator's landing line | nothing linked |
+| AG-BeautifulCity | `AdventureSuit` | sets the flag, then grapple limit 2 and the grapple latch, boots off, a Matinee, two console commands | nothing linked |
+| AG-BeautifulCity | `Cutscenes` | sets the flag, then a toggle, a sound mode, an `IsTimeTrial` branch | nothing linked |
+| AG-BeautifulCity | `Sounds` | sets the flag | nothing linked |
+| AG-Darkcave | `Cutscenes` | nothing linked | hides three actors again: the level re-applies what the save does not keep |
+| AG-Darkcave | `Sounds` | sets the flag | nothing linked |
+| AG-StarHaven | `Cutscenes` | (not traced past the comparison) | (not traced) |
+
+So the original keeps an opening from playing again by the saved variable, not by a rule about openings:
+the first checkpoint save after the opening holds the flag as set, and a load restores it before the event
+fires. A save from before that (the level left before its first registered checkpoint) holds another map's
+script, and the opening plays again, in the original too. One-time prompts, music cues and cutscenes on
+touch events are kept from repeating by the same load through their restored trigger counts.
+
+**Ours** (`asamu_kismet::save_state`, `asamu_game::kismet_host`):
+
+- `Runtime::capture_state` writes the three kinds for every attached level, floats rounded to four
+  decimals. `LevelScript::save_into` adds it to the snapshot the app writes after the tick that made a
+  checkpoint the latest (`ui/flow.rs`, `process_ticks`). That is the script's state at the end of that
+  tick: the original's for a touched checkpoint; for a Kismet-triggered one ours also holds what the ops
+  after the trigger action wrote in that update (no measured case; open item).
+- `Runtime::set_start_state` hands a state to the level start, which puts it back between the adaptive
+  music start and the "save loaded" events (`Runtime::restore_state`: the rules of the table, entry by
+  entry; entries that do not fit their object are skipped). `interp_set_position` is the native
+  `SetPosition`; the director cut and fade outputs of a Matinee that is only put in place are dropped, and
+  so are the sounds its sound keys started in that update (the stock sound track instance stops its sound
+  when it is torn down, STRONG, not re-read natively; PLACEHOLDER for a track set to let its sound outlive
+  the Matinee, a setting the converted data does not hold).
+- Not saved by ours: vector variables (the runtime has no such class and no shipped level sequence has
+  one), the stored value of random and player variables (computed on every read).
+- A death, the quick-load key and the pause menu's restart load nothing; the restart in Workshop and
+  Epilogue loads the level again (`ui/flow.rs`, `FlowRequest::Restart`).
+- **Ours, no original counterpart:** a snapshot of this map written without script state (our builds up
+  to 2026-10-12 saved none) restores the variables as the level's own start leaves them
+  (`Runtime::level_start_variables`: the level start and one update without time on a copy of the runtime
+  against a host that does nothing). That sets the guard flags of the table above, so such a save does not
+  play the opening again; trigger counts, `bEnabled` switches and Matinee positions stay as at a fresh
+  start. The first checkpoint reached afterwards writes a whole save.
+
+Measured on AG-ParadiseCave (ours, gated test `crates/asamu-game/tests/continue_from_checkpoint.rs`, 60 Hz):
+a fresh start switches cinematic mode on in tick 1, cuts to the camera in tick 106 and starts the
+narrator's line `Land` within 900 ticks; the save written at the fifth checkpoint (index 4) holds 83
+events, 150 variables, 35 Matinees and 5 collectibles (51,069 bytes of `snapshot.json`); the level started
+from it shows no cut, no cinematic mode, no view target, no Matinee fade and no narrator line in 900 ticks,
+starts none of the opening's three Matinees, and keeps the saved grapple limit 2, latch and collectibles.
+The same holds for that save with its script state removed (the stand-in above), and the control (the same
+start with nothing restored) plays the opening.
+
+**Measured on every chapter** (ours; gated and ignored test `crates/asamu-game/tests/continue_story_maps.rs`,
+optimized build, 60 Hz; added by the verification of 2026-10-13). A scripted walk plays each level from a
+fresh start: the opening, then the checkpoints in index order, the pawn put into every Kismet touch trigger
+on the way (the story exits excepted) with five seconds of play after each. Every checkpoint that becomes
+the latest writes the save the app writes, and the running game is kept as it was at that tick. The level
+is then started again from the save, next to the kept game that simply plays on.
+
+| Level | Checkpoints that wrote a save | Fresh start shows | Continued games compared |
+|---|---|---|---|
+| AG-Workshop, AG-Epilogue | none: one checkpoint each, the first, which never registers (A-CP-3) | cinematic mode, a Matinee fade | none: a Continue there is a first start, opening included, as in the original (its save is another map's) |
+| AG-ParadiseCave | 23 of 24 | cinematic mode from tick 1, a director cut at tick 106, the narrator's `Land` | 9 |
+| AG-BeautifulCity | 11 of 12 | a Matinee fade | 9 |
+| AG-Darkcave | 16 of 17 | a Matinee fade, the narrator's `EnteredTheChasms` | 9 |
+| AG-StarHaven | 24 of 25 | the player's view | 9 |
+| AG-IceCave | 26 of 28 (the first, and one a Kismet action triggers) | the player's view | 9 |
+
+In all 45 continued games: no director cut, no cinematic mode, no view target and no line of the opening's
+narration in 900 ticks; every saved variable has its saved value after the first tick; no mover that is at
+rest in both games is in another place; the abilities are those of the game that played on; a death respawns
+at the saved checkpoint and shows nothing of the opening; no value becomes non-finite and the script reports
+no new error. The smoke harness's story chain, started from 15 continued games (the first, a late and the
+last saved checkpoint of each of the five levels), reaches the next map each time, AG-IceCave with `TheCore`
+streamed in and the credits run.
+
+**What a continued game does not have.** Where the continued game differs from the one that played on, the
+difference follows from what the save holds (the table at the top of this section). None of it was compared
+with a recording of the original: the rule is CONFIRMED (src, native), its consequences in these levels are
+ours to observe, NEEDS EVIDENCE.
+
+| Difference | Where it was measured | Why, by the rule |
+|---|---|---|
+| A loop that a level-loaded event starts runs again, also where play had stopped it | AG-BeautifulCity: the paper plane's Matinee (the plane flies again, 337 uu from where it had come to rest), Samuel's and Maddie's idle; AG-Darkcave: Maddie reading; AG-StarHaven: the sway and the strays' idle (5 to 29 uu) | level-loaded events fire on every load; the touch event that stopped the loop keeps its restored trigger count |
+| Actors that one-time script had hidden are visible again, and the other way round | AG-BeautifulCity: up to 3 (the plane, two characters); AG-StarHaven: 37 hidden there and visible here (a level-loaded chain hides them behind a bool that the load restores as set), 4 the other way | hidden, destroyed and toggled states are not in the save |
+| Story mode is off | every stretch of AG-BeautifulCity, AG-Darkcave, AG-StarHaven and AG-IceCave where the first-start branch or a one-time trigger had switched it on | not in the save; the branch that sets it does not run again |
+| The event keys of a Matinee that was playing at the save fire again, all at once, up to the saved position | AG-BeautifulCity's first registered checkpoint is not touched: the `End` key of the first-encounter cutscene triggers it 55.0 s into that Matinee, which is still playing. Continued from that save, the cutscene's two narrator lines are queued again and the key's chain runs again. Also the cutscenes of Samuel's cove (AG-BeautifulCity) and of finding Maddie (AG-Darkcave) when a checkpoint is saved during them | a playing Matinee is put at its position without a jump, from position 0 of the freshly loaded action, and the event track fires the keys in between; the output impulses are delivered when the forced Play is processed (§3, the op's processing step) |
+
+**`TheCore` in AG-IceCave.** `Trigger_7`, whose one-time touch streams the sub-level in, lies 22,778 uu
+beyond the level's last checkpoint (index 27); the checkpoint before that is 78,262 uu from it. So play
+saves no checkpoint behind the trigger: a Continue starts before it with the touch event unspent, and the
+chain from the last checkpoint's save reaches the Epilogue. Only a save written at the last checkpoint
+after the trigger (the checkpoint missed on the way and touched afterwards) leaves the continued level
+without `TheCore` and without a way out, here as by the original's rule (measured, not asserted). STRONG
+for the order of trigger and checkpoint (distances; not walked).
+
 ## Open items
 
+- §12: a checkpoint that a `SeqAct_TriggerCheckpoint` activates is saved by the original in the middle of
+  the sequence update; ours saves at the end of the tick (the ops after the trigger action have run).
+- §12: AG-IceCave streams `TheCore` in from a one-time touch event (`Trigger_7`), and nothing in the
+  original's load reads the saved list of streamed levels. The trigger lies beyond the last checkpoint
+  (§12, "`TheCore` in AG-IceCave"), so play does not produce a save behind it; a save made there by
+  touching the last checkpoint late continues without the sub-level.
+- §12: the differences of a continued game listed under "What a continued game does not have" (loops
+  that start again, hidden actors, story mode, the event keys of a Matinee that was playing at the save)
+  follow from the original's rule as read. NEEDS EVIDENCE: recordings of a Continue in the original at
+  AG-BeautifulCity's first checkpoint (is the first encounter's narration spoken again?) and inside a
+  story-mode stretch (is the hand out?).
+- §12: recharge crystals and falling rocks are savable actors of the original that ours does not save
+  yet (`docs/UI_AND_SAVES.md`).
 - AG-Epilogue: the order of its two speed commands in the original (66 or 132 uu/s), and the effect of
   `changesize 1.4`, need a recording of that level (§8).
 - Console commands are applied after the Kismet update, not at the point of the update where their action

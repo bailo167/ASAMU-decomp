@@ -1281,8 +1281,8 @@ note = "Own container (header line + embedded trace), always tagged not_parity; 
 id = "sandbox-arenas"
 name = "Hand-made lab arenas"
 status = "implemented"
-evidence = "crates/asamu-sandbox/tests/arenas.rs; docs/SANDBOX.md"
-note = "movement-lab and grapple-lab: box levels written by us, no original content. Parameter rulers are Classic values read at build time; jump rulers are measured in this recreation, not in the original. No slopes."
+evidence = "crates/asamu-sandbox/tests/{arenas,playground}.rs; docs/SANDBOX.md"
+note = "The Playground (the level `asamu --sandbox` opens into: hub, three grapple chains with timed routes, carousel, wheel, ferry, crystals, runway, tower; every route flown by a test pilot, none played by a person yet) and the two lab arenas movement-lab and grapple-lab: levels written by us, no original content. Parameter rulers are Classic values read at build time; jump rulers are measured in this recreation, not in the original."
 
 [[category.item]]
 id = "sandbox-app"

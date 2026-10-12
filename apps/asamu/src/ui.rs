@@ -282,6 +282,7 @@ impl Plugin for UiPlugin {
             .init_resource::<notify::Toasts>()
             .init_resource::<notify::TimeTrialClock>()
             .init_resource::<flow::LevelLoad>()
+            .init_resource::<DelayedMenuAction>()
             .add_message::<GameTick>()
             .add_message::<menus::UiAction>()
             .add_message::<flow::FlowRequest>()
@@ -296,6 +297,7 @@ impl Plugin for UiPlugin {
             .add_observer(menus::on_activate)
             .add_systems(Startup, (setup, notify::spawn_hud).chain())
             .add_systems(Startup, fonts::load_fallback_font)
+            .add_systems(Update, send_delayed_menu_action.before(UiFlowSet))
             .add_systems(
                 Update,
                 (
@@ -358,7 +360,7 @@ pub(crate) fn start_direct_level(
         warn!("save failed: {e}");
     }
     if let Some(script) = script {
-        flow::prepare_script(script, &saves.0, index);
+        flow::prepare_script(script, &saves.0, index, start.snapshot.as_ref());
     }
     *play = Play {
         chapter: start.chapter,
@@ -388,6 +390,50 @@ pub(crate) fn parse_menu_action(value: &str) -> Option<menus::UiAction> {
     }
 }
 
+/// The longest `ASAMU_MENU_ACTION_DELAY`, seconds (ours).
+pub(crate) const MENU_ACTION_DELAY_LIMIT: f32 = 600.0;
+
+/// `ASAMU_MENU_ACTION_DELAY` (unattended checks): seconds the main menu is
+/// shown before `ASAMU_MENU_ACTION` is sent, so that a frame recording that
+/// starts by itself (`--record-frames` with `ASAMU_RECORD_AUTOSTART`, which
+/// waits for the menu's backdrop) is already running when the level loads
+/// and shows the level's first frames. `None` (send at once) without the
+/// variable or for a value that is not a number from 0 to
+/// [`MENU_ACTION_DELAY_LIMIT`].
+#[must_use]
+pub(crate) fn parse_menu_action_delay(value: Option<&str>) -> Option<f32> {
+    value?
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite() && (0.0..=MENU_ACTION_DELAY_LIMIT).contains(v) && *v > 0.0)
+}
+
+/// A menu action waiting for its delay: real seconds left and the action.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct DelayedMenuAction(Option<(f32, menus::UiAction)>);
+
+/// Sends the delayed menu action when its time has come (and the answer to
+/// the confirmation it may raise).
+fn send_delayed_menu_action(
+    time: Res<Time<Real>>,
+    mut delayed: ResMut<DelayedMenuAction>,
+    mut actions: MessageWriter<menus::UiAction>,
+) {
+    let Some((left, _)) = delayed.0.as_mut() else {
+        return;
+    };
+    *left -= time.delta_secs();
+    if *left > 0.0 {
+        return;
+    }
+    if let Some((_, action)) = delayed.0.take() {
+        info!("ASAMU_MENU_ACTION (delayed): {action:?}");
+        actions.write(action);
+        actions.write(menus::UiAction::Confirm);
+    }
+}
+
 /// Opens the saves and settings and shows the first screen.
 #[allow(clippy::too_many_arguments)]
 fn setup(
@@ -399,6 +445,7 @@ fn setup(
     mut state: ResMut<UiState>,
     mut toasts: ResMut<notify::Toasts>,
     mut actions: MessageWriter<menus::UiAction>,
+    mut delayed: ResMut<DelayedMenuAction>,
 ) {
     let root = SaveStore::default_root();
     *user = UserSettings::load(root.as_deref());
@@ -445,15 +492,21 @@ fn setup(
     if launch.show_menu {
         state.open(Screen::Main);
         if let Ok(value) = std::env::var("ASAMU_MENU_ACTION") {
-            match parse_menu_action(&value) {
-                Some(action) => {
+            let delay =
+                parse_menu_action_delay(std::env::var("ASAMU_MENU_ACTION_DELAY").ok().as_deref());
+            match (parse_menu_action(&value), delay) {
+                (Some(action), Some(seconds)) => {
+                    info!("ASAMU_MENU_ACTION: {action:?} in {seconds} s");
+                    delayed.0 = Some((seconds, action));
+                }
+                (Some(action), None) => {
                     info!("ASAMU_MENU_ACTION: {action:?}");
                     actions.write(action);
                     // Answers "replace the Continue point?" with yes (a
                     // no-op when nothing asks).
                     actions.write(menus::UiAction::Confirm);
                 }
-                None => warn!("ASAMU_MENU_ACTION {value:?} not understood"),
+                (None, _) => warn!("ASAMU_MENU_ACTION {value:?} not understood"),
             }
         }
     }
@@ -462,6 +515,46 @@ fn setup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_menu_action_s_delay_is_a_number_of_seconds_within_its_limit() {
+        assert_eq!(parse_menu_action_delay(None), None);
+        assert_eq!(parse_menu_action_delay(Some(" 12 ")), Some(12.0));
+        assert_eq!(parse_menu_action_delay(Some("0.5")), Some(0.5));
+        assert_eq!(parse_menu_action_delay(Some("600")), Some(600.0));
+        for bad in ["", "0", "-1", "601", "nan", "inf", "soon", "1e40"] {
+            assert_eq!(parse_menu_action_delay(Some(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_delayed_menu_action_is_sent_once_when_its_time_has_come() {
+        use bevy::ecs::message::Messages;
+        let mut app = App::new();
+        app.add_message::<menus::UiAction>()
+            .init_resource::<Time<Real>>()
+            .insert_resource(DelayedMenuAction(Some((0.25, menus::UiAction::Continue))))
+            .add_systems(Update, send_delayed_menu_action);
+        let sent = |app: &App| {
+            app.world()
+                .resource::<Messages<menus::UiAction>>()
+                .iter_current_update_messages()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // No time has passed: nothing yet.
+        app.update();
+        assert!(sent(&app).is_empty());
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_by(std::time::Duration::from_millis(300));
+        app.update();
+        assert_eq!(
+            sent(&app),
+            vec![menus::UiAction::Continue, menus::UiAction::Confirm]
+        );
+        assert!(app.world().resource::<DelayedMenuAction>().0.is_none());
+    }
 
     #[test]
     fn backdrop_prefers_the_front_end_then_story_order() {

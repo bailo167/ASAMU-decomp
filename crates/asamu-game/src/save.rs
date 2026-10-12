@@ -10,7 +10,7 @@
 //! |---|---|---|
 //! | [`Progression`] (`progression.json`) | `PlayerProgression.bin` | chapters entered, collectibles, optional story items, achievements, finished flag |
 //! | [`General`] (`general.json`) | `GeneralSave.bin` | chapter pointer (Continue target), Kismet saved strings |
-//! | [`Snapshot`] (`snapshot.json`) | `SaveGame.bin` | map, per-chapter latest checkpoint, grapple capacity / boots / grapple latch, savable actor and Kismet state |
+//! | [`Snapshot`] (`snapshot.json`) | `SaveGame.bin` | map, per-chapter latest checkpoint, grapple capacity / boots / grapple latch, savable actors (collectibles), the level script's events, variables and Matinees |
 //! | [`TimeTrialTimes`] (`time_trial.json`) | `TTS.bin` | best time-trial times |
 //! | [`Settings`] (`settings.json`) | user ini files (SAVE.md §7) | FOV, mouse, volumes, window, subtitles |
 //!
@@ -30,7 +30,11 @@
 //! [`SaveSession::begin_level`], [`SaveSession::on_checkpoint_saved`],
 //! [`SaveSession::on_collectible`], …); [`Game::capture_snapshot`] and
 //! [`Game::apply_snapshot`] move the snapshot's state out of and into a
-//! running [`Game`]. Everything here is deterministic and render-free.
+//! running [`Game`]; the level script's part goes through
+//! [`Snapshot::set_script_state`] / [`Snapshot::script_state`] and
+//! [`crate::LevelScript::save_into`] / [`crate::LevelScript::start_from_save`]
+//! ("What a load from a checkpoint restores" in `docs/UI_AND_SAVES.md`).
+//! Everything here is deterministic and render-free.
 //!
 //! Deliberate differences from the original (data-losing quirks fixed, see
 //! SAVE.md §8 and `docs/UI_AND_SAVES.md`): an unreadable document resets only
@@ -44,6 +48,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use asamu_kismet::{EventState, MatineeState, ScriptState, VarState};
 use asamu_player::{grapple_gun, rocket_boots};
 use thiserror::Error;
 
@@ -1056,14 +1061,24 @@ pub struct Snapshot {
     /// Grapple capacity / boots / latch at save time (`None` when saved from
     /// a world without a player pawn, e.g. the menu).
     pub abilities: Option<Abilities>,
-    /// Savable actors keyed by their path relative to the map (collectible
-    /// taken, crystal state, rock placement, …). Entries are opaque objects
-    /// owned by the world/Kismet workstreams; unknown paths are skipped on
-    /// load, as in the original.
+    /// Savable actors keyed by their path relative to the map
+    /// (`TheWorld.PersistentLevel.<name>`), each an object with a `kind`.
+    /// Written and read: collectibles (`{"kind": "collectible", "collected":
+    /// bool}`, [`Game::capture_snapshot`] / [`Game::apply_snapshot`]). The
+    /// original also saves recharge crystals and falling rocks; ours does
+    /// not yet (`docs/UI_AND_SAVES.md`). Unknown paths and kinds are skipped
+    /// on load, as the original skips a path it does not find.
     pub actors: BTreeMap<String, Value>,
-    /// Kismet events/variables/Matinee state keyed by object path (opaque;
-    /// owned by the Kismet host).
+    /// The level script's events, variables and Matinees keyed by object
+    /// path, each an object with a `kind` ([`Snapshot::set_script_state`],
+    /// [`Snapshot::script_state`]).
     pub kismet: BTreeMap<String, Value>,
+    /// `kismet` holds the level script's state at the save. `false` for a
+    /// snapshot written from a world without a level script (the menu's
+    /// fresh snapshot) and for one written before the script state was
+    /// saved (our builds up to 2026-10-12), which a load treats as
+    /// [`crate::LevelScript::start_from_save`] says.
+    pub script_saved: bool,
 }
 
 impl Snapshot {
@@ -1077,7 +1092,152 @@ impl Snapshot {
             ..Self::default()
         }
     }
+
+    /// Stores a level script's state (SAVE.md §4.3 entries 4 to 6: every
+    /// event's rest of its re-trigger delay, trigger count and `bEnabled`;
+    /// every bool, int, float, object and string variable; every Matinee's
+    /// position, playing and paused flags) and marks the snapshot as
+    /// holding one. A number that is not finite is stored as 0.
+    pub fn set_script_state(&mut self, state: &ScriptState) {
+        let finite = |x: f32| Value::from_f32(if x.is_finite() { x } else { 0.0 });
+        let entry = |kind: &str, fields: Vec<(&str, Value)>| {
+            let mut m = BTreeMap::new();
+            m.insert("kind".to_owned(), Value::from(kind));
+            for (k, v) in fields {
+                m.insert(k.to_owned(), v);
+            }
+            Value::Object(m)
+        };
+        self.kismet.clear();
+        for (path, e) in &state.events {
+            self.kismet.insert(
+                path.clone(),
+                entry(
+                    SCRIPT_EVENT,
+                    vec![
+                        ("retrigger_left", finite(e.retrigger_left)),
+                        ("trigger_count", Value::from(e.trigger_count)),
+                        ("enabled", Value::Bool(e.enabled)),
+                    ],
+                ),
+            );
+        }
+        for (path, v) in &state.variables {
+            let (kind, value) = match v {
+                VarState::Bool(b) => (SCRIPT_BOOL, Value::Bool(*b)),
+                VarState::Int(i) => (SCRIPT_INT, Value::from(*i)),
+                VarState::Float(f) => (SCRIPT_FLOAT, finite(*f)),
+                VarState::Object(o) => {
+                    (SCRIPT_OBJECT, o.as_deref().map_or(Value::Null, Value::from))
+                }
+                VarState::Str(t) => (SCRIPT_STRING, Value::from(t.as_str())),
+            };
+            self.kismet
+                .insert(path.clone(), entry(kind, vec![("value", value)]));
+        }
+        for (path, m) in &state.matinees {
+            self.kismet.insert(
+                path.clone(),
+                entry(
+                    SCRIPT_MATINEE,
+                    vec![
+                        ("position", finite(m.position)),
+                        ("playing", Value::Bool(m.playing)),
+                        ("paused", Value::Bool(m.paused)),
+                    ],
+                ),
+            );
+        }
+        self.script_saved = true;
+    }
+
+    /// The level script's state this snapshot holds; `None` when it was
+    /// saved without one ([`Snapshot::script_saved`]). An entry that is not
+    /// an object of a known kind with fields of the right shape is left out
+    /// (a save file is user data: nothing in it can fail a load).
+    #[must_use]
+    pub fn script_state(&self) -> Option<ScriptState> {
+        if !self.script_saved {
+            return None;
+        }
+        let mut state = ScriptState::default();
+        for (path, v) in &self.kismet {
+            let Some(kind) = v.get("kind").and_then(Value::as_str) else {
+                continue;
+            };
+            let flag = |k: &str| v.get(k).and_then(Value::as_bool);
+            match kind {
+                SCRIPT_EVENT => {
+                    let (Some(left), Some(count), Some(enabled)) = (
+                        v.get("retrigger_left").and_then(Value::as_f32),
+                        v.get("trigger_count").and_then(Value::as_i32),
+                        flag("enabled"),
+                    ) else {
+                        continue;
+                    };
+                    state.events.insert(
+                        path.clone(),
+                        EventState {
+                            retrigger_left: left,
+                            trigger_count: count,
+                            enabled,
+                        },
+                    );
+                }
+                SCRIPT_MATINEE => {
+                    let (Some(position), Some(playing), Some(paused)) = (
+                        v.get("position").and_then(Value::as_f32),
+                        flag("playing"),
+                        flag("paused"),
+                    ) else {
+                        continue;
+                    };
+                    state.matinees.insert(
+                        path.clone(),
+                        MatineeState {
+                            position,
+                            playing,
+                            paused,
+                        },
+                    );
+                }
+                _ => {
+                    let value = v.get("value");
+                    let var = match kind {
+                        SCRIPT_BOOL => value.and_then(Value::as_bool).map(VarState::Bool),
+                        SCRIPT_INT => value.and_then(Value::as_i32).map(VarState::Int),
+                        SCRIPT_FLOAT => value.and_then(Value::as_f32).map(VarState::Float),
+                        SCRIPT_STRING => value
+                            .and_then(Value::as_str)
+                            .map(|t| VarState::Str(t.to_owned())),
+                        SCRIPT_OBJECT => match value {
+                            Some(Value::Null) => Some(VarState::Object(None)),
+                            Some(o) => o.as_str().map(|t| VarState::Object(Some(t.to_owned()))),
+                            None => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(var) = var {
+                        state.variables.insert(path.clone(), var);
+                    }
+                }
+            }
+        }
+        Some(state)
+    }
 }
+
+/// `kind` of the entries of [`Snapshot::kismet`].
+const SCRIPT_EVENT: &str = "event";
+const SCRIPT_MATINEE: &str = "matinee";
+const SCRIPT_BOOL: &str = "bool";
+const SCRIPT_INT: &str = "int";
+const SCRIPT_FLOAT: &str = "float";
+const SCRIPT_OBJECT: &str = "object";
+const SCRIPT_STRING: &str = "string";
+
+/// `kind` of a collectible's entry in [`Snapshot::actors`].
+const ACTOR_COLLECTIBLE: &str = "collectible";
 
 /// Time-trial medals (SAVE.md §6.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1683,6 +1843,7 @@ impl Document for Snapshot {
         );
         f.insert("actors".into(), Value::Object(self.actors.clone()));
         f.insert("kismet".into(), Value::Object(self.kismet.clone()));
+        f.insert("script_saved".into(), Value::Bool(self.script_saved));
         f
     }
 
@@ -1718,12 +1879,16 @@ impl Document for Snapshot {
         let kismet = opt_object(fields, "kismet", kind)?
             .cloned()
             .unwrap_or_default();
+        // Absent in the snapshots written before the script state was
+        // saved: such a snapshot holds none.
+        let script_saved = opt_bool(fields, "script_saved", kind)?.unwrap_or(false);
         Ok(Self {
             map,
             checkpoints,
             abilities,
             actors,
             kismet,
+            script_saved,
         })
     }
 }
@@ -2494,10 +2659,13 @@ impl Game {
 
     /// The snapshot the original writes at a new latest checkpoint: the map,
     /// the checkpoint table (`previous`'s entries carried over, this
-    /// chapter's latest updated), and the grapple capacity, boots and latch
-    /// from the pawn's gun (none without the script layer). Actor and Kismet
-    /// entries are carried from `previous` only when it was written by the
-    /// same map; the world and Kismet workstreams add theirs.
+    /// chapter's latest updated), the grapple capacity, boots and latch from
+    /// the pawn's gun (none without the script layer), and the savable
+    /// actors as they are now: every collectible of the map with its
+    /// `bCollected` (the original writes each savable actor at every save;
+    /// nothing is carried from `previous`). The level script's state is the
+    /// script's to add ([`crate::LevelScript::save_into`]); without it the
+    /// snapshot says so ([`Snapshot::script_saved`]).
     #[must_use]
     pub fn capture_snapshot(&self, previous: Option<&Snapshot>) -> Snapshot {
         let map = self
@@ -2507,9 +2675,15 @@ impl Game {
             checkpoints: previous.map(|p| p.checkpoints.clone()).unwrap_or_default(),
             ..Snapshot::default()
         };
-        if let Some(p) = previous.filter(|p| p.map.eq_ignore_ascii_case(&map)) {
-            snap.actors = p.actors.clone();
-            snap.kismet = p.kismet.clone();
+        if let Some(npcs) = self.npcs() {
+            let states = &npcs.runtime().collectibles;
+            for (def, state) in npcs.scene().collectibles.iter().zip(states) {
+                let mut m = BTreeMap::new();
+                m.insert("kind".to_owned(), Value::from(ACTOR_COLLECTIBLE));
+                m.insert("collected".to_owned(), Value::Bool(state.collected));
+                snap.actors
+                    .insert(crate::npc::collectible_save_key(def), Value::Object(m));
+            }
         }
         if let (Some(chapter), Some(latest)) = (self.chapter(), self.latest_checkpoint_index()) {
             snap.checkpoints.insert(chapter, latest);
@@ -2534,12 +2708,36 @@ impl Game {
     /// levels the player reset to the checkpoint the respawn lookup returns
     /// (the first checkpoint when the table has no entry, A-CP-4). Hand-made
     /// levels only take the abilities. Story mode (Workshop, Epilogue) set
-    /// at load is kept.
+    /// at load is kept. A snapshot written by this map also gives every
+    /// collectible it names its saved `bCollected` (the original finds its
+    /// savable actors by their full path, which only this map's have).
     pub fn apply_snapshot(&mut self, snapshot: &Snapshot) -> SnapshotApplied {
         if let Some(a) = snapshot.abilities {
             grapple_gun::set_max_grapples(&mut self.player, a.max_grapples);
             rocket_boots::enable_rocket_boots(&mut self.player, a.rocket_boots);
             grapple_gun::enable_grapple(&mut self.player, a.grapple_enabled);
+        }
+        let same_map = self
+            .map_name()
+            .is_some_and(|m| m.eq_ignore_ascii_case(&snapshot.map));
+        if same_map && let Some(npcs) = self.npcs_mut() {
+            let saved: Vec<(u32, bool)> = npcs
+                .scene()
+                .collectibles
+                .iter()
+                .filter_map(|def| {
+                    let entry = snapshot
+                        .actors
+                        .get(&crate::npc::collectible_save_key(def))?;
+                    if entry.get("kind").and_then(Value::as_str) != Some(ACTOR_COLLECTIBLE) {
+                        return None;
+                    }
+                    Some((def.id, entry.get("collected").and_then(Value::as_bool)?))
+                })
+                .collect();
+            for (id, collected) in saved {
+                npcs.set_collected(id, collected);
+            }
         }
         apply_level_abilities(&mut self.player, &self.level);
         let chapter = self.chapter();

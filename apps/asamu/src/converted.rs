@@ -14,10 +14,11 @@
 //! `asamu_assets::materials`): lights use our UE3 → physical mapping; the
 //! original's baked light maps are applied afterwards by `lightmaps.rs`, and
 //! surfaces without one get an ambient term (the level's precomputed light
-//! volume through `light_volume.rs`, or a constant stand-in); fog is a
-//! placeholder distance fog enabled only when the level has a height-fog
-//! actor (`post.rs` replaces it), and materials without a converted
-//! description use untextured neutral colours.
+//! volume through `light_volume.rs`, or a constant stand-in); fog is not
+//! drawn here: the level's height fog and fog volumes come from its data
+//! in `post.rs` and `fog_volumes.rs` (a level converted before that data
+//! existed has no fog), and materials without a converted description use
+//! untextured neutral colours.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,7 +42,6 @@ use bevy::image::{
 use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster};
 use bevy::math::Affine2;
 use bevy::mesh::{Indices, PrimitiveTopology, UvChannel};
-use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, Face, TextureDimension, TextureFormat};
 use bevy::tasks::futures::check_ready;
@@ -68,7 +68,8 @@ pub struct RenderSettings {
     pub shadows: bool,
     /// How many point/spot lights (the most powerful) get shadow maps.
     pub light_shadows: usize,
-    /// Placeholder distance fog when the level has a height-fog actor.
+    /// Draw the level's fog (height fog and fog volumes, from its data;
+    /// `post.rs`). `--no-fog` clears it.
     pub fog: bool,
     /// Use converted normal maps (off by default: the tangent-space
     /// convention of UE3 normal maps under the importer's axis mirror is not
@@ -387,7 +388,6 @@ fn poll_planning(
     mut ambient: ResMut<GlobalAmbientLight>,
     mut users: ResMut<TextureUsers>,
     mut image_assets: ResMut<Assets<Image>>,
-    camera: Query<Entity, With<Camera3d>>,
     mut projection: Query<&mut Projection, With<Camera3d>>,
 ) {
     let Some(LevelPhase::Planning(task)) = level.phase.as_mut() else {
@@ -435,8 +435,9 @@ fn poll_planning(
         )
     });
     // Far plane (Bevy's projection is infinite reverse-Z: `far` only bounds
-    // culling and shadow cascades) from the level extent; fog from the
-    // origins' radius.
+    // culling and shadow cascades) from the level extent. No fog is set up
+    // here: an invented distance fog used to stand in for the height fog;
+    // the fog now comes from the level's data only (`post.rs`).
     let radius = plan.render_radius();
     // Kept finite (a damaged plan's extent can be huge).
     let far = (plan.extent * 2.0 + 10.0)
@@ -446,26 +447,6 @@ fn poll_planning(
         if let Projection::Perspective(persp) = p.as_mut() {
             persp.far = far;
             persp.near = 0.05;
-        }
-    }
-    let has_height_fog = plan
-        .scene
-        .stats
-        .atmosphere_actors
-        .keys()
-        .any(|k| k.to_ascii_lowercase().contains("heightfog"));
-    if settings.fog && has_height_fog {
-        for cam in &camera {
-            // PLACEHOLDER parameters: the fog component values are not in the
-            // scene export yet.
-            commands.entity(cam).insert(DistanceFog {
-                color: Color::srgb(0.55, 0.6, 0.68),
-                falloff: FogFalloff::Linear {
-                    start: radius * 0.5,
-                    end: radius * 3.0,
-                },
-                ..default()
-            });
         }
     }
     level.phase = Some(LevelPhase::Spawned(summary));

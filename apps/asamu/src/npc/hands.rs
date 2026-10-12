@@ -56,6 +56,25 @@
 //! on another actor ([`own_view`]): AG-ParadiseCave's opening flight, where
 //! the level script has the hand raised from the first frame.
 //!
+//! # The grapple pose and the beam's socket
+//!
+//! While the gun is attached the tree blends to its grappling branch over
+//! 0.3 s and plays `Grapple` once, then loops `Grapple_Loop`; a release
+//! switches to `Grapple_Release` at once, and when that has played the tree
+//! blends back to the other branches over 0.3 s (CONFIRMED (src, data):
+//! the gun's attach and release code and its animation-end handler). All
+//! three sequences are converted; `super::skins` plays them in that order
+//! from the gun's state (the blend times are Bevy's clip transitions there,
+//! not the tree's two nested blends: PLACEHOLDER).
+//!
+//! The beam leaves the hand at the mesh's socket `GrappleSocket`, on the
+//! bone `Hand_R` (CONFIRMED (data); the skeletal importer writes sockets as
+//! nodes named `SOCKET_<Name>` under their bones, so the node follows the
+//! hand's animation). This module marks that node ([`BeamSocket`]) and the
+//! overlay camera ([`BeamView`], with whether the hand is on screen) for
+//! `crate::vfx`, which draws the beam from there with the overlay camera
+//! (`crate::vfx::emitter`).
+//!
 //! PLACEHOLDER (presentation): a lowered hand is not drawn at all, where the
 //! original blends to the `HandsDown` pose over 0.3 s (or at once); and
 //! during the suit-on one-shot the hand is drawn with its ordinary animation
@@ -76,6 +95,7 @@ use super::NpcWorld;
 use super::skins::{
     NpcSkin, SkinKind, StartAnim, ancestor_with, gltf_path, load_clips, skeletal_settings,
 };
+use crate::vfx::{BeamSocket, BeamView, SOCKET_NODE};
 use crate::{PlayerCamera, Sim, bevy_vec};
 
 /// Render layer of the first-person overlay (ours).
@@ -361,6 +381,7 @@ pub(super) fn spawn_hands(
         c.spawn((
             Name::new("first-person overlay camera"),
             HandCamera,
+            BeamView::default(),
             Camera3d::default(),
             Camera {
                 order: 1,
@@ -403,10 +424,12 @@ pub(super) fn spawn_hands(
     );
 }
 
-/// Puts the meshes of overlay scenes on the overlay layer as they spawn.
+/// Puts the meshes of overlay scenes on the overlay layer as they spawn,
+/// and marks the hand's beam socket ([`SOCKET_NODE`]) for the grapple beam.
 pub(super) fn tag_overlay_meshes(
     mut commands: Commands,
     meshes: Query<Entity, Added<Mesh3d>>,
+    named: Query<(Entity, &Name), Added<Name>>,
     parents: Query<&ChildOf>,
     roots: Query<(), With<OverlayRoot>>,
 ) {
@@ -419,6 +442,19 @@ pub(super) fn tag_overlay_meshes(
             ));
         }
     }
+    for (e, name) in &named {
+        if is_beam_socket(name.as_str())
+            && ancestor_with(&parents, e, |a| roots.contains(a)).is_some()
+        {
+            commands.entity(e).insert(BeamSocket);
+            info!("first-person hands: the beam leaves from {SOCKET_NODE}");
+        }
+    }
+}
+
+/// Whether a node of the hand's scene is the beam's socket.
+fn is_beam_socket(node: &str) -> bool {
+    node == SOCKET_NODE
 }
 
 /// Follows the simulation for [`HandPose`]: story mode, the gun's flag, the
@@ -465,21 +501,30 @@ pub(super) fn update_hands(
     pose: Option<Res<HandPose>>,
     presentation: Option<Res<crate::kismet::Presentation>>,
     window: Query<&Window, With<PrimaryWindow>>,
-    mut cams: Query<&mut Projection, With<HandCamera>>,
+    mut cams: Query<(&mut Projection, Option<&mut BeamView>), With<HandCamera>>,
     mut hands: Query<(&HandRoot, &mut Transform, &mut Visibility)>,
 ) {
-    if let Some(w) = window.iter().next() {
-        let aspect = (w.width() / w.height().max(1.0)).max(0.1);
-        for mut p in &mut cams {
-            if let Projection::Perspective(p) = p.as_mut() {
-                p.fov = 2.0 * ((HAND_MESH_FOV.to_radians() * 0.5).tan() / aspect).atan();
-            }
-        }
-    }
+    let aspect = window
+        .iter()
+        .next()
+        .map(|w| (w.width() / w.height().max(1.0)).max(0.1));
     let shown = pose.as_ref().is_none_or(|p| p.shown())
         && presentation
             .as_ref()
             .is_none_or(|p| own_view(p.cut.is_some(), p.view_target.is_some()));
+    for (mut p, view) in &mut cams {
+        if let (Some(aspect), Projection::Perspective(p)) = (aspect, p.as_mut()) {
+            p.fov = overlay_fov(aspect);
+        }
+        // What the beam is told: the hand is on screen (it is drawn only
+        // with a game, below).
+        if let Some(mut view) = view {
+            let hand_shown = shown && sim.is_some();
+            if view.hand_shown != hand_shown {
+                view.hand_shown = hand_shown;
+            }
+        }
+    }
     for (root, mut transform, mut visibility) in &mut hands {
         let Some(sim) = &sim else {
             *visibility = Visibility::Hidden;
@@ -504,9 +549,42 @@ pub(super) fn update_hands(
     }
 }
 
+/// The overlay camera's vertical field of view for a window of `aspect`:
+/// the hand mesh's 70° ([`HAND_MESH_FOV`]) is horizontal, as the original's
+/// fields of view are.
+fn overlay_fov(aspect: f32) -> f32 {
+    2.0 * ((HAND_MESH_FOV.to_radians() * 0.5).tan() / aspect).atan()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overlay_is_70_degrees_across_at_any_window_shape() {
+        for aspect in [16.0 / 9.0, 4.0 / 3.0, 21.0 / 9.0, 0.625f32] {
+            let across = 2.0 * ((overlay_fov(aspect) * 0.5).tan() * aspect).atan();
+            assert!(
+                (across.to_degrees() - HAND_MESH_FOV).abs() < 1e-3,
+                "{aspect}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_beam_socket_is_found_by_its_node_name() {
+        assert_eq!(SOCKET_NODE, "SOCKET_GrappleSocket");
+        assert!(is_beam_socket("SOCKET_GrappleSocket"));
+        for other in [
+            "SOCKET_PowerJumpLight",
+            "SOCKET_RootSocket",
+            "Hand_R",
+            "GrappleSocket",
+            "",
+        ] {
+            assert!(!is_beam_socket(other), "{other}");
+        }
+    }
 
     fn seen(story: bool, hard_hidden: bool, tick: u64) -> HandObservation {
         HandObservation {
@@ -776,9 +854,21 @@ mod tests {
                 Visibility::Inherited,
             ))
             .id();
+        // The overlay camera as `spawn_hands` makes it, for the beam's flag.
+        let overlay = app
+            .world_mut()
+            .spawn((
+                HandCamera,
+                BeamView::default(),
+                Projection::from(PerspectiveProjection::default()),
+            ))
+            .id();
         let shown = |app: &mut App| {
             app.update();
-            *app.world().get::<Visibility>(hand).unwrap() == Visibility::Inherited
+            let drawn = *app.world().get::<Visibility>(hand).unwrap() == Visibility::Inherited;
+            let told = app.world().get::<BeamView>(overlay).unwrap().hand_shown;
+            assert_eq!(told, drawn, "the beam is told what is drawn");
+            drawn
         };
         assert!(!shown(&mut app), "no game");
         // `--level` before the click that starts the game.

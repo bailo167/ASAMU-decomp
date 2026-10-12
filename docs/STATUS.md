@@ -2,6 +2,53 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
+## 2026-10-13 — Session 3 (night): the owner's second play session and its four fixes
+
+**What happened.** Late on 2026-10-12 the owner played a freshly merged build for a filmed session (story from
+Continue, then the Sandbox) and stopped after a few minutes: Continue replayed the level's opening before the
+checkpoint, AG-ParadiseCave was very misty, the Sandbox opened into a story map under developer read-outs, and the
+grapple beam did not start at the hand. That build had not been looked at on the owner's path first. No gameplay
+clip was published. Recorded frames and notes are local (`research/local/play-shots/2026-10-12/`).
+
+**Done (branch `play/fixes2`, four packages, each built and then checked by an independent agent with its own
+hidden, silent runs on the Windows machine; merged):**
+- *Continue.* A load from a checkpoint (Continue, pause-menu restart, respawn) restores the level script's saved
+  state instead of running the level's start again: no opening camera flight, the player's view from the first
+  frame, in all five chapters that write checkpoint saves; each continued game followed still reaches its exit.
+  Known leftovers after a Continue (they follow from what the save holds; none is checked against a recording of
+  the original): narration of a cutscene that was still playing at the save is spoken again; idle loops started
+  by level-loaded events run again; actors hidden by one-time script are visible again (up to 3 in
+  AG-BeautifulCity, 37 in AG-StarHaven); story mode is off after a Continue inside a story-mode stretch.
+- *Fog.* A fog volume actor's bounding mesh is never drawn as a surface; fog volumes are drawn as fog by the
+  original's density integrals (constant and half-space), after the height fog; the invented distance fog is
+  gone, fog comes from level data only. **This did not make AG-ParadiseCave less misty**: the veil the owner saw
+  is the level's exponential height fog (`FogDensity` 5, `FogHeightFalloff` 1, `FogMaxOpacity` 0.7, actor at
+  height 100,930), which by the data puts 70 % fog colour over everything beyond a few metres below that height.
+  Whether the original is as veiled at those checkpoints is OPEN: two agents read the engine's maths the same
+  way and the shipped stills agree where they can be placed, but there is no picture of the original from the
+  lower cave. One screenshot of the original there would settle it. `--no-fog`, `ASAMU_POST=no-height-fog` and
+  `ASAMU_POST=no-fog-volumes` switch the two fogs for comparison. Not handled: AG-IceCave's script turns the
+  height fog off inside the core, ours keeps it on.
+- *Sandbox.* `asamu --sandbox` opens straight into a purpose-built level of ours (the Playground: a hub, three
+  grapple chains with timed routes, a carousel and a wheel to ride, a ferry, crystals, a runway and ramp, a
+  tower, a catch that returns a fall to the hub), playing, with one line on screen; the read-outs, graphs,
+  inspector and the stage list open with F5. Works without game data. Nobody has played it by hand yet. Its
+  grapple budget is three with Classic parameters (unlimited is one click in the tools).
+- *Grapple beam.* The beam starts at the hand's palm socket as drawn in the hand's overlay and ends on the
+  anchor (riding a moving one), at any window size and field of view; it is drawn from the converted emitter
+  data (two ribbons, white core and blue edge, additive) instead of a flat ribbon. Its width follows a native
+  reading of the emitter size (to each side of the centre line). Without converted data it comes in over the
+  bottom edge.
+- Every run started on the Windows machine through `tools/dev/win_host.sh` is forced silent (`ASAMU_MUTE`);
+  `--record-frames` can start by itself and run longer (`ASAMU_RECORD_AUTOSTART`, `ASAMU_RECORD_SECONDS`).
+
+**Rule adopted:** before the owner is asked to play or film, the exact start path is run hidden on the same
+machine and data, and frames of it are looked at.
+
+**Next:** the mist against the original (needs one screenshot from the owner, or a recording that shows it); the
+leftovers after a Continue; Matinee movers in per-sample replays; the floor check's lift; the landing frame; a
+gameplay clip for the README once a pre-flighted build is played.
+
 ## 2026-10-12 — Session 3: second parity wave merged, first measured comparison, owner's play session
 
 **Done**

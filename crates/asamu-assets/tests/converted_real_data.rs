@@ -192,11 +192,21 @@ fn independent_checks(dir: &ConvertedDir, level: &str, plan: &LevelPlan, manifes
     for a in &actors {
         let hidden = a["hidden"].as_bool().unwrap_or(false);
         let slot = a["slot"].as_u64().unwrap_or(u64::MAX);
+        // The mesh of a fog volume actor bounds the fog and is never a
+        // surface, hidden or not (POST_FOG_SKY.md, section 3).
+        let fog_volume = a["class"]
+            .as_str()
+            .and_then(|class| class.rsplit('.').next())
+            .map(str::to_ascii_lowercase)
+            .is_some_and(|name| name.starts_with("fogvolume") && name.ends_with("densityinfo"));
         for c in a["components"].as_array().into_iter().flatten() {
             if !c["light"].is_null() {
                 lights += 1;
             }
             if c["kind"] != "static_mesh" || hidden || c["hidden_game"].as_bool() == Some(true) {
+                continue;
+            }
+            if fog_volume {
                 continue;
             }
             if c["static_mesh"].as_str().is_none_or(str::is_empty) {

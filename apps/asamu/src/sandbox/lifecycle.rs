@@ -29,11 +29,12 @@
 
 use asamu_game::asamu_world::graybox_test_level;
 use asamu_sandbox::arena::{build_arena, builtin_arenas};
+use asamu_sandbox::playground::load_playground;
 use asamu_sandbox::session::Session;
 use bevy::prelude::*;
 
 use super::control::{self, ON_DISK_SAVES, SimOp, SimOps};
-use super::{Lab, LabLaunch, LabRequest, Phase, Stage, storage};
+use super::{Lab, LabLaunch, LabRequest, Phase, PlaygroundStart, Stage, storage};
 use crate::Sim;
 use crate::ui::{self, Screen, UiAction, UiLaunch, UiState};
 
@@ -51,8 +52,10 @@ pub(super) fn build(app: &mut App) {
     );
 }
 
-/// In a `--sandbox` process: opens the launcher, or starts straight on the
-/// stage the command line named (`--arena`, `--level`, `--no-menu`).
+/// In a `--sandbox` process: starts in the playground, or on the stage the
+/// command line named (`--arena`, `--level`; `--no-menu` without converted
+/// data is the stock graybox test level, as it was before the playground
+/// existed). The launcher is what a session that ends returns to.
 fn startup(
     lab: Res<Lab>,
     launch: Res<LabLaunch>,
@@ -91,16 +94,22 @@ fn startup(
                 });
             }
             None => {
-                requests.write(LabRequest::OpenLauncher);
+                requests.write(LabRequest::Start {
+                    stage: Stage::Playground,
+                    profile,
+                });
             }
         }
-    } else if launch.no_menu || !ui_launch.show_menu {
+    } else if launch.no_menu {
         requests.write(LabRequest::Start {
             stage: Stage::Graybox,
             profile,
         });
     } else {
-        requests.write(LabRequest::OpenLauncher);
+        requests.write(LabRequest::Start {
+            stage: Stage::Playground,
+            profile,
+        });
     }
 }
 
@@ -144,6 +153,31 @@ fn plan_start(
             return Ok(SimOp::StartMap {
                 session: Box::new(session),
                 map: map.to_owned(),
+            });
+        }
+        Stage::Playground => {
+            // In the graybox composition it replaces the Classic graybox
+            // game, which must be one the Sandbox can tune.
+            if ui_launch.converted.is_none() {
+                let classic = lab
+                    .classic
+                    .as_ref()
+                    .map(|keep| &keep.game)
+                    .or(sim.map(|sim| &sim.game));
+                if classic.is_some_and(|game| game.params().pawn.is_none()) {
+                    return Err(
+                        "the Sandbox tunes the Classic parameter set: this run uses the \
+                         placeholder parameters"
+                            .to_owned(),
+                    );
+                }
+            }
+            let (game, script) =
+                load_playground().map_err(|e| format!("the playground could not be built: {e}"))?;
+            return Ok(SimOp::StartPlayground {
+                session: Box::new(session),
+                start: Box::new(PlaygroundStart { game, script }),
+                capture: lab.phase != Phase::Idle,
             });
         }
         Stage::Graybox => graybox_test_level(),
@@ -365,6 +399,18 @@ mod tests {
         }
     }
 
+    /// A `--sandbox` process starts in the playground: ending that session
+    /// is the way to the launcher.
+    fn to_launcher(app: &mut App) {
+        frames(app, 2);
+        assert_eq!(lab(app).phase, Phase::Active);
+        assert_eq!(lab(app).stage, Some(Stage::Playground));
+        send(app, LabRequest::End);
+        frames(app, 1);
+        assert_eq!(lab(app).phase, Phase::Launcher);
+        assert_eq!(screen(app), Screen::Sandbox);
+    }
+
     #[test]
     fn a_session_cannot_start_on_a_disk_backed_save_session() {
         let root = TempRoot::new("disk-saves");
@@ -387,6 +433,7 @@ mod tests {
         assert_eq!(screen(&app), Screen::Main);
         for request in [
             LabRequest::OpenLauncher,
+            start(Stage::Playground, None),
             start(Stage::Graybox, None),
             start(Stage::Arena(MOVEMENT_LAB.to_owned()), Some("moon")),
             start(Stage::Map("AG-Workshop".to_owned()), None),
@@ -573,9 +620,18 @@ mod tests {
         });
         // `ui::setup` opens the main menu at start-up.
         app.world_mut().resource_mut::<UiState>().open(Screen::Main);
+        // The process starts in the playground, playing: the menu is gone
+        // before it acted on anything.
+        frames(&mut app, 2);
+        assert_eq!(lab(&app).phase, Phase::Active);
+        assert_eq!(lab(&app).stage, Some(Stage::Playground));
+        assert_eq!(screen(&app), Screen::None);
+        // Its end is the launcher, with the Classic game back in its place.
+        send(&mut app, LabRequest::End);
         frames(&mut app, 1);
         assert_eq!(lab(&app).phase, Phase::Launcher);
         assert_eq!(screen(&app), Screen::Sandbox);
+        assert!(sim(&app).game.scene_map().is_none() && sim(&app).script.is_none());
 
         // `End` at the launcher: there is nothing to go back to.
         send(&mut app, LabRequest::End);
@@ -618,20 +674,23 @@ mod tests {
             from_cli: true,
             ..Rig::default()
         });
-        frames(&mut app, 1);
-        assert_eq!(lab(&app).phase, Phase::Launcher);
+        to_launcher(&mut app);
+        let written = sim_writes(&app);
         send(&mut app, LabRequest::Quit);
         frames(&mut app, 1);
         assert_eq!(flow_requests(&app), vec![FlowRequest::Quit]);
-        assert_eq!(sim_writes(&app), 0, "quitting the launcher writes no game");
+        assert_eq!(
+            sim_writes(&app),
+            written,
+            "quitting the launcher writes no game"
+        );
 
         // From a tuned, frozen session.
         let mut app = rig(Rig {
             from_cli: true,
             ..Rig::default()
         });
-        frames(&mut app, 1);
-        assert_eq!(lab(&app).phase, Phase::Launcher);
+        to_launcher(&mut app);
         send(&mut app, start(Stage::Graybox, Some("moon")));
         frames(&mut app, 3);
         assert_eq!(lab(&app).phase, Phase::Active);
@@ -693,8 +752,8 @@ mod tests {
         assert!(sim(&app).banner.contains("SANDBOX"));
         assert!(lab(&app).session.as_ref().is_some_and(Session::is_pristine));
 
-        // An unattended run (`--sandbox --screenshot ...` shows no menu):
-        // straight onto the graybox too.
+        // An unattended run (`--sandbox --screenshot ...` shows no menu)
+        // starts where every `--sandbox` process does: in the playground.
         let mut app = rig(Rig {
             from_cli: true,
             launch: UiLaunch {
@@ -705,7 +764,7 @@ mod tests {
         });
         frames(&mut app, 2);
         assert_eq!(lab(&app).phase, Phase::Active);
-        assert_eq!(lab(&app).stage, Some(Stage::Graybox));
+        assert_eq!(lab(&app).stage, Some(Stage::Playground));
 
         // A profile that does not exist: no session, the launcher says why.
         let mut app = rig(Rig {
@@ -769,8 +828,12 @@ mod tests {
         });
         app.world_mut()
             .spawn((PrimaryWindow, CursorOptions::default()));
+        // The playground it starts in was started by the command line too:
+        // the mouse is free there, and at the launcher.
         frames(&mut app, 2);
-        assert_eq!(lab(&app).phase, Phase::Launcher);
+        assert_eq!(lab(&app).stage, Some(Stage::Playground));
+        assert_eq!(grab(&mut app), free);
+        to_launcher(&mut app);
         assert_eq!(grab(&mut app), free);
         send(&mut app, start(Stage::Graybox, None));
         frames(&mut app, 1);
@@ -780,6 +843,136 @@ mod tests {
         send(&mut app, LabRequest::End);
         frames(&mut app, 1);
         assert_eq!(grab(&mut app), free);
+    }
+
+    /// `asamu --sandbox`: in the playground, playing, in both compositions,
+    /// and nothing of it is left when the session ends.
+    #[test]
+    fn a_sandbox_process_starts_in_the_playground_and_leaves_nothing_behind() {
+        use asamu_sandbox::playground::{PLAYGROUND_LEVEL_NAME, PLAYGROUND_MAP, is_playground};
+
+        // Without converted data: it takes the place of the Classic graybox
+        // game, which is put back untouched.
+        let mut app = rig(Rig {
+            from_cli: true,
+            ..Rig::default()
+        });
+        let classic_player = format!("{:?}", sim(&app).game.player());
+        frames(&mut app, 4);
+        {
+            let lab = lab(&app);
+            assert_eq!(lab.phase, Phase::Active);
+            assert_eq!(lab.stage, Some(Stage::Playground));
+            let session = lab.session.as_ref().unwrap();
+            assert!(session.is_pristine(), "it starts on the Classic set");
+            assert!(
+                lab.notice
+                    .as_deref()
+                    .is_some_and(|n| n.contains(PLAYGROUND_LEVEL_NAME)),
+                "{:?}",
+                lab.notice
+            );
+            let sim = sim(&app);
+            assert!(is_playground(&sim.game));
+            assert_eq!(sim.game.map_name(), Some(PLAYGROUND_MAP));
+            assert_eq!(sim.game.state(), GameState::Playing);
+            assert!(sim.game.clock().tick() > 0, "it plays");
+            assert!(sim.script.is_some(), "its level script runs it");
+            assert_eq!(*sim.game.params(), PlayerParams::asamu_original());
+            assert!(sim.banner.contains("SANDBOX") && sim.banner.contains(PLAYGROUND_LEVEL_NAME));
+            assert!(!sim.banner.contains("converted"), "{}", sim.banner);
+            assert_eq!(screen(&app), Screen::None);
+        }
+        // The full suit, from the level's own script.
+        frames(&mut app, 10);
+        let player = sim(&app).game.player();
+        assert_eq!(player.script.gun.max_grapples, 3);
+        assert!(player.script.boots.enabled);
+        // The stage list can take it elsewhere and back: the Classic game is
+        // set aside once and stays what it was.
+        send(&mut app, start(Stage::Arena(MOVEMENT_LAB.to_owned()), None));
+        frames(&mut app, 2);
+        assert_eq!(lab(&app).stage, Some(Stage::Arena(MOVEMENT_LAB.to_owned())));
+        assert!(sim(&app).script.is_none() && sim(&app).game.scene_map().is_none());
+        send(&mut app, start(Stage::Playground, Some("moon")));
+        frames(&mut app, 2);
+        assert_eq!(lab(&app).stage, Some(Stage::Playground));
+        assert!(is_playground(&sim(&app).game));
+        assert_ne!(*sim(&app).game.params(), PlayerParams::asamu_original());
+        send(&mut app, LabRequest::End);
+        frames(&mut app, 1);
+        assert_eq!(lab(&app).phase, Phase::Launcher);
+        assert!(lab(&app).session.is_none() && lab(&app).classic.is_none());
+        let sim = sim(&app);
+        assert_eq!(sim.game.level(), Game::graybox().unwrap().level());
+        assert_eq!(*sim.game.params(), PlayerParams::asamu_original());
+        assert_eq!(format!("{:?}", sim.game.player()), classic_player);
+        assert_eq!(sim.game.state(), GameState::Boot);
+        assert!(sim.script.is_none());
+        assert_eq!(sim.banner, classic_banner());
+
+        // On converted data, where no simulation exists outside a level:
+        // the playground's game is the simulation, and goes with the
+        // session. No level load is asked for.
+        let mut app = rig(Rig {
+            from_cli: true,
+            launch: converted_launch(&["AG-Workshop"]),
+            without_sim: true,
+            ..Rig::default()
+        });
+        app.world_mut().resource_mut::<UiState>().open(Screen::Main);
+        frames(&mut app, 4);
+        assert_eq!(lab(&app).phase, Phase::Active);
+        assert_eq!(lab(&app).stage, Some(Stage::Playground));
+        assert_eq!(screen(&app), Screen::None);
+        {
+            let sim = app.world().resource::<Sim>();
+            assert!(is_playground(&sim.game) && sim.script.is_some());
+            assert_eq!(sim.game.state(), GameState::Playing);
+            assert!(sim.game.clock().tick() > 0);
+        }
+        assert!(flow_requests(&app).is_empty());
+        send(&mut app, LabRequest::End);
+        frames(&mut app, 1);
+        assert!(app.world().get_resource::<Sim>().is_none());
+        assert_eq!(lab(&app).phase, Phase::Launcher);
+        assert!(flow_requests(&app).is_empty());
+
+        // From the main menu's button (not a `--sandbox` process): the
+        // launcher offers it, and its end is the main menu.
+        let mut app = rig(Rig::default());
+        app.world_mut().resource_mut::<UiState>().open(Screen::Main);
+        app.world_mut().write_message(UiAction::OpenSandbox);
+        frames(&mut app, 2);
+        assert_eq!(lab(&app).phase, Phase::Launcher);
+        send(&mut app, start(Stage::Playground, None));
+        frames(&mut app, 2);
+        assert_eq!(lab(&app).phase, Phase::Active);
+        assert!(is_playground(&self::sim(&app).game));
+        send(&mut app, LabRequest::End);
+        frames(&mut app, 1);
+        assert_eq!(lab(&app).phase, Phase::Idle);
+        assert_eq!(screen(&app), Screen::Main);
+        assert_eq!(
+            self::sim(&app).game.level(),
+            Game::graybox().unwrap().level()
+        );
+
+        // The placeholder configuration has no Classic set to tune.
+        let mut app = rig(Rig {
+            placeholder: true,
+            ..Rig::default()
+        });
+        send(&mut app, start(Stage::Playground, None));
+        frames(&mut app, 2);
+        assert_eq!(lab(&app).phase, Phase::Idle);
+        assert!(
+            lab(&app)
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("placeholder"))
+        );
+        assert_eq!(sim_writes(&app), 0);
     }
 
     #[test]
@@ -852,8 +1045,8 @@ mod tests {
             without_sim: true,
             ..Rig::default()
         });
-        frames(&mut app, 1);
-        assert_eq!(lab(&app).phase, Phase::Launcher);
+        to_launcher(&mut app);
+        assert!(app.world().get_resource::<Sim>().is_none());
 
         // The launcher starts a map: a story load is requested, nothing else.
         send(

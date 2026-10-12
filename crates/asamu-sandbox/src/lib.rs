@@ -41,6 +41,7 @@
 //! | [`predict`] | A predicted arc on a copy of the player |
 //! | [`recording`] | The Sandbox recording container |
 //! | [`arena`] | Built-in hand-made lab arenas |
+//! | [`playground`] | The playground: the level the Sandbox opens into, its timed routes |
 //! | [`inspect`] | Read-only views of a session for a user interface |
 //!
 //! The app-side plugin lives in `apps/asamu/src/sandbox.rs` behind that
@@ -54,6 +55,7 @@ pub mod command;
 pub mod inspect;
 pub mod keys;
 pub mod overlay;
+pub mod playground;
 pub mod predict;
 pub mod profile;
 pub mod recording;
