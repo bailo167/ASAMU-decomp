@@ -537,17 +537,18 @@ and, per mesh it needs a body of, the shapes file.
 
 A blocking component is placed as its triangles (for whatever goes to them) and as one instance per convex
 element and box of its body (for whatever goes to those), all of the same actor. The pawn-blocking placements
-per map, as the loader counts them on the Windows conversion (`scene_simple_real_data`, 2026-10-12; a map
-includes the sub-levels it streams):
+per map, as the loader counts them on the Windows conversion (`scene_simple_real_data` and, against a recount
+made without this repository's code, `scene_simple_verify`, 2026-10-12; a map includes the sub-levels it
+streams):
 
 | Map | at the simple body | not at all | at triangles | body shapes placed |
 |---|---:|---:|---:|---:|
 | AG-Workshop | 273 | 755 | 3 | 1,101 |
-| AG-ParadiseCave | 1,518 | 222 | 237 | 17,619 |
+| AG-ParadiseCave | 1,514 | 226 | 237 | 17,615 |
 | AG-BeautifulCity (with Freds_place) | 2,060 | 1,132 | 142 | 7,978 |
 | AG-Darkcave | 1,301 | 815 | 108 | 12,188 |
 | AG-StarHaven | 3,112 | 1,833 | 7 | 29,331 |
-| AG-IceCave (with TheCore) | 4,301 | 553 | 138 | 20,444 |
+| AG-IceCave (with TheCore) | 4,298 | 556 | 138 | 20,441 |
 | AG-Epilogue | 288 | 516 | 2 | 1,116 |
 | TheCore alone | 44 | 98 | 0 | 591 |
 
@@ -557,7 +558,24 @@ Counted by the actors' stored collision flags alone, the same classification giv
 higher where an actor's class or stored collision type overrides its flags (`scene.rs`, "Collision flags"): the
 166 falling rocks of AG-IceCave (their meshes have bodies), its 98 recharge crystals and 7 of AG-StarHaven's, and
 15 glow flowers of AG-Darkcave; 2 sound-making foliage actors of AG-StarHaven lose their blocking the same way. Crystals and glow
-flowers have no body and their box switch is on: by this table the pawn passes through them.
+flowers have no body and their box switch is on: by this table the pawn passes through them. And 7 placements
+of a mesh with a body are in "not at all" because they are too small (next paragraph): 4 in AG-ParadiseCave, 3
+in AG-IceCave.
+
+**A very small placement has no simple collision.** Before `UStaticMeshComponent::LineCheck` hands a trace to
+the body (its call of `FKAggregateGeom::LineCheck` at 0x100C58CE4), it separates the component's matrix into
+rows of length one and a scale: the scale on an axis is the length of that row, or zero when the row's squared
+length is not above 1e-8 (the float at 0x10163FED4). When the absolute product of the three scales is not above
+1e-4 (the double at 0x1016393A0, compared at 0x100C58C8D) the call is skipped, for a trace with or without an
+extent, and the simple path reports no hit (CONFIRMED: 0x100C58AD4 to 0x100C58C95, read 2026-10-12 by the
+verification pass). Uniformly that is a scale of 0.0464 or less. The body's check then multiplies the scale
+back into the rows, so for every other placement the matrix is the component's own. Ours:
+`scene::simple_body_checked`, with the lengths and the product in `f32` in the original's order;
+`LoadStats::pawn_scale_skipped`. The shipped levels have 7 such pawn-blocking placements of a mesh with a body:
+`Sanctuary_Props.Entrance_Pole_2` twice at 0.0274 and `Village_Props.Meshes.Lantern` twice at 0.0419 in
+AG-ParadiseCave, and `Platforms.Meshes.grappleRock_01` three times at 0.0116 in AG-IceCave (products 1.5e-6 to
+7.4e-5; the next smallest product of a placement with a body is 2.9e-4, so no placement is near the threshold).
+The pawn passes through them; bullet traces still end on their triangles. Not compared with a recording.
 
 **Shapes.**
 
@@ -577,8 +595,12 @@ flowers have no body and their box switch is on: by this table the pawn passes t
   lists say, like any other. For the swept box an element is the solid its stored directions cut out around its
   vertices, which contains every vertex and can be larger than the surface its triangles describe; this is the
   native test's own behaviour (it projects the vertices on the stored directions and never looks at the planes).
-  The test is a fixed number of projections per element: nothing loops, and no input makes it fail (an element
-  without usable vertices is left out with a warning). Zero-extent traces see the triangles, one-sided as seen
+  The test is a fixed number of projections per element: nothing loops, and no input makes it fail. An element
+  without a usable vertex is left out with a warning, and so is one that is neither a solid (no usable face
+  direction, or more than 256 vertices) nor a surface: it would be loose points. The shipped elements have at
+  most 79 vertices, 83 face directions and 148 edge directions, and each has a face direction; 2 have no edge
+  direction (they are then tested on the box's axes and their face directions only, as the original does) and 1
+  has a vertex no triangle uses (`simple_hostile.rs` has the hostile cases). Zero-extent traces see the triangles, one-sided as seen
   from the vertices' centre, where the native zero-extent check clips against the element's planes; on the 584
   those two solids differ (UNKNOWN whether any trace of the game that is not a bullet trace reaches one).
 - The scale of a placement applies to the shapes as to the triangles, mirroring and non-uniform scale included
@@ -603,8 +625,39 @@ the pawn at its triangles, as before this work, and the loader warns once, befor
 mesh, that pawn collision is approximate and that the meshes should be converted again. A mesh whose shapes file is missing or malformed
 falls back to its triangles in the same way, with a warning naming it.
 
+**Checked a second time** (verification pass, 2026-10-12; gated tests `scene_simple_verify`, with the script
+counts made in Python over the converted JSON alone):
+
+- **Counts.** Per map, the three classes, the number of shapes placed and the placements too small for a body
+  equal the recount on all eight maps; by the stored flags the recount equals V6. The 24 volumes and their 15
+  disabled ones equal V14 per map.
+- **The four starts at which our pawn could not move** (V8: DC1 seg3 tick 742, PLAY2 seg6 tick 95, seg1 tick
+  3950, seg0 tick 1868). At the recorded location the pawn's box overlaps nothing that blocks the pawn, while it
+  does overlap the triangles of a mesh (what it collided with before). The floor under it is the recorded base
+  actor in all four, of the kind that mesh's switch says, at the gap the original's floor rule leaves
+  (`NATIVE_PHYSICS.md` 3.3 with the pull-back): 3.289 and 3.149 on simple bodies (rule 2.9 to 3.4), 4.893 on
+  triangles (rule 4.7 to 5.2), and 2.6153 at the rest after the landing at the start of AG-Darkcave, where the
+  recorded fall gives 2.15 + 0.1 × 4.658 = 2.6158.
+- **Every recorded position** (45,237 records of the three recordings). The pawn's box overlaps pawn collision
+  on 139 records, where it overlapped the triangles of some mesh on 3,177. The 139 are: 81 inside
+  `DynamicBlockingVolume_2` and `_5` of AG-BeautifulCity, which start enabled and are passed after a change of
+  level-script state (`docs/PARITY_FINDINGS.md` N3); 55 inside four Matinee-moved platforms of AG-ParadiseCave
+  standing where they start (N4); and 3 in AG-Workshop where the box is under 0.1 uu inside BSP beside a wall
+  it slides along (WS1 records 1608 to 1610; not this section's subject). None is a static mesh's body or
+  triangles.
+- **Every walking record** that is free (27,524): the gap under the box is inside the rule's band on 26,623
+  (96.7%), and on 12,251 of the 12,797 that stand on a simple body (95.7%; median 3.144 to 3.150 per map against
+  the rule's 3.15). All 2,998 walking records of AG-Workshop are in the band, 215 of them on the staircase's
+  body. Among the rest are the 84 records of the rest after the AG-Darkcave landing (2.615) and other rests
+  after a landing; they were not classified further.
+
 Open:
 
+- 16 pawn-blocking placements of a mesh with a body have two scales whose product is within 1e-5 of 100 (a
+  `DrawScale` of exactly 10: 6 in AG-ParadiseCave, 1 in AG-BeautifulCity, 9 in AG-Darkcave), which is the
+  threshold at which the original's convex check leaves out a face axis of the box (`NATIVE_PHYSICS.md` 10.1).
+  The original decides that in `f32` on the rows of an inverted matrix and ours in `f64`: for these 16 the two
+  can differ. UNKNOWN which way each falls in the original.
 - The native point checks (is a place free: spawning, growing) against simple bodies were not read; ours tests
   the exact solids.
 - The native box-element routine's axis order.

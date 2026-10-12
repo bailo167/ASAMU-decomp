@@ -207,11 +207,19 @@ Evidence side: the original (scene data and script, read locally from the user's
   collision instance of an actor by actor id (static or among the game layer's moving instances),
   `scene::actor_collision` reads the switch, `LoadedMap::actors_without_collision` lists what is off, and
   `LoadStats::switchable_volumes` / `disabled_volumes` count them. The switch survives an actor being moved by
-  level script (`CollisionScene::take_actor_statics` hands the instances over as they are). Which Kismet
-  actions reach these actors is the game layer's (`docs/reverse-engineering/KISMET_RUNTIME.md`).
+  level script as far as this crate goes (`CollisionScene::take_actor_statics` hands the instances over as they
+  are; a game layer that builds new ones from their mesh and transform instead loses the switch, the kind and
+  the sweep rule). Which Kismet actions reach these actors is the game layer's
+  (`docs/reverse-engineering/KISMET_RUNTIME.md`).
 - The recorded flight through `DynamicBlockingVolume_6` of AG-BeautifulCity (V13) is free in the loaded map:
   the pawn's box at (4353, −595, 37937) overlaps nothing until the volume is switched on (gated test
   `scene_simple_real_data`).
+- Two volumes that start **enabled** are passed in the recordings after level script changed state, which is
+  the toggle at work in the original: the pawn's box is inside `DynamicBlockingVolume_2` of AG-BeautifulCity on
+  51 records (DC1 raw 13289 to 13510, after the state change the findings list at seg3 tick 5019) and inside
+  `DynamicBlockingVolume_5` on 30 (PLAY2 raw 17620 to 17649, after those at seg4 ticks 2470 and 2535). In the
+  loaded map both still block there until the game layer applies the toggle (gated measurement
+  `scene_simple_verify`, 2026-10-12). No other volume is entered on any of the 45,237 records.
 
 Volume hulls are swept by the pawn's box with the original's convex rule in the space of the volume's brush
 component (`NATIVE_PHYSICS.md` 10.1): the hulls are stored in world space, so the loader hands the component's
