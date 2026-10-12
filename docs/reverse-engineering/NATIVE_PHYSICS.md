@@ -1297,9 +1297,10 @@ of those are placed at a scale above 10 on at least one axis (2,157 on all three
 different meshes. Of the 906 blocking-volume actors none is scaled above 10 and none is turned other
 than by quarter turns about Z, so blocking volumes are not affected beyond the 0.57° rule. Counted again
 on 2026-10-12 by the scene loader with the rule itself (`crates/asamu-world/tests/scene_simple_real_data.rs`
-on the Windows conversion, the seven story maps with their sub-levels): of 12,853 placements that the
+on the Windows conversion, the seven story maps with their sub-levels): of 12,846 placements that the
 pawn meets at a simple body, 2,162 lose at least one face axis of the box (two scales multiplying to
-more than 100), which is 31,944 of the 89,419 convex elements placed for them: AG-ParadiseCave 486
+more than 100), which is 31,944 of the 89,412 convex elements placed for them (7 placements fewer, with
+one element each, than first counted: those too small to have a simple body, above): AG-ParadiseCave 486
 placements, AG-Darkcave 418, AG-IceCave 941, AG-BeautifulCity 188, AG-StarHaven 123, AG-Workshop 3,
 AG-Epilogue 3. They are the large rocks and platforms the levels are built from (`Rocks.Mesh.Rock_Huge_1`
 and `_2`, `Platforms.Meshes.Platform_Medium_1`, the icicles of AG-IceCave). No volume hull loses one. Of

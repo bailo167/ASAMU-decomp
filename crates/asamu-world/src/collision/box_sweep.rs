@@ -100,9 +100,9 @@
 //!   contacts earlier. STRONG for that consequence (it follows from the
 //!   code; no recording has been compared with it yet). For a scale that is
 //!   not uniform, a face axis goes when the scales on the other two axes
-//!   multiply to more than 100. In the user's data 2,162 of the 12,853
+//!   multiply to more than 100. In the user's data 2,162 of the 12,846
 //!   pawn-blocking placements of a mesh that is met at its simple body
-//!   lose at least one face axis that way (31,944 of the 89,419 shapes
+//!   lose at least one face axis that way (31,944 of the 89,412 shapes
 //!   placed for them; counted by `scene_simple_real_data`), and no volume
 //!   does.
 //! - The aggregate check takes an element only when its time is strictly
