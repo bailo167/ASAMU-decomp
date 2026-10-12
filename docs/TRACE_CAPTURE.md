@@ -277,9 +277,17 @@ read, keeps its FOV in the verdict unless `exclude` is given. All 14 traces of 2
 and are excluded as before. Nothing else changes: the FOV's tolerance, its statistics and its first exceedance
 are reported as before, and the summary says whether the FOV counted and why. (A comparison in which only an
 excluded FOV differs has the verdict `Exact`: exact in every field that counts. The text and the report show
-the FOV's numbers next to it.) That the lock is what the zoom sets on this build is read from the camera's
-accessors (V19, identifier names only); no recording has shown a locked FOV yet: the rule is CONFIRMED as the
-camera's, its effect on a real zoom is still to be seen.
+the FOV's numbers next to it.)
+
+That the lock is what the zoom sets on this build was read from the camera's accessors (V19, identifier names
+only) and is CONFIRMED by the first recording made with recorder 0.2.0 (2026-10-12, keyboard and mouse, 52,266
+records in 7 runs; 6.10). On every one of its records the lock flag is set and `fov_camera` and `fov_default`
+are 90.0: this game keeps the camera's FOV locked all the time, so the FOV of every sample of such a recording
+is `fov_lock`. That is 90.0 on 51,660 records, 50.0 on 351 (the zoom held) and between the two on 255 (the
+zoom's way in and out), 606 records in which the cached view FOV says 90 and the camera's FOV is another. A
+replay of 601 ticks of its first run through three zoom holds (`replay --from-tick 3300 --ticks 600 --converted
+…` of segment 0, in the Workshop; 399 of the samples have a FOV other than 90, 278 of them 50) gives our FOV
+equal to the recorded one on all 601 samples, with the FOV counted in the verdict.
 
 **The anchor** (corrected 2026-10-10). The converter used to write the location of the gun's helper actor
 (raw `anchor`). The first recordings show that this is the anchor only for some grapples: the gun's own
@@ -305,7 +313,7 @@ documents the evidence (M1–M6 there, with counts). In short:
 | Walking or falling, acceleration ≠ 0 | `AccelRate` (2048) along `normal(aForward·X + aStrafe·Y)` without its Z part, `X`/`Y` = forward and right axes of the pawn's rotation **as the frame began** (`R_(k−1)`), each angle **truncated to 4 rotator units**; pitch and roll take part. The stick's magnitude is not in it (the original discards it). After a landing the value can have unit length instead (2 records) | the unit vector `(forward, right)` that solves it: the stick's direction after the dead zone. CONFIRMED for the yaw, its time and its truncation (10,051 of 10,051 on-axis samples), STRONG for pitch and roll (kept pitch: 15 of 22 decidable samples continue into the next frame, against 1 with yaw-only axes; lean alone: the direction holds still in 14 of 188 decidable windows, against none) |
 | Walking or falling, acceleration = 0 | no deflection beyond the dead zone, **or** a move suppressed in a way the record does not show (the move-input lock, a controller state without a walking move) | 0, counted as "others" |
 | Up to two records after a grapple let go, acceleration = 0 | the controller's tick after a release runs no move (GRAPPLE.md G-RL-7; measured: after 75 releases by the button never fewer than one zero record, exactly one after 69; after 43 releases with the button held exactly two after 30, one after one, more after the rest) | 0, counted apart: what the stick did is not known and neither game reads it |
-| Grapple attached (`Physics` 4) | always 0 (9,601 of 9,601 records): no steering is read (G-PH-1) | 0, counted apart |
+| Grapple attached (`Physics` 4) | 0: no steering is read (G-PH-1). 9,601 of 9,601 records of 2026-10-10 and 8,076 of 8,077 of 2026-10-12. The one other record is the first of a flight that the weapon's **refire check** attached instead of the button press (the weapon was already `WeaponFiring` in the record before, and the `RefireCheckTimer` count wraps in that tick): it keeps the acceleration of that tick's move, and the next record has none. Of the 66 flights of 2026-10-12 that begin after a record of the frame before, 62 were attached by the press (no acceleration in the first flying record of any; 27 of them had one in the record before) and 4 by the refire check (1 with an acceleration in the record before, which it keeps; 3 without). Only a recording with the weapon's state and timers (recorder 0.2.0) shows which kind an attach is | 0, counted apart (`check: acceleration while the grapple is attached on N samples (not used)`) |
 
 Not well defined, in other words: the stick's magnitude anywhere; its direction while attached and in the
 release gap (irrelevant to either game); and whether a zero outside those is "no input" or "input ignored".
@@ -436,6 +444,18 @@ marker is in exactly one run's notes: an `event: N marker(s) …: T "NAME", …`
 reads. Names are written as the recorder stores them (printable, at most 64 characters). A marker ends no run
 and changes no sample; it does not end a replay's validity.
 
+The converter's `markers:` line is the one that goes on with a JSON object (`markers: {`). A trace's notes also
+hold the recording's own header notes, after the converter's lines about the run, and a person's note may begin
+with the same word: `win_remote.sh session` gives every recording the note `markers: see the stats file (set
+with win_remote.sh mark)`, and the recording of 2026-10-12 has it in each of its 7 runs. `asamu-trace starts`
+took that note for the converter's line and failed on every one of those runs (`invalid markers: note`); the
+reader now passes over a `markers:` line that holds no object, with or without a converter's line before it,
+and still refuses a line whose object is broken (`tools/asamu-trace/src/segments.rs`, `markers_of`; the unit
+test there and `the_session_note_of_a_real_recording_is_not_the_markers_line` in `tests/pipeline.rs`). The same
+holds for no other line: the `state:` and `init:` lines are written after the header notes, and their readers
+take the last one. That recording has no marker (none was set in the session), so markers at their ticks are
+tested with the recorder's fake game only (6.10).
+
 **Dropped frames.** A frame without a record is a frame gap and ends a run, as before. With the recorder's
 dropped-frame log (the sidecar, 3.2) the notes of the runs on both sides say which frames are missing and why:
 `dropped: N frame(s) without a record after this run (frames A..=B): A torn: <the recorder's detail>; …`, and
@@ -445,7 +465,11 @@ frame has a record: sample `k` takes its input from record `k − 1`, and that r
 frame's; as the last record of a run its keys are used by no sample (`dropped: the run ends with frame F, whose
 record was written without its frame's input (…): its keys are not used`). The recorder itself writes such a
 record only as the last of a run (6.3); the converter does not rely on it. Without a log (recorder 0.1.0, the
-Mac recorder) there are no such notes and no such split.
+Mac recorder) there are no such notes and no such split. The recording of 2026-10-12 has a log of 14 entries
+for 1,190 frames: its 6 frame gaps between records each have an entry for every missing frame, and its 3
+records without input (frames 31829, 40737 and 53454) are each the last record before a gap or the last of the
+recording, so no run of it is split between two consecutive frames
+(`optional_members_markers_and_dropped_frames_of_real_recordings` in `tests/real_recordings.rs` counts both).
 
 **Validity of a replay** (`replay --level-events stop|inject|ignore`; original recordings only, since our own
 simulation reproduces its own respawns). A teleport and the level-script changes (the four rows from "story
@@ -1187,9 +1211,22 @@ values, `tools/asamu-trace/tests/python_crosscheck.rs`):
 | `floor`, `gun.state`, `gun.timers` (the `RefireCheckTimer` entry), `cylinder` (radius, half height), `base_level`, `base_eye_height` | per-tick fields of the `state:` note; the weapon's firing state and the refire timer are also compared with ours after every tick of a replay | 3.5, 3.6 |
 | `fov_default`, `camera_pov`, `walk_bob`, `bob`; `cylinder.translation`, `cylinder.collision_component`; timers other than the refire check | read, typed and kept in the raw file; no conversion uses them yet | — |
 
-That the lock is what the zoom sets on this build is read from the camera's accessors; no recording has shown a
-locked FOV yet (the first session with recorder 0.2.0 will: [PARITY_FINDINGS.md](PARITY_FINDINGS.md) section 6,
-step 2). A replay does not start from the recorded weapon state, refire timer or floor normal yet (3.5).
+A replay does not start from the recorded weapon state, refire timer or floor normal yet (3.5).
+
+**The first recording with optional fields** (2026-10-12, `KM1`: keyboard and mouse, 52,266 records, frames
+1179..=53454; read with `asamu-trace validate` and counted from the raw file, which stays local):
+
+| What | Measured |
+|---|---|
+| members | each of the 12 on 52,266 of 52,266 records (no group left out, none unannounced); layout `win-x86-steam-1822049-optional` |
+| sidecar | 0 markers; a dropped-frame log of 14 entries for 1,190 frames (1,175 of them before the first record, without a player) |
+| conversion | 7 runs, 52,266 samples; `asamu-trace convert` and `asamu_recorder_core.py convert` agree on every sample and every note, with the sidecar and with `--no-stats` (parsed values compared) |
+| camera | `fov_locked` true, `fov_camera` 90.0 and `fov_default` 90.0 on every record; `fov_lock` 90.0 on 51,660, 50.0 on 351, between the two on 255 (3.3) |
+| weapon | state `Active` on 42,383 records and `WeaponFiring` on 9,883; a `RefireCheckTimer` entry (period 0.1 s, looping, never paused) on exactly the 9,883 firing records. In replays of three stretches of segment 2 on the converted level (from ticks 1940, 2410 and 2640; 130, 230 and 400 ticks) our firing state equals the recorded one after every tick, and our refire timer equals the recorded count, bit for bit, on each of the 38, 30 and 204 ticks on which both run: the comparison's alignment and unit (elapsed seconds) are CONFIRMED on the game |
+| pawn | cylinder radius 21, half height 44, no translation, the collision component, on every record; `base_eye_height` 38.0 on every record; `floor` straight up on 34,962 records, tilted on 17,249, zero on 55 |
+| base | `base_level` is `null` exactly on the 25,967 records without a base, and on the other 26,299 it is the map's name in whatever case the engine holds it (`ag-workshop` in the Workshop: compare level names without case) |
+
+The trace tool's tests that take recordings (`ASAMU_TRACE_RAW_DIR`) read this one with the first three.
 
 **A group is read whole or not at all.**
 
