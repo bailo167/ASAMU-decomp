@@ -247,7 +247,8 @@ ignored `research/`, never the install, never through symlinks):
 | `<map>/atlas_<n>.png` | `--png`: Reinhard tone-mapped sRGB preview |
 | `<map>/vertex.dds` | vertex light maps reduced to one constant each (4 x 4 texel cells) |
 | `<map>.bsp.bin` | geometry of every BSP element: positions, normals, texture UVs, light map UVs, triangles (UE3 world space) |
-| `<map>.lightmaps.json` | `format` `asamu-lightmaps`, version 1: atlases; one entry per lit static mesh component (actor, actor slot, component, mesh, kind, atlas, UV rectangle, UV channel, scale vectors, baked light count, shadow maps); BSP elements (material, byte spans; atlas and rectangle only when the element has a texture light map); every light component with `LightGuid`, `LightmapGuid`, `baked`, `shadow_mapped`; statistics |
+| `<map>.lightmaps.json` | `format` `asamu-lightmaps`, version 1: atlases; one entry per lit static mesh component (actor, actor slot, component, mesh, kind, atlas, UV rectangle, UV channel, scale vectors, baked light count, shadow maps); BSP elements (material, byte spans; atlas and rectangle only when the element has a texture light map); every light component with `LightGuid`, `LightmapGuid`, `baked`, `shadow_mapped`; statistics; `light_volume` when the level has one (added 2026-10-12, optional) |
+| `<map>.lightvolume.bin` | the level's precomputed light volume: the baked light for objects without a light map (`LIGHTING.md`, sections 3 and 4) |
 
 - Atlas texels: for each light map region, `irradiance = srgb(coefficient 0) x scale 0 x mean_i(srgb(coefficient
   1)_i x scale 1_i)` with that light map's own scale vectors (`lightmap::directional_irradiance`; the approximation
@@ -290,6 +291,9 @@ ignored `research/`, never the install, never through symlinks):
 - A light baked into light maps still lights the surfaces that have no light map (the 72 BSP elements above, draws
   without a pairing, dynamic objects); UE3 gives static surfaces without a light map no static light at all, so
   those surfaces are brighter here than in the original.
+- The ambient term, which reaches only surfaces without a light map, follows the level's precomputed light volume
+  at the viewer when that is converted (`LIGHTING.md`, section 4.3; added 2026-10-12); otherwise it is the constant
+  stand-in.
 - What is lost: per-pixel directionality (normal-mapped detail in the baked light), the static shadow maps of
   dominant lights (Bevy's real-time shadows stand in), instanced meshes (not drawn), decal light maps.
 

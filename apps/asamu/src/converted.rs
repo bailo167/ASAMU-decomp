@@ -11,11 +11,13 @@
 //! batch.
 //!
 //! Approximations (render side only; see `asamu_assets::lighting` and
-//! `asamu_assets::materials`): lights use our UE3 → physical mapping, the
-//! original's baked lightmaps are not rendered (a constant ambient term
-//! stands in), fog is a placeholder distance fog enabled only when the level
-//! has a height-fog actor, and materials without a converted description use
-//! untextured neutral colours.
+//! `asamu_assets::materials`): lights use our UE3 → physical mapping; the
+//! original's baked light maps are applied afterwards by `lightmaps.rs`, and
+//! surfaces without one get an ambient term (the level's precomputed light
+//! volume through `light_volume.rs`, or a constant stand-in); fog is a
+//! placeholder distance fog enabled only when the level has a height-fog
+//! actor (`post.rs` replaces it), and materials without a converted
+//! description use untextured neutral colours.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

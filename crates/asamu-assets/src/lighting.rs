@@ -3,8 +3,9 @@
 //! UE3 lights have no physical units: a `PointLightComponent` has a unitless
 //! `Brightness`, an sRGB `LightColor`, a `Radius` beyond which it contributes
 //! nothing and a `FalloffExponent` shaping the attenuation inside it. Most of
-//! the original's look comes from **baked lightmaps**, which the runtime does
-//! not use yet, so dynamic lights in the recreation can only approximate it.
+//! the original's look comes from **baked light maps** ([`crate::lightmaps`]);
+//! the mapping here serves the lights that are not baked and the objects
+//! that have no light map, and can only approximate the original there.
 //!
 //! The mapping below is ours, chosen so a level reads plausibly under Bevy's
 //! default camera exposure; it is not recovered from the original and must
@@ -52,8 +53,10 @@ pub struct LightMapping {
     pub directional_lux_per_brightness: f32,
     /// Ambient brightness per unit sky light `Brightness`.
     pub sky_ambient_per_brightness: f32,
-    /// Ambient brightness always added (stands in for the baked indirect
-    /// light of the original's lightmaps, which are not rendered yet).
+    /// Ambient brightness of surfaces without a light map where the level's
+    /// precomputed light volume is not converted (a number of ours that
+    /// stands in for the baked indirect light; with a volume the app uses
+    /// [`LightVolume`] instead).
     pub base_ambient: f32,
 }
 
