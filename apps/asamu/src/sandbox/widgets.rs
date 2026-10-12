@@ -1145,7 +1145,9 @@ mod tests {
             &mut view,
         );
         assert!(view.message.is_none());
-        assert!(!view.hud);
+        // (The click itself switched the read-outs on: a session starts
+        // with them off.)
+        assert!(view.hud);
     }
 
     #[test]

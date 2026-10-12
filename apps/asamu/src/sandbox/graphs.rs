@@ -299,6 +299,10 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(lab)
             .init_resource::<VizSettings>()
+            .insert_resource(ViewState {
+                hud: true,
+                ..ViewState::default()
+            })
             .init_resource::<PanelState>()
             .add_systems(Update, sync);
         let count = |app: &mut App| {

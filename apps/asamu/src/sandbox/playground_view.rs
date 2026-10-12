@@ -722,6 +722,224 @@ pub(super) fn build(app: &mut App) {
 mod tests {
     use super::*;
 
+    use asamu_sandbox::playground::load_playground;
+    use asamu_sandbox::session::Session;
+
+    /// A headless app in a session on the playground, with what a graybox
+    /// run has for this module to change.
+    fn app() -> App {
+        let (mut game, script) = load_playground().unwrap();
+        game.start();
+        let mut lab = Lab::new(true);
+        lab.phase = Phase::Active;
+        lab.session = Some(Session::classic());
+        lab.stage = Some(Stage::Playground);
+        lab.dirs = None;
+        let mut app = App::new();
+        app.insert_resource(lab)
+            .insert_resource(Sim::new(game, String::new()).with_script(Some(script)))
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .insert_resource(ClearColor(Color::BLACK))
+            .insert_resource(GlobalAmbientLight {
+                brightness: 123.0,
+                ..default()
+            })
+            .insert_resource(crate::hud::DebugInfo(true))
+            .insert_resource(LevelGizmos(true));
+        build(&mut app);
+        app
+    }
+
+    fn own(app: &mut App) -> usize {
+        let world = app.world_mut();
+        world
+            .query_filtered::<Entity, With<PlaygroundEntity>>()
+            .iter(world)
+            .count()
+    }
+
+    #[test]
+    fn the_playground_is_drawn_while_it_is_played_and_everything_is_put_back() {
+        let mut app = app();
+        let stock = app
+            .world_mut()
+            .spawn((LevelVisual, Visibility::Inherited))
+            .id();
+        let camera = app
+            .world_mut()
+            .spawn((PlayerCamera, Transform::from_xyz(1.0, 2.0, 3.0)))
+            .id();
+        app.update();
+        app.update();
+        // One mesh per piece, a light per lamp, the sun and the sky.
+        let level = playground();
+        let lamps = level.pieces.iter().filter(|p| p.look == Look::Lamp).count();
+        assert!(lamps > 0);
+        assert_eq!(own(&mut app), level.pieces.len() + lamps + 2);
+        // A clean picture: nothing of the graybox, no developer drawings.
+        assert_eq!(
+            app.world().get::<Visibility>(stock),
+            Some(&Visibility::Hidden)
+        );
+        assert!(!app.world().resource::<crate::hud::DebugInfo>().0);
+        assert!(!app.world().resource::<LevelGizmos>().0);
+        assert_ne!(app.world().resource::<ClearColor>().0, Color::BLACK);
+        assert_ne!(
+            app.world().resource::<GlobalAmbientLight>().brightness,
+            123.0
+        );
+        assert!(app.world().get::<DistanceFog>(camera).is_some());
+        // The sky stays around the camera.
+        let world = app.world_mut();
+        let sky: Vec<Vec3> = world
+            .query_filtered::<&Transform, With<SkyDome>>()
+            .iter(world)
+            .map(|t| t.translation)
+            .collect();
+        assert_eq!(sky, [Vec3::new(1.0, 2.0, 3.0)]);
+
+        // What the level script moves is drawn where the script has it.
+        {
+            let mut sim = app.world_mut().resource_mut::<Sim>();
+            let Sim { game, script, .. } = &mut *sim;
+            for _ in 0..240 {
+                script
+                    .as_mut()
+                    .unwrap()
+                    .tick(game, &asamu_player::InputFrame::default());
+            }
+        }
+        app.update();
+        let moved: HashMap<u32, (sim_glam::Vec3, [i32; 3])> = app
+            .world()
+            .resource::<Sim>()
+            .script
+            .as_ref()
+            .unwrap()
+            .moved_actors()
+            .into_iter()
+            .map(|(id, location, rotation)| (id, (location, rotation)))
+            .collect();
+        let world = app.world_mut();
+        let drawn: Vec<(u32, Transform)> = world
+            .query::<(&Moving, &Transform)>()
+            .iter(world)
+            .map(|(piece, transform)| (piece.0, *transform))
+            .collect();
+        let movers = level
+            .pieces
+            .iter()
+            .filter(|p| !matches!(p.role, Role::Fixed | Role::Decor | Role::Crystal))
+            .count();
+        assert_eq!(drawn.len(), movers);
+        let mut carried = 0;
+        for (actor, transform) in drawn {
+            let piece = level
+                .pieces
+                .iter()
+                .find(|p| p.actor == Some(actor))
+                .unwrap();
+            let Some((location, rotation)) = moved.get(&actor).copied() else {
+                continue;
+            };
+            assert_eq!(transform, placement(location, rotation), "{}", piece.name);
+            if matches!(piece.role, Role::Carried | Role::Gondola) {
+                assert_ne!(
+                    transform.translation,
+                    placement(piece.location, piece.rotation).translation,
+                    "{} did not move",
+                    piece.name
+                );
+                carried += 1;
+            }
+        }
+        assert!(carried >= 12);
+
+        // The session leaves the playground: nothing of it stays.
+        app.world_mut().resource_mut::<Lab>().phase = Phase::Idle;
+        app.update();
+        app.update();
+        assert_eq!(own(&mut app), 0);
+        assert_eq!(
+            app.world().get::<Visibility>(stock),
+            Some(&Visibility::Inherited)
+        );
+        assert!(app.world().resource::<crate::hud::DebugInfo>().0);
+        assert!(app.world().resource::<LevelGizmos>().0);
+        assert_eq!(app.world().resource::<ClearColor>().0, Color::BLACK);
+        assert_eq!(
+            app.world().resource::<GlobalAmbientLight>().brightness,
+            123.0
+        );
+        assert!(app.world().get::<DistanceFog>(camera).is_none());
+        assert!(app.world().resource::<Shown>().kept.is_none());
+    }
+
+    #[test]
+    fn a_converted_level_behind_the_menu_is_taken_out_of_the_picture() {
+        use asamu_assets::{ConvertedDir, PlanOptions};
+
+        let mut app = app();
+        app.insert_resource(ConvertedLevel {
+            dir: ConvertedDir::new(std::path::PathBuf::from("conv")),
+            level: "AG-Somewhere".to_owned(),
+            options: PlanOptions::default(),
+            settings: crate::converted::RenderSettings::default(),
+            eye_height: 38.0,
+            force_all_sublevels: false,
+            phase: None,
+            progress: (3, 0, 5),
+        });
+        let mesh = app
+            .world_mut()
+            .spawn(LevelEntity {
+                actor_slot: 0,
+                level: 0,
+            })
+            .id();
+        let bsp = app.world_mut().spawn(LevelBsp).id();
+        let other = app.world_mut().spawn(Transform::default()).id();
+        app.update();
+        app.update();
+        assert!(app.world().get_entity(mesh).is_err());
+        assert!(app.world().get_entity(bsp).is_err());
+        assert!(
+            app.world().get_entity(other).is_ok(),
+            "only the level's own"
+        );
+        {
+            let level = app.world().resource::<ConvertedLevel>();
+            assert_eq!(level.level, PLAYGROUND_MAP);
+            assert!(level.phase.is_none());
+            assert_eq!(level.progress, (0, 0, 0));
+        }
+        // A plan that still spawned after it was cancelled goes as well.
+        let late = app
+            .world_mut()
+            .spawn(LevelEntity {
+                actor_slot: 1,
+                level: 0,
+            })
+            .id();
+        app.update();
+        app.update();
+        assert!(app.world().get_entity(late).is_err());
+        // Another stage: the level's entities are the flow's again.
+        app.world_mut().resource_mut::<Lab>().stage = Some(Stage::Map("AG-Somewhere".to_owned()));
+        app.update();
+        let kept = app
+            .world_mut()
+            .spawn(LevelEntity {
+                actor_slot: 2,
+                level: 0,
+            })
+            .id();
+        app.update();
+        app.update();
+        assert!(app.world().get_entity(kept).is_ok());
+    }
+
     #[test]
     fn every_look_has_its_own_colour() {
         let looks = [

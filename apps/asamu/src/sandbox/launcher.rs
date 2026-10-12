@@ -342,8 +342,10 @@ mod tests {
     #[test]
     fn a_graybox_launch_offers_the_hand_made_stages() {
         let all = stages(&UiLaunch::default());
-        assert_eq!(all[0].stage, Stage::Graybox);
-        let arenas: Vec<&Stage> = all[1..].iter().map(|s| &s.stage).collect();
+        // The playground first: it is what the Sandbox opens into.
+        assert_eq!(all[0].stage, Stage::Playground);
+        assert_eq!(all[1].stage, Stage::Graybox);
+        let arenas: Vec<&Stage> = all[2..].iter().map(|s| &s.stage).collect();
         assert_eq!(
             arenas,
             [
@@ -351,7 +353,13 @@ mod tests {
                 &Stage::Arena("grapple-lab".to_owned())
             ]
         );
-        assert_eq!(all.len(), 1 + builtin_arenas().len());
+        assert_eq!(all.len(), 2 + builtin_arenas().len());
+        // Every hand-made stage says what it holds.
+        let items = launcher_items(&data(&UiLaunch::default(), true));
+        let said = format!("{items:?}");
+        for entry in &all {
+            assert!(said.contains(&clip(&entry.summary, 200)), "{}", entry.title);
+        }
     }
 
     #[test]
@@ -365,10 +373,16 @@ mod tests {
         assert_eq!(
             all.iter().map(|s| s.stage.clone()).collect::<Vec<_>>(),
             [
+                Stage::Playground,
                 Stage::Map("AG-Workshop".to_owned()),
                 Stage::Map("AG-IceCave".to_owned())
             ]
         );
+        // The playground says what it is; the maps all read the same and
+        // say nothing.
+        let said = format!("{:?}", launcher_items(&data(&launch, true)));
+        assert!(said.contains(&clip(&all[0].summary, 200)));
+        assert!(!said.contains(&all[1].summary));
     }
 
     #[test]

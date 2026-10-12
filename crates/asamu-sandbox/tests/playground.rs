@@ -836,6 +836,13 @@ fn a_session_on_the_playground_keeps_its_promises() {
     let summary = Inspection::new(&rig.game, rig.script.as_ref(), &rig.session).summary();
     assert_eq!(summary.level, PLAYGROUND_LEVEL_NAME);
     assert!(summary.scripted);
+    let world = Inspection::new(&rig.game, rig.script.as_ref(), &rig.session).world();
+    assert!(
+        world.hand_made,
+        "the tools call it hand-made, not converted"
+    );
+    assert_eq!(world.level, PLAYGROUND_LEVEL_NAME);
+    assert_eq!(world.checkpoints, 1 + playground().stations.len() - 1);
     rig.run(Command::Record { on: Toggle::On });
     rig.idle(10);
     let recording = rig

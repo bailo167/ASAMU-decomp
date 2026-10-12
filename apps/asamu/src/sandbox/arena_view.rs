@@ -820,7 +820,12 @@ mod tests {
         frames(&mut app, 4);
         assert_eq!(lab(&app).phase, Phase::Active, "{:?}", lab(&app).notice);
         let level = build_arena(GRAPPLE_LAB).unwrap();
-        // The arena's cuboids, the HUD, the graphs and the marker labels.
+        // The arena's cuboids and the HUD's one line: a session starts with
+        // the clean screen.
+        assert_eq!(view_entities(&mut app), visuals(&level).len() + 1);
+        // The tools: the graphs and the marker labels come too.
+        app.world_mut().resource_mut::<ViewState>().hud = true;
+        frames(&mut app, 3);
         assert_eq!(view_entities(&mut app), visuals(&level).len() + 3);
         assert_eq!(
             app.world().get::<Visibility>(stock),
