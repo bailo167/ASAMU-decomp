@@ -52,7 +52,9 @@
 //! keys move, R respawn, F2 toggle story mode, F3 cycle the grapple capacity
 //! (0/1/2/3/unlimited), F4 toggle the rocket boots, F6 activate the attractor
 //! pad (stand-ins for the original's Kismet actions), F9 start/stop trace
-//! recording, Esc pauses (pause menu). Mouse sensitivity is an app
+//! recording, F1 the developer drawings ([`hud::DebugInfo`]: the read-out,
+//! the ability line, the aim marker; off by default on converted levels,
+//! however the level was started), Esc pauses (pause menu). Mouse sensitivity is an app
 //! setting (settings menu): the original's `PlayerInput` look scaling
 //! (`MouseSensitivity` 30, `LookRightScale` 300, `LookUpScale` −250) is not
 //! ported because its exact formula is not specified yet.
@@ -210,8 +212,8 @@ const USAGE: &str = "usage: asamu [options]\n\
     --no-shadows            no directional light shadows\n  \
     --no-fog                no placeholder fog\n  \
     --normal-maps           use converted normal maps (unverified convention)\n  \
-    --debug-info            start with the developer read-out shown (F1 toggles it; the graybox\n                          \
-    always starts with it)\n\
+    --debug-info            start with the developer drawings shown: the read-out, the ability\n                          \
+    line and the aim marker (F1 toggles them; the graybox always starts with them)\n\
     \n\
     sandbox (experimental, not verified against the original; saves stay in memory):\n  \
     --sandbox               start in the Sandbox: live tuning, time control, save states\n  \
@@ -880,7 +882,7 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
     converted::register_source(&mut app, dir.root().to_path_buf());
     add_default_plugins(
         &mut app,
-        &format!("ASAMU-decomp - {level} (converted, pre-alpha)"),
+        &converted_window_title(TitleSubject::of(None, menu, &level)),
         cli,
     );
     app.insert_resource(ClearColor(Color::srgb(0.04, 0.045, 0.06)))
@@ -891,7 +893,9 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         .insert_resource(hud::HudStyle {
             info_color: Color::srgb(0.92, 0.92, 0.88),
         })
-        // The developer read-out would cover the game: F1 shows it.
+        // The developer drawings (read-out, ability line, aim marker) are
+        // not part of the game: F1 or `--debug-info` shows them, whether the
+        // level was started from the menu or with `--level`.
         .insert_resource(hud::DebugInfo(cli.debug_info))
         .insert_resource(
             capture::AutoCapture::new(cli.screenshot.clone(), cli.exit_after)
@@ -919,6 +923,7 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
             (
                 poll_game_load,
                 (apply_level_start, update_converted_hud).run_if(not(resource_exists::<Sim>)),
+                sync_window_title,
             ),
         );
     add_simulation_systems(&mut app);
@@ -932,6 +937,57 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         );
     }
     app.run()
+}
+
+/// What a converted run's window title names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleSubject<'a> {
+    /// The main menu (a level is only rendered behind it).
+    MainMenu,
+    /// The map being played, or shown by the fly camera.
+    Map(&'a str),
+}
+
+impl<'a> TitleSubject<'a> {
+    /// The subject of a run: the map the game plays (`playing`) when there
+    /// is one; else the main menu when the run has one (`menu`), whose
+    /// backdrop level is not what the player is "in"; else the level the fly
+    /// camera shows (`shown`).
+    fn of(playing: Option<&'a str>, menu: bool, shown: &'a str) -> Self {
+        match playing {
+            Some(map) => Self::Map(map),
+            None if menu => Self::MainMenu,
+            None => Self::Map(shown),
+        }
+    }
+}
+
+/// The window title of a converted run. It always says "pre-alpha".
+fn converted_window_title(subject: TitleSubject) -> String {
+    match subject {
+        TitleSubject::MainMenu => "ASAMU-decomp - main menu (converted, pre-alpha)".to_owned(),
+        TitleSubject::Map(map) => format!("ASAMU-decomp - {map} (converted, pre-alpha)"),
+    }
+}
+
+/// Keeps the window title on the level being played: the menu flow changes
+/// levels (New Game, chapter select, the story's own `open <map>`) long after
+/// the window was created.
+fn sync_window_title(
+    play: Res<ui::Play>,
+    launch: Res<ui::UiLaunch>,
+    level: Res<converted::ConvertedLevel>,
+    mut window: Single<&mut Window, With<PrimaryWindow>>,
+) {
+    if !play.is_changed() && !level.is_changed() {
+        return;
+    }
+    let subject = TitleSubject::of(play.map.as_deref(), launch.show_menu, &level.level);
+    let title = converted_window_title(subject);
+    if window.title != title {
+        info!("window title: {title}");
+        window.title = title;
+    }
 }
 
 /// The `--camera` override, applied when the level start is known.
@@ -1471,10 +1527,35 @@ fn sync_camera(
     }
 }
 
+/// Which of the player gizmos are drawn. They are developer drawings: the
+/// original shows a beam (drawn by `crate::vfx` on converted levels) and its
+/// HUD crosshair, never a marker in the world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlayerGizmos {
+    /// The line from the hand to the anchor and the sphere at the anchor.
+    beam: bool,
+    /// The sphere where the aim trace ends.
+    aim_marker: bool,
+}
+
+impl PlayerGizmos {
+    /// `debug`: the developer drawings are on ([`hud::DebugInfo`]).
+    /// `converted`: a converted level is played, whose grapple beam
+    /// `crate::vfx` draws from the game's own data. The graybox has no such
+    /// data, so there the line is the only picture of the grapple and stays.
+    fn of(debug: bool, converted: bool) -> Self {
+        Self {
+            beam: debug || !converted,
+            aim_marker: debug,
+        }
+    }
+}
+
 fn draw_gizmos(
     sim: Res<Sim>,
     fixed: Res<Time<Fixed>>,
     level_gizmos: Res<LevelGizmos>,
+    debug: Option<Res<hud::DebugInfo>>,
     mut gizmos: Gizmos,
 ) {
     let game = &sim.game;
@@ -1482,30 +1563,40 @@ fn draw_gizmos(
     let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
     let centre = sim.prev_position.lerp(sim.curr_position, alpha);
     let eye = sim.prev_eye.lerp(sim.curr_eye, alpha);
+    let shown = PlayerGizmos::of(debug.is_some_and(|d| d.0), game.scene_map().is_some());
 
     let hand = eye - sim_glam::Vec3::Z * ROPE_HAND_DOWN_UU
         + ue_right_flat(player.yaw) * ROPE_HAND_RIGHT_UU;
+    let rope = match player.grapple {
+        GrappleState::Attached {
+            anchor,
+            rope_length,
+        } => Some((anchor, rope_length)),
+        GrappleState::Idle => None,
+    };
     if let Some(anchor) = player.script.gun.anchor() {
         // The original grapple: a beam, no rope.
-        gizmos.line(
-            to_render(hand),
-            to_render(anchor),
-            Color::srgb(0.2, 0.6, 1.0),
-        );
-        gizmos.sphere(to_render(anchor), 0.12, Color::srgb(0.3, 0.7, 1.0));
-    } else if let GrappleState::Attached {
-        anchor,
-        rope_length,
-    } = player.grapple
-    {
-        let taut = centre.distance(anchor) >= rope_length - 1.0;
-        let color = if taut {
-            Color::srgb(0.15, 0.1, 0.05)
-        } else {
-            Color::srgb(0.45, 0.35, 0.25)
-        };
-        gizmos.line(to_render(hand), to_render(anchor), color);
-        gizmos.sphere(to_render(anchor), 0.12, Color::srgb(1.0, 0.3, 0.1));
+        if shown.beam {
+            gizmos.line(
+                to_render(hand),
+                to_render(anchor),
+                Color::srgb(0.2, 0.6, 1.0),
+            );
+            gizmos.sphere(to_render(anchor), 0.12, Color::srgb(0.3, 0.7, 1.0));
+        }
+    } else if let Some((anchor, rope_length)) = rope {
+        if shown.beam {
+            let taut = centre.distance(anchor) >= rope_length - 1.0;
+            let color = if taut {
+                Color::srgb(0.15, 0.1, 0.05)
+            } else {
+                Color::srgb(0.45, 0.35, 0.25)
+            };
+            gizmos.line(to_render(hand), to_render(anchor), color);
+            gizmos.sphere(to_render(anchor), 0.12, Color::srgb(1.0, 0.3, 0.1));
+        }
+    } else if !shown.aim_marker {
+        // The aim marker is a developer drawing (F1).
     } else if let Some(aim) = game.gun_aim() {
         if aim.impact.hit.is_some() {
             let color = if aim.acceptable {
@@ -2068,6 +2159,85 @@ mod tests {
             report.is_some_and(|r| r.events.gun.fire.is_some()),
             "the trigger did not reach the grapple gun"
         );
+    }
+
+    #[test]
+    fn the_window_title_names_what_is_played() {
+        // The run starts in the main menu with the front end behind it.
+        let menu = TitleSubject::of(None, true, "ASAMUFrontEndMap");
+        assert_eq!(menu, TitleSubject::MainMenu);
+        assert_eq!(
+            converted_window_title(menu),
+            "ASAMU-decomp - main menu (converted, pre-alpha)"
+        );
+        // New Game, then the story's own level change: the played map, not
+        // the level the window was created with.
+        for map in ["AG-Workshop", "AG-ParadiseCave"] {
+            let title =
+                converted_window_title(TitleSubject::of(Some(map), true, "ASAMUFrontEndMap"));
+            assert_eq!(
+                title,
+                format!("ASAMU-decomp - {map} (converted, pre-alpha)")
+            );
+            assert!(!title.contains("FrontEnd"));
+        }
+        // `--level` (no menu): the level, also while its game still loads
+        // and in fly mode.
+        assert_eq!(
+            converted_window_title(TitleSubject::of(None, false, "AG-IceCave")),
+            "ASAMU-decomp - AG-IceCave (converted, pre-alpha)"
+        );
+        // Every title keeps the pre-alpha wording.
+        for subject in [menu, TitleSubject::Map("X")] {
+            assert!(converted_window_title(subject).contains("pre-alpha"));
+        }
+    }
+
+    #[test]
+    fn player_gizmos_are_developer_drawings_on_converted_levels() {
+        // A converted level, default screen: no world marker at all.
+        assert_eq!(
+            PlayerGizmos::of(false, true),
+            PlayerGizmos {
+                beam: false,
+                aim_marker: false
+            }
+        );
+        // F1 / --debug-info: both.
+        assert_eq!(
+            PlayerGizmos::of(true, true),
+            PlayerGizmos {
+                beam: true,
+                aim_marker: true
+            }
+        );
+        // The graybox has no converted beam: the line stays even with the
+        // read-outs switched off; the aim marker follows the switch.
+        assert_eq!(
+            PlayerGizmos::of(false, false),
+            PlayerGizmos {
+                beam: true,
+                aim_marker: false
+            }
+        );
+        assert!(PlayerGizmos::of(true, false).aim_marker);
+    }
+
+    #[test]
+    fn debug_info_is_off_unless_asked_for() {
+        let cli = parse_cli(args(&["--converted", "/tmp/conv"]), None)
+            .unwrap()
+            .unwrap();
+        assert!(!cli.debug_info, "the menu path starts with a clean screen");
+        let cli = parse_cli(args(&["--level", "AG-Workshop"]), None)
+            .unwrap()
+            .unwrap();
+        assert!(!cli.debug_info, "so does --level");
+        let cli = parse_cli(args(&["--converted", "/tmp/conv", "--debug-info"]), None)
+            .unwrap()
+            .unwrap();
+        assert!(cli.debug_info);
+        assert!(USAGE.contains("--debug-info"));
     }
 
     #[test]
