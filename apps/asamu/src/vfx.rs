@@ -788,6 +788,13 @@ fn decal_entity(
 /// is re-traced from the eye (the tick report carries none; when the trace
 /// misses the anchor — a target that moved — the direction back to the eye
 /// stands in), then the decal box is projected onto the collision world.
+///
+/// The anchor is the fire trace's hit as the original reports it, which is
+/// short of the surface along the trace: by 4.0 uu on a mesh's triangles,
+/// less on anything else (GRAPPLE.md G-AT-4;
+/// `asamu_player::world::PULL_BACK_MAX_TRIANGLES`). The surface is therefore
+/// looked for up to that far beyond the anchor, plus the 2 uu of slack this
+/// search always had.
 fn grapple_decal(
     game: &asamu_game::Game,
     anchor: sim_glam::Vec3,
@@ -795,10 +802,11 @@ fn grapple_decal(
 ) -> hit_decals::DecalMesh {
     let eye = game.eye_position();
     let to = anchor - eye;
+    let reach = asamu_player::world::PULL_BACK_MAX_TRIANGLES + 2.0;
     let normal = game
         .world()
-        .raycast(eye, to, to.length() + 2.0)
-        .filter(|h| h.position.distance(anchor) < 2.0)
+        .raycast(eye, to, to.length() + reach)
+        .filter(|h| h.position.distance(anchor) < reach)
         .map_or_else(|| (-to).normalize_or_zero(), |h| h.normal);
     let spawn = hit_decals::DecalSpawn::grapple(anchor, normal, random01);
     hit_decals::project(&spawn, |o, d, len| {
