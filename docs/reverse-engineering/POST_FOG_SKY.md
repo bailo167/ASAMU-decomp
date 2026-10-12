@@ -164,9 +164,10 @@ cache: constant, linear half-space, sphere).
   the fog material on the mesh — after writing the component's `SimpleLightColor` into the parameter
   `EmissiveColor` when the material is an instance — and registers the mesh with the scene as that component's fog
   volume (`FScene::AddFogVolume`), then the meshes of `FogVolumeActors` (`AddFogVolumeComponents`, @0x1003c1e90).
-- A translucent mesh whose material is marked for fog volumes is drawn by `RenderFogVolume` (@0x1003c8b00), which
-  looks the mesh up among the scene's fog volumes and draws the two steps below. What it does when the mesh is not
-  registered (a disabled volume) was not traced: TENTATIVE that nothing is drawn.
+- `RenderFogVolume` (@0x1003c8b00) looks a mesh up among the scene's fog volumes and draws the two steps below.
+  That the translucency pass sends every mesh whose material is marked for fog volumes there, and nowhere else,
+  is STRONG (the function's arguments are a translucent mesh batch; its caller was not read). What happens to a
+  mesh that is not registered (a disabled volume) was not traced: TENTATIVE that nothing is drawn.
 - `CreateFogVolumeDensityInfo` makes no volume when the density (`PlaneDistanceFactor` for a half-space) is not
   positive (seen in the half-space variant, @0x1003c3150).
 - The shipped configuration has `FogVolumes=True` (`BaseSystemSettings.ini`, the platform file).
