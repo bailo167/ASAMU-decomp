@@ -12,7 +12,7 @@
 //!   [`converted`]): renders a level from the user-local output of
 //!   `asamu-import` (scene JSON, glTF meshes, DDS textures, materials when
 //!   converted). The level's game with its Kismet and NPCs
-//!   (`asamu_game::load_level_with_kismet_options`: triangle collision, the
+//!   (`asamu_game::load_level_with_kismet_options`: the level's collision, the
 //!   gameplay actors, the level script, Matinee movers, NPCs) loads on a
 //!   background task; once it is ready the simulation drives the
 //!   first-person camera exactly as in the graybox, and every fixed tick runs
@@ -147,7 +147,7 @@ fn banner(game: &Game) -> String {
             })
             .unwrap_or_else(|| "no grapple gun".to_owned());
         let abilities = if game.scene_map().is_some() {
-            "converted level: abilities, story mode and movers from the map's Kismet, NPCs, triangle collision"
+            "converted level: abilities, story mode and movers from the map's Kismet, NPCs, the level's collision (simple bodies, triangles, BSP, volumes)"
         } else {
             "graybox abilities: everything on, 3 grapples (test configuration)"
         };
@@ -858,7 +858,7 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         fog: cli.fog,
         normal_maps: cli.normal_maps,
     };
-    // Gameplay: the level's game (triangle collision, gameplay actors) loads
+    // Gameplay: the level's game (its collision, gameplay actors) loads
     // on the async pool; until it is ready (or with --fly) the camera flies.
     let game_load = GameLoad {
         request: (!cli.fly && !menu).then(|| (dir.root().to_path_buf(), level.clone())),
