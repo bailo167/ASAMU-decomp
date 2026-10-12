@@ -69,7 +69,8 @@ suspicion was that plants have no light map and are lit by a light environment i
 - **They are dark because the data is dark**: the baked light on most leaves is dim, and the leaf textures are dark
   (2.2, 2.3). A dark leaf in dim light ends up near black once the level's own tone curve is applied
   (`POST_FOG_SKY.md`: it halves such shadows on screen).
-- **The original shows the same plants as dark silhouettes** (2.5, STRONG: two shipped stills of this level).
+- **The original shows the same plants as dark silhouettes** (2.5, STRONG: stills of the original that ship with
+  the game).
 - **What made them look wrong was the ground**, not the plants: in the build that was played, the ground and rock
   materials were reduced to an almost white surface (the materials defect, fixed separately; `MATERIALS.md`), so
   dark plants stood on glaring ground. With the corrected materials the same plants stand on dark textured rock
@@ -142,9 +143,10 @@ what the product of the two data sets predicts.
 ### 2.5 What the original looks like — STRONG (reference stills)
 
 The game's UI package ships seven full-screen textures (`ASAMUHudFlash.asamu_previewending_I*`, 1,920 x 1,080,
-DXT1): frames of the original game used by a preview-build end screen. Two were taken in AG-ParadiseCave. They may
-come from an earlier build and from other graphics settings than a default run, so they show the look, not exact
-values.
+DXT1): frames of the original game used by a preview-build end screen. One was taken in AG-ParadiseCave for
+certain (the start bridge, with the first checkpoint's stones and the cave paintings), a second very likely (the
+same moss, fog and lantern props; its exact place was not found). They may come from an earlier build and from
+other graphics settings than a default run, so they show the look, not exact values.
 
 - One is the view down the hanging bridge from the start towards the first checkpoint, which our fly camera can
   reproduce. Mean sRGB values of the same regions, original still against our render at 1,600 x 900:
