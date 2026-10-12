@@ -33,6 +33,12 @@
 //! component is drawn unless its actor has `bHidden` or the component has
 //! `HiddenGame`. Light actors are `bHidden` by class default, but their light
 //! components still light the level, so `bHidden` does not apply to lights.
+//!
+//! The static mesh of a fog volume actor (`FogVolume*DensityInfo`) is never a
+//! drawn surface, whatever `bHidden` says: in the original that mesh only
+//! bounds the volume the fog is integrated over (CONFIRMED,
+//! `docs/reverse-engineering/POST_FOG_SKY.md` section 3). The volumes are in
+//! [`AtmosphereInfo::fog_volumes`]; the renderer draws them as fog.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -1245,6 +1251,9 @@ pub struct LevelSceneStats {
     pub drawn: usize,
     /// Skipped: actor `bHidden` or component `HiddenGame`.
     pub hidden: usize,
+    /// Skipped: the shape mesh of a fog volume actor (never a surface; see
+    /// the module documentation).
+    pub fog_volume_meshes: usize,
     /// Skipped: no static mesh assigned.
     pub no_mesh: usize,
     /// Skipped: non-finite world matrix.
@@ -1300,6 +1309,17 @@ fn is_atmosphere_class(class: &str) -> bool {
     ["fog", "sky", "postprocess", "lightmass"]
         .iter()
         .any(|k| c.contains(k))
+}
+
+/// True for the fog volume actor classes (`Engine.FogVolumeDensityInfo` and
+/// its constant, linear half-space, spherical and cone subclasses): the
+/// class name without its package starts with `FogVolume` and ends with
+/// `DensityInfo`.
+#[must_use]
+pub fn is_fog_volume_actor_class(class: &str) -> bool {
+    let name = class.rsplit('.').next().unwrap_or(class);
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("fogvolume") && lower.ends_with("densityinfo")
 }
 
 /// True for `Engine.PostProcessVolume` (and classes named like it).
@@ -1421,6 +1441,7 @@ impl LevelScene {
                 });
             }
             let matinee_driven = !actor.matinee.is_empty();
+            let fog_volume_actor = is_fog_volume_actor_class(&actor.class);
             for comp in &actor.components {
                 if let Some(l) = &comp.light {
                     stats.lights += 1;
@@ -1448,6 +1469,11 @@ impl LevelScene {
                     continue;
                 }
                 stats.mesh_components += 1;
+                if fog_volume_actor {
+                    // The bounds of a fog volume, not a surface.
+                    stats.fog_volume_meshes += 1;
+                    continue;
+                }
                 if actor.hidden || comp.hidden_game {
                     stats.hidden += 1;
                     continue;
@@ -1620,6 +1646,7 @@ impl LevelScene {
         self.stats.mesh_components += sub.stats.mesh_components;
         self.stats.drawn += sub.stats.drawn;
         self.stats.hidden += sub.stats.hidden;
+        self.stats.fog_volume_meshes += sub.stats.fog_volume_meshes;
         self.stats.no_mesh += sub.stats.no_mesh;
         self.stats.bad_transform += sub.stats.bad_transform;
         self.stats.lights += sub.stats.lights;
@@ -1752,10 +1779,8 @@ pub(crate) mod tests {
         assert_eq!(door.actor_kind, "interp_actor");
         // 1e39 overflows f32 to infinity: refused, counted.
         assert_eq!(s.stats.bad_transform, 1);
-        assert_eq!(
-            s.stats.hidden, 2,
-            "camera mesh (HiddenGame) and fog volume (bHidden)"
-        );
+        assert_eq!(s.stats.hidden, 1, "camera mesh (HiddenGame)");
+        assert_eq!(s.stats.fog_volume_meshes, 1, "the fog volume's cube");
         assert_eq!(s.stats.no_mesh, 1);
         assert_eq!(s.stats.mesh_components, 6);
         assert_eq!(s.stats.drawn, 2);
@@ -2406,6 +2431,78 @@ pub(crate) mod tests {
         assert_eq!(
             s.meshes.iter().map(|m| m.instance).collect::<Vec<_>>(),
             [Some(0), Some(1)]
+        );
+    }
+    #[test]
+    fn fog_volume_classes_are_recognised_by_name() {
+        for class in [
+            "Engine.FogVolumeDensityInfo",
+            "Engine.FogVolumeConstantDensityInfo",
+            "Engine.FogVolumeLinearHalfspaceDensityInfo",
+            "Engine.FogVolumeSphericalDensityInfo",
+            "Engine.FogVolumeConeDensityInfo",
+            "fogvolumeconstantdensityinfo",
+        ] {
+            assert!(is_fog_volume_actor_class(class), "{class}");
+        }
+        for class in [
+            "Engine.ExponentialHeightFog",
+            "Engine.HeightFog",
+            "Engine.StaticMeshActor",
+            "Engine.FogVolumeConstantDensityComponent",
+            "Pkg.FogVolumeDensityInfo.Inner",
+            "",
+        ] {
+            assert!(!is_fog_volume_actor_class(class), "{class}");
+        }
+    }
+
+    /// The fog volume of AG-ParadiseCave stores `bHidden = false`; the
+    /// others inherit `true`. Neither makes the cube a drawn surface, with
+    /// or without `HiddenGame`, and the sub-level merge keeps the count.
+    #[test]
+    fn a_fog_volume_mesh_is_never_a_surface() {
+        let ident = "[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]";
+        let volume = |slot: usize, class: &str, hidden: bool, hidden_game: bool| {
+            format!(
+                r#"{{"slot": {slot}, "name": "Fog_{slot}", "class": "{class}", "kind": "other",
+                     "hidden": {hidden},
+                     "components": [
+                       {{"name": "Density", "class": "Engine.FogVolumeConstantDensityComponent",
+                         "kind": "other", "local_to_world": {ident}}},
+                       {{"name": "Auto", "class": "Engine.StaticMeshComponent", "kind": "static_mesh",
+                         "local_to_world": {ident}, "hidden_game": {hidden_game},
+                         "static_mesh": "EngineMeshes.Cube", "materials": ["Map.FogVolumeMI_0"]}}]}}"#
+            )
+        };
+        let json = format!(
+            r#"{{"format": "asamu-scene", "version": 1, "package": "M", "actors": [
+                 {}, {}, {},
+                 {{"slot": 9, "name": "StaticMeshActor_0", "class": "Engine.StaticMeshActor",
+                   "kind": "static_mesh", "hidden": false,
+                   "components": [{{"name": "SMC", "kind": "static_mesh", "local_to_world": {ident},
+                                    "static_mesh": "EngineMeshes.Cube",
+                                    "materials": ["Map.FogVolumeMI_0"]}}]}}]}}"#,
+            volume(1, "Engine.FogVolumeConstantDensityInfo", false, false),
+            volume(2, "Engine.FogVolumeLinearHalfspaceDensityInfo", true, false),
+            volume(3, "Engine.FogVolumeConstantDensityInfo", false, true),
+        );
+        let mut s = LevelScene::from_json(Path::new("x"), json.as_bytes()).unwrap();
+        // Only the ordinary actor's cube is drawn (the rule is about the
+        // actor class, not about the mesh or the material).
+        assert_eq!(s.meshes.len(), 1);
+        assert_eq!(s.meshes[0].actor_name, "StaticMeshActor_0");
+        assert_eq!(s.stats.fog_volume_meshes, 3);
+        assert_eq!(s.stats.hidden, 0);
+        assert_eq!(s.stats.drawn, 1);
+        assert_eq!(s.stats.mesh_components, 4);
+        let sub = LevelScene::from_json(Path::new("y"), json.as_bytes()).unwrap();
+        s.merge_sublevel(sub, Vec3::ZERO);
+        assert_eq!(s.stats.fog_volume_meshes, 6);
+        assert!(
+            s.meshes
+                .iter()
+                .all(|m| !is_fog_volume_actor_class(&m.actor_class))
         );
     }
 }
