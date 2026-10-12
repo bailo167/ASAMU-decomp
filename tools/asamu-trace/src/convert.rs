@@ -2164,6 +2164,92 @@ mod tests {
         assert!(s.fov.as_ref().unwrap().counted);
     }
 
+    /// The camera's rule is keyed on the lock **flag**: a record without
+    /// `fov_locked` says nothing about the lock, whatever else it carries.
+    /// The recorder writes the three FOV members together or not at all, but
+    /// the reader accepts each on its own, so the converter must not take a
+    /// `LockedFOV` for the camera's FOV when the flag is not there.
+    #[test]
+    fn the_fov_rule_needs_the_lock_flag() {
+        let tol = asamu_player::trace::CompareTolerances::default();
+        let zoomed = &convert(&raw(zooming(&[101, 102])), &ConvertOptions::default()).unwrap()[0];
+        assert_eq!(
+            fovs(&zoomed.trace),
+            [90.0, 50.0, 50.0, 90.0, 90.0, 90.0],
+            "with the flag: LockedFOV 50 on frames 101 and 102"
+        );
+
+        // The flag absent, LockedFOV (50 on frames 101 and 102) and
+        // DefaultFOV still there: every sample is the cached view FOV 90,
+        // counted as such, nothing is said to have been read from the lock,
+        // and the column is left out of a verdict as a version-1 one is.
+        let mut no_flag = zooming(&[101, 102]);
+        for r in &mut no_flag {
+            let p = r.player.as_mut().unwrap();
+            assert!(p.fov_lock.is_some() && p.fov_default.is_some());
+            p.fov_locked = None;
+        }
+        assert_eq!(
+            no_flag[1].player.as_ref().unwrap().fov_lock,
+            Some(50.0),
+            "the locked FOV is in the record"
+        );
+        let t = &convert(&raw(no_flag), &ConvertOptions::default()).unwrap()[0].trace;
+        assert_eq!(fovs(t), [90.0; 6]);
+        assert_eq!(
+            fov_notes(t),
+            [
+                "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 6 of 6 samples: a \
+                 locked camera FOV (the zoom) does not show in it"
+            ]
+        );
+        let s = crate::compare::compare_traces("no flag", t, "zoomed", &zoomed.trace, &tol);
+        assert!(!s.fov.as_ref().unwrap().counted, "{:?}", s.fov);
+
+        // The flag there, LockedFOV absent: where the lock is set (frames
+        // 101 and 102) there is no locked FOV to write, so those two samples
+        // get the cached view FOV, are counted as cached and named in the
+        // check; the four unlocked samples have the lock read. The cached
+        // note covers 2 of 6 samples, so the FOV counts in a verdict.
+        let mut no_value = zooming(&[101, 102]);
+        for r in &mut no_value {
+            r.player.as_mut().unwrap().fov_lock = None;
+        }
+        let t = &convert(&raw(no_value), &ConvertOptions::default()).unwrap()[0].trace;
+        assert_eq!(fovs(t), [90.0; 6]);
+        assert_eq!(
+            fov_notes(t),
+            [
+                "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 2 of 6 samples: a \
+                 locked camera FOV (the zoom) does not show in it",
+                "fov: camera FOV lock read (bLockedFOV, LockedFOV) on 4 of 6 samples: the FOV is \
+                 the locked FOV while the lock is set (0 samples), else the cached view FOV",
+                "check: the camera's FOV lock is set without a usable LockedFOV on 2 samples \
+                 (not believed: the cached view FOV is written)",
+            ]
+        );
+        let s = crate::compare::compare_traces("no value", t, "zoomed", &zoomed.trace, &tol);
+        assert!(s.fov.as_ref().unwrap().counted, "{:?}", s.fov);
+        assert_eq!(s.verdict, crate::compare::Verdict::Diverged);
+
+        // DefaultFOV alone (the lock members absent) changes nothing either.
+        let mut only_default = zooming(&[101, 102]);
+        for r in &mut only_default {
+            let p = r.player.as_mut().unwrap();
+            p.fov_locked = None;
+            p.fov_lock = None;
+            p.fov_default = Some(50.0);
+        }
+        let t = &convert(&raw(only_default), &ConvertOptions::default()).unwrap()[0].trace;
+        assert_eq!(fovs(t), [90.0; 6]);
+        assert!(
+            t.meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with(FOV_CACHED_NOTE_PREFIX) && n.contains(" on 6 of 6 samples"))
+        );
+    }
+
     /// The optional members reach the `state:` note of a converted run, and
     /// a version-1 recording's notes are the ones it had.
     #[test]

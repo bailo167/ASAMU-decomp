@@ -13,7 +13,7 @@ use std::path::Path;
 
 use asamu_trace::convert::{ConvertOptions, MoveInput, convert};
 use asamu_trace::move_input::MoveFrame;
-use asamu_trace::raw::{OPTIONAL_FIELDS, RawBinding, RawFile, RawTimer};
+use asamu_trace::raw::{OPTIONAL_FIELDS, RawBinding, RawFile, RawPlayer, RawTimer};
 use asamu_trace::sidecar::RecorderLog;
 
 use common::{python, recorder_dir, run_python};
@@ -388,6 +388,257 @@ fn optional_member_names_are_the_recorders() {
     let record = lines.next().unwrap();
     assert_eq!(members(record, &["player"]), strings(&lists["player"]));
     assert_eq!(members(record, &["player", "gun"]), strings(&lists["gun"]));
+}
+
+/// Removes the optional member `name` (one of [`OPTIONAL_FIELDS`]) from a
+/// record's player part.
+fn strip_member(p: &mut RawPlayer, name: &str) {
+    match name {
+        "player.base_eye_height" => p.base_eye_height = None,
+        "player.base_level" => p.base_level = None,
+        "player.bob" => p.bob = None,
+        "player.camera_pov" => p.camera_pov = None,
+        "player.cylinder" => p.cylinder = None,
+        "player.floor" => p.floor = None,
+        "player.fov_default" => p.fov_default = None,
+        "player.fov_lock" => p.fov_lock = None,
+        "player.fov_locked" => p.fov_locked = None,
+        "player.gun.state" => {
+            if let Some(g) = p.gun.as_mut() {
+                g.state = None;
+            }
+        }
+        "player.gun.timers" => {
+            if let Some(g) = p.gun.as_mut() {
+                g.timers = None;
+            }
+        }
+        "player.walk_bob" => p.walk_bob = None,
+        other => panic!("not an optional member: {other}"),
+    }
+}
+
+/// `raw` without the optional members in `names`, in every record and in the
+/// header's list.
+fn without_members(raw: &RawFile, names: &[&str]) -> RawFile {
+    let mut out = raw.clone();
+    for p in out.records.iter_mut().filter_map(|r| r.player.as_mut()) {
+        for name in names {
+            strip_member(p, name);
+        }
+    }
+    out.header
+        .optional_fields
+        .retain(|f| !names.contains(&f.as_str()));
+    out
+}
+
+/// The fields a member gives the `state:` note (docs/TRACE_CAPTURE.md 3.5);
+/// none for the members no conversion uses, and none for the camera's lock,
+/// which is in the samples' FOV column.
+fn state_keys_of(member: &str) -> &'static [&'static str] {
+    match member {
+        "player.base_eye_height" => &["base_eye_height"],
+        "player.base_level" => &["base_level"],
+        "player.cylinder" => &["cylinder_half_height", "cylinder_radius"],
+        "player.floor" => &["floor"],
+        "player.gun.state" => &["weapon_state"],
+        "player.gun.timers" => &["gun_timers", "refire_count", "refire_rate"],
+        _ => &[],
+    }
+}
+
+/// The keys of recorder 0.2.0 that the `state:` notes of `segs` hold.
+fn optional_state_keys(segs: &[asamu_trace::convert::Segment]) -> Vec<String> {
+    let all: Vec<&str> = OPTIONAL_FIELDS
+        .iter()
+        .flat_map(|m| state_keys_of(m).iter().copied())
+        .collect();
+    let mut found = std::collections::BTreeSet::new();
+    for seg in segs {
+        let note = seg
+            .trace
+            .meta
+            .notes
+            .iter()
+            .find_map(|n| n.strip_prefix(asamu_trace::state::STATE_NOTE_PREFIX))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(note).unwrap();
+        for change in v["changes"].as_array().unwrap() {
+            for key in change[1].as_object().unwrap().keys() {
+                if all.contains(&key.as_str()) {
+                    found.insert(key.clone());
+                }
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+fn samples_of(segs: &[asamu_trace::convert::Segment]) -> Vec<&[asamu_player::TraceSample]> {
+    segs.iter().map(|s| s.trace.samples.as_slice()).collect()
+}
+
+/// Every optional member absent in turn, and every one alone: both
+/// converters agree on each of the 24 recordings, and each member has
+/// exactly the effect docs/TRACE_CAPTURE.md 3.3 and 3.5 give it.
+///
+/// - The samples depend on two members only, the camera's lock flag and its
+///   locked FOV, and on both together: without either one no sample has a
+///   locked FOV, so the samples are those of the same recording without any
+///   optional member (the cached view FOV). Without any other member the
+///   samples are those of the full recording.
+/// - A member's fields are in the `state:` note exactly when a record
+///   carries the member.
+#[test]
+fn python_and_rust_agree_with_each_optional_member_absent_or_alone() {
+    let Some(py) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut full = common::varied_recording(51, 240, true);
+    common::with_optional_members(&mut full, 51);
+    let stats = common::recorder_stats(&full, 51);
+    let opts = ConvertOptions {
+        log: Some(RecorderLog::from_json_str(&stats).unwrap()),
+        ..ConvertOptions::default()
+    };
+    assert_eq!(full.optional_counts().len(), OPTIONAL_FIELDS.len());
+    let plain = without_members(&full, &OPTIONAL_FIELDS);
+    assert!(plain.optional_counts().is_empty() && plain.header.optional_fields.is_empty());
+    let with_all = convert(&full, &opts).unwrap();
+    let with_none = convert(&plain, &opts).unwrap();
+    assert!(with_all.len() >= 2);
+    // The recording zooms: with the lock the samples are not the blind ones.
+    assert_ne!(samples_of(&with_all), samples_of(&with_none));
+    assert!(optional_state_keys(&with_none).is_empty());
+    let every_key: Vec<String> = {
+        let mut keys: Vec<String> = OPTIONAL_FIELDS
+            .iter()
+            .flat_map(|m| state_keys_of(m).iter().map(|k| (*k).to_owned()))
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(optional_state_keys(&with_all), every_key);
+    let lock = ["player.fov_lock", "player.fov_locked"];
+    let lock_read = |segs: &[asamu_trace::convert::Segment]| {
+        segs.iter()
+            .flat_map(|s| &s.trace.meta.notes)
+            .any(|n| n.starts_with(asamu_trace::convert::FOV_LOCK_NOTE_PREFIX))
+    };
+    assert!(lock_read(&with_all) && !lock_read(&with_none));
+
+    for (i, member) in OPTIONAL_FIELDS.iter().enumerate() {
+        // Absent in turn.
+        let absent = without_members(&full, &[member]);
+        let counts = absent.optional_counts();
+        assert!(!counts.contains_key(member), "{member}");
+        assert_eq!(counts.len(), OPTIONAL_FIELDS.len() - 1, "{member}");
+        crosscheck_files(
+            py,
+            &absent,
+            Some(&stats),
+            dir.path(),
+            &format!("absent{i}"),
+            &ConvertOptions::default(),
+        );
+        let segs = convert(&absent, &opts).unwrap();
+        let blind = lock.contains(member);
+        assert_eq!(
+            samples_of(&segs),
+            samples_of(if blind { &with_none } else { &with_all }),
+            "without {member}"
+        );
+        let mut want = every_key.clone();
+        want.retain(|k| !state_keys_of(member).contains(&k.as_str()));
+        assert_eq!(optional_state_keys(&segs), want, "without {member}");
+        // The lock is read exactly when its flag is there.
+        assert_eq!(
+            lock_read(&segs),
+            *member != "player.fov_locked",
+            "without {member}"
+        );
+
+        // Alone.
+        let others: Vec<&str> = OPTIONAL_FIELDS
+            .iter()
+            .copied()
+            .filter(|m| m != member)
+            .collect();
+        let alone = without_members(&full, &others);
+        assert_eq!(
+            alone.optional_counts().keys().copied().collect::<Vec<_>>(),
+            [*member]
+        );
+        assert_eq!(alone.header.optional_fields, [*member]);
+        crosscheck_files(
+            py,
+            &alone,
+            Some(&stats),
+            dir.path(),
+            &format!("alone{i}"),
+            &ConvertOptions::default(),
+        );
+        let segs = convert(&alone, &opts).unwrap();
+        // One member alone never shows a zoom: the flag has no locked FOV to
+        // go with it, the locked FOV no flag.
+        assert_eq!(samples_of(&segs), samples_of(&with_none), "{member} alone");
+        let want: Vec<String> = state_keys_of(member)
+            .iter()
+            .map(|k| (*k).to_owned())
+            .collect();
+        assert_eq!(optional_state_keys(&segs), want, "{member} alone");
+        assert_eq!(
+            lock_read(&segs),
+            *member == "player.fov_locked",
+            "{member} alone"
+        );
+    }
+
+    // What the header says about the recorder and the members decides
+    // nothing: the records do. A header that names an older recorder, one
+    // that announces nothing, and one that announces members no record has.
+    let mut old_name = full.clone();
+    old_name.header.recorder = "asamu_win 0.1.0".to_owned();
+    crosscheck_files(
+        py,
+        &old_name,
+        Some(&stats),
+        dir.path(),
+        "old-name",
+        &ConvertOptions::default(),
+    );
+    let segs = convert(&old_name, &opts).unwrap();
+    assert_eq!(samples_of(&segs), samples_of(&with_all));
+    assert_eq!(optional_state_keys(&segs), every_key);
+
+    let mut unannounced = full.clone();
+    unannounced.header.optional_fields.clear();
+    unannounced.header.optional_layout = None;
+    crosscheck_files(
+        py,
+        &unannounced,
+        Some(&stats),
+        dir.path(),
+        "unannounced",
+        &ConvertOptions::default(),
+    );
+    assert_eq!(convert(&unannounced, &opts).unwrap(), with_all);
+
+    let mut announced_only = plain.clone();
+    announced_only.header.optional_fields = full.header.optional_fields.clone();
+    announced_only.header.optional_layout = full.header.optional_layout.clone();
+    crosscheck_files(
+        py,
+        &announced_only,
+        Some(&stats),
+        dir.path(),
+        "announced-only",
+        &ConvertOptions::default(),
+    );
+    assert_eq!(convert(&announced_only, &opts).unwrap(), with_none);
 }
 
 /// Recordings with the optional members of recorder 0.2.0 and its sidecar

@@ -1765,6 +1765,303 @@ fn a_recording_of_recorder_0_2_0_converts_with_the_rust_tool() {
     common::same_notes(&python[0].meta.notes, &rust.meta.notes);
 }
 
+/// A recording **and its sidecar as the recorder itself writes them**
+/// (`tests/common/fake_recording.py` runs the recorder's own recording loop
+/// on its fake game: markers set through its request files, a torn frame, a
+/// record written without its input). The sidecars of the other tests are
+/// written by hand; this one fails if the recorder and the strict reader of
+/// `asamu_trace::sidecar` stop agreeing on a member.
+///
+/// Every expectation is computed here from the two files with the rules of
+/// docs/TRACE_CAPTURE.md 3.3 and 3.6, not taken from a converter:
+/// a run is a stretch of consecutive frames and ends after a record the log
+/// lists as `no-input`; a marker is at tick `frame − first frame of its
+/// run`; the notes of the runs on both sides of a gap name every log entry
+/// that covers a missing frame.
+#[test]
+fn a_recorders_own_sidecar_gives_markers_and_dropped_frames() {
+    use asamu_trace::segments::{MarkerPlace, markers_of};
+    use asamu_trace::sidecar::RecorderLog;
+
+    let Some(py) = common::python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let kept = d.join("kept");
+    let driver = common::repo_root().join("tools/asamu-trace/tests/common/fake_recording.py");
+    let out = common::run_python(
+        py,
+        &[
+            driver.as_os_str(),
+            common::recorder_dir().as_os_str(),
+            kept.as_os_str(),
+        ],
+    );
+    let raw_path = kept.join("session.raw.jsonl");
+    let stats_path = kept.join("session.stats.json");
+    if !raw_path.is_file() {
+        assert!(out.contains("skipped: "), "{out}");
+        eprintln!("skipped: the recorder's optional layout file is not there");
+        return;
+    }
+    assert!(
+        out.contains("recorded 70 records with asamu_win 0.2.0"),
+        "{out}"
+    );
+
+    // The strict reader takes the recorder's file as it is.
+    let raw = RawFile::from_str_lines(&std::fs::read_to_string(&raw_path).unwrap()).unwrap();
+    let log = RecorderLog::read(&stats_path).unwrap();
+    log.check_belongs_to(&raw).unwrap();
+    assert_eq!(log.recorder.as_deref(), Some("asamu_win 0.2.0"));
+    let drops = log.drops.clone().expect("recorder 0.2.0 keeps a log");
+    let stats: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&stats_path).unwrap()).unwrap();
+    assert_eq!(
+        log.markers.len(),
+        stats["markers"].as_array().unwrap().len(),
+        "every marker of the file is read"
+    );
+    assert_eq!(
+        drops.len(),
+        stats["stats"]["drops"].as_array().unwrap().len()
+    );
+    // What the session did (fake_recording.py): four markers, the first
+    // before any record; a torn frame; a record without its input.
+    let names: Vec<&str> = log.markers.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["before anything", "scenario A", "zoom hold 1", "wall 45"]
+    );
+    assert_eq!(log.markers[0].frame, None);
+    assert!(log.markers[1..].iter().all(|m| m.frame.is_some()));
+    let torn: Vec<_> = drops.iter().filter(|e| e.reason == "torn").collect();
+    let no_input: Vec<_> = drops.iter().filter(|e| e.is_no_input()).collect();
+    assert_eq!((torn.len(), no_input.len()), (1, 1), "{drops:#?}");
+    assert_eq!(no_input[0].frame, no_input[0].last);
+
+    // The runs, from the frame numbers and the log alone.
+    let frames: Vec<u64> = raw.records.iter().map(|r| r.frame).collect();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for i in 1..=frames.len() {
+        let cut = i == frames.len()
+            || frames[i] != frames[i - 1] + 1
+            || frames[i - 1] == no_input[0].frame;
+        if cut {
+            if i - start >= 2 {
+                runs.push((start, i - 1));
+            }
+            start = i;
+        }
+    }
+    assert_eq!(runs.len(), 3, "{frames:?}");
+    // The torn frame lies between the first two runs, and the second run
+    // ends with the record that has no input.
+    assert!(frames[runs[0].1] < torn[0].frame && torn[0].frame < frames[runs[1].0]);
+    assert_eq!(frames[runs[1].1], no_input[0].frame);
+
+    // validate and convert find the sidecar next to the raw file.
+    let v = run_ok(bin().arg("validate").arg(&raw_path));
+    assert!(
+        v.contains("70 records, 70 usable, 3 convertible segment(s)"),
+        "{v}"
+    );
+    assert!(
+        v.contains(&format!(
+            "session.stats.json: 4 marker(s), dropped-frame log with {} entries for {} frame(s)",
+            drops.len(),
+            drops.iter().map(|e| e.count).sum::<u64>()
+        )),
+        "{v}"
+    );
+    let rust_dir = d.join("rust");
+    std::fs::create_dir_all(&rust_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&raw_path)
+            .arg("--out-dir")
+            .arg(&rust_dir),
+    );
+    let traces: Vec<Trace> = (0..3)
+        .map(|i| {
+            asamu_trace::read_trace(&rust_dir.join(format!("session.seg{i}.trace.jsonl"))).unwrap()
+        })
+        .collect();
+    assert!(!rust_dir.join("session.seg3.trace.jsonl").exists());
+
+    let mut placed = 0;
+    for (i, ((a, b), t)) in runs.iter().zip(&traces).enumerate() {
+        let (first, last) = (frames[*a], frames[*b]);
+        let notes = &t.meta.notes;
+        assert_eq!(t.samples.len(), b - a + 1, "run {i}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == &format!("frames {first}..={last} (segment {} of 3)", i + 1)),
+            "{notes:#?}"
+        );
+        // Sample k is the state of record k of the run.
+        for (s, r) in t.samples.iter().zip(&raw.records[*a..=*b]) {
+            assert_eq!(s.position, r.player.as_ref().unwrap().location);
+        }
+
+        // Markers: at the tick of the record whose frame they carry; the
+        // one without a frame at the first tick of the first run.
+        let got: Vec<(u64, String, Option<u64>, MarkerPlace)> = markers_of(notes)
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.tick, m.name, m.frame, m.place))
+            .collect();
+        let mut want: Vec<(u64, String, Option<u64>, MarkerPlace)> = Vec::new();
+        for m in &log.markers {
+            match m.frame {
+                None if i == 0 => want.push((0, m.name.clone(), None, MarkerPlace::Before)),
+                Some(f) if first <= f && f <= last => {
+                    want.push((f - first, m.name.clone(), Some(f), MarkerPlace::At));
+                }
+                _ => {}
+            }
+        }
+        want.sort_by_key(|m| m.0);
+        assert_eq!(got, want, "run {i}");
+        for (tick, _, frame, place) in &got {
+            if *place == MarkerPlace::At {
+                assert_eq!(Some(raw.records[a + *tick as usize].frame), *frame);
+            }
+        }
+        placed += got.len();
+
+        // Dropped frames: the gap before and the gap after the run, each
+        // with every log entry (but the no-input ones) that covers one of
+        // its frames, in the recorder's words; and the record without its
+        // input, where the run ends with it.
+        let dropped: Vec<&String> = notes
+            .iter()
+            .filter(|n| n.starts_with("dropped: "))
+            .collect();
+        let gap = |side: &str, lo: u64, hi: u64| -> String {
+            let entries: Vec<String> = drops
+                .iter()
+                .filter(|e| !e.is_no_input() && e.frame <= hi && e.last >= lo)
+                .map(|e| {
+                    assert_eq!(e.frame, e.last, "one frame per entry in this session");
+                    format!(
+                        "{} {}: {}",
+                        e.frame,
+                        e.reason,
+                        e.detail.as_deref().expect("the recorder says why")
+                    )
+                })
+                .collect();
+            assert_eq!(
+                entries.len() as u64,
+                hi - lo + 1,
+                "every missing frame has its entry: {drops:#?}"
+            );
+            format!(
+                "dropped: {} frame(s) without a record {side} this run (frames {lo}..={hi}): {}",
+                hi - lo + 1,
+                entries.join("; ")
+            )
+        };
+        let mut expected: Vec<String> = Vec::new();
+        if *a > 0 && frames[a - 1] + 1 < first {
+            expected.push(gap("before", frames[a - 1] + 1, first - 1));
+        }
+        if last == no_input[0].frame {
+            expected.push(format!(
+                "dropped: the run ends with frame {last}, whose record was written without its \
+                 frame's input ({}): its keys are not used",
+                no_input[0]
+                    .detail
+                    .as_deref()
+                    .expect("the recorder says why")
+            ));
+        }
+        if b + 1 < frames.len() && last + 1 < frames[b + 1] {
+            expected.push(gap("after", last + 1, frames[b + 1] - 1));
+        }
+        assert_eq!(dropped, expected.iter().collect::<Vec<_>>(), "run {i}");
+        assert!(!expected.is_empty(), "run {i} has a gap next to it");
+    }
+    assert_eq!(placed, 4, "every marker is in exactly one run");
+    // The first marker says that it was set before there was a record.
+    assert!(
+        traces[0].meta.notes.iter().any(|n| n.starts_with(
+            "event: 2 marker(s) (set with the recorder's mark command; the tick is that of the \
+             last record written when the marker was taken): 0 \"before anything\" (set before \
+             the first record), "
+        )),
+        "{:#?}",
+        traces[0].meta.notes
+    );
+    let listing = run_ok(
+        bin()
+            .arg("starts")
+            .arg(rust_dir.join("session.seg0.trace.jsonl"))
+            .arg("--events"),
+    );
+    assert!(listing.contains(", 2 marker(s)\n"), "{listing}");
+    assert!(
+        listing.contains("\n        0 marker \"before anything\" (set before the first record)\n"),
+        "{listing}"
+    );
+    assert!(listing.contains(" marker \"scenario A\"\n"), "{listing}");
+
+    // The zoom is in the samples of every run, by the camera's rule.
+    let mut zoomed = 0;
+    for ((a, b), t) in runs.iter().zip(&traces) {
+        for (s, r) in t.samples.iter().zip(&raw.records[*a..=*b]) {
+            let p = r.player.as_ref().unwrap();
+            let want = if p.fov_locked == Some(true) {
+                zoomed += 1;
+                p.fov_lock.unwrap()
+            } else {
+                p.fov_camera.unwrap()
+            };
+            assert_eq!(s.fov, want, "frame {}", r.frame);
+        }
+    }
+    assert!(zoomed >= 8, "only {zoomed} zoomed samples");
+
+    // The Python converter finds the same sidecar and writes the same traces.
+    let python = common::python_convert(py, &raw_path, &d.join("python"), &[], 3);
+    for (p, r) in python.iter().zip(&traces) {
+        assert_eq!(p.samples, r.samples);
+        common::same_notes(&p.meta.notes, &r.meta.notes);
+    }
+
+    // Without the sidecar the frame gaps still end the runs (the record
+    // without its input is followed by a missing frame in this session), so
+    // the samples are the same; no marker and no reason is known.
+    let bare_dir = d.join("bare");
+    std::fs::create_dir_all(&bare_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&raw_path)
+            .arg("--no-stats")
+            .arg("--out-dir")
+            .arg(&bare_dir),
+    );
+    for (i, t) in traces.iter().enumerate() {
+        let bare =
+            asamu_trace::read_trace(&bare_dir.join(format!("session.seg{i}.trace.jsonl"))).unwrap();
+        assert_eq!(bare.samples, t.samples, "run {i}");
+        assert!(
+            !bare.meta.notes.iter().any(|n| n.starts_with("dropped: ")
+                || n.starts_with("markers: ")
+                || n.contains("marker(s)")),
+            "{:#?}",
+            bare.meta.notes
+        );
+    }
+}
+
 /// The command line with a recording of recorder 0.2.0 and its sidecar: the
 /// zoom in the samples, the markers in the listing, the reason of a gap in
 /// the notes; and what is refused.
