@@ -10,7 +10,8 @@
 //!    below);
 //! 2. **Kismet** runs one update (`Runtime::tick`: queued events, latent
 //!    actions, Matinee, which moves the movers through the host), then the
-//!    narrator's and beat actors' timers;
+//!    narrator's and beat actors' timers; then the actors the engine turns
+//!    by itself turn, with what is attached to them ("Turning actors");
 //! 3. a player standing on a mover that moved is carried with it;
 //! 4. the **game tick** runs ([`Game::tick`]: the player's input events, map
 //!    actors, controller/pawn, touches);
@@ -41,17 +42,110 @@
 //! taken out of the static set before play
 //! (`CollisionScene::take_actor_statics`) and becomes dynamic instances
 //! placed with the actor's transform, which Matinee and attachment set.
-//! Moving actors report their location for grapple anchors (GRAPPLE.md
-//! G-AT-8). Falling rocks bound to Matinee move through the rock state
-//! instead.
+//! Moving actors report their location and rotation for grapple anchors,
+//! which ride them (GRAPPLE.md G-AT-8). Falling rocks bound to Matinee move
+//! through the rock state instead.
+//!
+//! In the original a Matinee does not move its actors in the sequence
+//! update: that only advances the action's position (the movement track's
+//! own update is an empty function), and each actor in the interpolating
+//! physics moves itself to its track's value in its own tick
+//! (`AActor::physInterpolating @ 0x100AE5A70`, CONFIRMED (native)), after
+//! the frame's input events. Ours are moved in step 2, before them: a fire
+//! trace meets a mover one tick's motion further on than the original's
+//! (the deviation of the frame order below).
+//!
+//! **Turning actors.** The engine turns an actor by itself when its
+//! `RotationRate` is not zero and its physics is neither `PHYS_None` nor the
+//! interpolating one: at the end of its physics step the rotation gains,
+//! member by member, the rate times the tick's time with the fraction
+//! dropped, and the actor is moved to that rotation where it stands, which
+//! carries what is attached to it. No remainder is kept, so the speed
+//! depends on the frame time: 9102 units/s are 116 units in a frame of
+//! 12.82 ms (9048 units/s) and 151 in a tick of 1/60 s (9060). CONFIRMED
+//! (native): `AActor::performPhysics @ 0x100AD86E0` returns at once for
+//! physics 0 and otherwise, after its dispatch, calls
+//! `AActor::physicsRotation @ 0x100AD93C0` unless the physics is 7
+//! (interpolating) or 10, when the low 16 bits of a member of the rate
+//! (Actor+0x1FC) are set; that function converts each product with a
+//! truncating `cvttss2si` (`0x100AD9403`..`0x100AD9438`) and moves the actor
+//! with a zero translation (`0x100AD951C`).
+//!
+//! A Matinee movement track moves an actor only in the interpolating
+//! physics (above: the dispatch calls `physInterpolating` for physics 7
+//! only). So an actor the level places in `PHYS_Rotating` with a rate turns
+//! by that rate even when a Matinee group names it, and an actor in
+//! `PHYS_Interpolating` with a rate follows its track and never the rate.
+//!
+//! Measured on the recording KM1 in AG-ParadiseCave, from the path of the
+//! grapple's anchor helper riding these rocks (`InterpActor_*`; frames of
+//! 12.82 ms):
+//!
+//! | Rock | Physics, rate | Frames | Turned, units | Against the truncated steps | Against rate × time |
+//! |---|---|---|---|---|---|
+//! | `_51` | rotating, yaw −9102, no Matinee | 2,252 | 261,135 | −2.2 to +12.9 | 1,483 short |
+//! | `_25`/`_101` | rotating, roll −4551, in a Matinee group (−359° in 14.4 s) | 1,828 | 105,968 | −3.5 to +0.8 | 611 short (318 short of the track) |
+//! | eight stretches on six wheels | interpolating, rates 4551 to 9102, tracks of one turn | 11,624 | 27,473 to 296,038 | up to 735 ahead | 3 short to 64 ahead of the track's length |
+//!
+//! `_51` turned 116 units in 2,249 of its 2,251 single frames. The rocks in
+//! the interpolating physics follow their tracks: each loop of a track that
+//! ends at 359.9° shows as a jump of 17.7 to 19.4 units (0.1° is 18.2).
+//!
+//! Ours: the level's own data names these actors
+//! (`asamu_world::scene::PlacedActor`: `PHYS_Rotating` and a rate). Each is
+//! a mover, with everything attached to it; it is taken out of the Matinee
+//! groups that name it, and step 2 turns it by [`rotation_step`] of the
+//! game's tick. The shipped story levels have 14: 7 in AG-ParadiseCave (3
+//! of them in Matinee groups), 2 in AG-BeautifulCity and 5 in AG-StarHaven,
+//! which has 8 more in that physics without a rate; those never turn
+//! (census of the level data; gated test `tests/parity_moving_anchor.rs`).
+//! An actor with a rate in another physics than these two is not modelled
+//! (none is placed). [`LevelScript::moved_actors`] reports the turning
+//! actors for drawing like the actors Kismet moves.
+//!
+//! **Attached actors.** When an actor has moved, the original moves every
+//! actor in its attached list, by the attached actor's kind (CONFIRMED
+//! (native), `UWorld::MoveActor @ 0x1008E94A0`, the loop from
+//! `0x1008E9E9B`; a move that only turns the actor runs it too, and each
+//! attached actor is moved by the same routine, so chains follow):
+//!
+//! - in the interpolating physics, or hard-attached and not blocking
+//!   actors: to the transform it keeps relative to its base
+//!   (`RelativeLocation`, `RelativeRotation`) on the base's new transform,
+//!   its rotation rebuilt from the matrix (kept as it is with
+//!   `bIgnoreBaseRotation`). What it keeps is set when its base is set
+//!   (`AActor::SetBase @ 0x1006D0EB0`): for a hard attachment its whole
+//!   transform relative to the base's; without one its offset from the
+//!   base in world axes and its rotation relative to the base's;
+//! - otherwise with `bIgnoreBaseRotation`: by the base's translation;
+//! - otherwise: by the base's change of transform (its location through
+//!   the inverse of the base's old transform and through the new one), and
+//!   its rotation gains the base's change, each member with its low two
+//!   bits left out on both sides. The grapple's anchor helper is carried
+//!   this way (`asamu_player::grapple_gun::carried_by_base`).
+//!
+//! All matrices use the 16 384-entry sine table. A pawn's location is
+//! carried like any actor's; its rotation goes through its script. A
+//! hard-attached actor that is blocked on the way undoes its base's whole
+//! move; that, and pushing in general, is not modelled (below).
+//!
+//! Ours: what is attached to a turning actor is carried by these rules
+//! ([`Passenger`]), with the relative transform taken from the two actors'
+//! placements. The passengers of an actor a Matinee moves are carried by
+//! the interpreter, which treats every attachment as a hard one
+//! (`asamu_kismet::Runtime`; hard attachments are 118 of the 120 passengers
+//! of AG-StarHaven's airships and all of AG-ParadiseCave's and
+//! AG-BeautifulCity's).
 //!
 //! **Basing (TENTATIVE).** A grounded player standing on a mover (the actor
 //! a short downward sweep of the pawn's box hits: the shape its floor check
 //! stands it with, so a mover whose top leans along both X and Y is found
 //! under the box's corner) is moved by the mover's change of transform
-//! that frame (position through the full transform, yaw by the yaw change).
-//! UE3 bases pawns on movers and moves them in the mover's encroachment
-//! pass; that path (and pushing, crushing) is not modelled.
+//! that frame (position through the full transform, yaw by the yaw change),
+//! whatever moved the mover: a Matinee, the engine's turn, or its own base.
+//! The original carries a based pawn's location in the same way ("Attached
+//! actors") and hands the turn to the pawn's script, which was not read;
+//! pushing and crushing by a mover are not modelled.
 //!
 //! **Abilities.** With Kismet attached, the hard-coded level-start ability
 //! table (`asamu_world::level_start_abilities`) that [`Game::load_level`]
@@ -138,15 +232,19 @@ use std::path::Path;
 use asamu_core::DEFAULT_TICK_RATE_HZ;
 use asamu_kismet::anim::AnimPosition;
 use asamu_kismet::camera_anim::{CameraAnimSet, CameraAnims, GameplayCue};
+use asamu_kismet::matinee::{
+    Matrix, matrix_mul, matrix_rotator, rigid_inverse, rotation_translation_matrix,
+};
 use asamu_kismet::{
     ActorInfo, ActorRef, Host, LoadError, Output, PropertyValue, Runtime, ToggleMode,
 };
+use asamu_player::grapple_gun::{BasePose, carried_by_base};
 use asamu_player::pawn::{LandingHandler, PowerJumpEvent, PowerJumpStateName};
 use asamu_player::rocket_boots::BootsEvent;
 use asamu_player::world::CollisionWorld;
 use asamu_player::{InputFrame, PlayerParams, PlayerState, SimEvent, pawn};
 use asamu_world::collision::{Affine, CollisionClass, InstanceInfo};
-use asamu_world::scene::{self, LoadedMap, SceneError};
+use asamu_world::scene::{self, LoadedMap, PlacedActor, PlacedPhysics, SceneError};
 use asamu_world::{WorldEvent, rotation};
 use glam::Vec3;
 use thiserror::Error;
@@ -261,6 +359,263 @@ impl MoverBody {
             self.pre_pivot,
         )
     }
+
+    /// Puts the body's collision parts where the actor is now and records
+    /// the actor's pose for what is based on it (grapple anchors).
+    fn place(&self, game: &mut Game) {
+        let affine = self.actor_affine(self.location, self.rotation);
+        if let Some(sc) = &mut game.world.scene {
+            for (i, rel) in &self.parts {
+                if let Some(inst) = sc.dynamic.get_mut(*i) {
+                    let info = inst.info;
+                    sc.map.collision.place_dynamic(inst, rel.then(&affine));
+                    inst.info = info;
+                }
+            }
+            sc.set_actor_pose(self.actor, self.location + self.offset, self.rotation);
+        }
+    }
+}
+
+/// What a mover body is made from: the actor's placement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BodySeed {
+    location: Vec3,
+    rotation: [i32; 3],
+    draw_scale: f32,
+    draw_scale3d: Vec3,
+    pre_pivot: Vec3,
+}
+
+impl BodySeed {
+    fn of_graph(info: &ActorInfo) -> Self {
+        Self {
+            location: Vec3::from_array(info.location),
+            rotation: info.rotation,
+            draw_scale: info.draw_scale,
+            draw_scale3d: Vec3::from_array(info.draw_scale3d),
+            pre_pivot: Vec3::from_array(info.pre_pivot),
+        }
+    }
+
+    fn of_placed(a: &PlacedActor) -> Self {
+        Self {
+            location: a.location,
+            rotation: a.rotation,
+            draw_scale: a.draw_scale,
+            draw_scale3d: a.draw_scale3d,
+            pre_pivot: a.pre_pivot,
+        }
+    }
+}
+
+/// An actor the engine turns by itself (module docs, "Turning actors").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Spinner {
+    actor: u32,
+    /// `RotationRate` (pitch, yaw, roll), rotator units per second.
+    rate: [i32; 3],
+}
+
+/// An actor attached to an actor the host moves (the level's `Base`), with
+/// how the original carries it (module docs, "Attached actors").
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Passenger {
+    actor: u32,
+    /// Carried through the transform it keeps relative to its base
+    /// (`relative`): an actor in `PHYS_Interpolating`, or a hard-attached
+    /// one that does not block actors. Otherwise it is carried by the
+    /// base's change of transform.
+    rigid: bool,
+    /// `bIgnoreBaseRotation`: its own rotation stays; without `rigid` it
+    /// only takes the base's translation.
+    ignore_base_rotation: bool,
+    /// The actor's transform relative to its base's, as the original keeps
+    /// it for the rigid path.
+    relative: Matrix,
+}
+
+impl Passenger {
+    /// The passenger for the placed actor `a` on its base `b`.
+    fn of(a: &PlacedActor, b: &PlacedActor) -> Self {
+        let actor = rotation_translation_matrix(a.rotation, a.location.to_array());
+        let base = rotation_translation_matrix(b.rotation, b.location.to_array());
+        let relative = if a.hard_attach {
+            // The whole transform relative to the base's.
+            matrix_mul(&actor, &rigid_inverse(&base))
+        } else {
+            // Without a hard attachment the original keeps the offset from
+            // the base in world axes and the rotation relative to the
+            // base's.
+            let turned = matrix_rotator(&matrix_mul(&actor, &rigid_inverse(&base)), false);
+            let offset = a.location - b.location;
+            rotation_translation_matrix(turned, offset.to_array())
+        };
+        Self {
+            actor: a.id,
+            rigid: a.physics == PlacedPhysics::Interpolating || (a.hard_attach && !a.block_actors),
+            ignore_base_rotation: a.ignore_base_rotation,
+            relative,
+        }
+    }
+
+    /// Where the passenger, now at `current` (location, rotation), is after
+    /// its base moved from `old` to `new`.
+    fn carried(
+        &self,
+        current: (Vec3, [i32; 3]),
+        old: (Vec3, [i32; 3]),
+        new: (Vec3, [i32; 3]),
+    ) -> (Vec3, [i32; 3]) {
+        if self.rigid {
+            let base = rotation_translation_matrix(new.1, new.0.to_array());
+            let m = matrix_mul(&self.relative, &base);
+            let [x, y, z, _] = m[3];
+            let location = Vec3::new(x, y, z);
+            if !location.is_finite() {
+                return current;
+            }
+            let rotation = if self.ignore_base_rotation {
+                current.1
+            } else {
+                matrix_rotator(&m, false)
+            };
+            return (location, rotation);
+        }
+        if self.ignore_base_rotation {
+            return (current.0 + (new.0 - old.0), current.1);
+        }
+        let pose = |p: (Vec3, [i32; 3])| BasePose {
+            location: p.0,
+            rotation: p.1,
+        };
+        let location = carried_by_base(current.0, pose(old), pose(new));
+        // Its own rotation takes the base's change, each member's low two
+        // bits left out on both sides.
+        let reduced = |i: usize| (new.1[i] & 0xFFFC).wrapping_sub(old.1[i] & 0xFFFC);
+        let rotation = [
+            current.1[0].wrapping_add(reduced(0)),
+            current.1[1].wrapping_add(reduced(1)),
+            current.1[2].wrapping_add(reduced(2)),
+        ];
+        (location, rotation)
+    }
+}
+
+/// What the host moves by itself in `map`, among the actors that have a
+/// mover body: the actors the engine turns, what is attached to each actor
+/// of that set, and every such actor's placement (location with its
+/// sub-level's offset, rotation).
+#[allow(clippy::type_complexity)]
+fn host_driven(
+    map: &LoadedMap,
+    movers: &BTreeMap<u32, MoverBody>,
+) -> (
+    Vec<Spinner>,
+    BTreeMap<u32, Vec<Passenger>>,
+    BTreeMap<u32, (Vec3, [i32; 3])>,
+) {
+    let turning = turning_actors(map);
+    let mut spinners = Vec::new();
+    let mut passengers: BTreeMap<u32, Vec<Passenger>> = BTreeMap::new();
+    let mut placements = BTreeMap::new();
+    for id in &turning {
+        let (Some(a), Some(body)) = (map.placed_actor(*id), movers.get(id)) else {
+            continue;
+        };
+        placements.insert(*id, (a.location + body.offset, a.rotation));
+        if turns_by_itself(a) {
+            spinners.push(Spinner {
+                actor: *id,
+                rate: a.rotation_rate,
+            });
+        }
+        let base = a
+            .base
+            .filter(|b| turning.contains(b) && movers.contains_key(b))
+            .and_then(|b| map.placed_actor(b));
+        if let Some(b) = base {
+            passengers
+                .entry(b.id)
+                .or_default()
+                .push(Passenger::of(a, b));
+        }
+    }
+    (spinners, passengers, placements)
+}
+
+/// The step the engine turns an actor by in one tick of `dt` seconds: each
+/// member of its `RotationRate` times `dt`, the fraction dropped (towards
+/// zero), so a rate of 9102 units/s is 151 units in a 1/60 s tick and 116
+/// in a 12.82 ms frame (module docs, "Turning actors").
+#[must_use]
+pub fn rotation_step(rate: [i32; 3], dt: f32) -> [i32; 3] {
+    rate.map(|r| {
+        let step = r as f32 * dt;
+        // Truncation; a product that is not a number is no step.
+        if step.is_finite() { step as i32 } else { 0 }
+    })
+}
+
+/// `true` for an actor the engine turns by itself: in `PHYS_Rotating` with
+/// a `RotationRate` of which the low 16 bits of a member are not zero
+/// (module docs, "Turning actors").
+fn turns_by_itself(a: &PlacedActor) -> bool {
+    a.physics == PlacedPhysics::Rotating && a.rotation_rate.iter().any(|r| r & 0xFFFF != 0)
+}
+
+/// The actors of `map` the engine turns by itself and everything attached
+/// to them (through `Base`, to [`asamu_kismet::runtime::MAX_ATTACH_DEPTH`]
+/// levels). Falling rocks move through their rock state and are left out.
+fn turning_actors(map: &LoadedMap) -> BTreeSet<u32> {
+    let rock = |id: u32| map.actors.rocks.iter().any(|r| r.id == id);
+    let mut out: BTreeSet<u32> = map
+        .placed
+        .iter()
+        .filter(|a| turns_by_itself(a) && !rock(a.id))
+        .map(|a| a.id)
+        .collect();
+    for _ in 0..asamu_kismet::runtime::MAX_ATTACH_DEPTH {
+        let more: Vec<u32> = map
+            .placed
+            .iter()
+            .filter(|a| !out.contains(&a.id) && !rock(a.id))
+            .filter(|a| a.base.is_some_and(|b| out.contains(&b)))
+            .map(|a| a.id)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        out.extend(more);
+    }
+    out
+}
+
+/// Takes the actors the engine turns by itself out of the Matinee groups
+/// they are bound to: a movement track moves an actor only in
+/// `PHYS_Interpolating` (module docs, "Turning actors"). Returns how many
+/// bindings were removed.
+fn unbind_turning_actors(scripts: &mut asamu_kismet::LevelScripts, map: &LoadedMap) -> usize {
+    let graph = &scripts.graph;
+    let turning = |path: &str| {
+        graph
+            .actor_by_path(path)
+            .and_then(|r| graph.actor(r))
+            .and_then(|info| world_id(map, info))
+            .and_then(|id| map.placed_actor(id))
+            .is_some_and(turns_by_itself)
+    };
+    let mut removed = 0;
+    for action in scripts.matinee.actions.values_mut() {
+        for binding in &mut action.bindings {
+            let before = binding.targets.len();
+            binding
+                .targets
+                .retain(|t| !t.object.as_deref().is_some_and(turning));
+            removed += before - binding.targets.len();
+        }
+    }
+    removed
 }
 
 /// A level's Kismet bound to a game.
@@ -274,6 +629,16 @@ pub struct LevelScript {
     /// Graph actors of each world actor id.
     by_world: BTreeMap<u32, Vec<ActorRef>>,
     movers: BTreeMap<u32, MoverBody>,
+    /// The actors the engine turns by itself, by id.
+    spinners: Vec<Spinner>,
+    /// What is attached to each actor the host moves (base id → passengers).
+    passengers: BTreeMap<u32, Vec<Passenger>>,
+    /// Placement (location with the sub-level's offset, rotation) of every
+    /// actor the host moves by itself: the turning actors and what they
+    /// carry.
+    host_placements: BTreeMap<u32, (Vec3, [i32; 3])>,
+    /// The actors of `host_placements` that have moved.
+    host_moved: BTreeSet<u32>,
     spawn_in_story: bool,
     host_errors: Vec<String>,
     /// `(SeqAct_Interp node, lower-case group name)` → the first bound
@@ -364,12 +729,19 @@ fn prepare_movers(
     scripts: &asamu_kismet::LevelScripts,
 ) -> BTreeMap<u32, MoverBody> {
     let g = &scripts.graph;
-    let mut wanted: BTreeMap<u32, ActorInfo> = BTreeMap::new();
+    let mut wanted: BTreeMap<u32, BodySeed> = BTreeMap::new();
     for r in kinetic_actors(scripts) {
         if let Some(info) = g.actor(r)
             && let Some(id) = world_id(map, info)
         {
-            wanted.entry(id).or_insert_with(|| info.clone());
+            wanted.entry(id).or_insert_with(|| BodySeed::of_graph(info));
+        }
+    }
+    // The actors the engine turns by itself and what is attached to them:
+    // the level's script need not know them.
+    for id in turning_actors(map) {
+        if let Some(a) = map.placed_actor(id) {
+            wanted.entry(id).or_insert_with(|| BodySeed::of_placed(a));
         }
     }
     // Falling rocks move through their rock state (and already have dynamic
@@ -382,16 +754,16 @@ fn prepare_movers(
     let taken = map.collision.take_actor_statics(&ids);
     let mut bodies: BTreeMap<u32, MoverBody> = wanted
         .iter()
-        .map(|(id, info)| {
+        .map(|(id, seed)| {
             let level = (id >> 16) as usize;
             let offset = map.levels.get(level).map_or(Vec3::ZERO, |l| l.offset);
             let body = MoverBody {
                 actor: *id,
-                location: Vec3::from_array(info.location),
-                rotation: info.rotation,
-                draw_scale: info.draw_scale,
-                draw_scale3d: Vec3::from_array(info.draw_scale3d),
-                pre_pivot: Vec3::from_array(info.pre_pivot),
+                location: seed.location,
+                rotation: seed.rotation,
+                draw_scale: seed.draw_scale,
+                draw_scale3d: seed.draw_scale3d,
+                pre_pivot: seed.pre_pivot,
                 offset,
                 parts: Vec::new(),
                 hidden_collision: false,
@@ -468,7 +840,7 @@ pub fn load_level_with_kismet_options(
         .skip(1)
         .map(|l| l.name.clone())
         .collect();
-    let scripts = match asamu_kismet::load_level_scripts(dir, &loaded.map, &subs) {
+    let mut scripts = match asamu_kismet::load_level_scripts(dir, &loaded.map, &subs) {
         Ok(s) => Some(s),
         Err(LoadError::Missing(_)) => None,
         Err(e) => return Err(e.into()),
@@ -477,6 +849,11 @@ pub fn load_level_with_kismet_options(
         .as_ref()
         .map(|s| prepare_movers(&mut loaded, s))
         .unwrap_or_default();
+    if let Some(s) = &mut scripts {
+        // After the movers are chosen: what is attached to such an actor
+        // stays a mover.
+        unbind_turning_actors(s, &loaded);
+    }
     if let Some(s) = &scripts {
         prepare_switchable_volumes(&mut loaded, s);
     }
@@ -577,12 +954,16 @@ impl LevelScript {
         }
         if let Some(sc) = &mut game.world.scene {
             for m in movers.values() {
-                if let Err(i) = sc.actor_locations.binary_search_by_key(&m.actor, |a| a.0) {
-                    sc.actor_locations
-                        .insert(i, (m.actor, m.location + m.offset));
+                if sc.actor_location(m.actor).is_none() {
+                    sc.set_actor_pose(m.actor, m.location + m.offset, m.rotation);
                 }
             }
         }
+        let (spinners, passengers, host_placements) = game
+            .scene
+            .as_ref()
+            .map(|s| host_driven(&s.map, &movers))
+            .unwrap_or_default();
         let level_offsets = game
             .scene
             .as_ref()
@@ -603,6 +984,10 @@ impl LevelScript {
             ids,
             by_world,
             movers,
+            spinners,
+            passengers,
+            host_placements,
+            host_moved: BTreeSet::new(),
             spawn_in_story: false,
             host_errors: Vec::new(),
             group_actors,
@@ -713,11 +1098,18 @@ impl LevelScript {
         Some((Vec3::from_array(location) + offset, rotation))
     }
 
-    /// The placement of world actor `id` in the actor table (location with
-    /// the sub-level offset, rotation): where Matinee starts moving it from.
+    /// The placement of world actor `id` (location with the sub-level
+    /// offset, rotation): where Matinee starts moving it from, or where the
+    /// engine starts turning it. From the script's actor table, else from
+    /// the level's own placement of an actor the engine turns by itself or
+    /// of what is attached to one.
     #[must_use]
     pub fn actor_placement(&self, id: u32) -> Option<(Vec3, [i32; 3])> {
-        let r = *self.actor_refs(id).first()?;
+        let Some(r) = self.actor_refs(id).first().copied() else {
+            // An actor the level's script does not know: one the engine
+            // turns by itself, or one attached to it.
+            return self.host_placements.get(&id).copied();
+        };
         let a = self.runtime.graph().actor(r)?;
         let offset = self
             .level_offsets
@@ -784,12 +1176,15 @@ impl LevelScript {
     }
 
     /// Every actor Kismet has moved (movers and their passengers, skeletal
-    /// actors, cameras, lights driven by Matinee) as `(world actor id,
+    /// actors, cameras, lights driven by Matinee) and every actor the engine
+    /// has turned by itself, with what it carries, as `(world actor id,
     /// location, rotation)`, for rendering; locations include the actor's
     /// sub-level offset. Actors outside the loaded levels are left out.
+    /// Kismet's come first, in actor-table order; then the others, by id.
     #[must_use]
     pub fn moved_actors(&self) -> Vec<(u32, Vec3, [i32; 3])> {
-        self.runtime
+        let mut out: Vec<(u32, Vec3, [i32; 3])> = self
+            .runtime
             .moved_actors()
             .filter_map(|(r, l, rot)| {
                 let id = self.world_id(r)?;
@@ -800,7 +1195,28 @@ impl LevelScript {
                     .unwrap_or(Vec3::ZERO);
                 Some((id, Vec3::from_array(l) + offset, rot))
             })
-            .collect()
+            .collect();
+        for id in &self.host_moved {
+            let Some(m) = self.movers.get(id) else {
+                continue;
+            };
+            // Where the host put it is where it is, whatever Kismet last
+            // said of it.
+            let pose = (*id, m.location + m.offset, m.rotation);
+            match out.iter_mut().find(|e| e.0 == *id) {
+                Some(e) => *e = pose,
+                None => out.push(pose),
+            }
+        }
+        out
+    }
+
+    /// World actor ids of the actors the engine turns by itself (module
+    /// docs, "Turning actors"), with their `RotationRate` (pitch, yaw, roll;
+    /// rotator units per second).
+    #[must_use]
+    pub fn turning_actors(&self) -> Vec<(u32, [i32; 3])> {
+        self.spinners.iter().map(|s| (s.actor, s.rate)).collect()
     }
 
     /// One Kismet-driven tick (see the module docs). `None` (and nothing
@@ -829,6 +1245,8 @@ impl LevelScript {
         }
         let mut outputs = self.runtime.take_outputs();
         self.apply_game_outputs(game, &outputs);
+        // 2b. The actors the engine turns by itself, with what they carry.
+        self.turn_actors(game, dt);
         // 3. Carry the player.
         if let Some((id, loc0, rot0)) = base_before
             && let Some(m) = self.movers.get(&id)
@@ -972,6 +1390,66 @@ impl LevelScript {
     #[must_use]
     pub fn console_commands(&self) -> &[(String, crate::ConsoleCommand)] {
         &self.console
+    }
+
+    /// One tick of the actors the engine turns by itself: each turns by
+    /// [`rotation_step`] of its `RotationRate` about its location, and what
+    /// is attached to it rides along.
+    fn turn_actors(&mut self, game: &mut Game, dt: f32) {
+        for i in 0..self.spinners.len() {
+            let Some(spinner) = self.spinners.get(i).copied() else {
+                break;
+            };
+            let Some(body) = self.movers.get(&spinner.actor) else {
+                continue;
+            };
+            let step = rotation_step(spinner.rate, dt);
+            if step == [0; 3] {
+                continue;
+            }
+            let rotation = [
+                body.rotation[0].wrapping_add(step[0]),
+                body.rotation[1].wrapping_add(step[1]),
+                body.rotation[2].wrapping_add(step[2]),
+            ];
+            let location = body.location;
+            self.move_body(game, spinner.actor, location, rotation, 0);
+        }
+    }
+
+    /// Puts the mover `id` at `location` and `rotation` (its collision and
+    /// its pose record follow) and carries what is attached to it
+    /// ([`Passenger`]), to [`asamu_kismet::runtime::MAX_ATTACH_DEPTH`]
+    /// levels.
+    fn move_body(
+        &mut self,
+        game: &mut Game,
+        id: u32,
+        location: Vec3,
+        rotation: [i32; 3],
+        depth: usize,
+    ) {
+        let Some(body) = self.movers.get_mut(&id) else {
+            return;
+        };
+        let old = (body.location, body.rotation);
+        body.location = location;
+        body.rotation = rotation;
+        body.place(game);
+        self.host_moved.insert(id);
+        if depth >= asamu_kismet::runtime::MAX_ATTACH_DEPTH || old == (location, rotation) {
+            return;
+        }
+        let Some(passengers) = self.passengers.get(&id).cloned() else {
+            return;
+        };
+        for p in passengers {
+            let Some(current) = self.movers.get(&p.actor).map(|m| (m.location, m.rotation)) else {
+                continue;
+            };
+            let (l, r) = p.carried(current, old, (location, rotation));
+            self.move_body(game, p.actor, l, r, depth + 1);
+        }
     }
 
     fn base_mover(&self, game: &Game) -> Option<u32> {
@@ -1280,21 +1758,7 @@ impl Host for GameHost<'_> {
             if let Some(r) = rot {
                 body.rotation = r;
             }
-            let affine = body.actor_affine(body.location, body.rotation);
-            if let Some(sc) = &mut self.game.world.scene {
-                for (i, rel) in &body.parts {
-                    if let Some(inst) = sc.dynamic.get_mut(*i) {
-                        let info = inst.info;
-                        sc.map.collision.place_dynamic(inst, rel.then(&affine));
-                        inst.info = info;
-                    }
-                }
-                if let Ok(i) = sc.actor_locations.binary_search_by_key(&id, |a| a.0)
-                    && let Some(slot) = sc.actor_locations.get_mut(i)
-                {
-                    slot.1 = loc + body.offset;
-                }
-            }
+            body.place(self.game);
             return;
         }
         // A falling rock driven by Matinee moves through its rock state (the
@@ -1423,16 +1887,7 @@ impl Host for GameHost<'_> {
             return;
         };
         body.draw_scale3d = scale;
-        let affine = body.actor_affine(body.location, body.rotation);
-        if let Some(sc) = &mut self.game.world.scene {
-            for (i, rel) in &body.parts {
-                if let Some(inst) = sc.dynamic.get_mut(*i) {
-                    let info = inst.info;
-                    sc.map.collision.place_dynamic(inst, rel.then(&affine));
-                    inst.info = info;
-                }
-            }
-        }
+        body.place(self.game);
     }
 }
 
@@ -1440,7 +1895,7 @@ impl Host for GameHost<'_> {
 mod tests {
     use super::*;
     use asamu_kismet::{Graph, MatineeSet};
-    use asamu_player::world::CollisionShape;
+    use asamu_player::world::{ActorClass, CollisionShape};
     use asamu_world::SurfaceTag;
     use asamu_world::collision::{
         CollisionClass, CollisionSceneBuilder, InstanceInfo, QueryFilter,
@@ -1641,6 +2096,7 @@ mod tests {
             collision: b.build(),
             dynamic: Vec::new(),
             bodies: Vec::new(),
+            placed: Vec::new(),
             actors: SceneActors {
                 player_starts: vec![PlayerStartDef {
                     id: 1,
@@ -3725,6 +4181,7 @@ mod tests {
             collision: b.build(),
             dynamic: Vec::new(),
             bodies: Vec::new(),
+            placed: Vec::new(),
             actors: SceneActors {
                 player_starts: vec![PlayerStartDef {
                     id: 1,
@@ -3963,5 +4420,597 @@ mod tests {
         assert_eq!(flags(&game, 1), (info, kind, lines, true));
         // The other body was not touched.
         assert!(!flags(&game, 0).3);
+    }
+
+    // --- Turning actors and what is attached to them.
+
+    /// A hand-made converted map with a wheel: a 400×400×50 platform (actor
+    /// 5, "Hub") at the origin, which the level places in the rotating
+    /// physics with a `RotationRate` of `rate` units/s of yaw, and a 50 uu
+    /// rock (actor 6, "Rock") hard-attached to it, 300 to 350 uu out along
+    /// the hub's X axis and 100 to 150 uu up (its actor location is (300, 0,
+    /// 100)). With `wall`, a slab of world geometry stands at x = 420 to 440
+    /// on the +Y side (y from 60). The level's script is empty: it knows
+    /// neither actor. The player starts on the platform at (100, 0).
+    fn wheel_map(rate: i32, wall: bool) -> (LoadedMap, asamu_kismet::LevelScripts) {
+        let mut b = CollisionSceneBuilder::new();
+        let v: Vec<Vec3> = (0..8)
+            .map(|i| Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32))
+            .collect();
+        let t = vec![
+            [0, 1, 3],
+            [0, 3, 2],
+            [4, 6, 7],
+            [4, 7, 5],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 3, 7],
+            [2, 7, 6],
+            [0, 2, 6],
+            [0, 6, 4],
+            [1, 5, 7],
+            [1, 7, 3],
+        ];
+        let cube = b.add_mesh(v, t).unwrap();
+        let info = |actor: Option<u32>, class| InstanceInfo {
+            actor,
+            class,
+            tag: SurfaceTag::None,
+            grapple_able: true,
+            blocks_pawn: true,
+            blocks_traces: true,
+            sublevel: 0,
+        };
+        let slab = |min: DVec3, max: DVec3| Affine {
+            rows: [
+                DVec3::X * (max.x - min.x),
+                DVec3::Y * (max.y - min.y),
+                DVec3::Z * (max.z - min.z),
+            ],
+            translation: min,
+        };
+        b.add_static(
+            cube,
+            slab(
+                DVec3::new(-4000.0, -4000.0, -1100.0),
+                DVec3::new(4000.0, 4000.0, -1000.0),
+            ),
+            info(None, CollisionClass::WorldGeometry),
+        )
+        .unwrap();
+        b.add_static(
+            cube,
+            slab(
+                DVec3::new(-200.0, -200.0, 0.0),
+                DVec3::new(200.0, 200.0, 50.0),
+            ),
+            info(Some(5), CollisionClass::InterpActor),
+        )
+        .unwrap();
+        b.add_static(
+            cube,
+            slab(
+                DVec3::new(300.0, -25.0, 100.0),
+                DVec3::new(350.0, 25.0, 150.0),
+            ),
+            info(Some(6), CollisionClass::InterpActor),
+        )
+        .unwrap();
+        if wall {
+            b.add_static(
+                cube,
+                slab(
+                    DVec3::new(420.0, 60.0, -100.0),
+                    DVec3::new(440.0, 1200.0, 600.0),
+                ),
+                info(None, CollisionClass::WorldGeometry),
+            )
+            .unwrap();
+        }
+        let placed = |id: u32, name: &str, location: Vec3| PlacedActor {
+            id,
+            name: name.into(),
+            kind: "interp_actor".into(),
+            location,
+            rotation: [0; 3],
+            draw_scale: 1.0,
+            draw_scale3d: Vec3::ONE,
+            pre_pivot: Vec3::ZERO,
+            physics: PlacedPhysics::Interpolating,
+            rotation_rate: [0; 3],
+            base: None,
+            hard_attach: false,
+            ignore_base_rotation: false,
+            block_actors: true,
+        };
+        let map = LoadedMap {
+            map: "T".into(),
+            levels: vec![SubLevel {
+                name: "T".into(),
+                streaming_class: None,
+                initially_loaded: true,
+                offset: Vec3::ZERO,
+                actors: 0,
+            }],
+            world: WorldSettings {
+                title: None,
+                kill_z: -100_000.0,
+                soft_kill_z: false,
+                default_gravity_z: -520.0,
+                global_gravity_z: 0.0,
+            },
+            collision: b.build(),
+            dynamic: Vec::new(),
+            bodies: Vec::new(),
+            placed: vec![
+                PlacedActor {
+                    physics: PlacedPhysics::Rotating,
+                    rotation_rate: [0, rate, 0],
+                    ..placed(5, "Hub", Vec3::ZERO)
+                },
+                PlacedActor {
+                    base: Some(5),
+                    hard_attach: true,
+                    ..placed(6, "Rock", Vec3::new(300.0, 0.0, 100.0))
+                },
+            ],
+            actors: SceneActors {
+                player_starts: vec![PlayerStartDef {
+                    id: 1,
+                    name: "PlayerStart_0".into(),
+                    location: Vec3::new(100.0, 0.0, 50.0 + 46.15),
+                    rotation: [0; 3],
+                    enabled: true,
+                    primary: true,
+                    half_height: 44.0,
+                }],
+                ..SceneActors::default()
+            },
+            stats: LoadStats::default(),
+            warnings: Vec::new(),
+        };
+        let g = graph(
+            r#"[{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": []}]"#,
+            "[]",
+        );
+        (map, scripts(g, MatineeSet::default()))
+    }
+
+    fn wheel_game(rate: i32, wall: bool) -> (Game, LevelScript) {
+        let (mut map, s) = wheel_map(rate, wall);
+        let movers = prepare_movers(&mut map, &s);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        (game, script)
+    }
+
+    /// The point at `radius` from the Z axis, `units` of yaw from the X
+    /// axis, at height `z`: where a yaw of `units` takes (radius, 0, z).
+    fn at_yaw(radius: f64, units: i32, z: f64) -> Vec3 {
+        let angle = f64::from(units) * std::f64::consts::TAU / 65_536.0;
+        Vec3::new(
+            (radius * angle.cos()) as f32,
+            (radius * angle.sin()) as f32,
+            z as f32,
+        )
+    }
+
+    #[test]
+    fn the_step_of_a_turn_is_the_rate_times_the_tick_truncated() {
+        let tick = 1.0_f32 / 60.0;
+        // 9102 / 60 = 151.7, 4551 / 60 = 75.85, 2184 / 60 = 36.4.
+        assert_eq!(rotation_step([0, -9102, 0], tick), [0, -151, 0]);
+        assert_eq!(rotation_step([9102, 4551, -2184], tick), [151, 75, -36]);
+        // The recorded frames of 12.8206 ms: 9102 × 0.0128206 = 116.69 and
+        // 5461 × 0.0128206 = 70.01, the steps the recorded rocks turn by.
+        assert_eq!(rotation_step([9102, 5461, 0], 0.012_820_6), [116, 70, 0]);
+        // A product below one unit is no turn in that tick; nothing is
+        // carried over to the next.
+        assert_eq!(rotation_step([59, -59, 60], tick), [0, 0, 1]);
+        assert_eq!(rotation_step([1, 2, 3], f32::NAN), [0; 3]);
+        assert_eq!(rotation_step([1, 2, 3], 0.0), [0; 3]);
+    }
+
+    #[test]
+    fn the_engine_turns_an_actor_in_the_rotating_physics_and_what_is_attached() {
+        // 6030 units/s: 100.5 units in a tick of 1/60 s, so 100.
+        let (mut game, mut script) = wheel_game(6030, false);
+        assert_eq!(script.mover_ids(), vec![5, 6]);
+        assert_eq!(script.turning_actors(), vec![(5, [0, 6030, 0])]);
+        assert!(script.moved_actors().is_empty(), "nothing has moved yet");
+        const TICKS: i32 = 64;
+        for _ in 0..TICKS {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        // 64 ticks of 100 units: 6400 units of yaw, about its own location.
+        let yaw = TICKS * 100;
+        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, yaw, 0])));
+        // The rock is hard-attached: it keeps its transform relative to the
+        // hub, (300, 0, 100) without a turn of its own.
+        let (rock, rock_rotation) = script.mover_transform(6).unwrap();
+        let expected = at_yaw(300.0, yaw, 100.0);
+        assert!((rock - expected).length() < 1e-2, "{rock} vs {expected}");
+        assert_eq!(rock_rotation, [0, yaw, 0]);
+        // What draws the level is told, with where each started.
+        assert_eq!(
+            script.moved_actors(),
+            vec![(5, Vec3::ZERO, [0, yaw, 0]), (6, rock, rock_rotation)]
+        );
+        assert_eq!(script.actor_placement(5), Some((Vec3::ZERO, [0; 3])));
+        assert_eq!(
+            script.actor_placement(6),
+            Some((Vec3::new(300.0, 0.0, 100.0), [0; 3]))
+        );
+        assert_eq!(script.actor_placement(7), None);
+        // The collision turned with them: straight down onto where the
+        // rock's centre (325 uu out) is now, its top is at 150.
+        let sc = game.world().scene.as_ref().unwrap();
+        let centre = at_yaw(325.0, yaw, 0.0);
+        let down = |x: f32, y: f32| {
+            sc.map
+                .collision
+                .raycast(
+                    &sc.dynamic,
+                    Vec3::new(x, y, 1000.0),
+                    Vec3::new(x, y, -2000.0),
+                    QueryFilter::TRACE,
+                )
+                .map(|h| 1000.0 - 3000.0 * h.t)
+        };
+        let top = down(centre.x, centre.y).unwrap();
+        assert!((top - 150.0).abs() < 1e-3, "{top}");
+        // ... and it is gone from where it was placed (y from −25 to 25 at
+        // x = 325): the platform does not reach there, the floor is below.
+        let was = down(325.0, -20.0).unwrap();
+        assert!((was + 1000.0).abs() < 1e-3, "{was}");
+        // The poses a grapple anchor rides.
+        assert_eq!(sc.actor_location(5), Some(Vec3::ZERO));
+        assert_eq!(sc.actor_rotation(5), Some([0, yaw, 0]));
+        assert_eq!(sc.actor_location(6), Some(rock));
+        assert_eq!(sc.actor_rotation(6), Some(rock_rotation));
+        // The pawn stood at (100, 0) on the platform and is carried around
+        // the hub's axis and turned with it (the basing rule of the module
+        // docs: position through the mover's change of transform, yaw by
+        // its change of yaw).
+        let p = game.player();
+        assert!(p.grounded, "still standing on the hub");
+        let carried = at_yaw(100.0, yaw, f64::from(p.position.z));
+        assert!(
+            (p.position - carried).length() < 0.5,
+            "the pawn is at {}, the hub took its place to {carried}",
+            p.position
+        );
+        let turned = f64::from(yaw) * std::f64::consts::TAU / 65_536.0;
+        assert!((f64::from(p.yaw) - turned).abs() < 1e-3, "{}", p.yaw);
+        assert!(
+            script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+            "{:?} {:?}",
+            script.runtime().errors(),
+            script.host_errors()
+        );
+    }
+
+    /// Puts the pawn in the air outside the wheel, `out` uu from the hub's
+    /// axis on the ray at `units` of yaw, its eye at the rock's mid height
+    /// (125), looking at the axis.
+    fn look_at_the_wheel(game: &mut Game, out: f64, units: i32) {
+        let eye = at_yaw(out, units, 125.0);
+        let eye_offset = game.player().view_location(game.params()) - game.player().position;
+        let p = game.player_mut();
+        p.position = eye - eye_offset;
+        p.velocity = Vec3::ZERO;
+        p.grounded = false;
+        p.pawn.based = false;
+        p.yaw = rotation::units_to_radians(units + 32_768);
+        p.pitch = 0.0;
+    }
+
+    #[test]
+    fn a_grapple_on_a_rock_attached_to_a_turning_actor_rides_the_wheel() {
+        let (mut game, mut script) = wheel_game(6030, false);
+        let idle = InputFrame::default();
+        let fire = InputFrame {
+            grapple_held: true,
+            ..InputFrame::default()
+        };
+        for _ in 0..10 {
+            script.tick(&mut game, &idle).unwrap();
+        }
+        game.set_max_grapples(3);
+        game.enable_grapple(true);
+        // The fire tick turns the wheel once more before the trace (the
+        // movers move before the input events): the rock will be at 11
+        // steps, 1100 units. The pawn looks at it from 1025 uu out on that
+        // ray.
+        let at_fire = 11 * 100;
+        look_at_the_wheel(&mut game, 1025.0, at_fire);
+        let t = script.tick(&mut game, &fire).unwrap();
+        let attached = t.report.events.gun.attached.expect("the grapple attaches");
+        assert_eq!(attached.surface.actor, Some(6), "the attached rock");
+        assert_eq!(attached.surface.class, ActorClass::InterpActor);
+        // The anchor: before the rock's outer face (350 uu out) on the
+        // pawn's ray, 4.0 uu short of it as before any mesh's triangles
+        // (G-AT-4): 354 uu out.
+        let anchor0 = game.player().script.gun.grapple_location;
+        let expected0 = at_yaw(354.0, at_fire, 125.0);
+        assert!(
+            (anchor0 - expected0).length() < 0.05,
+            "{anchor0} vs {expected0}"
+        );
+        let follow = game.player().script.gun.follow.expect("the anchor follows");
+        assert_eq!(follow.actor, 6);
+        // Held: the anchor rides the rock, which rides the hub: 100 units of
+        // yaw a tick about the hub's axis.
+        let mut released = None;
+        let mut previous = (anchor0 - game.player().position).length();
+        for tick in 1..=60 {
+            let t = script.tick(&mut game, &fire).unwrap();
+            let expected = at_yaw(354.0, at_fire + tick * 100, 125.0);
+            let gun = game.player().script.gun;
+            assert!(
+                (gun.grapple_location - expected).length() < 0.05,
+                "tick {tick}: the anchor is at {}, the wheel took its place to {expected}",
+                gun.grapple_location
+            );
+            // The rope: the pull's distance is measured to the anchor where
+            // the wheel has taken it (G-PH-2).
+            let d = (game.player().position - expected).length();
+            assert!(
+                (gun.distance - d).abs() < 0.05,
+                "tick {tick}: measured {}, the anchor is {d} uu away",
+                gun.distance
+            );
+            if let Some(r) = t.report.events.gun.released {
+                released = Some((tick, r.reason, d));
+                break;
+            }
+            assert!(gun.is_attached());
+            previous = d;
+        }
+        // The proximity release measures to the moved anchor too: it comes
+        // in the first tick whose distance is below the release distance,
+        // 200 uu (G-RL-2).
+        let (tick, reason, d) = released.expect("the pull brings the pawn to the anchor");
+        assert_eq!(reason, asamu_player::grapple_gun::ReleaseReason::Proximity);
+        assert!(d < 200.0 && previous >= 200.0, "{previous} then {d}");
+        // By then the anchor has gone a long way from where the grapple hit.
+        let travelled = (at_yaw(354.0, at_fire + tick * 100, 125.0) - anchor0).length();
+        assert!(travelled > 30.0, "{travelled} uu in {tick} ticks");
+    }
+
+    #[test]
+    fn a_grapple_stays_attached_when_its_rock_passes_behind_a_wall() {
+        // 12 000 units/s: 200 units a tick.
+        let (mut game, mut script) = wheel_game(12_000, true);
+        let fire = InputFrame {
+            grapple_held: true,
+            ..InputFrame::default()
+        };
+        game.set_max_grapples(3);
+        game.enable_grapple(true);
+        // From 1500 uu out on the rock's ray of the fire tick (one step).
+        look_at_the_wheel(&mut game, 1500.0, 200);
+        let t = script.tick(&mut game, &fire).unwrap();
+        let attached = t.report.events.gun.attached.expect("the grapple attaches");
+        assert_eq!(attached.surface.actor, Some(6));
+        let mut hidden_for = 0;
+        for tick in 1..=40 {
+            script.tick(&mut game, &fire).unwrap();
+            let expected = at_yaw(354.0, 200 * (1 + tick), 125.0);
+            let gun = game.player().script.gun;
+            // No release looks at the line to the anchor (GRAPPLE.md §8:
+            // button, proximity, the instant timer, death, story mode).
+            assert!(gun.is_attached(), "released in tick {tick}");
+            assert!(
+                (gun.grapple_location - expected).length() < 0.05,
+                "tick {tick}: {} vs {expected}",
+                gun.grapple_location
+            );
+            let eye = game.player().view_location(game.params());
+            if game.world().line_blocked(eye, gun.grapple_location) {
+                hidden_for += 1;
+                if hidden_for == 12 {
+                    break;
+                }
+            } else {
+                assert_eq!(hidden_for, 0, "tick {tick}: in sight again");
+            }
+        }
+        assert_eq!(
+            hidden_for, 12,
+            "the rock went behind the wall and the grapple held"
+        );
+    }
+
+    /// A Matinee movement track moves an actor only in the interpolating
+    /// physics: the lift of [`lift_map`], placed in the rotating physics
+    /// with a rate, turns by the rate and is not lifted. Its Matinee still
+    /// plays to its end.
+    #[test]
+    fn a_matinee_does_not_move_an_actor_in_the_rotating_physics() {
+        let (mut map, mut s) = lift_map();
+        let placed = |id: u32, name: &str, location: Vec3| PlacedActor {
+            id,
+            name: name.into(),
+            kind: "interp_actor".into(),
+            location,
+            rotation: [0; 3],
+            draw_scale: 1.0,
+            draw_scale3d: Vec3::ONE,
+            pre_pivot: Vec3::ZERO,
+            physics: PlacedPhysics::Interpolating,
+            rotation_rate: [0; 3],
+            base: None,
+            hard_attach: false,
+            ignore_base_rotation: false,
+            block_actors: true,
+        };
+        map.placed = vec![
+            PlacedActor {
+                physics: PlacedPhysics::Rotating,
+                // 630 / 60 = 10.5: 10 units a tick.
+                rotation_rate: [0, 630, 0],
+                ..placed(5, "Lift", Vec3::ZERO)
+            },
+            PlacedActor {
+                base: Some(5),
+                hard_attach: true,
+                ..placed(6, "Crate", Vec3::new(100.0, 100.0, 50.0))
+            },
+        ];
+        let movers = prepare_movers(&mut map, &s);
+        assert_eq!(movers.keys().copied().collect::<Vec<_>>(), vec![5, 6]);
+        assert_eq!(unbind_turning_actors(&mut s, &map), 1);
+        assert_eq!(unbind_turning_actors(&mut s, &map), 0);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        for _ in 0..90 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        // Not lifted (the track's 200 uu), turned 90 × 10 units.
+        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, 900, 0])));
+        // The crate at (100, 100, 50) rode the turn: √2 × 100 uu out, at an
+        // eighth of a turn (8192 units) plus 900.
+        let (crate_at, crate_rotation) = script.mover_transform(6).unwrap();
+        let expected = at_yaw(100.0 * std::f64::consts::SQRT_2, 8192 + 900, 50.0);
+        assert!(
+            (crate_at - expected).length() < 1e-2,
+            "{crate_at} vs {expected}"
+        );
+        assert_eq!(crate_rotation, [0, 900, 0]);
+        // The Matinee ran to its end all the same: `Completed` set the
+        // grapple limit.
+        assert_eq!(game.player().script.gun.max_grapples, 2);
+        assert!(
+            script.runtime().errors().is_empty(),
+            "{:?}",
+            script.runtime().errors()
+        );
+    }
+
+    /// The three ways the original carries an attached actor
+    /// (`UWorld::MoveActor`, module docs "Attached actors").
+    #[test]
+    fn an_attached_actor_is_carried_by_its_kind_of_attachment() {
+        let placed = |location: Vec3, rotation: [i32; 3]| PlacedActor {
+            id: 2,
+            name: "A".into(),
+            kind: "interp_actor".into(),
+            location,
+            rotation,
+            draw_scale: 1.0,
+            draw_scale3d: Vec3::ONE,
+            pre_pivot: Vec3::ZERO,
+            physics: PlacedPhysics::Other,
+            rotation_rate: [0; 3],
+            base: Some(1),
+            hard_attach: false,
+            ignore_base_rotation: false,
+            block_actors: false,
+        };
+        // The base at (1000, 0, 0), turned a quarter turn of yaw already;
+        // the actor 100 uu from it along world +Y, which is the base's own
+        // X axis, its rotation 500 units of yaw more than the base's.
+        let base = PlacedActor {
+            id: 1,
+            base: None,
+            ..placed(Vec3::new(1000.0, 0.0, 0.0), [0, 16_384, 0])
+        };
+        let actor = placed(Vec3::new(1000.0, 100.0, 0.0), [0, 16_884, 0]);
+        let old = (base.location, base.rotation);
+        // The base moves by (0, 0, 10) and turns another quarter turn.
+        let new = (Vec3::new(1000.0, 0.0, 10.0), [0, 32_768, 0]);
+        let current = (actor.location, actor.rotation);
+        let close = |a: Vec3, b: Vec3| (a - b).length() < 1e-2;
+
+        // Hard-attached, not blocking: the transform relative to the base
+        // is kept. The offset, world (0, 100, 0), is (100, 0, 0) in the
+        // base's frame at a quarter turn; at half a turn that is world
+        // (−100, 0, 0). Its rotation stays 500 units ahead of the base's:
+        // 33 268, which a rotation rebuilt from a matrix gives as
+        // 33 268 − 65 536 = −32 268.
+        let hard = Passenger::of(
+            &PlacedActor {
+                hard_attach: true,
+                ..actor.clone()
+            },
+            &base,
+        );
+        assert!(hard.rigid);
+        let (l, r) = hard.carried(current, old, new);
+        assert!(close(l, Vec3::new(900.0, 0.0, 10.0)), "{l}");
+        assert_eq!(r, [0, -32_268, 0]);
+        // ... and with `bIgnoreBaseRotation` it goes to the same place and
+        // keeps its own rotation.
+        let hard_unturned = Passenger::of(
+            &PlacedActor {
+                hard_attach: true,
+                ignore_base_rotation: true,
+                ..actor.clone()
+            },
+            &base,
+        );
+        let (l, r) = hard_unturned.carried(current, old, new);
+        assert!(close(l, Vec3::new(900.0, 0.0, 10.0)), "{l}");
+        assert_eq!(r, actor.rotation);
+
+        // Not hard-attached (and not interpolating): carried by the base's
+        // change of transform from where it is, the same place for a rigid
+        // motion; its rotation takes the base's change (16 384 units).
+        let soft = Passenger::of(&actor, &base);
+        assert!(!soft.rigid);
+        let (l, r) = soft.carried(current, old, new);
+        assert!(close(l, Vec3::new(900.0, 0.0, 10.0)), "{l}");
+        assert_eq!(r, [0, 33_268, 0]);
+        // The change leaves out each rotation's low two bits: from 16 387
+        // (which is 16 384 to the sine table) to 32 769 (32 768) it is
+        // still 16 384.
+        let (_, r) = soft.carried(current, (old.0, [0, 16_387, 0]), (new.0, [0, 32_769, 0]));
+        assert_eq!(r, [0, 33_268, 0]);
+        // Hard-attached but blocking actors: carried the same way, not
+        // through a kept relative transform.
+        let blocking = Passenger::of(
+            &PlacedActor {
+                hard_attach: true,
+                block_actors: true,
+                ..actor.clone()
+            },
+            &base,
+        );
+        assert!(!blocking.rigid);
+        assert_eq!(
+            blocking.carried(current, old, new),
+            soft.carried(current, old, new)
+        );
+        // With `bIgnoreBaseRotation`: the base's translation only.
+        let unturned = Passenger::of(
+            &PlacedActor {
+                ignore_base_rotation: true,
+                ..actor.clone()
+            },
+            &base,
+        );
+        let (l, r) = unturned.carried(current, old, new);
+        assert_eq!(l, Vec3::new(1000.0, 100.0, 10.0));
+        assert_eq!(r, actor.rotation);
+
+        // An actor in the interpolating physics is carried through its kept
+        // relative transform even without a hard attachment, and what the
+        // original keeps for it then is its offset from the base in world
+        // axes: (0, 100, 0), which the base's new rotation (half a turn)
+        // takes to (0, −100, 0).
+        let interpolating = Passenger::of(
+            &PlacedActor {
+                physics: PlacedPhysics::Interpolating,
+                ..actor.clone()
+            },
+            &base,
+        );
+        assert!(interpolating.rigid);
+        let (l, r) = interpolating.carried(current, old, new);
+        assert!(close(l, Vec3::new(1000.0, -100.0, 10.0)), "{l}");
+        assert_eq!(r, [0, -32_268, 0]);
     }
 }
