@@ -184,7 +184,18 @@ fn start_library_load(mut runtime: ResMut<AudioRuntime>, level: Option<Res<Conve
     begin_library_load(&mut runtime, level.as_deref());
 }
 
+/// `true` when this run must not make a sound: an unattended run with a
+/// hidden window (`--hidden-window`, used for offscreen screenshots on
+/// someone's machine), or `ASAMU_MUTE` set in the environment.
+fn muted() -> bool {
+    std::env::var_os("ASAMU_MUTE").is_some() || std::env::args().any(|a| a == "--hidden-window")
+}
+
 fn begin_library_load(runtime: &mut AudioRuntime, level: Option<&ConvertedLevel>) {
+    if muted() {
+        info!("audio: muted (hidden window or ASAMU_MUTE); the game is silent");
+        return;
+    }
     let Some(dir) = audio_dir(level) else {
         info!(
             "audio: no converted audio (run `asamu-import --out <dir> audio`); the game is silent"
