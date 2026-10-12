@@ -435,6 +435,16 @@ move; recorded advances 0.2114 and 0.1074, rest 0.0999 uu from the contact plane
 the pawn's centre is 21.025 uu from the door's face: the move's box is 1.001 × 21 = 21.021 wide (9.2).
 `crates/asamu-player/tests/parity_pull_back.rs` holds the derivation as a test.
 
+Re-measured by the package's verifier (2026-10-12, own script over the raw records, the attempted move
+of each tick recomputed with 2.1 from the previous record's velocity and this record's acceleration):
+the gap before tick 1563 is 0.41877 and the contact plane x = 302.98485. Ticks 1564 to 1569 attempt
+moves under 1 uu that turn sideways (0.032 to 0.074 uu of 0.56 to 0.79), and the gap follows the cosine
+rule above tick by tick: derived 0.09992, 0.09980, 0.09958, 0.09945, 0.09938, 0.09913, recorded
+0.09993, 0.09980, 0.09959, 0.09947, 0.09941, 0.09913 (positions there are multiples of 0.00003). The
+"0.0999" is therefore 0.1 times the cosine, not a rounding of 0.1. Sideways the pawn makes the whole
+attempted move on each of the seven ticks (to 0.00002 uu): what the blocked tries leave is slid along
+the door. `crates/asamu-player/tests/parity_pull_back_recorded.rs` runs the port over these seven moves.
+
 #### 3.2.1 APawn::stepUp @ 0x100ADCFA0 [CONFIRMED]
 
 `StepDown = down · (MaxStepHeight[+0x250] + 2.0)`.
@@ -511,7 +521,8 @@ FloorDist = max(0, g − 2.8)        mesh triangles
 
 - The target 2.15 is a true 3.15 uu (4.95 on triangles) and the band 1.9 to 2.4 a true 2.9 to 3.4
   (4.7 to 5.2). Measured: the centre at 72 + 44 + 2.15 + 1.0 = 119.150 on 1,817 of 1,817 Workshop
-  records over the BSP floor at 72 (V18); 3.151 uu above flat hull tops at 7 places (P2); 4.954 uu
+  records over the BSP floor at 72 (V18; recounted: 1,563 hold the `f32` nearest to 119.15 and 254 the
+  one below it, 0.0000076 lower, so the height is not one bit pattern); 3.151 uu above flat hull tops at 7 places (P2); 4.954 uu
   (sd 0.113, n 23) under the box's footprint on triangle floors, standing gaps 4.72 to 5.17 (P4, V7).
 - A floor nearer than the pull-back is reported at distance 0 and not as penetrating, so the pawn is
   moved up by the whole 2.15, wherever it is below 1.0 (2.8). From close to a floor it therefore
@@ -688,7 +699,13 @@ than the pull-back is reported at time 0: the pawn lands where it is, and the ve
 re-derived (`Hit.Time ≤ 0.1`). The walking that follows in the same frame (carried time, forced floor
 check, 5.2) then moves the pawn up as described in 3.3: a landing with a 4.66 uu move on triangles
 rests at 0.466 + 2.15 = 2.616 uu (the after-landing rest of 2.62 at the Darkcave start, V7), and at
-4.766 after the next moving frame. A landing found only after a slide (4.5) carries no time: the pawn
+4.766 after the next moving frame. Re-measured on the five landings of the recordings after which the
+pawn stood still (2026-10-12, verifier's own script; `L` from the record before the landing): on
+triangles `L` = 4.658 rests at 2.616 (2.615 under the box's footprint on the converted triangles) and
+rises 2.150 with the first step, and `L` = 1.051 rests at 2.255 (2.255) and rises 2.148; on
+simple-collision floors `L` = 1.325, 1.283 and 1.288 rise to 3.15 with the first step, by
+`1.0 − 0.1·L` = 0.867, 0.872, 0.871 (recorded 0.867, 0.879, 0.875; heights there are multiples of
+0.0039). Two more such landings are on uneven floors and were not used. A landing found only after a slide (4.5) carries no time: the pawn
 stays the slide's pull-back above the floor until the next frame.
 
 ### 4.5 Walls and ceilings (non-walkable hits)
@@ -1433,8 +1450,9 @@ not above 1e-8. Their own pull-back therefore uses the shortened length `L·Dila
 floor check over a mesh's triangles with BSP `h` uu below them, and the pawn `g` above the triangles,
 the trace the mesh sees is `g + h − 1 + 5` long, and while that is under 28 the triangles are reported
 `0.1·(g + h + 4)` short instead of 2.8: the pawn then stands `(2.15 + 0.1·(h + 4)) / 0.9` above them,
-2.83 uu for `h` = 0 rising to 4.95 at `h` = 19.05. [CONFIRMED code; not compared with a recording: the
-four low standing gaps of V7 (1.18, 2.26, 2.38, 2.62) are candidates, 2.62 being a landing rest.]
+2.83 uu for `h` = 0 rising to 4.95 at `h` = 19.05. [CONFIRMED code; not compared with a recording. Of the
+four low standing gaps of V7 (1.18, 2.26, 2.38, 2.62), 2.26 and 2.62 are landing rests (4.4:
+`0.1·L + 2.15` for `L` = 1.051 and 4.658); 1.18 and 2.38 are unexplained and remain candidates.]
 
 Which hit comes first is decided on the reported times, so it need not be the first surface touched:
 on the 28 uu check a mesh's triangles up to 1.8 uu below the top of a blocking volume are reported
@@ -1444,6 +1462,18 @@ before it (2.8 uu back against 1.0).
 here), one wall (3.2), landings (4.4), 47 grapple anchors 3.9967 uu short of the triangles (V16: a
 16,384 uu bullet trace, K = 4.0). Not measured: the zero-extent rows of BSP, brushes and simple bodies,
 the pawn cylinder, and "BSP first".
+
+**Second reading** (2026-10-12, the package's verifier, by another route). Rule K stands in two
+routines the readings above did not use, both with K = 4.0 and the same flag test, length, comparison
+and clamp: `UFracturedStaticMeshComponent::LineCheck @ 0x10086C320` (0x10086CA5A to 0x10086CB07) and
+`UTerrainComponent::LineCheck @ 0x1001C0540` (0x1001C0783 to 0x1001C07D2). The seven constants and the
+vector at 0x10171DA60 were read again from the file's bytes; `MoveActor`'s extent and location update,
+the floor check's flags (0x20DF at 0x100ADB153, extent from `GetCylinderExtent` unscaled) and the
+shortening after a BSP hit were re-read at the addresses given and agree. A NaN time leaves the
+original's clamp as 1 (no hit), as the note on `pull_back` says. Standing gaps on per-triangle floors,
+recomputed from the raw records and the converted triangles under the 42 × 42 footprint: 20 of 23
+standing places (11 or more identical records) are between 4.779 and 5.167, inside the 4.7 to 5.2 the
+rule gives; the other three are 2.255 and 2.615 (the landing rests above) and 2.379.
 
 **Ours.** `asamu_player::world::pull_back` is the rule, operation for operation in `f32`, for the five
 kinds and both sorts of trace; `bsp_checked_fraction` and `reported_time` are "BSP first".
@@ -1524,3 +1554,8 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   trace after a BSP hit in `UWorld::MultiLineCheck`, which no earlier pass had read); what follows from
   it in 3.2 (wall contact), 3.3 (the floor check's distances are reported ones; rising in stages) and
   4.4 (where a landing leaves the pawn); 9.2 item 1 and 9.5 item 7 now point to it.
+- 2026-10-12: verification pass of 10.2 and of what 3.2, 3.3 and 4.4 say about it: rule K read at two
+  further routines, the constants and `MoveActor` re-read, and the wall contact (seven ticks, with the
+  cosine of the approach), the Workshop height, five landings and the standing gaps on triangle floors
+  recomputed from the raw recordings. Corrected: two of the four low standing gaps are landing rests,
+  not candidates for "BSP first".
