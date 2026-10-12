@@ -958,6 +958,24 @@ pub fn chain_step(
     expected: Option<&str>,
     max_ticks: u64,
 ) -> Result<ChainStep, LevelScriptError> {
+    chain_step_from(dir, map, expected, max_ticks, &|_, _| {})
+}
+
+/// [`chain_step`] on a level that does not start fresh: `prepare` runs on
+/// every attempt's freshly loaded game and script before the game starts
+/// (e.g. [`Game::apply_snapshot`] and [`LevelScript::start_from_save`] for a
+/// level continued from a checkpoint save), and the search goes on from
+/// there. For checking that a level can still be finished after a Continue.
+///
+/// # Errors
+/// The map could not be loaded.
+pub fn chain_step_from(
+    dir: &Path,
+    map: &str,
+    expected: Option<&str>,
+    max_ticks: u64,
+    prepare: &dyn Fn(&mut Game, &mut LevelScript),
+) -> Result<ChainStep, LevelScriptError> {
     let mut step = ChainStep {
         map: map.to_owned(),
         expected: expected.map(str::to_owned),
@@ -984,9 +1002,10 @@ pub fn chain_step(
         }
     }
     for (progress, touches) in plans {
-        let (mut game, Some(script)) = load_level_with_kismet(dir, map)? else {
+        let (mut game, Some(mut script)) = load_level_with_kismet(dir, map)? else {
             break;
         };
+        prepare(&mut game, &mut script);
         game.start();
         let mut s = ChainStep {
             map: step.map.clone(),
