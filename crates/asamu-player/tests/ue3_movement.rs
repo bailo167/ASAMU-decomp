@@ -4,6 +4,10 @@
 //! Every expected value below is derived independently in the test (formulas
 //! or a separate re-statement of the spec rule), never by calling the code
 //! under test. Parameter values set here are test inputs, not game values.
+//!
+//! The pawn is swept as a box (spec 10.1) and every hit is reported short of
+//! the contact (the pull-back, spec 10.2): [`pull`] restates that rule for
+//! BSP, which is what `BoxWorld` and `SlopeWorld` answer as.
 
 mod common;
 
@@ -13,14 +17,36 @@ use asamu_player::ue3_movement::{
     MAX_ITERATIONS, MIN_TICK_TIME, PawnPhysicsState, PhysicsMode, TickStats, Ue3PawnMovement,
 };
 use asamu_player::{
-    BoxWorld, CollisionShape, CollisionWorld, HalfSpace, InputFrame, MovementModelKind,
-    PlayerParams, PlayerState, SlopeWorld, StepEvents, step_with,
+    BoxWorld, CollisionWorld, HalfSpace, InputFrame, MovementModelKind, PlayerParams, PlayerState,
+    SlopeWorld, StepEvents, step_with,
 };
 use common::SplitMix64;
 use glam::Vec3;
 
 const DT: f32 = 1.0 / 60.0;
-const HOVER: f32 = 2.15;
+/// What the walking floor check aims at: the *reported* distance to the
+/// floor (spec 3.3).
+const REPORTED_HOVER: f32 = 2.15;
+/// The true height of a walking pawn's bottom above a floor in these worlds
+/// with the default parameters: the floor check is `MaxStepHeight + 2` =
+/// 20 uu long, a BSP floor is reported `pull(20)` = 1.0 uu nearer than it
+/// is, and the pawn is held at a reported 2.15: 2.15 + 1.0.
+const HOVER: f32 = 3.15;
+
+/// The distance (uu) by which the original reports a hit short of the
+/// contact on a box trace `len` uu long against BSP: 0.1 uu for a trace
+/// shorter than 1 uu, else a tenth of the trace, at most 1.0 uu (spec 10.2,
+/// rule K with K = 1.0; `docs/PARITY_FINDINGS.md` V2). Written out here, not
+/// taken from the code under test.
+fn pull(len: f32) -> f32 {
+    if len < 1.0 { 0.1 } else { (0.1 * len).min(1.0) }
+}
+
+/// The floor check's reading of a floor `gap` uu below the pawn's bottom
+/// (spec 3.3 with 10.2): the reported distance, never below 0.
+fn floor_dist(params: &PlayerParams, gap: f32) -> f32 {
+    (gap - pull(params.movement.step_height.value + 2.0)).max(0.0)
+}
 
 fn no_input() -> LocomotionIntent {
     LocomotionIntent::default()
@@ -65,11 +91,10 @@ fn half_height(params: &PlayerParams) -> f32 {
     params.movement.capsule_half_height.value
 }
 
-fn trace_shape(params: &PlayerParams) -> CollisionShape {
-    CollisionShape {
-        radius: params.movement.capsule_radius.value,
-        half_height: half_height(params),
-    }
+/// Half sizes of the box of an extent trace (the floor check).
+fn trace_extent(params: &PlayerParams) -> Vec3 {
+    let r = params.movement.capsule_radius.value;
+    Vec3::new(r, r, half_height(params))
 }
 
 /// A walking state hovering `HOVER` above a flat floor at `floor_z`, based,
@@ -86,11 +111,12 @@ fn standing_on(params: &PlayerParams, floor_z: f32, x: f32, y: f32) -> PlayerSta
     s
 }
 
-/// Vertical gap between the cylinder bottom and the first surface below.
+/// Vertical gap between the bottom of the pawn's box and the first surface
+/// below (the exact contact, no pull-back).
 fn hover_gap<W: CollisionWorld + ?Sized>(world: &W, params: &PlayerParams, pos: Vec3) -> f32 {
     world
-        .sweep_capsule(pos, pos - Vec3::Z * 1000.0, trace_shape(params))
-        .map_or(f32::INFINITY, |h| h.distance)
+        .sweep_box(pos, pos - Vec3::Z * 1000.0, trace_extent(params))
+        .map_or(f32::INFINITY, |h| h.hit.distance)
 }
 
 /// Independent statement of the spec's sub-step rule (1.4) in f32:
@@ -303,9 +329,9 @@ fn jump_follows_the_doubled_gravity_closed_form() {
     // Single gravity would give J²/(2|g|) ≈ 169.6: clearly not the case.
     assert!(apex < 0.6 * jz * jz / (2.0 * -g));
 
-    // Lands in tick 49 (z_n reaches −HOVER between n = 48 and 49); the
-    // landing velocity is the semi-implicit velocity of that sub-step,
-    // J + (2n − 1)·g·h.
+    // Lands in tick 49 (z_n reaches −HOVER, the floor, between n = 48 and
+    // 49: z_48 = 3.2, z_49 = −3.81); the landing velocity is the
+    // semi-implicit velocity of that sub-step, J + (2n − 1)·g·h.
     let (n, impact) = landed_at.expect("landed");
     assert_eq!(n, 49);
     let expected_impact = jz + (2.0 * 49.0 - 1.0) * g * h;
@@ -319,7 +345,24 @@ fn jump_follows_the_doubled_gravity_closed_form() {
         Vec3::ZERO,
         "walking zeroes Z; no horizontal motion"
     );
-    // The carried time walked and re-established the hover.
+    // The fall's last move, |impact|·h = 7.01 uu long, is reported
+    // 0.1 × 7.01 uu short of the floor and the pawn stops there. The carried
+    // time then walks: its forced floor check reports the floor
+    // pull(20) = 1.0 uu nearer, clamped to 0, and moves the pawn up by the
+    // whole 2.15. It rests 0.70 + 2.15 above the floor, 0.30 under the
+    // hover; standing still it stays (the floor check is skipped).
+    let rest = f64::from(pull((-expected_impact * h) as f32)) + f64::from(REPORTED_HOVER);
+    assert_eq!(floor_dist(&params, (rest - 2.15) as f32), 0.0);
+    assert!(
+        (f64::from(s.position.z) - z0 - (rest - f64::from(HOVER))).abs() < 1e-3,
+        "{} vs {rest}",
+        f64::from(s.position.z) - z0 + f64::from(HOVER)
+    );
+    tick(&mut s, no_input(), &params, &world, DT);
+    assert!((f64::from(s.position.z) - z0 - (rest - f64::from(HOVER))).abs() < 1e-3);
+    // The first moving tick checks the floor again: reported
+    // rest − 1.0 = 1.85, under 1.9, so the pawn is moved up to the hover.
+    tick(&mut s, towards(Vec3::X), &params, &world, DT);
     assert!((f64::from(s.position.z) - z0).abs() < 1e-3);
 }
 
@@ -553,12 +596,16 @@ fn air_control_wall_probe_disables_steering_into_walls() {
 
 #[test]
 fn hover_band_is_corrected_to_2_15() {
+    // 3.3 with 10.2: the band 1.9 to 2.4 and the target 2.15 are distances
+    // as the floor check reports them, pull(20) = 1.0 uu short of the true
+    // gap and never below 0.
     let params = PlayerParams::default();
     let world = BoxWorld::new().with_ground(0.0, false);
     let h = half_height(&params);
     let probe = params.movement.step_height.value + 2.0;
+    assert_eq!(pull(probe), 1.0);
     for gap in [
-        0.05_f32, 0.5, 1.0, 1.85, 1.95, 2.15, 2.3, 2.39, 2.45, 5.0, 19.5,
+        0.05_f32, 0.5, 1.0, 1.85, 2.85, 2.95, 3.15, 3.3, 3.39, 3.45, 5.0, 19.5,
     ] {
         for (based, force) in [(true, true), (false, false), (true, false)] {
             let mut s = standing_on(&params, 0.0, 0.0, 0.0);
@@ -567,10 +614,13 @@ fn hover_band_is_corrected_to_2_15() {
             s.pawn.force_floor_check = force;
             tick(&mut s, no_input(), &params, &world, DT);
             let got = s.position.z - h;
+            let seen = floor_dist(&params, gap);
             let expected = if based && !force {
                 gap // zero move on a static base: floor trace skipped
-            } else if !based || !(1.9..=2.4).contains(&gap) {
-                HOVER // new base → snap; else push up / snap down
+            } else if !based || !(1.9..=2.4).contains(&seen) {
+                // New base → snap; else push up / snap down: moved by
+                // 2.15 − the reported distance.
+                gap + REPORTED_HOVER - seen
             } else {
                 gap // inside the band on the current base
             };
@@ -583,6 +633,10 @@ fn hover_band_is_corrected_to_2_15() {
             assert_eq!(s.velocity, Vec3::ZERO);
         }
     }
+    // From 1 uu up the correction ends at the hover, 3.15; nearer than that
+    // the floor is reported at 0 and the pawn rises by 2.15 only.
+    assert_eq!(1.0 + REPORTED_HOVER - floor_dist(&params, 1.0), HOVER);
+    assert_eq!(0.5 + REPORTED_HOVER - floor_dist(&params, 0.5), 2.65);
     // Beyond the probe (MaxStepHeight + 2): no floor → falling.
     let mut s = standing_on(&params, 0.0, 0.0, 0.0);
     s.position.z = h + probe + 0.5;
@@ -597,13 +651,15 @@ fn steps_up_onto_a_box_of_max_step_height_but_not_much_higher() {
     let step = params.movement.step_height.value;
     let h = half_height(&params);
     let r = params.movement.capsule_radius.value;
-    // Stepping raises the pawn by MaxStepHeight + 2 from its 2.15 hover, so
-    // ledges up to MaxStepHeight + 4.15 (less the pull-back) are climbable.
+    // Stepping raises the pawn by MaxStepHeight + 2 from its hover, 3.15 uu
+    // above the floor, so its bottom passes over ledges lower than
+    // MaxStepHeight + 5.15 (the original's 26: 31.15) and is stopped by
+    // higher ones.
     for (height, climbs) in [
         (step * 0.5, true),
         (step, true),
-        (step + 4.0, true),
-        (step + 4.3, false),
+        (step + 5.0, true),
+        (step + 5.3, false),
         (step + 20.0, false),
     ] {
         let world = BoxWorld::new().with_ground(0.0, false).with_box(
@@ -699,8 +755,12 @@ fn walkable_ramp_keeps_full_horizontal_speed_and_the_hover_band() {
             s.velocity
         );
         assert_eq!(s.velocity.z, 0.0);
-        let gap = hover_gap(&world, &params, s.position);
-        assert!((1.9..=2.4).contains(&gap), "hover {gap} at {}", s.position);
+        let seen = floor_dist(&params, hover_gap(&world, &params, s.position));
+        assert!(
+            (1.9..=2.4).contains(&seen),
+            "floor reported at {seen} at {}",
+            s.position
+        );
         if s.position.x > 140.0 {
             climbed += 1;
             assert!((s.pawn.floor.z - 0.8).abs() < 1e-6);
@@ -743,6 +803,7 @@ fn slope_slide_triggers_only_below_its_thresholds() {
         let mut params = PlayerParams::default();
         params.movement.ground_friction.value = friction;
         let (world, mut s) = settled_on_ramp(&params, nz);
+        let gap_before = hover_gap(&world, &params, s.position);
         for _ in 0..3 {
             let before = s;
             tick(&mut s, no_input(), &params, &world, DT);
@@ -775,8 +836,15 @@ fn slope_slide_triggers_only_below_its_thresholds() {
             }
             assert!(s.grounded);
         }
+        // The slide runs along the floor, so the height above it is what
+        // the landing left (a pawn sliding this slowly does not check the
+        // floor: its velocity is braked to zero every tick, 2.3).
         let gap = hover_gap(&world, &params, s.position);
-        assert!((1.9..=2.4).contains(&gap), "nz {nz}: hover {gap}");
+        assert!(
+            (gap - gap_before).abs() < 2e-3,
+            "nz {nz}: {gap} vs {gap_before}"
+        );
+        assert!(floor_dist(&params, gap) <= 2.4, "nz {nz}: {gap}");
     }
 }
 
@@ -920,11 +988,19 @@ fn landing_carries_the_unused_substep_time_into_walking() {
     s.velocity = Vec3::new(0.0, 0.0, -300.0);
     let dt = 0.2;
     let (events, stats) = tick(&mut s, towards(Vec3::X), &params, &world, dt);
-    // Sub-step 1 (0.05 s): V1 = −300 + g·0.05 = −326, move −16.3 uu, contact
-    // after 10 uu, pulled back 0.05 uu along the move.
+    // Sub-step 1 (0.05 s): V1.z = −300 + g·0.05 = −326, 16.3 uu down, and the
+    // floor is 10 uu below. The input also steers (4.2, limiter on, from
+    // rest: AccelRate·AirControl + (10 − 0)/dt = 800 uu/s²), so the move is
+    // (2, 0, −16.3), 16.42 uu long, and the hit is reported
+    // pull(16.42) = 1.0 uu short along it.
+    assert!(params.movement.limit_fall_accel.value);
     let v1 = -300.0 + g * 0.05;
     let travel = -v1 * 0.05;
-    let t = (10.0 - 0.05) / travel;
+    let steer =
+        params.movement.ground_acceleration.value * params.movement.air_control.value + 10.0 / dt;
+    let length = (steer * 0.05 * 0.05).hypot(travel);
+    assert_eq!(pull(length), 1.0);
+    let t = 10.0 / travel - pull(length) / length;
     let returned = 0.05 * (1.0 - t);
     let landed = events.landed.expect("landed");
     assert!((landed - v1).abs() < 0.05, "impact {landed} vs {v1}");
@@ -947,7 +1023,13 @@ fn landing_carries_the_unused_substep_time_into_walking() {
     assert!(left < 1e-6);
     assert_accounting(&stats, dt);
     assert!(s.grounded && s.pawn.based);
-    assert!((s.position.z - (h + HOVER)).abs() < 1e-3, "{}", s.position);
+    // The landing left the pawn 1.0 × 16.3/16.42 = 0.99 uu above the floor
+    // (the pull-back is along the move); the first walking floor check
+    // reports that as 0 and moves it up by 2.15, to 3.14; the next reports
+    // 2.14, inside the band, and leaves it there, 0.007 under the hover.
+    let rest = pull(length) * travel / length + REPORTED_HOVER;
+    assert!((1.9..=2.4).contains(&floor_dist(&params, rest)));
+    assert!((s.position.z - (h + rest)).abs() < 1e-3, "{}", s.position);
     // Walked for the carried time only (velocity from that displacement).
     assert!(s.position.x > 0.0 && s.velocity.x > 0.0);
 }

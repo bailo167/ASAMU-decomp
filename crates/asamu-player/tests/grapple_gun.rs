@@ -356,9 +356,23 @@ fn g_ph_6_blocked_pull_stays_attached_pressed_against_the_obstacle() {
     assert!(s.is_grapple_attached() && s.pawn.flying);
     assert!(s.script.gun.distance >= 200.0);
     let pressed = pressed.expect("reached the wall");
+    // Held against the wall: no further way towards it or sideways. Along
+    // the wall it is not held. The pawn is swept as a box (PARITY_FINDINGS
+    // P4), so the two wall faces beside the slit are one flat face to it
+    // (as a cylinder it was wedged between the slit's two corners, which
+    // stopped it in every direction), and flying slides along a flat face
+    // (G-PH-3 step 5). The pull points from the pawn's centre to the anchor,
+    // which the fire trace from the eye put above the centre, so the pawn
+    // creeps up the wall towards the anchor's height and never past it.
     assert!(
-        (s.position - pressed).length() < 1.0,
+        (s.position.x - pressed.x).abs() < 1.0 && s.position.y == pressed.y,
         "held against the wall: {} vs {pressed}",
+        s.position
+    );
+    assert!(
+        anchor.z > pressed.z && s.position.z >= pressed.z && s.position.z <= anchor.z,
+        "slides up the wall towards the anchor's height {}: {} vs {pressed}",
+        anchor.z,
         s.position
     );
     // The stored velocity is only the last pull increment: what physics
