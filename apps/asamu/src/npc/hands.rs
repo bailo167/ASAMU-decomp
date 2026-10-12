@@ -124,9 +124,10 @@ pub(super) enum ToggleWiring {
 /// action wired on both inputs cannot be followed by its activation count;
 /// when its visibility option is off the flag's edges still tell (the one
 /// such action in the shipped maps, in AG-Darkcave, is of that kind), and
-/// otherwise its activations are ignored (no shipped map has one: of the 8
-/// actions in 4 maps, 5 are hide-only, 2 hide-only or show-only with the
-/// mesh kept visible, 1 is wired on both with visibility off).
+/// otherwise its activations are ignored (no shipped map has one: of the 7
+/// actions in 4 maps, 4 are hide-only with the mesh switched off, 2 are
+/// hide-only or show-only with the mesh kept visible, 1 is wired on both
+/// with visibility off).
 pub(super) fn toggle_actions(graph: &Graph) -> Vec<(usize, ToggleWiring)> {
     let mut found: Vec<(usize, bool, bool)> = graph
         .nodes

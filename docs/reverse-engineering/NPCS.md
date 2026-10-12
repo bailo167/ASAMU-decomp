@@ -418,7 +418,8 @@ hand; taking the suit plays a 7.51 s Matinee (events at 1.00 s and 6.01 s), and 
 capacity to 0 and starts the 5.97 s suit-on animation; a hide that keeps the mesh is wired 15 s after the 6.01 s
 event (it finds the hand already lowered); the launch hides the hand with the mesh off. Every action of this kind
 in the shipped maps, by input and `Visibility`: Workshop hide/kept and hide/off; ParadiseCave show/kept and
-hide/off; Darkcave one action wired on both inputs, off; StarHaven two hide/off (8 actions in 4 maps; none animated).
+hide/off; Darkcave one action wired on both inputs, off;
+StarHaven two hide/off (7 actions in 4 maps, none animated; corrected in the verification pass, this said 8).
 
 **Runtime** (`apps/asamu/src/npc/hands.rs`, `HandPose`): the hand is drawn while the mesh is not switched off and
 the tree would be on its shown branch, or the suit-on animation runs. The simulation keeps the "hand hidden" flag
