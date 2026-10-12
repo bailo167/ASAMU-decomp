@@ -66,6 +66,104 @@ impl Default for UvTransform {
     }
 }
 
+/// One factor of a [`Gradient`]: `max(scale * c + offset, 0) ^ power`, `c`
+/// being the U or V texture coordinate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientFactor {
+    /// The V coordinate (else U).
+    pub v: bool,
+    /// Multiplier of the coordinate.
+    pub scale: f32,
+    /// Added after the multiplier.
+    pub offset: f32,
+    /// Exponent.
+    pub power: f32,
+}
+
+/// A value computed from a mesh's own texture coordinates: the product of
+/// the factors, clamped to 0..1 (a fade along one axis of an effect mesh).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    /// The factors.
+    pub factors: Vec<GradientFactor>,
+}
+
+/// Most factors a [`Gradient`] read from a file may have.
+pub const MAX_GRADIENT_FACTORS: usize = 8;
+
+impl Gradient {
+    /// The value at `(u, v)`, 0..1 (0 for input that is not finite).
+    #[must_use]
+    pub fn eval(&self, u: f32, v: f32) -> f32 {
+        let mut out = 1.0f32;
+        for f in &self.factors {
+            let base = (f.scale * if f.v { v } else { u } + f.offset).max(0.0);
+            out *= if f.power == 1.0 {
+                base
+            } else if f.power == 0.0 {
+                1.0
+            } else {
+                base.powf(f.power)
+            };
+        }
+        if out.is_finite() {
+            out.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// The colour of a [`ComposedTexture`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComposedRgb {
+    /// White: the material's constant colour shows.
+    White,
+    /// The displayed texture.
+    Texture(TextureBinding),
+    /// Grey, the value of a gradient (linear).
+    Gradient(Gradient),
+}
+
+/// The alpha of a [`ComposedTexture`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComposedAlpha {
+    /// Opaque.
+    One,
+    /// `clamp(channel * scale + bias, 0, 1)` of a texture, the channel as
+    /// the GPU would sample it (a colour channel of an sRGB texture is
+    /// linearised, alpha never is).
+    Texture {
+        /// The opacity texture.
+        texture: TextureBinding,
+        /// 0 red, 1 green, 2 blue, 3 alpha.
+        channel: usize,
+        /// Multiplier.
+        scale: f32,
+        /// Added after the multiplier.
+        bias: f32,
+    },
+    /// A gradient.
+    Gradient(Gradient),
+}
+
+/// A picture the renderer puts together when it loads a material, because
+/// the original keeps the material's colour and its opacity in different
+/// textures (or channels), or computes one of them from the texture
+/// coordinates, and a standard material takes both from one image: the
+/// colour in RGB, the opacity in alpha. It replaces the base colour texture;
+/// [`RenderMaterial::uv`] applies to it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComposedTexture {
+    /// Colour.
+    pub rgb: ComposedRgb,
+    /// Opacity.
+    pub alpha: ComposedAlpha,
+    /// The colour is the emissive channel's (a lit material whose base
+    /// colour is black): the picture is the emissive texture as well.
+    pub emissive: bool,
+}
+
 /// Where a [`RenderMaterial`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MaterialSource {
@@ -106,6 +204,9 @@ pub struct RenderMaterial {
     pub uv: UvTransform,
     /// Texture paths the description names that were not converted.
     pub missing_textures: Vec<String>,
+    /// A picture to compose in place of the base colour texture (a renderer
+    /// that cannot uses `base_color_texture` and loses the cut-out or fade).
+    pub composed: Option<ComposedTexture>,
 }
 
 /// FNV-1a 64 (palette selection only).
@@ -181,6 +282,7 @@ pub fn fallback_material(path: Option<&str>) -> RenderMaterial {
         unlit: false,
         uv: UvTransform::default(),
         missing_textures: Vec::new(),
+        composed: None,
     };
     let Some(path) = path else {
         return m;
@@ -311,6 +413,42 @@ mod tests {
         assert!(bind_texture(Some(&m), "Pkg.T_Bad", false).is_none());
         assert!(bind_texture(Some(&m), "Pkg.Missing", false).is_none());
         assert!(bind_texture(None, "Pkg.T_D", false).is_none());
+    }
+
+    #[test]
+    fn gradient_is_a_clamped_product() {
+        let fade = Gradient {
+            factors: vec![GradientFactor {
+                v: true,
+                scale: 1.0,
+                offset: 0.0,
+                power: 5.0,
+            }],
+        };
+        assert_eq!(fade.eval(0.3, 0.0), 0.0);
+        assert_eq!(fade.eval(0.3, 1.0), 1.0);
+        assert!((fade.eval(0.9, 0.5) - 0.03125).abs() < 1e-6);
+        assert_eq!(fade.eval(0.0, -1.0), 0.0);
+        assert_eq!(fade.eval(0.0, 7.0), 1.0);
+        assert_eq!(fade.eval(0.0, f32::NAN), 0.0);
+        let two = Gradient {
+            factors: vec![
+                GradientFactor {
+                    v: false,
+                    scale: -1.0,
+                    offset: 1.0,
+                    power: 1.0,
+                },
+                GradientFactor {
+                    v: true,
+                    scale: 2.0,
+                    offset: 0.0,
+                    power: 1.0,
+                },
+            ],
+        };
+        assert!((two.eval(0.25, 0.25) - 0.375).abs() < 1e-6);
+        assert_eq!(Gradient { factors: vec![] }.eval(0.5, 0.5), 1.0);
     }
 
     #[test]
