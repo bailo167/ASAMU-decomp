@@ -568,7 +568,7 @@ carries the anchor around it; that is the whole motion of AG-ParadiseCave's whee
 moves. Three kinds occur there [CONFIRMED (level data); the motion rules CONFIRMED (native) and measured,
 KISMET_RUNTIME.md §6]: rocks a Matinee track turns (`PHYS_Interpolating`; e.g. `InterpActor_64`, one
 turn of roll in 7.2 s), rocks the engine turns by their `RotationRate` (`PHYS_Rotating`; `InterpActor_51`
-at 9102 units/s of yaw, and `InterpActor_25`/`_101`, which a Matinee group names without moving them),
+at 9102 units/s of yaw, and `InterpActor_25` and `_101`, which a Matinee group names without moving them),
 and rocks hard-attached to either (9 `grappleRock` actors on Matinee platforms, 1 on the turning
 `InterpActor_16`).
 → Rust (G-WO-*): world objects expose `on_grappled/on_ungrappled`, `release_instant`, `accepts_decal`,

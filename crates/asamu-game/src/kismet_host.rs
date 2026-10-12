@@ -84,7 +84,7 @@
 //! | Rock | Physics, rate | Frames | Turned, units | Against the truncated steps | Against rate × time |
 //! |---|---|---|---|---|---|
 //! | `_51` | rotating, yaw −9102, no Matinee | 2,252 | 261,135 | −2.2 to +12.9 | 1,483 short |
-//! | `_25`/`_101` | rotating, roll −4551, in a Matinee group (−359° in 14.4 s) | 1,828 | 105,968 | −3.5 to +0.8 | 611 short (318 short of the track) |
+//! | `_25` | rotating, roll −4551, in a Matinee group (−359° in 14.4 s) | 1,828 | 105,968 | −3.5 to +0.8 | 611 short (318 short of the track) |
 //! | eight stretches on seven rocks | interpolating, rates 4551 to 9102, tracks of one turn | 11,624 | 27,473 to 296,038 | 37 to 735 ahead | 3 short to 64 ahead of one turn per track length |
 //!
 //! `_51` turned 116 units in 2,249 of its 2,251 single frames. The rocks in

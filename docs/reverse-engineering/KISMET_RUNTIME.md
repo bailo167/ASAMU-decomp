@@ -343,8 +343,13 @@ helper riding these rocks (GRAPPLE.md G-AT-8; frames of 12.82 ms, angles in rota
 | Rock (`InterpActor_*`) | Physics, rate | Frames | Turned | Against the sum of the truncated steps | Against rate × time |
 |---|---|---|---|---|---|
 | `_51` | rotating, yaw −9102, no Matinee | 2,252 | 261,135 | −2.2 to +12.9 | 1,483 short |
-| `_25` / `_101` | rotating, roll −4551, in a Matinee group (−359° in 14.4 s) | 1,828 | 105,968 | −3.5 to +0.8 | 611 short (318 short of the track) |
-| `_64`, `_17` (twice), `_0`, `_57`, `_22`/`_21`, `_149`/`_23`, `_24`/`_151` | interpolating, rates 4551 to 9102, tracks of one turn in 7.2 to 14.4 s | 11,624 | 27,473 to 296,038 | 37 to 735 ahead | 3 short to 64 ahead of one turn per track length |
+| `_25` | rotating, roll −4551, in a Matinee group (−359° in 14.4 s) | 1,828 | 105,968 | −3.5 to +0.8 | 611 short (318 short of the track) |
+| `_64`, `_17` (twice), `_0`, `_57`, `_21`, `_149`, `_151` | interpolating, rates 4551 to 9102, tracks of one turn in 7.2 to 14.4 s | 11,624 | 27,473 to 296,038 | 37 to 735 ahead | 3 short to 64 ahead of one turn per track length |
+
+Which rock each stretch is on follows from the helper's circle: its axis passes within 0.6 uu of that
+actor's `Location` and is within 0.01° of that actor's own axis (GRAPPLE.md G-AT-8); where two rocks share a
+location (`_25` and `_101`, `_21` and `_22`, `_149` and `_23`, `_151` and `_24`) the other one's axis is
+1.5° to 8.2° off. Times are differences of the world's clock.
 
 `_51` turned 116 units (9102 × 0.01282 = 116.7) in 2,249 of its 2,251 single frames. The rocks in the
 interpolating physics follow their tracks: every loop of a track that ends at 359.9° shows as a jump of
