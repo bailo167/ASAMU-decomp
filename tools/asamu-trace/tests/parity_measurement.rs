@@ -52,7 +52,11 @@
 //! make that attach itself, so what the attach does to the script state, one
 //! level off the move-input lock, is missing: with exact key input the
 //! pawn of a one-step replay then does not steer where the original
-//! does). The notes count what was left out.
+//! does). In a recording with exact move keys, a walking tick with a move
+//! key held and no recorded acceleration is one in which the original
+//! ignored the input (a move-input lock that, on the ground, only level
+//! script sets, and that no record shows): those are left out too. The
+//! notes count what was left out.
 //!
 //! # Tolerances (PARITY_FINDINGS.md section 5; measured noise only)
 //!
@@ -159,6 +163,12 @@ struct Seg {
     /// Per sample: a walking tick in which the pawn gained speed over what
     /// its input gives ([`Seg::walk_tick`]): something moved it.
     pushed: Vec<bool>,
+    /// Per sample, recordings with exact move keys only: a walking tick
+    /// whose input has a move key and whose record has no acceleration. The
+    /// original ignored the move input: a move-input lock (ABILITIES.md
+    /// A-IL-1) that on the ground only level script sets (cinematic mode),
+    /// and that no record shows.
+    ignored: Vec<bool>,
     /// Per sample: attached to a target that moves (the anchor of the
     /// grapple does not stay within 0.01 uu of its first one).
     moving: Vec<bool>,
@@ -169,6 +179,17 @@ struct Seg {
     /// then on.
     after_moving: Vec<bool>,
     events: Vec<(usize, EventKind)>,
+}
+
+/// One walking tick of a recording against an unobstructed one
+/// ([`Seg::walk_tick`]), uu/s.
+struct WalkTick {
+    /// Recorded speed minus the unobstructed tick's.
+    gained: f64,
+    /// Length of the difference of the two velocities.
+    differs: f64,
+    /// From which difference the two count as different.
+    limit: f64,
 }
 
 impl Seg {
@@ -203,16 +224,17 @@ impl Seg {
     /// pushed: a level object the per-sample replay does not run acts on it.
     fn mover(&self, a: usize, b: usize) -> bool {
         (a..=b.min(self.len() - 1))
-            .any(|k| self.on_mover(k) || self.pushed[k] || self.after_moving[k])
+            .any(|k| self.on_mover(k) || self.pushed[k] || self.after_moving[k] || self.ignored[k])
     }
-    /// The horizontal velocity an unobstructed walking tick `k` gives, the
-    /// recorded one, and the difference from which the two count as
-    /// different, when the pawn walks before and after it. That threshold
+    /// The horizontal velocity an unobstructed walking tick `k` gives
+    /// against the recorded one, and the difference from which the two
+    /// count as different, when the pawn walks before and after it. That
+    /// threshold
     /// is the ground analysis's 0.5 uu/s, or 2 velocity quanta where that is
     /// more (far from the origin the recorded velocity, a displacement of
     /// rounded positions over the frame length, is that coarse: 1.2 uu/s a
     /// quantum in AG-ParadiseCave at 78 frames a second).
-    fn walk_tick(&self, k: usize) -> Option<((f64, f64), (f64, f64), f64)> {
+    fn walk_tick(&self, k: usize) -> Option<WalkTick> {
         if k == 0 || !(self.walking(k - 1) && self.walking(k)) || self.ends.contains(&k) {
             return None;
         }
@@ -232,11 +254,12 @@ impl Seg {
         );
         let at = self.s(k).position;
         let quantum = ulp32(at.x.abs().max(at.y.abs())) / f64::from(self.ds[k]);
-        Some((
-            v,
-            (f64::from(q.velocity.x), f64::from(q.velocity.y)),
-            (2.0 * quantum).max(0.5),
-        ))
+        let recorded = (f64::from(q.velocity.x), f64::from(q.velocity.y));
+        Some(WalkTick {
+            gained: recorded.0.hypot(recorded.1) - v.0.hypot(v.1),
+            differs: (v.0 - recorded.0).hypot(v.1 - recorded.1),
+            limit: (2.0 * quantum).max(0.5),
+        })
     }
     fn name(&self) -> String {
         format!("{} seg{}", self.rec, self.index)
@@ -395,6 +418,7 @@ fn load() -> Result<(Vec<Seg>, Vec<Group>), String> {
                 dir,
                 map,
                 pushed: Vec::new(),
+                ignored: vec![false; n],
                 moving: vec![false; n],
                 after_moving: vec![false; n],
                 ends: all
@@ -408,12 +432,19 @@ fn load() -> Result<(Vec<Seg>, Vec<Group>), String> {
                 trace: seg.trace,
             };
             seg.pushed = (0..n)
-                .map(|k| {
-                    seg.walk_tick(k).is_some_and(|(free, v, limit)| {
-                        v.0.hypot(v.1) >= free.0.hypot(free.1) + limit
-                    })
-                })
+                .map(|k| seg.walk_tick(k).is_some_and(|w| w.gained >= w.limit))
                 .collect();
+            if keys {
+                for k in 1..n {
+                    let i = &seg.s(k).input;
+                    let a = seg.players[k].acceleration;
+                    seg.ignored[k] = seg.walking(k - 1)
+                        && seg.walking(k)
+                        && (i.move_forward != 0.0 || i.move_right != 0.0)
+                        && a.x == 0.0
+                        && a.y == 0.0;
+                }
+            }
             let mut k = 1;
             while k < n {
                 if seg.attached(k) && !seg.attached(k - 1) {
@@ -1019,18 +1050,19 @@ fn cases(segs: &[Seg], notes: &mut Vec<String>) -> Vec<Case> {
         // Wall contacts: walking ticks held up.
         let held_up = |k: usize| {
             !seg.pushed[k]
-                && seg
-                    .walk_tick(k)
-                    .is_some_and(|(free, v, limit)| (free.0 - v.0).hypot(free.1 - v.1) >= limit)
+                && !seg.ignored[k]
+                && seg.walk_tick(k).is_some_and(|w| w.differs >= w.limit)
         };
         let contacts = runs(n, 8, held_up);
         notes.push(format!(
             "{}: {} walking tick(s) held up, in {} contact(s); {} walking tick(s) pushed (speed \
-             gained that no input gives: a level object the replay does not run)",
+             gained that no input gives: a level object the replay does not run); {} walking \
+             tick(s) with a move key held and no acceleration (the original ignored the input)",
             seg.name(),
             (1..n).filter(|k| held_up(*k)).count(),
             contacts.len(),
-            seg.pushed.iter().filter(|p| **p).count()
+            seg.pushed.iter().filter(|p| **p).count(),
+            seg.ignored.iter().filter(|p| **p).count()
         ));
         for (a, b) in contacts {
             let w0 = clip_back(a.saturating_sub(5).max(1), a, &walking);
@@ -1076,7 +1108,9 @@ fn cases(segs: &[Seg], notes: &mut Vec<String>) -> Vec<Case> {
             if let Some(e) = seg.ends.iter().find(|e| **e > start) {
                 limit = limit.min(*e - 1);
             }
-            if let Some(k) = (start..n).find(|k| seg.on_mover(*k) || seg.pushed[*k]) {
+            if let Some(k) =
+                (start..n).find(|k| seg.on_mover(*k) || seg.pushed[*k] || seg.ignored[*k])
+            {
                 limit = limit.min(k.saturating_sub(1));
             }
             if let Some(k) = moving_targets.iter().find(|k| **k > start) {
@@ -1145,7 +1179,7 @@ fn cases(segs: &[Seg], notes: &mut Vec<String>) -> Vec<Case> {
             // (A grapple in the air after a flight on a target that moves
             // is compared: the attach is ours again, and nothing steers a
             // flight.)
-            if (w0..=w1).any(|j| seg.on_mover(j) || seg.pushed[j]) {
+            if (w0..=w1).any(|j| seg.on_mover(j) || seg.pushed[j] || seg.ignored[j]) {
                 on_a_mover.set(on_a_mover.get() + 1);
                 continue;
             }
@@ -1179,8 +1213,9 @@ fn cases(segs: &[Seg], notes: &mut Vec<String>) -> Vec<Case> {
         }
         if on_a_mover.get() > 0 {
             notes.push(format!(
-                "{}: {} stretch(es) in which the pawn walks on an InterpActor, is pushed, or is in \
-                 the air after a flight on a target that moves: not compared",
+                "{}: {} stretch(es) in which the pawn walks on an InterpActor, is pushed, has its \
+                 move keys ignored, or is in the air after a flight on a target that moves: not \
+                 compared",
                 seg.name(),
                 on_a_mover.get()
             ));
@@ -1410,6 +1445,9 @@ fn every_event_of_the_recordings_one_step_and_free_running() {
                 (false, true, false, true) if mover => "walking on a mover (not run by the replay)",
                 (false, true, false, true) if pushed => {
                     "walking, pushed by a level object (not run by the replay)"
+                }
+                (false, true, false, true) if seg.ignored[k] => {
+                    "walking, move keys ignored by the original (a lock no record shows)"
                 }
                 (false, true, false, true) => "walking",
                 (false, false, false, _) if seg.after_moving[k] => {
@@ -1708,4 +1746,89 @@ fn every_event_of_the_recordings_one_step_and_free_running() {
             );
         }
     }
+}
+
+/// Free-running stretches from a standing start that are inside the section
+/// 5 tolerances on every tick, pinned: recording, segment, start tick,
+/// ticks, and what the pawn does in them (counted from the recording by
+/// the test, which prints it). Each is a stretch of the measurement above
+/// ("free run from a standing start"), cut before the first tick outside a
+/// tolerance where there is one; none was chosen or shortened by more than
+/// that, and no tolerance is other than the module's table.
+const PINNED: [(&str, usize, u64, usize); 12] = [
+    ("WS1", 0, 2462, 538),
+    ("DC1", 0, 5777, 301),
+    ("DC1", 3, 1806, 1500),
+    ("PLAY2", 1, 5980, 227),
+    ("PLAY2", 5, 6928, 179),
+    ("KM1", 0, 3311, 820),
+    ("KM1", 0, 10527, 1234),
+    ("KM1", 1, 667, 1500),
+    ("KM1", 1, 1417, 790),
+    ("KM1", 1, 5346, 616),
+    ("KM1", 4, 932, 1500),
+    ("KM1", 5, 10744, 712),
+];
+
+/// The pinned free runs stay inside the tolerances: the regression test of
+/// the measurement. A recording that is not there is skipped with a line.
+#[test]
+fn the_free_runs_that_agree_keep_agreeing() {
+    let (segs, _) = match load() {
+        Ok(s) => s,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let (mut ticks, mut seen) = (0, 0);
+    for (rec, index, tick, n) in PINNED {
+        let Some(seg) = segs.iter().find(|s| s.rec == rec && s.index == index) else {
+            eprintln!("skipped: no {rec} recording in ASAMU_TRACE_RAW_DIR");
+            continue;
+        };
+        let a = seg
+            .trace
+            .samples
+            .binary_search_by_key(&tick, |s| s.tick)
+            .unwrap();
+        let b = a + n;
+        assert!(
+            is_clean_start(&seg.trace.samples, a),
+            "{} {tick}",
+            seg.name()
+        );
+        assert!(seg.valid(a, b) && !seg.mover(a, b), "{} {tick}", seg.name());
+        let r = replay(&seg.trace, &options(seg, a, Some(n), false)).unwrap();
+        assert_eq!(r.trace.samples.len(), n + 1, "{} {tick}", seg.name());
+        let o = evaluate(seg, &r.trace.samples, (a + 1, b), a, false, false, &[]);
+        let mut what: BTreeMap<&str, usize> = BTreeMap::new();
+        for (k, kind) in &seg.events {
+            if *k > a && *k <= b {
+                *what.entry(kind.name()).or_default() += 1;
+            }
+        }
+        let walking = (a + 1..=b).filter(|k| seg.walking(*k)).count();
+        let attached = (a + 1..=b).filter(|k| seg.attached(*k)).count();
+        println!(
+            "PINNED {} from tick {tick}, {n} ticks ({} walking, {} attached, {} falling): inside \
+             the tolerances {} (stricter reading {}); first outside {:?}; largest position \
+             difference {:.6} uu (tick {}), velocity {:.6} uu/s (tick {}); events {what:?}",
+            seg.name(),
+            walking,
+            attached,
+            n - walking - attached,
+            o.agrees,
+            o.strict,
+            o.first,
+            o.position.value,
+            o.position.tick,
+            o.velocity.value,
+            o.velocity.tick
+        );
+        assert!(o.agrees, "{} from tick {tick}: {:?}", seg.name(), o.first);
+        ticks += o.ticks;
+        seen += 1;
+    }
+    println!("{seen} pinned free runs, {ticks} ticks, all inside the section 5 tolerances");
 }
