@@ -456,12 +456,51 @@ Changes to the sections above:
 - **Not settled:** the straight wall hold, the 5000 uu limit, low frame rates (items 3 and 7 of section 6 remain
   for a next session).
 
+### P14 (found in play, 2026-10-12). A grapple's anchor rides a turning rock; rocks in the rotating physics turn by themselves; a Matinee moves only actors in the interpolating physics
+
+- **Class / severity:** level state and grapple; a route blocker where it applies (AG-ParadiseCave's wheels).
+  **Fixed**, verified by a second reading of the natives and a recomputation from KM1.
+- **Found by:** the owner, playing ours: an anchor on a wheel rock stayed at the world point of the hit. Ours
+  followed only the base's translation, and a wheel rock never translates (a fixed actor location, the mesh on a
+  pivot arm); 14 `PHYS_Rotating` actors with a `RotationRate` never moved.
+- **Rules (CONFIRMED native, NATIVE_PHYSICS.md 10.5):**
+  - an actor based on another is carried by its base's change of transform (`UWorld::MoveActor`, the
+    attached-actor loop), so the anchor helper rides its rock rigidly, through chains;
+  - an actor in `PHYS_Rotating` turns by `RotationRate` × frame time per member, truncated, nothing carried over
+    (`AActor::physicsRotation`);
+  - a Matinee's movement track moves an actor only in the interpolating physics (`AActor::physInterpolating`),
+    and nothing puts an actor into it when its Matinee starts.
+- **Measured (KM1, AG-ParadiseCave, frames of 12.82 ms):**
+  - 13 of 66 attachments are on an `InterpActor`, and in each the gun's anchor is the helper's location in every
+    frame; in the other 53 the anchor does not move.
+  - 10 of the 13 are on turning rocks: circles about the rock actor's axis through its `Location` (radii 2,106 to
+    5,064 uu, up to 4.5 turns, 0.06 to 0.75 uu rms off the circle).
+  - `InterpActor_51` (rotating physics, yaw −9102 units/s, no Matinee): 261,135 units in 2,252 frames, within 13
+    of the sum of the truncated steps, 1,483 short of rate × time.
+  - `InterpActor_25` (rotating physics, roll −4551 units/s, named by a Matinee group): 105,968 units in 1,828
+    frames, within 3.5 of the truncated steps, no step off by more than 2.7 units where the track's loop is a hop
+    of 182.
+  - `StaticMeshActor_173` (named by a group whose track goes 50 uu in 5 s and back): the pawn at rest on it for 17
+    and for 8 frames did not move by one step of the float.
+- **Not decided by the recording:** `InterpActor_16` (the two rules differ by 0.1 units/s at this frame time) and
+  `InterpActor_101` (never touched); `StaticMeshActor_4` and `_347`. They follow from the native rule alone.
+- **What changed in ours:** anchors ride what turns; 14 actors of three levels turn by their rate (7 in
+  AG-ParadiseCave, 2 in AG-BeautifulCity, 5 in AG-StarHaven) with what is attached to them; six actors of
+  AG-ParadiseCave left the Matinee groups that name them.
+- **Consequence to decide (owner):** the turn by a rate depends on the frame time. At 60 Hz the merry-go-round's
+  arm that turns by its rate falls 0.131° a second behind the arm on the track; at the recorded 78 frames a second
+  the arms stay half a turn apart.
+- **NEEDS EVIDENCE:** a recording with an anchor on a rock of `InterpActor_16` held across a loop of its track
+  (30 s), and one standing on `StaticMeshActor_347` or `_4`.
+- **Left:** movers move before the frame's input events; encroachment (a turning rock passes into a pawn beside
+  it) is not modelled.
+
 Next root causes, in the order of how much they explain:
 
 1. **Level objects that Matinee or Kismet move are not run in per-sample replays** (14,516 of 97,458 one-step
    ticks are uncompared for this reason; at least 54 walking failures are the Workshop's observatory doors, shut
-   in the level file). Cleanest segment: KM1 seg0 from tick 9856, 50 ticks. In play the same area shows a defect:
-   a grapple anchor on a mover attached to a rotating mover stays at the world point of the hit.
+   in the level file). Cleanest segment: KM1 seg0 from tick 9856, 50 ticks. In play the same area showed a defect
+   (P14 above, fixed): a grapple anchor on a turning rock stayed at the world point of the hit.
 2. **The original's floor check lifts the pawn 2.15 uu where ours does not** (60 one-step ticks 2.15 uu apart plus
    27 walking-flag differences). Cleanest: PLAY2 seg5 from 3136, 64 ticks; KM1 seg1 from 2440, 40 ticks. Cause
    not established.

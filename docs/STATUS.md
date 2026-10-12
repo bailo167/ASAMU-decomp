@@ -27,10 +27,13 @@ _Session journal. Newest entry first. Each entry: what was done, what is true no
 - Not parity. Remaining differences are listed in `docs/PARITY.md`: moving level objects in replays, a 2.15 uu
   floor-check lift of the original, the landing frame in about a quarter of landings, some wall contacts, three of
   52 airborne anchors, float-spacing drift. Three story levels are in no recording.
-- **A route blocker found in play:** a grapple anchor on a mover that is attached to a rotating mover (the wheels
-  of rocks in AG-ParadiseCave: 70 `InterpActor`s hard-attached to `InterpActor` hubs) stays at the world point of
-  the hit instead of riding the rock. In the original the anchor rides it (KM1: the anchor moved on 13 of 66
-  attachments, by up to 9,547 uu).
+- **A route blocker found in play is fixed and verified:** a grapple anchor on the turning rocks of
+  AG-ParadiseCave's wheels stayed at the world point of the hit. Anchors now ride their base rigidly, and actors
+  in `PHYS_Rotating` turn by their truncated `RotationRate` (7 in AG-ParadiseCave, 2 in AG-BeautifulCity, 5 in
+  AG-StarHaven); six actors of AG-ParadiseCave are no longer moved by Matinee groups that name them (the original
+  does not move them). Evidence: `docs/PARITY_FINDINGS.md` P14, NATIVE_PHYSICS.md 10.5, GRAPPLE.md G-AT-8.
+  **Owner's decision open:** at our 60 Hz tick the merry-go-round's two arms drift apart by 0.131° a second (as
+  the original does at 60 fps, not at the recorded 78).
 - A conversion made before this wave (mesh manifest version 1) must be re-imported (`asamu-import meshes`):
   with it collision is approximate. The Mac's local conversion is version 1.
 - In progress on the local branch `play/fixes` (not pushed): fixes for what the screenshots showed (material
@@ -49,8 +52,7 @@ _Session journal. Newest entry first. Each entry: what was done, what is true no
   above a spawn point that lies inside a simple body; 13 placements sit exactly on the scale threshold.
 - Actors hidden at level start are not drawn when shown later; the macOS recorder route has never recorded.
 
-**Next, in order:** the anchor on attached and rotating movers (with KM1 as evidence); verify and merge
-`play/fixes`; Matinee movers in per-sample replays; the floor check's lift; the landing frame.
+**Next, in order:** verify and merge `play/fixes`; Matinee movers in per-sample replays; the floor check's lift; the landing frame.
 
 ## 2026-10-10 — Session 2 wrap-up: where to pick up
 

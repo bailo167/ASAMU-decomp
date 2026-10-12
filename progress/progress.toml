@@ -747,7 +747,7 @@ id = "attach-rules"
 name = "Attachment rules"
 status = "implemented"
 evidence = "crates/asamu-player/src/grapple_gun.rs; docs/PARITY.md"
-note = "Grapple-able surface rules, crystals, falling rocks. Not trace-verified."
+note = "Grapple-able surface rules, crystals, falling rocks. Anchors ride moving and turning InterpActors rigidly (rule read from the executable; measured on 13 stretches of the keyboard recording of the original). Not verified as a whole: grapples on moving targets are not replayed against the recordings yet."
 
 [[category.item]]
 id = "pull"
