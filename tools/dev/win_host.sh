@@ -329,9 +329,12 @@ ps_array() {
 
 # PowerShell that enters the work tree NAME and sets the build environment,
 # in ENTER (a variable, because $(...) would drop the line break at its end).
+# ASAMU_MUTE is set last, so nothing started this way (cargo, exec, gate, ps)
+# makes a sound on a machine its owner is sitting at; only `desk`, which puts
+# a program on that machine's screen for its owner, runs with sound.
 ENTER=""
 enter() {
-  ENTER="\$work = WhEnter $(psq "$1")$NL${ASAMU_WIN_ENV:-}$NL"
+  ENTER="\$work = WhEnter $(psq "$1")$NL${ASAMU_WIN_ENV:-}$NL\$env:ASAMU_MUTE = '1'$NL"
 }
 
 # The files of this checkout that sync sends: names in $TMP/manifest, and

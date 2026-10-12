@@ -193,8 +193,10 @@ def audit_call(folder, n, lib, env):
     if any(re.fullmatch(form, command) for form in PLAIN):
         return None
     head = re.match(r"\$work = WhEnter '%s'\n" % NAME, command)
-    if head and command[head.end():].startswith(env + "\n"):
-        command = command[head.end() + len(env) + 1:]
+    # After the caller's environment comes the line that keeps the run silent.
+    mute = "$env:ASAMU_MUTE = '1'\n"
+    if head and command[head.end():].startswith(env + "\n" + mute):
+        command = command[head.end() + len(env) + 1 + len(mute):]
         if any(re.fullmatch(form, command) for form in ENTERED):
             return None
     return "script command %r" % command
@@ -472,9 +474,9 @@ is "clean: one NAME only" "$RC" 2
 is "clean: one NAME only, nothing contacted" "$(calls)" 0
 
 wh "$R" gate h1
-is "gate: command" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}WhGate 'h1' @()"
+is "gate: command" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}\$env:ASAMU_MUTE = '1'${NL}WhGate 'h1' @()"
 wh "$R" gate h1 clippy test
-is "gate: chosen steps" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}WhGate 'h1' @('clippy','test')"
+is "gate: chosen steps" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}\$env:ASAMU_MUTE = '1'${NL}WhGate 'h1' @('clippy','test')"
 wh "$R" gate h1 bogus
 is "gate: unknown step refused" "$RC" 2
 is "gate: unknown step, nothing contacted" "$(calls)" 0
@@ -487,7 +489,7 @@ is "gate: a failed step is exit code 1" "$RC" 1
 set -- test --workspace -- --exact "it's a 'test'" 'a b' '' '$(touch x)' '`id`' '; Remove-Item -Recurse C:\' '-x' "$(printf 'caf\303\251 \342\234\223')" "$(printf '\342\200\231curly\342\200\231')" "$(printf 'two\nlines')" '"quoted"' 'back\slash\' '%OS%' '@args' '#x'
 wh "$R" cargo h1 "$@"
 is "cargo: exit code" "$RC" 0
-is "cargo: command" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}WhRun 'cargo' @($(printf '<T>, %.0s' "$@" | sed 's/, $//'))"
+is "cargo: command" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}\$env:ASAMU_MUTE = '1'${NL}WhRun 'cargo' @($(printf '<T>, %.0s' "$@" | sed 's/, $//'))"
 printf '%s\0' "$@" > "$T/expected"
 check "cargo: the arguments, byte for byte" cmp "$T/expected" "$T/texts"
 inspect command "$LOG" 2 "$HERE/win_host_remote.ps1" 'D:\asamu' "$T/texts" > "$T/cmd"
@@ -503,14 +505,14 @@ check "cargo: standard output passes through untouched" cmp "$T/out" "$T/fake.st
 is "cargo: PowerShell's CLIXML on standard error becomes plain lines" "$(cat "$T/err")" "err line${NL}WARNING: careful <now> & \"then\"${NL}first${NL}second"
 
 ASAMU_WIN_ENV='$env:ASAMU_CONVERTED_DIR="D:\asamu\converted"' wh "$R" cargo h1 test
-is "cargo: ASAMU_WIN_ENV on its own line" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}\$env:ASAMU_CONVERTED_DIR=\"D:\\asamu\\converted\"${NL}WhRun 'cargo' @(<T>)"
+is "cargo: ASAMU_WIN_ENV on its own line" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}\$env:ASAMU_CONVERTED_DIR=\"D:\\asamu\\converted\"${NL}\$env:ASAMU_MUTE = '1'${NL}WhRun 'cargo' @(<T>)"
 
 wh "$R" exec h1 'C:\Program Files\some tool\x.exe'
-is "exec: program without arguments" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}WhRun <T> @()"
+is "exec: program without arguments" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}\$env:ASAMU_MUTE = '1'${NL}WhRun <T> @()"
 printf '%s\0' 'C:\Program Files\some tool\x.exe' > "$T/expected"
 check "exec: the program name, byte for byte" cmp "$T/expected" "$T/texts"
 wh "$R" exec h1 prog --flag 'a b'
-is "exec: program with arguments" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}WhRun <T> @(<T>, <T>)"
+is "exec: program with arguments" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}\$env:ASAMU_MUTE = '1'${NL}WhRun <T> @(<T>, <T>)"
 wh "$R" exec h1 ''
 is "exec: empty program refused" "$RC" 2
 FAKE_FAIL_AT=2 FAKE_FAIL_RC=37 wh "$R" exec h1 prog
@@ -525,7 +527,7 @@ is "ps: command" "$(command_of 2)" ". ([scriptblock]::Create(<T>))"
 } > "$T/expected"
 check "ps: the script, byte for byte, plus the exit rule" cmp "$T/expected" "$T/texts"
 STDIN="$T/script.ps1" wh "$R" ps h1
-is "ps NAME: enters the work tree first" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}. ([scriptblock]::Create(<T>))"
+is "ps NAME: enters the work tree first" "$(command_of 2)" "\$work = WhEnter 'h1'${NL}${NL}\$env:ASAMU_MUTE = '1'${NL}. ([scriptblock]::Create(<T>))"
 STDIN="$T/script.ps1" FAKE_FAIL_AT=2 FAKE_FAIL_RC=12 wh "$R" ps
 is "ps: the exit code is the script's" "$RC" 12
 wh "$R" ps h1 h2

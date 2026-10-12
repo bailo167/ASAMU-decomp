@@ -99,6 +99,22 @@ fn watch_window(mut commands: Commands, time: Res<Time<Real>>, watch: Option<Res
 pub const RECORD_PERIOD: f32 = 1.0 / 20.0;
 /// A recording stops by itself after this many seconds (ours).
 pub const RECORD_MAX_SECONDS: f32 = 60.0;
+/// The longest `ASAMU_RECORD_SECONDS` may make a recording (ours: 15
+/// minutes are 18,000 frames).
+pub const RECORD_LIMIT_SECONDS: f32 = 900.0;
+
+/// How long a recording runs before it stops by itself:
+/// [`RECORD_MAX_SECONDS`], or `ASAMU_RECORD_SECONDS` (1 to
+/// [`RECORD_LIMIT_SECONDS`]) for a longer or shorter session.
+#[must_use]
+pub fn record_max_seconds() -> f32 {
+    std::env::var("ASAMU_RECORD_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(RECORD_MAX_SECONDS, |v| v.clamp(1.0, RECORD_LIMIT_SECONDS))
+}
+
 /// Window size while frames are recorded, physical pixels (ours: small
 /// frames keep the read-back cheap enough to play through).
 pub const RECORD_WINDOW: (u32, u32) = (1280, 720);
@@ -142,6 +158,9 @@ impl FrameRecorder {
     /// assets settled (unattended runs, e.g. with `--walk`).
     #[must_use]
     pub fn with_autostart(mut self, autostart: bool) -> Self {
+        // `ASAMU_RECORD_AUTOSTART`: start by itself in an attended run too
+        // (a session filmed from start to end, no key to remember).
+        let autostart = autostart || std::env::var_os("ASAMU_RECORD_AUTOSTART").is_some();
         self.autostart = autostart.then_some(RECORD_AUTOSTART_DELAY);
         self
     }
@@ -192,9 +211,10 @@ fn record_frames(
     let Some(started) = recorder.started else {
         return;
     };
-    if now - started > RECORD_MAX_SECONDS {
+    let limit = record_max_seconds();
+    if now - started > limit {
         recorder.started = None;
-        info!("frame recording stopped after {RECORD_MAX_SECONDS} s");
+        info!("frame recording stopped after {limit} s");
         return;
     }
     if now - recorder.last < RECORD_PERIOD {
