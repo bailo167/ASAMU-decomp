@@ -52,7 +52,7 @@ use crate::events::SimEvent;
 use crate::params::{GrappleGunParams, PlayerParams};
 use crate::pawn::{self, PawnStateName, ScriptConstant, poll_timer};
 use crate::rocket_boots::BootsStateName;
-use crate::sim::{PlayerState, StepEvents};
+use crate::sim::{PlayerState, StepEvents, rotator_cos, rotator_sin};
 use crate::ue3_movement::safe_normal;
 use crate::world::{ActorClass, ActorTag, CollisionWorld, Surface, TraceExtent};
 
@@ -188,19 +188,110 @@ pub struct Attachment {
     pub handler_target: bool,
 }
 
+/// Where a base actor is: its location and its rotation as the original's
+/// integer rotator `(pitch, yaw, roll)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BasePose {
+    /// `Location`, UU.
+    pub location: Vec3,
+    /// `Rotation` (pitch, yaw, roll), 65 536 units per turn.
+    pub rotation: [i32; 3],
+}
+
+impl BasePose {
+    /// The pose of the tracked actor `actor` in `world`
+    /// ([`CollisionWorld::actor_location`], [`CollisionWorld::actor_rotation`];
+    /// a world that knows no rotation for it reports one that never
+    /// changes). `None` when the world does not track the actor.
+    #[must_use]
+    pub fn of<W: CollisionWorld + ?Sized>(world: &W, actor: u32) -> Option<Self> {
+        let location = world.actor_location(actor)?;
+        Some(Self {
+            location,
+            rotation: world.actor_rotation(actor).unwrap_or([0; 3]),
+        })
+    }
+}
+
 /// The anchor helper (`GrappleGunHitLocActor`) based on a moving target
 /// (`bGrappledInterpActor`, G-AT-7/8). It keeps following after a release
 /// (cosmetic then).
+///
+/// The helper is an actor based on the hit actor and not hard-attached to
+/// it, so every move of that actor moves it too, rigidly
+/// ([`carried_by_base`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AnchorFollow {
     /// The base actor.
     pub actor: u32,
-    /// Helper location minus the base's location when it was placed, UU
-    /// (translation-only basing; rotation with the base is TENTATIVE and
-    /// not modelled).
-    pub offset: Vec3,
+    /// Where the base was when the helper was placed or last carried
+    /// (`None`: the world does not track the actor, the helper stays put).
+    #[serde(default)]
+    pub base: Option<BasePose>,
     /// Current helper location, UU.
     pub helper: Vec3,
+}
+
+/// The rows of the original's rotation matrix of a rotator `(pitch, yaw,
+/// roll)`: the world images of the local X, Y and Z axes, built from the
+/// sine table's values ([`crate::sim::rotator_sin`]: each angle floored to 4
+/// units) with single-precision products. NativeCode `UWorld::MoveActor @
+/// 0x1008E94A0` (the table lookups at `0x1008E9F6C` and `0x1008E9FA4`, the
+/// rows as written here). CONFIRMED (native).
+fn rotation_rows(rotation: [i32; 3]) -> [Vec3; 3] {
+    let [pitch, yaw, roll] = rotation;
+    let (sp, cp) = (rotator_sin(pitch), rotator_cos(pitch));
+    let (sy, cy) = (rotator_sin(yaw), rotator_cos(yaw));
+    let (sr, cr) = (rotator_sin(roll), rotator_cos(roll));
+    [
+        Vec3::new(cp * cy, cp * sy, sp),
+        Vec3::new(sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp),
+        Vec3::new(-(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp),
+    ]
+}
+
+/// Where an actor that is based on another, without a hard attachment, is
+/// after its base moved from `from` to `to` (GRAPPLE.md G-AT-8).
+///
+/// The original moves the actors attached to a moved actor at the end of
+/// that actor's move (`UWorld::MoveActor @ 0x1008E94A0`, the loop from
+/// `0x1008E9E9B`; CONFIRMED (native)):
+///
+/// - when the base's rotation did not change (all three members compared
+///   as whole integers), the attached actor is moved by the base's
+///   translation;
+/// - when it changed, the attached actor's location is taken through the
+///   inverse of the base's old transform and through its new one (rotation
+///   and location, no scale): its offset from the base's old location keeps
+///   its coordinates in the base's frame. A move that only turns the base
+///   carries its attached actors too.
+///
+/// Both transforms use the sine table, so a turn that stays within one
+/// 4-unit step of every angle moves nothing. Measured on the recording KM1
+/// in AG-ParadiseCave: in each of the ten stretches in which the helper
+/// rides a turning rock (15 704 frames) its path is a circle about that
+/// rock's location (radii 2 106 to 5 064 uu, up to 4.5 turns, radial
+/// deviation 0.06 to 0.75 uu rms, at most 1.35 uu), and 15 407 of its
+/// 15 693 single-frame steps are within half a unit of a whole multiple of
+/// 4 units of angle (all of them in eight stretches; in the other two the
+/// rock's turn changes more than one member of its rotator).
+///
+/// The original inverts the old transform as a general 4×4 matrix in single
+/// precision at world coordinates; this takes the offset from the base's
+/// location first, which is the same rule with less rounding (a base that
+/// only translates moves the point by its translation exactly).
+#[must_use]
+pub fn carried_by_base(point: Vec3, from: BasePose, to: BasePose) -> Vec3 {
+    if from.rotation == to.rotation {
+        return point + (to.location - from.location);
+    }
+    let offset = point - from.location;
+    let old = rotation_rows(from.rotation);
+    let new = rotation_rows(to.rotation);
+    // Into the old frame (the inverse of a rotation is its transpose), out
+    // of the new one.
+    let local = Vec3::new(offset.dot(old[0]), offset.dot(old[1]), offset.dot(old[2]));
+    to.location + (new[0] * local.x + new[1] * local.y + new[2] * local.z)
 }
 
 /// Run-time state of the grapple gun.
@@ -289,9 +380,9 @@ impl GunState {
             && self.refire_timer.is_none_or(f32::is_finite)
             && self.instant_release_timer.is_none_or(f32::is_finite)
             && self.hide_hand_timer.is_none_or(f32::is_finite)
-            && self
-                .follow
-                .is_none_or(|f| f.offset.is_finite() && f.helper.is_finite())
+            && self.follow.is_none_or(|f| {
+                f.helper.is_finite() && f.base.is_none_or(|b| b.location.is_finite())
+            })
     }
 }
 
@@ -662,10 +753,9 @@ fn place_helper<W: CollisionWorld + ?Sized>(
     location: Vec3,
 ) -> Option<AnchorFollow> {
     let actor = actor?;
-    let base = world.actor_location(actor).unwrap_or(location);
     Some(AnchorFollow {
         actor,
-        offset: location - base,
+        base: BasePose::of(world, actor),
         helper: location,
     })
 }
@@ -815,11 +905,17 @@ pub fn tick<W: CollisionWorld + ?Sized>(
     }
     // CheckForRange (HUD crosshair).
     state.script.gun.crosshair = crosshair(state, params, gun, world);
-    // G-AT-8: follow the helper's base.
+    // G-AT-8: the helper rides its base (the base's actor ticked before the
+    // gun), and the anchor is the helper's location.
     let g = &mut state.script.gun;
     if let Some(mut f) = g.follow {
-        if let Some(base) = world.actor_location(f.actor) {
-            f.helper = base + f.offset;
+        if let Some(now) = BasePose::of(world, f.actor) {
+            if let Some(was) = f.base
+                && was != now
+            {
+                f.helper = carried_by_base(f.helper, was, now);
+            }
+            f.base = Some(now);
         }
         g.follow = Some(f);
         g.grapple_location = f.helper;

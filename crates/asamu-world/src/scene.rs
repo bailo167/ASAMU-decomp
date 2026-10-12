@@ -23,7 +23,10 @@
 //! static-mesh component placed by its `LocalToWorld` (as its triangles, as
 //! the shapes of its simple body, or both: see below), the BSP and the
 //! convex hulls of blocking volumes; the moving actors' collision as dynamic
-//! instances; and the gameplay actors ([`crate::gameplay::SceneActors`]).
+//! instances; the gameplay actors ([`crate::gameplay::SceneActors`]); and
+//! the actors that are attached to another, carry one, or are turned by the
+//! engine itself ([`PlacedActor`]: `Base`, `bHardAttach`, `Physics`,
+//! `RotationRate`), for the game layer that moves them.
 //!
 //! The JSON structures here are our own, independent of `asamu-ue3`; unknown
 //! fields are ignored. Everything read is treated as untrusted: file sizes,
@@ -470,6 +473,43 @@ pub struct InstanceValues {
     /// `CollisionComponent` (object path).
     #[serde(rename = "CollisionComponent", default)]
     pub collision_component: Option<String>,
+    /// `RotationRate` as stored (`{"Pitch": .., "Yaw": .., "Roll": ..}`,
+    /// rotator units per second); read it with [`Self::rotation_rate`].
+    #[serde(rename = "RotationRate", default)]
+    pub rotation_rate_value: Option<Value>,
+    /// `bIgnoreBaseRotation` as stored; read it with
+    /// [`Self::ignore_base_rotation`].
+    #[serde(rename = "bIgnoreBaseRotation", default)]
+    pub ignore_base_rotation_value: Option<Value>,
+}
+
+impl InstanceValues {
+    /// The stored `RotationRate` as `(pitch, yaw, roll)` in rotator units
+    /// per second. A member that is not stored, not a whole number or
+    /// outside the 32-bit range is 0, and so is all of it when nothing is
+    /// stored (the class default of every placed class is zero).
+    #[must_use]
+    pub fn rotation_rate(&self) -> [i32; 3] {
+        let member = |name: &str| {
+            self.rotation_rate_value
+                .as_ref()
+                .and_then(|v| v.get(name))
+                .and_then(Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(0)
+        };
+        [member("Pitch"), member("Yaw"), member("Roll")]
+    }
+
+    /// The stored `bIgnoreBaseRotation` (`false` when it is not stored: the
+    /// class default).
+    #[must_use]
+    pub fn ignore_base_rotation(&self) -> bool {
+        self.ignore_base_rotation_value
+            .as_ref()
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 /// One placed actor.
@@ -501,6 +541,15 @@ pub struct ActorJson {
     /// `LocalToWorld`.
     #[serde(default = "identity")]
     pub local_to_world: Mat4,
+    /// `Base` (object path of the actor this one is attached to).
+    #[serde(default)]
+    pub base: Option<String>,
+    /// `bHardAttach` (`None` when the scene file does not say).
+    #[serde(default)]
+    pub hard_attach: Option<bool>,
+    /// `Physics` (`PHYS_Interpolating`, `PHYS_Rotating`, ...).
+    #[serde(default)]
+    pub physics: Option<String>,
     /// `bHidden`.
     #[serde(default)]
     pub hidden: bool,
@@ -856,6 +905,136 @@ pub struct DynamicBody {
     pub pre_pivot: Vec3,
 }
 
+/// `Physics` of a placed actor, as far as the game layer moves actors by it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlacedPhysics {
+    /// `PHYS_Interpolating`: a Matinee movement track moves the actor.
+    Interpolating,
+    /// `PHYS_Rotating`: the actor turns by its `RotationRate`.
+    Rotating,
+    /// Anything else (`PHYS_None`, ...).
+    #[default]
+    Other,
+}
+
+impl PlacedPhysics {
+    /// From the scene file's `physics` value.
+    #[must_use]
+    pub fn from_name(name: Option<&str>) -> Self {
+        match name {
+            Some(n) if n.eq_ignore_ascii_case("PHYS_Interpolating") => Self::Interpolating,
+            Some(n) if n.eq_ignore_ascii_case("PHYS_Rotating") => Self::Rotating,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// A placed actor that takes part in motion the level's script does not
+/// spell out: it is attached to another actor (`Base`), it carries one, or
+/// the engine turns it by itself (`PHYS_Rotating`, a `RotationRate`). The
+/// values are the level's own (LEVEL_FORMAT.md, "Actor fields").
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlacedActor {
+    /// Actor id.
+    pub id: u32,
+    /// Object name (`InterpActor_51`).
+    pub name: String,
+    /// Gameplay kind of the scene file (`interp_actor`, `light`, ...).
+    pub kind: String,
+    /// `Location`, as stored: the sub-level's offset is not applied.
+    pub location: Vec3,
+    /// `Rotation` (pitch, yaw, roll).
+    pub rotation: [i32; 3],
+    /// `DrawScale`.
+    pub draw_scale: f32,
+    /// `DrawScale3D`.
+    pub draw_scale3d: Vec3,
+    /// `PrePivot`.
+    pub pre_pivot: Vec3,
+    /// `Physics`.
+    pub physics: PlacedPhysics,
+    /// `RotationRate` (pitch, yaw, roll), rotator units per second.
+    pub rotation_rate: [i32; 3],
+    /// The actor it is attached to (`Base`), when that is an actor of the
+    /// same level.
+    pub base: Option<u32>,
+    /// `bHardAttach`.
+    pub hard_attach: bool,
+    /// `bIgnoreBaseRotation`.
+    pub ignore_base_rotation: bool,
+    /// `bBlockActors`.
+    pub block_actors: bool,
+}
+
+/// The [`PlacedActor`]s of one level: every actor with a base in that
+/// level, every such base, and every actor in `PHYS_Rotating` or with a
+/// non-zero `RotationRate`; sorted by id.
+#[must_use]
+pub fn placed_actors(scene: &SceneFile, level: u8) -> Vec<PlacedActor> {
+    let slots: BTreeMap<&str, usize> = scene
+        .actors
+        .iter()
+        .map(|a| (a.name.as_str(), a.slot))
+        .collect();
+    // A base is named by its object path; it is an actor of this level when
+    // the path's package is the level's and its last part is an actor's name.
+    let base_of = |a: &ActorJson| -> Option<u32> {
+        let path = a.base.as_deref()?;
+        let package = path.split('.').next()?;
+        if !package.eq_ignore_ascii_case(&scene.package) {
+            return None;
+        }
+        let slot = *slots.get(object_name(path))?;
+        (slot != a.slot).then(|| actor_id(level, slot)).flatten()
+    };
+    let mut wanted: BTreeSet<u32> = BTreeSet::new();
+    for a in &scene.actors {
+        let Some(id) = actor_id(level, a.slot) else {
+            continue;
+        };
+        let base = base_of(a);
+        let turns = PlacedPhysics::from_name(a.physics.as_deref()) == PlacedPhysics::Rotating
+            || a.instance.rotation_rate() != [0; 3];
+        if base.is_some() || turns {
+            wanted.insert(id);
+        }
+        wanted.extend(base);
+    }
+    let mut out: Vec<PlacedActor> = scene
+        .actors
+        .iter()
+        .filter_map(|a| {
+            let id = actor_id(level, a.slot).filter(|id| wanted.contains(id))?;
+            let location = v3(a.location);
+            let draw_scale3d = v3(a.draw_scale3d);
+            let pre_pivot = v3(a.pre_pivot);
+            (location.is_finite()
+                && draw_scale3d.is_finite()
+                && pre_pivot.is_finite()
+                && a.draw_scale.is_finite())
+            .then(|| PlacedActor {
+                id,
+                name: a.name.clone(),
+                kind: a.kind.clone(),
+                location,
+                rotation: a.rotation,
+                draw_scale: a.draw_scale,
+                draw_scale3d,
+                pre_pivot,
+                physics: PlacedPhysics::from_name(a.physics.as_deref()),
+                rotation_rate: a.instance.rotation_rate(),
+                base: base_of(a),
+                hard_attach: a.hard_attach.unwrap_or(false),
+                ignore_base_rotation: a.instance.ignore_base_rotation(),
+                block_actors: a.block_actors,
+            })
+        })
+        .collect();
+    out.sort_by_key(|a| a.id);
+    out.dedup_by_key(|a| a.id);
+    out
+}
+
 /// Counts of a load.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LoadStats {
@@ -922,6 +1101,9 @@ pub struct LoadedMap {
     pub dynamic: Vec<Instance>,
     /// Moving actors.
     pub bodies: Vec<DynamicBody>,
+    /// Attached actors, their bases and the actors the engine turns
+    /// ([`placed_actors`] of every level), sorted by id.
+    pub placed: Vec<PlacedActor>,
     /// Gameplay actors.
     pub actors: SceneActors,
     /// Counts.
@@ -947,6 +1129,20 @@ impl LoadedMap {
         self.levels
             .iter()
             .position(|l| l.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The [`PlacedActor`] with the id `id`.
+    #[must_use]
+    pub fn placed_actor(&self, id: u32) -> Option<&PlacedActor> {
+        let i = self.placed.binary_search_by_key(&id, |a| a.id).ok()?;
+        self.placed.get(i)
+    }
+
+    /// The first [`PlacedActor`] named `name` (an object name is unique in
+    /// its level; the persistent level comes first).
+    #[must_use]
+    pub fn placed_actor_named(&self, name: &str) -> Option<&PlacedActor> {
+        self.placed.iter().find(|a| a.name == name)
     }
 }
 
@@ -2090,10 +2286,12 @@ pub fn load_map(
     let mut builder = CollisionSceneBuilder::new();
     let mut pending_dynamic: Vec<Placement> = Vec::new();
     let mut bodies: Vec<DynamicBody> = Vec::new();
+    let mut placed: Vec<PlacedActor> = Vec::new();
     let mut actors = SceneActors::default();
 
     for (level_index, (scene, info)) in scenes.iter_mut().enumerate() {
         let level = level_index as u8;
+        placed.extend(placed_actors(scene, level));
         let offset = Affine::from_translation(info.offset.as_dvec3());
         info.actors = scene.actors.len();
         stats.actors += scene.actors.len();
@@ -2370,6 +2568,7 @@ pub fn load_map(
         collision,
         dynamic,
         bodies,
+        placed,
         actors,
         stats,
         warnings,
@@ -2474,5 +2673,83 @@ mod tests {
         );
         assert_eq!(actor_id(1, 5), Some(65_541));
         assert_eq!(actor_id(0, 70_000), None);
+    }
+
+    /// A hand-written level: a hub in `PHYS_Rotating` with a rate, a rock
+    /// hard-attached to it, a lamp attached to the rock, a mover with a
+    /// stored rate in `PHYS_Interpolating`, and actors that take no part.
+    fn wheel_scene() -> SceneFile {
+        let text = serde_json::json!({
+            "format": SCENE_FORMAT, "version": SCENE_VERSION, "package": "Wheel",
+            "actors": [
+                {"slot": 4, "name": "Hub", "class": "Engine.InterpActor", "kind": "interp_actor",
+                 "location": [100.0, 200.0, 300.0], "rotation": [0, 16384, 0],
+                 "draw_scale": 2.0, "pre_pivot": [0.0, 50.0, 0.0],
+                 "physics": "PHYS_Rotating",
+                 "instance": {"RotationRate": {"Pitch": 0, "Roll": 0, "Yaw": -9102}}},
+                {"slot": 9, "name": "Rock", "class": "Engine.InterpActor", "kind": "interp_actor",
+                 "location": [100.0, 700.0, 300.0], "physics": "PHYS_Interpolating",
+                 "base": "wheel.TheWorld.PersistentLevel.Hub", "hard_attach": true,
+                 "block_actors": true},
+                {"slot": 2, "name": "Lamp", "class": "Engine.PointLightMovable", "kind": "light",
+                 "base": "Wheel.TheWorld.PersistentLevel.Rock", "hard_attach": null,
+                 "instance": {"bIgnoreBaseRotation": true}},
+                {"slot": 7, "name": "Mover", "class": "Engine.InterpActor", "kind": "interp_actor",
+                 "physics": "PHYS_Interpolating",
+                 "instance": {"RotationRate": {"Roll": 4551, "Pitch": 1.5, "Yaw": "x"}}},
+                {"slot": 11, "name": "Still", "class": "Engine.InterpActor", "kind": "interp_actor",
+                 "physics": "PHYS_Interpolating", "instance": {"RotationRate": {"Yaw": 0}}},
+                {"slot": 12, "name": "Elsewhere", "class": "Engine.StaticMeshActor",
+                 "kind": "static_mesh", "base": "Other.TheWorld.PersistentLevel.Hub"},
+                {"slot": 13, "name": "Self", "class": "Engine.StaticMeshActor",
+                 "kind": "static_mesh", "base": "Wheel.TheWorld.PersistentLevel.Self"},
+                {"slot": 14, "name": "Lost", "class": "Engine.StaticMeshActor",
+                 "kind": "static_mesh", "base": "Wheel.TheWorld.PersistentLevel.Gone"},
+            ],
+        });
+        serde_json::from_value(text).expect("the scene parses")
+    }
+
+    #[test]
+    fn placed_actors_are_the_attached_their_bases_and_the_turning() {
+        let scene = wheel_scene();
+        let placed = placed_actors(&scene, 3);
+        let id = |slot: usize| actor_id(3, slot).unwrap();
+        // Sorted by id (slot): the lamp (2), the hub (4), the mover (7), the
+        // rock (9). The actor without a rate, the one whose base is in
+        // another package, the one based on itself and the one whose base
+        // does not exist take no part.
+        assert_eq!(
+            placed.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            ["Lamp", "Hub", "Mover", "Rock"]
+        );
+        let hub = &placed[1];
+        assert_eq!(hub.id, id(4));
+        assert_eq!(hub.kind, "interp_actor");
+        assert_eq!(hub.location, Vec3::new(100.0, 200.0, 300.0));
+        assert_eq!(hub.rotation, [0, 16_384, 0]);
+        assert_eq!(hub.draw_scale, 2.0);
+        assert_eq!(hub.draw_scale3d, Vec3::ONE);
+        assert_eq!(hub.pre_pivot, Vec3::new(0.0, 50.0, 0.0));
+        assert_eq!(hub.physics, PlacedPhysics::Rotating);
+        // (pitch, yaw, roll).
+        assert_eq!(hub.rotation_rate, [0, -9102, 0]);
+        assert_eq!(hub.base, None);
+        let rock = &placed[3];
+        // The base's package is matched without regard to case.
+        assert_eq!(rock.base, Some(id(4)));
+        assert!(rock.hard_attach);
+        assert!(rock.block_actors && !hub.block_actors);
+        assert_eq!(rock.physics, PlacedPhysics::Interpolating);
+        assert_eq!(rock.rotation_rate, [0; 3]);
+        let lamp = &placed[0];
+        assert_eq!(lamp.base, Some(id(9)));
+        assert!(!lamp.hard_attach, "a null flag is false");
+        assert!(lamp.ignore_base_rotation);
+        assert_eq!(lamp.physics, PlacedPhysics::Other);
+        // A member that is not a whole number is 0; the others stay.
+        let mover = &placed[2];
+        assert_eq!(mover.rotation_rate, [0, 0, 4551]);
+        assert_eq!(mover.base, None);
     }
 }

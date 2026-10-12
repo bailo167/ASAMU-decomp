@@ -693,6 +693,143 @@ fn falling_rocks_move_their_collision_when_activated() {
     assert!((loc.z - (lower - 50.0)).abs() < 1e-3, "{loc} vs {lower}");
 }
 
+/// [`objects_fixture`] with a falling rock that spins: `bShouldRotate`, a
+/// yaw rate of 9000 units/s reached at once (`RotationAccelRate` 100 with
+/// the 0.017 s update: the whole difference in one step).
+fn spinning_rock_fixture() -> MemorySource {
+    let mut src = MemorySource::new();
+    let mut s = SceneFixture::new("AG-IceCave", -50_000.0);
+    floor(&mut s, 10_000.0, 0.0);
+    s.player_start(Vec3::new(0.0, 0.0, 50.0), 0);
+    s.mesh_actor(
+        "asamu.ASAMUFallingRock",
+        "falling_rock",
+        "Pkg.Rock",
+        Place::at(Vec3::new(0.0, 1500.0, 3000.0)),
+        "COLLIDE_CustomDefault",
+        None,
+        json!({
+            "fallDistance": 20000.0, "fallingLowerRate": 300.0, "fallingHigherRate": 300.0,
+            "bShouldRotate": true, "RotationAccelRate": 100.0,
+            "rotationLowerRate": {"X": 0.0, "Y": 9000.0, "Z": 0.0},
+            "rotationHigherRate": {"X": 0.0, "Y": 9000.0, "Z": 0.0},
+        }),
+    );
+    s.write(&mut src);
+    let mut meshes = MeshFixtures::new();
+    let (v, t) = box_mesh(Vec3::splat(-50.0), Vec3::splat(50.0));
+    meshes.add("Pkg.Rock", "AG-IceCave", v, t);
+    meshes.write(&mut src, true);
+    src
+}
+
+/// Where the point `p` that rides a base rigidly is after the base went
+/// from the pose `from` to the pose `to` (location, rotation as pitch, yaw,
+/// roll): its offset from the base's location keeps its coordinates in the
+/// base's frame (GRAPPLE.md G-AT-8). The rows of the rotation matrix with
+/// the sine table's flooring of each angle to 4 units; exact sines.
+fn rigid(p: Vec3, from: (Vec3, [i32; 3]), to: (Vec3, [i32; 3])) -> Vec3 {
+    use glam::DVec3;
+    let rows = |rotation: [i32; 3]| {
+        let sin_cos = |units: i32| {
+            let index = (units as u32 >> 2) & 0x3FFF;
+            (f64::from(index) * std::f64::consts::TAU / 16_384.0).sin_cos()
+        };
+        let (sp, cp) = sin_cos(rotation[0]);
+        let (sy, cy) = sin_cos(rotation[1]);
+        let (sr, cr) = sin_cos(rotation[2]);
+        [
+            DVec3::new(cp * cy, cp * sy, sp),
+            DVec3::new(sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp),
+            DVec3::new(-(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp),
+        ]
+    };
+    let offset = (p - from.0).as_dvec3();
+    let (old, new) = (rows(from.1), rows(to.1));
+    let local = DVec3::new(offset.dot(old[0]), offset.dot(old[1]), offset.dot(old[2]));
+    (to.0.as_dvec3() + new[0] * local.x + new[1] * local.y + new[2] * local.z).as_vec3()
+}
+
+/// G-WO-3: the anchor follows a falling rock. While it is grappled the rock
+/// brakes without turning, so the anchor goes down with it; after the
+/// release it falls and spins again, and the helper, still based on it,
+/// rides the spin too.
+#[test]
+fn the_anchor_on_a_falling_rock_rides_its_fall_and_its_spin() {
+    let src = spinning_rock_fixture();
+    let mut g = game(&src, "AG-IceCave");
+    let rock_id = g.scene_map().unwrap().actors.rocks[0].id;
+    let rock = |g: &Game| {
+        let s = g.scene_runtime().unwrap().rocks[0];
+        (s.location, s.rotation)
+    };
+    g.set_falling_rocks_active(true);
+    for _ in 0..30 {
+        g.tick(&idle()).unwrap();
+    }
+    let (at, rotation) = rock(&g);
+    assert!(at.z < 2990.0, "the rock falls: {at}");
+    assert_ne!(rotation, [0; 3], "the rock spins: {rotation:?}");
+    // What an anchor rides: the collision world has the rock's pose.
+    assert_eq!(g.world().actor_location(rock_id), Some(at));
+    assert_eq!(g.world().actor_rotation(rock_id), Some(rotation));
+    // Look a little below the rock's middle (it falls on while the view
+    // turns) and fire.
+    let target = at - Vec3::Z * 10.0;
+    g.tick(&look_at(&g, target)).unwrap();
+    let pose0 = rock(&g);
+    let fire = InputFrame {
+        grapple_held: true,
+        ..InputFrame::default()
+    };
+    let r = g.tick(&fire).unwrap();
+    let attached = r.events.gun.attached.expect("the grapple attaches");
+    assert_eq!(attached.surface.actor, Some(rock_id));
+    let anchor0 = attached.anchor;
+    // Grappled: the rock brakes (`decelRate` 1000) and does not turn.
+    let mut lowest = pose0.0.z;
+    for tick in 0..25 {
+        if tick > 0 {
+            g.tick(&fire).unwrap();
+        }
+        let pose = rock(&g);
+        assert_eq!(
+            pose.1, pose0.1,
+            "tick {tick}: a grappled rock does not turn"
+        );
+        assert!(pose.0.z <= lowest);
+        lowest = pose.0.z;
+        let anchor = g.player().script.gun.anchor().expect("attached");
+        // The same rotation: the rock's translation (added tick by tick in
+        // `f32`: steps of 2.4e-4 uu at these heights).
+        let expected = anchor0 + (pose.0 - pose0.0);
+        assert!(
+            (anchor - expected).length() < 0.01,
+            "tick {tick}: {anchor} vs {expected}"
+        );
+    }
+    assert!(lowest < pose0.0.z - 20.0, "the rock went on down: {lowest}");
+    // Released: the rock falls and spins again; the helper stays based on
+    // it and rides both (cosmetic then, G-AT-8).
+    g.tick(&idle()).unwrap();
+    assert!(g.player().script.gun.anchor().is_none());
+    let mut turned = false;
+    for tick in 0..40 {
+        g.tick(&idle()).unwrap();
+        let pose = rock(&g);
+        turned |= pose.1 != pose0.1;
+        let helper = g.player().script.gun.follow.expect("still based").helper;
+        let expected = rigid(anchor0, pose0, pose);
+        // Carried once per tick in `f32` at coordinates of a few thousand
+        // uu (steps of 2.4e-4 uu): well within 0.05 uu after 65 carries.
+        assert!(
+            (helper - expected).length() < 0.05,
+            "tick {tick}: the helper is at {helper}, the rock took its place to {expected}"
+        );
+    }
+    assert!(turned, "the released rock spins again");
+}
+
 #[test]
 fn workshop_starts_in_story_mode() {
     let mut src = MemorySource::new();

@@ -5,7 +5,7 @@
 //! ([`SceneCollision`]: the static [`asamu_world::collision::CollisionScene`]
 //! shared through an `Arc`, plus the current dynamic instances, the loaded
 //! sub-levels and the state the gameplay script reads from hit actors —
-//! crystal charge, moving actors' locations). It implements
+//! crystal charge, moving actors' locations and rotations). It implements
 //! [`CollisionWorld`].
 //!
 //! # The original's world check
@@ -211,6 +211,10 @@ pub struct SceneCollision {
     pub crystals: Vec<(u32, bool)>,
     /// `(actor id, location)` of moving actors, sorted by id.
     pub actor_locations: Vec<(u32, Vec3)>,
+    /// `(actor id, rotation as pitch, yaw, roll)` of the same actors, sorted
+    /// by id: what an anchor helper based on one of them turns with
+    /// (GRAPPLE.md G-AT-8).
+    pub actor_rotations: Vec<(u32, [i32; 3])>,
 }
 
 impl SceneCollision {
@@ -229,12 +233,42 @@ impl SceneCollision {
             .map(|r| (r.id, r.location))
             .collect();
         actor_locations.sort_unstable_by_key(|a| a.0);
+        let mut actor_rotations: Vec<(u32, [i32; 3])> = map
+            .actors
+            .rocks
+            .iter()
+            .map(|r| (r.id, r.rotation))
+            .collect();
+        actor_rotations.sort_unstable_by_key(|a| a.0);
         Self {
             map,
             dynamic,
             level_mask,
             crystals,
             actor_locations,
+            actor_rotations,
+        }
+    }
+
+    /// Records where the moving actor `id` is now: its location and its
+    /// rotation (pitch, yaw, roll). An actor that was not tracked yet is
+    /// added.
+    pub fn set_actor_pose(&mut self, id: u32, location: Vec3, rotation: [i32; 3]) {
+        match self.actor_locations.binary_search_by_key(&id, |a| a.0) {
+            Ok(i) => {
+                if let Some(slot) = self.actor_locations.get_mut(i) {
+                    slot.1 = location;
+                }
+            }
+            Err(i) => self.actor_locations.insert(i, (id, location)),
+        }
+        match self.actor_rotations.binary_search_by_key(&id, |a| a.0) {
+            Ok(i) => {
+                if let Some(slot) = self.actor_rotations.get_mut(i) {
+                    slot.1 = rotation;
+                }
+            }
+            Err(i) => self.actor_rotations.insert(i, (id, rotation)),
         }
     }
 
@@ -492,6 +526,16 @@ impl SceneCollision {
             .ok()?;
         self.actor_locations.get(i).map(|a| a.1)
     }
+
+    /// Current rotation (pitch, yaw, roll) of a moving actor.
+    #[must_use]
+    pub fn actor_rotation(&self, id: u32) -> Option<[i32; 3]> {
+        let i = self
+            .actor_rotations
+            .binary_search_by_key(&id, |a| a.0)
+            .ok()?;
+        self.actor_rotations.get(i).map(|a| a.1)
+    }
 }
 
 /// Boxes plus an optional converted scene (see the module docs).
@@ -598,6 +642,14 @@ impl CollisionWorld for GameWorld {
         self.boxes
             .actor_location(id)
             .or_else(|| self.scene.as_ref().and_then(|s| s.actor_location(id)))
+    }
+
+    fn actor_rotation(&self, id: u32) -> Option<[i32; 3]> {
+        // The boxes of hand-made levels do not turn; a converted scene's
+        // moving actors do.
+        self.boxes
+            .actor_rotation(id)
+            .or_else(|| self.scene.as_ref().and_then(|s| s.actor_rotation(id)))
     }
 
     fn sweep_box(&self, start: Vec3, end: Vec3, half_extents: Vec3) -> Option<TraceHit> {

@@ -903,25 +903,25 @@ fn insert_events(events: &mut StepEvents, at: usize, extra: &StepEvents) {
     }
 }
 
-/// Copies the rocks' locations into the collision world (anchor following)
-/// and re-places their collision after a reset.
+/// Copies the rocks' locations and rotations into the collision world
+/// (anchor following: a helper based on a rock rides both, GRAPPLE.md
+/// G-AT-8) and re-places their collision after a reset.
 fn sync_rock_collision(s: &SceneGame, sc: &mut SceneCollision) {
     for (state, def) in s.runtime.rocks.iter().zip(&s.map.actors.rocks) {
-        if let Ok(i) = sc.actor_locations.binary_search_by_key(&def.id, |a| a.0)
-            && let Some(slot) = sc.actor_locations.get_mut(i)
+        let Some(known) = sc.actor_location(def.id) else {
+            continue;
+        };
+        if known != state.location
+            && let Some(body) = def.body.and_then(|b| s.map.bodies.get(b))
         {
-            if slot.1 != state.location
-                && let Some(body) = def.body.and_then(|b| s.map.bodies.get(b))
-            {
-                let actor = scene::body_transform(body, state.location, state.rotation);
-                for (index, relative) in &body.parts {
-                    if let Some(inst) = sc.dynamic.get_mut(*index) {
-                        s.map.collision.place_dynamic(inst, relative.then(&actor));
-                    }
+            let actor = scene::body_transform(body, state.location, state.rotation);
+            for (index, relative) in &body.parts {
+                if let Some(inst) = sc.dynamic.get_mut(*index) {
+                    s.map.collision.place_dynamic(inst, relative.then(&actor));
                 }
             }
-            slot.1 = state.location;
         }
+        sc.set_actor_pose(def.id, state.location, state.rotation);
     }
 }
 

@@ -900,7 +900,13 @@ Declaration-order consistency with stock UE3/UDK classes is used as a supporting
 | +0x188 | PhysicsVolume | PhysicsVolume* | gravity, friction, terminal velocity, zone velocity | STRONG |
 | +0x190 | Velocity | FVector | integrated by CalcVelocity/NewFallVelocity; recomputed from displacement | CONFIRMED (usage) |
 | +0x19C | Acceleration | FVector | input to CalcVelocity/physFalling; overwritten by UDK CalcVelocity | CONFIRMED (usage) |
-| +0x1D8 | RelativeLocation | FVector | compared with Location − Base.Location for floor-check skip | TENTATIVE |
+| +0x0E8 bit 41 | bHardAttach | bool | chooses how a moved base carries the actor (10.5) | STRONG (bit from the script-property layout) |
+| +0x0E8 bit 42 | bIgnoreBaseRotation | bool | an attached actor keeps its rotation (10.5) | STRONG |
+| +0x0E8 bit 44 | bSkipAttachedMoves | bool | a hard-attached, non-blocking actor is moved by its base without a sweep of its own; it does **not** skip the move (10.5) | STRONG |
+| +0x0E8 bit 62 | bBlockActors | bool | a hard attachment that blocks actors is carried like a soft one (10.5) | STRONG |
+| +0x1C8 / +0x1D0 | Attached (data, count) | TArray<Actor*> | the loop over attached actors at the end of MoveActor; SetBase appends and removes | CONFIRMED (usage) |
+| +0x1D8 | RelativeLocation | FVector | compared with Location − Base.Location for floor-check skip; written by SetBase, read by MoveActor for attached actors (10.5) | STRONG |
+| +0x1E4 | RelativeRotation | FRotator | written by SetBase / UpdateRelativeRotation, read by MoveActor for attached actors (10.5) | STRONG |
 | +0x1F0 | CollisionComponent | PrimitiveComponent* | its +0x200 Translation offsets trace origins; cylinder test in GetCylinderExtent | STRONG |
 | +0x1FC/+0x200/+0x204 | RotationRate | FRotator | read by SetRotationRate (AI) and actor rotation | STRONG |
 | +0x208 | PendingTouch | Actor* | PostTouch chain at end of performPhysics | STRONG |
@@ -1149,8 +1155,8 @@ tick(dt):
 
 Present but not specified here (not expected for the player) [TENTATIVE]: `APawn::physSwimming`,
 `physFlying`, `physLadder`, `physSpider` (uses `GetGravityDirection` = −Floor when spidering),
-`physNavMeshWalking`, `AActor::physProjectile`, `AActor::physInterpolating` (matinee/movers),
-rigid-body modes. Actor-level `AActor::physWalking @ 0x100AE2760` / `AActor::physFalling @ 0x100AE07A0`
+`physNavMeshWalking`, `AActor::physProjectile`, rigid-body modes (`AActor::physInterpolating`, the
+Matinee movers' routine, and `AActor::physicsRotation` are in 10.5). Actor-level `AActor::physWalking @ 0x100AE2760` / `AActor::physFalling @ 0x100AE07A0`
 / `AActor::stepUp` (fixed 35.0 step, |Nz| < 0.08) / `AActor::physicsRotation` / `AActor::moveSmooth`
 serve non-pawn actors and AI. `APawn::physicsRotation @ 0x100AD9000` is superseded by the UDK version.
 If script ever switches the player into one of these modes (e.g. ladders, swimming, grapple via
@@ -1642,6 +1648,117 @@ first tick sees 0.4 s pass in it, so its delays and Matinees are up to 0.4 s fur
 pawn, than ours. What a script does within that tick was not read: TENTATIVE, and a candidate for the
 timing leftovers of PARITY_FINDINGS P13.
 
+### 10.5 Attached actors, the turn by `RotationRate`, and what moves a Matinee's actor
+
+Read in the user's macOS executable (2026-10-12; `objdump -d --x86-asm-syntax=intel` over the ranges named
+below, vtable slots resolved from `__ZTV6AActor`, `__ZTV12AInterpActor` and `__ZTV16UInterpTrackMove`).
+CONFIRMED for the code unless a line says otherwise; flag names are those of the script-property layout
+(bit n of the 64-bit word at Actor+0xE8). In our own words. Measured on the recording KM1 where a line says
+so (the numbers are in GRAPPLE.md G-AT-8 and KISMET_RUNTIME.md §6).
+
+**The turn by `RotationRate`.** `AActor::performPhysics @ 0x100AD86E0` dispatches on the physics byte
+through the 15-entry table at `0x100AD8954`: 0 returns at once; 1 walking, 2 falling, 6 projectile,
+7 `physInterpolating` (slot +0x4B8), 10 rigid body, 11 soft body and 14 custom call their routine; 5 has no
+routine and goes straight on. After the dispatch (`0x100AD8866` to `0x100AD88B4`), unless the actor is being
+deleted, it calls `physicsRotation` (slot +0x470) when **the low 16 bits of a member of the rate at
+Actor+0x1FC are not zero and the physics is neither 7 nor 10**. So an actor in physics 5 (the rotating one)
+with a rate turns, and one in the interpolating physics never turns by its rate.
+
+`AActor::physicsRotation @ 0x100AD93C0`: nothing for a time step of 0 or less. Otherwise, for each member,
+the whole 32-bit rate is converted to `f32`, multiplied by the time step and **truncated** towards zero
+(`cvtsi2ss`, `mulss`, `cvttss2si` at `0x100AD9406` to `0x100AD9438`); the new rotation is the old one plus
+these three integers (not wrapped to 16 bits). No fraction is kept from tick to tick, no desired rotation
+is involved, and the velocity argument is not used. The actor is then moved with a zero translation to
+that rotation (`UWorld::MoveActor` at `0x100AD951C`) and its angular velocity is set from the two
+rotations. Consequences: the turn's speed depends on the frame time (9102 units/s: 116 units a frame at
+12.82 ms, 151 a tick at 1/60 s), and a rate below one unit per frame never turns the actor. Measured: a
+rock in the rotating physics turned by the truncated step in 2,249 of 2,251 frames.
+
+**What moves a Matinee's actor.** The movement track has no update of its own: its vtable slot (+0x2D8) is
+the base class's `UInterpTrack::UpdateTrack @ 0x1008CE400`, an empty function, so the sequence update of a
+`SeqAct_Interp` only advances the action's position. The actor moves itself, in its own tick:
+`AActor::physInterpolating @ 0x100AE5A70` finds the playing action's movement track for the actor
+(`FindInterpMoveTrack`, slot +0x3A0) and `AActor::MoveWithInterpMoveTrack @ 0x100AE5180` moves the actor to
+the track's value at the action's position (`MoveActor` at `0x100AE545A`), sets its velocity from the
+displacement, and for an attached actor stores its transform relative to its base again. Without a track
+it zeroes the velocity and moves nothing. `physInterpolating` is called from the dispatch above for physics
+7 only (and from `USeqAct_Interp::SetPosition`, again only for actors in physics 7). **An actor that a
+Matinee group names but that is not in the interpolating physics is not moved by the track.** Measured: a
+rock in the rotating physics that a Matinee group names turned by its rate's truncated steps and not by
+the track.
+
+**Nothing puts such an actor into the interpolating physics when its Matinee starts** (a second,
+independent reading on 2026-10-12, by the call sites instead of the routines; CONFIRMED (native, script
+names, level data)):
+
+- `USeqAct_Interp::Activated @ 0x1008A4DB0` registers each actor of a group with the action (the action's
+  slot +0x338), runs `performPhysics` for it only when its physics is 7 already (the compare at
+  `0x1008A4F92`) and raises the script event `InterpolationStarted`. It stores no physics.
+- In the whole executable the physics byte (Actor+0xC0) is written by `AActor::setPhysics`, by the network
+  receive routines, by `APawn::TickSimulated` and by the path-building scout, and no routine of
+  `USeqAct_Interp`, `UInterpGroupInst` or `UInterpTrackInstMove` calls `setPhysics` (slot +0x420); the AI
+  group's instance does, for pawns (`objdump -d` over the text, filtered for the store and for the slot).
+- The script side: `Actor`'s handler of that event is empty, and `InterpActor`'s calls `ClearTimer` twice and
+  its moving-sound function, nothing else (`asamu-inspect calls Engine.u InterpActor`). The rocks are plain
+  `Engine.InterpActor`s.
+- The levels: no Kismet action of a story level sets an actor's physics (the action classes of the seven
+  maps' graphs). The actors outside the interpolating physics that a Matinee group with a keyed movement
+  track names are six, all in AG-ParadiseCave: the three rocks in the rotating physics, and three
+  `StaticMeshActor`s (`_4`, `_173`, `_347`; static, not movable and in no physics by the class's defaults,
+  no other physics stored), each in a group with a movement track and nothing else. (Two lights of
+  AG-Workshop in such groups have movement tracks without a key; AG-StarHaven's `PHYS_None` rope actors are
+  in groups with a vector-property track only; skeletal actors in physics none are in groups with
+  animation tracks.)
+- Measured for one of the static mesh actors (KM1): the pawn stood at rest on `StaticMeshActor_173` in
+  frames 25,453 to 25,469 and 25,578 to 25,585 (0.21 s and 0.09 s, 1.4 s apart; velocity and acceleration
+  zero), and its location did not change by one step of the float (1/128 uu) in either, where the group's
+  track goes 50 uu down in 5 s and back at once, eased (slower than 0.04 uu/s only within 3 ms of a
+  turn). The same pawn at rest on the turning `InterpActor_16` was carried every frame. So the static mesh
+  actor did not move.
+
+The same reading agrees with the rest of this section: the dispatch table of `performPhysics` (case 5 goes
+straight to the rate's turn, case 0 returns), the truncating conversions of `physicsRotation`, the three
+branches of the attached-actor loop (`0x1008EAA19`: physics 7; `0x1008EAA2D`: the mask of bits 41 and 62;
+`0x1008EA414`: bit 42), and the bit numbers of the four flags (their order among `Actor`'s boolean
+properties). The placed levels store `RelativeLocation` and `RelativeRotation` for attached actors; for the
+80 actors attached to an `InterpActor` in AG-ParadiseCave they are within 1.3 uu and 0.05°
+of what the two actors' placements give, so taking the relative transform from the placements (ours) and
+from the stored values (the original) is the same to that precision.
+
+**Attached actors.** `UWorld::MoveActor @ 0x1008E94A0` ends, on every path that moved or turned the actor,
+with a loop over the actor's attached list (from `0x1008E9E9B`). A move with a zero translation and a new
+rotation runs it; no move flag skips it; an attached entry is skipped only when it is null or attached to
+a skeletal component. For each attached actor:
+
+1. **Rigid** (`0x1008EAA19` to `0x1008EAA47`): the attached actor is in physics 7, **or** it is
+   hard-attached and does not block actors. Its new location is its stored `RelativeLocation` taken
+   through the base's new transform (the rotation matrix of the base's new rotation, the base's location
+   after its move); its new rotation is rebuilt from the matrix of its stored `RelativeRotation` times the
+   base's, or stays its own with `bIgnoreBaseRotation`. If that move is stopped short or does not reach
+   the rotation, the base's whole move is undone (`0x1008EB2EF`).
+2. Otherwise with `bIgnoreBaseRotation` (`0x1008EA414`): moved by the base's translation, rotation kept.
+3. Otherwise: its rotation gains the base's change, computed member by member from the two rotations with
+   their low two bits masked out (`0x1008E9F1A` to `0x1008E9F5E`). When the base's rotation changed (the
+   members compared as whole integers), its location is taken through the inverse of the base's old
+   transform (`FMatrix::Inverse` at `0x1008EA651`) and through the new one; when it did not, it is moved
+   by the base's translation. A pawn's location is carried the same way; its rotation is handed to its
+   script.
+
+Each attached actor is moved by a call of the same routine (move flag 1), so what is attached to it
+follows in turn. Every matrix here is built from the 16 384-entry sine table (`(angle >> 2) & 0x3FFF`, the
+cosine a quarter turn on; `0x1008E9F6C`, `0x1008E9FA4`), with the rows `(cp·cy, cp·sy, sp)`,
+`(sr·sp·cy − cr·sy, sr·sp·sy + cr·cy, −sr·cp)`, `(−(cr·sp·cy + sr·sy), cy·sr − cr·sp·sy, cr·cp)`.
+
+What a rigid actor keeps is written when its base is set (`AActor::SetBase @ 0x1006D0EB0`): without a hard
+attachment its offset from the base **in world axes** and its rotation relative to the base's
+(`AActor::UpdateRelativeRotation @ 0x1006CEF90`); with a hard attachment its whole transform relative to
+the base's (the two rotation-and-location matrices, one inverted). A base that is world geometry never
+gets the actor into its attached list, so nothing based on world geometry is carried.
+
+Not read: the pawn's script side of a turn of its base, and what an encroaching mover does to actors that
+are not attached to it. **Ours:** `asamu_player::grapple_gun::carried_by_base` (rule 3 for the grapple's
+anchor helper) and `asamu_game::kismet_host` ("Turning actors", "Attached actors").
+
 ## 11. Verification log
 
 An independent adversarial pass (2026-10-09) re-read the local decompilation, the disassembly and the
@@ -1722,3 +1839,14 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   reported first).
 - 2026-10-12 (game layer, second wave, second pass): section 10.4 (the clamp of a tick's time in
   `UWorld::Tick` and the 0.4 s first tick of a level, measured on four recorded level starts).
+- 2026-10-12 (the grapple's anchor on turning rocks): section 10.5 (how a moved actor carries its attached
+  actors in `UWorld::MoveActor`, what `AActor::SetBase` stores, the turn by `RotationRate` in
+  `AActor::physicsRotation` and when `AActor::performPhysics` calls it, and that a Matinee's actor moves in
+  `AActor::physInterpolating`, which only the interpolating physics reaches); the flags and fields it uses
+  added to 7.1.
+- 2026-10-12 (the same, adversarial pass): 10.5 re-read by another route (call sites of `setPhysics`,
+  `performPhysics`, `physInterpolating` and `MoveWithInterpMoveTrack` in the whole text, the stores to the
+  physics byte, `USeqAct_Interp::Activated` and `SetPosition`, the script handlers by name, the levels'
+  action classes and stored properties). No claim changed; added: nothing switches an actor's physics when
+  its Matinee starts, the three static mesh actors a Matinee names without moving them (one measured), and
+  the stored relative transforms of attached actors against their placements.

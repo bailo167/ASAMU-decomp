@@ -35,7 +35,7 @@ addresses are published as facts. This document was adversarially re-verified (s
 | 5 | Range: a hit counts only if it is **closer than 5000 uu (`fMaxDistance`) to the eye**; the trace itself is 16 384 uu long. | CONFIRMED (src, cdo) |
 | 6 | Budget: firing needs `used < capacity`; each attach costs one; **any landing refills** (except on floors tagged `NotLandable`); a charged `ASAMURechargeCrystal` refills; capacity starts at **0** and Kismet sets it per level (values in the maps: 0, 1, 2, 3). Capacities ≥ 4 behave as unlimited. | CONFIRMED (src, cdo, map decode) |
 | 7 | Release-instant targets (`ASAMUReleaseGrappleInstantInterface`: recharge crystals, glow flowers) attach, suppress the pull and auto-release after a 0.05 s gun timer. | CONFIRMED (src, cdo) |
-| 8 | The anchor follows the hit actor **only if it is an `InterpActor`**; on anything else (including moving `DynamicSMActor`s such as `ASAMUFloatingRock`) it stays at the world-space hit point. | CONFIRMED (src) |
+| 8 | The anchor follows the hit actor **only if it is an `InterpActor`**; on anything else (including moving `DynamicSMActor`s such as `ASAMUFloatingRock`) it stays at the world-space hit point. It follows **rigidly**: the actor's translation and its turn about its own location (G-AT-8). | CONFIRMED (src); the rigid riding CONFIRMED (native) and measured |
 | 9 | Release speed is **frame-rate dependent**: proximity release halves a velocity that already contains the last pull increment (≈ `50 000·dt` uu/s near 200 uu); a button release hands over up to `2000 + dt·10⁷/d`. | CONFIRMED (src) arithmetic; magnitudes are model predictions to verify by trace |
 | 10 | No cooldown: the "just released" flag clears on the next gun tick. A re-press while the weapon is still in its firing state waits for the next 0.1 s refire check. | CONFIRMED (src, incl. stock `Engine.Weapon`) |
 | 11 | Frame order is now **STRONG**: input → map-placed actors → player controller → pawn (physics) → power-jump actor → rocket boots → gun (pull, release) → anchor helper. Every scripted velocity write after the pawn's tick is integrated by the next frame's physics. | CONFIRMED (native) iteration/append rules; STRONG overall (§15) |
@@ -79,7 +79,7 @@ Format facts used by the throwaway local scripts (never committed; easy to rewri
 | Object | Class chain | Grapple role |
 |---|---|---|
 | Grapple gun | `GrappleGun` → `UDKBase.UDKWeapon` → `Engine.Weapon` | Fires the instant-hit trace, owns the budget, the anchor, the pull (`UpdateGrapple`) and release (`ReleaseGrappleButton`). Created by `ASAMUGameInfo.AddDefaultInventory`. |
-| Anchor helper | `GrappleGunHitLocActor` → `Actor` (empty class) | Spawned by the gun; placed at the hit point and based on the hit actor so the anchor can ride moving targets. |
+| Anchor helper | `GrappleGunHitLocActor` → `Actor` (empty class) | Spawned by the gun; placed at the hit point and based on the hit actor so the anchor can ride moving targets. Not hard-attached (`bHardAttach` is not set by the class or by the gun), no collision, no physics of its own: the engine moves it with every move of its base (G-AT-8). |
 | Controller | `ASAMUPlayerController` → `UDKPlayerController` → `GamePlayerController` → `PlayerController` | States `Grappling` (attached) and `ReleaseGrapple` (one-tick transition back to `PlayerWalking`). `PlayerFlying` is the stock cheat fly mode, not used by the grapple. |
 | Pawn | `ASAMUPawn` → `UTPawn` → `UDKPawn` → `GamePawn` → `Pawn` | Physics Walking/Falling → **Flying** on attach and → **Falling** on release. Pawn script states `Shooting` (attach) and `Release` (release) only drive sounds/animation. |
 | Target interfaces | `ASAMUGrappleAbleInterface` (`Grappled`, `UnGrappled`), `ASAMUReleaseGrappleInstantInterface` (marker), `ASAMUDoesNotAcceptGrappleDecal` (marker) | Implemented by `ASAMURechargeCrystal` (all three), `ASAMUGlowFlower` (all three), `ASAMUFallingRock` and `ASAMUFallingWhenGrappledRock` (grapple-able only). All four are `InterpActor`s. |
@@ -269,11 +269,48 @@ Gameplay state:
   placed at the hit point and based on it); otherwise the anchor stays at the world hit point. This final
   decision overrides the follow flag the interactable branch of G-AT-3 set earlier, so
   `grappleInteractable`-tagged non-InterpActors and moving `DynamicSMActor`s (`ASAMUFloatingRock`) do not
-  carry the anchor.
+  carry the anchor. An attach on anything else leaves the helper alone: it stays based on the last
+  `InterpActor` it was put on and goes on riding it, unread [CONFIRMED (src); measured on the recording
+  KM1 in AG-ParadiseCave: 13 of the 66 attachments are on an `InterpActor`, and in each of them the gun's
+  anchor is the helper's location in every frame; in the other 53 the helper is elsewhere (at its
+  farthest 1,062 to 56,087 uu from the anchor): at the place it was spawned at before the first such
+  attach, and from then on moving with the actor it was last put on].
 - **G-AT-8 Following**: every gun tick (attached or not) while the follow flag is set, `A` := helper location.
-  The helper is a based actor, so it moves with its base's translation [STRONG]; orbiting with base rotation
-  is stock basing behaviour [TENTATIVE] (falling rocks only rotate while *not* grappled; rotating movers would
-  matter). The flag is not cleared on release (only cosmetic afterwards).
+  The flag is not cleared on release (only cosmetic afterwards). The helper is an actor based on the hit
+  actor without a hard attachment, and the engine moves such an actor whenever its base has moved or
+  turned, **rigidly** [CONFIRMED (native) `UWorld::MoveActor @ 0x1008E94A0`, the loop over the moved
+  actor's attached actors from `0x1008E9E9B`; NATIVE_PHYSICS.md 10.5]:
+  - the base's rotation did not change (its three members compared as whole integers): the helper is
+    moved by the base's translation;
+  - it changed, also when the base only turned where it stands: the helper's location is taken through
+    the inverse of the base's old transform (rotation and location) and through its new one, so the
+    helper's offset from the base's location keeps its coordinates in the base's frame. The helper's own
+    rotation gains the base's change;
+  - both transforms come from the 16 384-entry sine table, which floors each angle to 4 units: a turn
+    that stays within one such step moves nothing;
+  - the base's own base carries the base first: a rock attached to a turning hub is moved by the hub's
+    move, and that move of the rock carries the helper.
+
+  The base moves in its own tick (a Matinee mover to its track's value, an actor in the rotating physics
+  by its `RotationRate`; KISMET_RUNTIME.md §6), and map-placed actors tick before the gun (G-TM-2), so the
+  anchor the gun reads is the helper's place after this frame's move of its base.
+
+  Measured on KM1 (the recorder reads the helper's location and the gun's anchor every frame). The
+  helper's path over the 13 stretches between one attach on an `InterpActor` and the next:
+  - 2 on lifts that move along one line: straight to within 0.02 uu over 6,443 and 8,086 uu, the
+    second the whole length of a lift's Matinee track there (8,086.0 uu);
+  - 1 on a platform that bobs 96 uu, within 0.27 uu of a vertical line;
+  - **10 on turning rocks: a circle about the rock actor's own axis through the rock actor's
+    `Location`.** The fitted axis passes 0.04 to 0.54 uu from the `Location` the level gives the actor
+    (the circle's centre is 107 to 706 uu along the axis from it: the helper is not in the plane of that
+    point) and is 0.000° to 0.008° from the axis the actor's rotation gives: its local X axis where the
+    turn is a roll (seven stretches, by a track or by a rate), its local Z axis where a track yaws it
+    (two), the world's Z axis for the rock with a rate of yaw. Radii 2,106 to 5,064 uu, 0.4 to 4.5
+    turns, 15,704 frames, radial deviation 0.06 to 0.75 uu rms (1.35 at most; what single-precision
+    rounding at these coordinates adds up to over the frames, TENTATIVE). 15,407 of the 15,693
+    single-frame steps are within half a unit of a whole multiple of 4 units of angle (all of them in
+    eight stretches; in the other two the rock's turn changes more than one member of its rotator): the
+    sine table's steps.
 - **G-AT-10 Velocity**: unchanged by attaching. Changing physics to Flying or Falling never touches velocity;
   only `PHYS_None`/`PHYS_Rotating` zero it [CONFIRMED (native) `APawn::setPhysics @ 0x100AD8C00` →
   `AActor::setPhysics @ 0x100AD8540`]. The first flying update (same frame, §15) applies drag and the 2000
@@ -288,7 +325,14 @@ particle; decal (skipped for `ASAMUDoesNotAcceptGrappleDecal` targets); impact p
 beam-loop sounds (fade-in 0.5 s); pawn script state `Shooting`; hand animation blends; rumble
 `RUMBLE_GRAPPLE` (from the `Grappling` state's begin code); Midas/goat variants.
 → Rust (G-AT-*): `attach()` atomic within the input event; `anchor_mode = Follow(actor_id) | Fixed(point)`;
-decrement the input-lock counter; physics → Flying.
+decrement the input-lock counter; physics → Flying. Following: `grapple_gun::carried_by_base` moves the
+helper from the base's last pose to its present one every gun tick; the world reports a tracked actor's
+pose through `CollisionWorld::actor_location` and `actor_rotation` (the game: Matinee movers, turning
+actors, what is attached to either, falling rocks). Ours drops the helper at an attach on anything that is
+not an `InterpActor` (nothing reads it until the next attach on one, which places it anew). Tests:
+`crates/asamu-player/tests/moving_anchor.rs`, the wheel tests of `asamu_game::kismet_host`,
+`crates/asamu-game/tests/converted_level.rs` (a spinning falling rock) and, on the converted
+AG-ParadiseCave, `crates/asamu-game/tests/parity_moving_anchor.rs`.
 
 ## 7. While attached
 
@@ -506,7 +550,9 @@ release, glows for `glowDuration` (10 s default, visual). 15 in DarkCave.
 **G-WO-3 `ASAMUFallingRock`** (`InterpActor`; grapple-able): while active and not grappled it rotates, falls
 and respawns in a cycle (Kismet `SeqAct_ToggleFallingRocksActive` via the falling-rock manager); while
 grappled it decelerates to a stop without rotating (`decelRate` 1000); on release it resumes. Motion steps
-use a latent 0.017 s loop (frame-quantised). The anchor follows it (G-AT-7). 134 in IceCave.
+use a latent 0.017 s loop (frame-quantised). The anchor follows it (G-AT-7): down with it while it
+brakes, and, the helper staying based on it after the release, around with it when it spins again
+(G-AT-8; cosmetic then). 134 in IceCave.
 
 **G-WO-4 `ASAMUFallingWhenGrappledRock`** (`InterpActor`; grapple-able): the first grapple starts a one-way fall
 of `fallDistance` (1000 default) at a randomised rate; the anchor rides it. Every player death resets all of
@@ -515,8 +561,16 @@ them to their start position and re-arms them. 32 in IceCave.
 **G-WO-5 `ASAMUFloatingRock`** (`DynamicSMActor`, no grapple interface, wanders around its start point):
 ordinary target; **the anchor does not follow** it (G-AT-7).
 
-**G-WO-6 Movers.** Any `InterpActor` (187 in Village, 393 in StarHaven, …): anchor follows. The pawn is not
-based on anything while flying.
+**G-WO-6 Movers.** Any `InterpActor` (187 in Village, 393 in StarHaven, …): anchor follows, rigidly
+(G-AT-8). The pawn is not based on anything while flying. A mover that turns about its own location
+carries the anchor around it; that is the whole motion of AG-ParadiseCave's wheel rocks, each an
+`InterpActor` whose mesh sits at the end of an arm (its `PrePivot`) from an actor location that never
+moves. Three kinds occur there [CONFIRMED (level data); the motion rules CONFIRMED (native) and measured,
+KISMET_RUNTIME.md §6]: rocks a Matinee track turns (`PHYS_Interpolating`; e.g. `InterpActor_64`, one
+turn of roll in 7.2 s), rocks the engine turns by their `RotationRate` (`PHYS_Rotating`; `InterpActor_51`
+at 9102 units/s of yaw, and `InterpActor_25` and `_101`, which a Matinee group names without moving them),
+and rocks hard-attached to either (9 `grappleRock` actors on Matinee platforms, 1 on the turning
+`InterpActor_16`).
 → Rust (G-WO-*): world objects expose `on_grappled/on_ungrappled`, `release_instant`, `accepts_decal`,
 `anchor_follows` (true iff InterpActor-like); `asamu-world` owns their state machines.
 
@@ -618,7 +672,8 @@ the explicit actor order above, configurable so trace recordings can confirm it.
 2. Input dispatch placement: are key events executed before the world tick (assumed) or inside the
    controller's interaction tick? Only the order relative to map-placed actors (crystals) would change.
 3. Camera-animation contribution to the aim rotation (camera cache = last frame's POV?).
-4. Rotation following of based anchor helpers on rotating movers.
+4. ~~Rotation following of based anchor helpers on rotating movers.~~ Answered (G-AT-8): the helper rides
+   its base rigidly.
 5. Which `SeqAct_SetMaxGrapples` instance applies at which point of each level (Kismet workstream).
 6. Does the weapon start each level in `Active`, or does the 0.33 s equip delay apply on map start?
 7. `MaxSpeedModifier` for the player is taken as 1 (human-controlled; never crouched; walking-slowly is
@@ -642,7 +697,7 @@ flag, anchor, used/capacity, camera POV, events.
 | T8 | Budget 2, two grapples mid-air, third press | Third press: fail sound; after landing (not `NotLandable`), count 0. |
 | T9 | Recharge crystal charged / uncharged | Charged: attach, 0.05 s hang (drag only), release, count 0; uncharged: same hang, count +1. |
 | T10 | Glow flower | Count +1, 0.05 s hang, release. |
-| T11 | Moving InterpActor platform | Anchor follows each tick. |
+| T11 | Moving InterpActor platform | Anchor follows each tick: the platform's translation, and its turn about its own location (measured on KM1, G-AT-8). |
 | T12 | `ASAMUFloatingRock` | Anchor stays at the original hit point. |
 | T13 | IceCave `TopOnlyGrappleAble` surface from below / above | Rejected silently unless normal Z ≥ 0.8. |
 | T14 | Re-press < 0.1 s after a release | Second grapple at the next 0.1 s refire check. |
@@ -703,3 +758,8 @@ bytecode literal search and native re-reads, as in §0. Outcome per item:
   before BSP, 1.0 before a brush), with what follows for the range check and the proximity release; G-TG-2:
   the crosshair's trace is a bullet trace too (and, later the same day, `grapple_gun::crosshair` measures
   to its reported hit).
+- 2026-10-12 (the anchor on turning rocks): G-AT-8: the helper rides its base rigidly, translation and
+  turn (the attached-actor loop of `UWorld::MoveActor` read natively; measured on the 13 stretches of the
+  recording KM1 in which the helper rides an `InterpActor`, 10 of them on turning rocks); G-AT-7: the
+  helper keeps its last base through attaches on other targets; G-WO-3 and G-WO-6 say what follows; open
+  question 4 answered.
