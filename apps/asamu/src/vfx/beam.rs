@@ -40,10 +40,12 @@ pub const UNLOCK_MIDAS: u32 = 20;
 /// (`bEnabled` false on their LOD level). CONFIRMED (content).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BeamEmitter {
-    /// Beam width, UU (`ParticleModuleSize.StartSize`, constant). The type
-    /// data's taper is off (`TaperMethod` none, factor and scale 1): the
-    /// beam is as wide at the anchor as at the hand.
-    pub width_uu: f32,
+    /// The beam's size, UU (`ParticleModuleSize.StartSize`, constant;
+    /// CONFIRMED (content)): what the engine puts to **each side** of the
+    /// beam's centre line ([`Self::width_uu`]). The type data's taper is off
+    /// (`TaperMethod` none, factor and scale 1): the beam is as wide at the
+    /// anchor as at the hand.
+    pub size_uu: f32,
     /// Source tangent strength: the gun sets emitter 0 to 1000 at start
     /// (`SetBeamSourceStrength(0, 1000, 0)`, CONFIRMED (src)); emitter 1
     /// keeps the asset's `ParticleModuleBeamSource.SourceStrength`, 1250.
@@ -61,18 +63,38 @@ pub struct BeamEmitter {
 /// first.
 pub const EMITTERS: [BeamEmitter; 2] = [
     BeamEmitter {
-        width_uu: 4.0,
+        size_uu: 4.0,
         source_strength: 1000.0,
         noise_min_uu: -1.0,
         noise_max_uu: 1.0,
     },
     BeamEmitter {
-        width_uu: 2.0,
+        size_uu: 2.0,
         source_strength: 1250.0,
         noise_min_uu: -1.3,
         noise_max_uu: 6.5,
     },
 ];
+impl BeamEmitter {
+    /// The width of the beam's ribbon, UU: twice the size.
+    ///
+    /// The engine's beam vertex builder writes, for every point of the
+    /// beam, one vertex at the point plus and one at the point minus the
+    /// unit vector across the beam times the particle's size (times the
+    /// taper, 1 here, and the component's scale): the size is the ribbon's
+    /// half width. CONFIRMED (native): `FDynamicBeam2EmitterData::
+    /// FillData_Noise` @ 0x100A509E0, which `DoBufferFill` @ 0x100A505E0
+    /// runs for an emitter with noise, and `FillVertexData_NoNoise`
+    /// @ 0x100A546C0 (read locally, nothing quoted). TENTATIVE: that the
+    /// component's scale is 1 (the field of view it is given changes its
+    /// transform, VFX_DECALS.md §2; whether that reaches the scale the
+    /// builder multiplies by was not read).
+    #[must_use]
+    pub fn width_uu(&self) -> f32 {
+        2.0 * self.size_uu
+    }
+}
+
 /// Beams each emitter keeps alive (`ParticleModuleTypeDataBeam2.
 /// MaxBeamCount` 2, with the spawn rate and the bursts at zero: an always-on
 /// beam emitter fills up to its count). CONFIRMED (content) for the count,
@@ -513,6 +535,25 @@ pub fn ribbon(points: &[Vec3], width: f32, min_width: impl Fn(f32) -> f32) -> Ri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ribbons are the emitters' size to each side of the centre line:
+    /// 8 and 4 UU wide, the wide beam first.
+    #[test]
+    fn a_beam_is_its_size_to_each_side() {
+        assert_eq!(EMITTERS.map(|e| e.size_uu), [4.0, 2.0]);
+        assert_eq!(EMITTERS.map(|e| e.width_uu()), [8.0, 4.0]);
+        // A ribbon of that width seen face on: its two edges are the size
+        // away from the centre line on either side.
+        let pts = [Vec3::new(0.0, 0.0, -100.0), Vec3::new(50.0, 0.0, -100.0)];
+        let r = ribbon(&pts, EMITTERS[0].width_uu(), |_| 0.0);
+        let (a, b) = (
+            Vec3::from_array(r.positions[0]),
+            Vec3::from_array(r.positions[1]),
+        );
+        assert!((a.distance(b) - 8.0).abs() < 1e-4, "{a} {b}");
+        assert!((a.distance(pts[0]) - EMITTERS[0].size_uu).abs() < 1e-4);
+        assert!((b.distance(pts[0]) - EMITTERS[0].size_uu).abs() < 1e-4);
+    }
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)

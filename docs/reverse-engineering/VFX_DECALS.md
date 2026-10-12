@@ -133,7 +133,8 @@ hides the beam at once).
 **Content** [CONFIRMED (content)]. The system has five emitters: three beam emitters named `GrappleBeam` and two
 sprite emitters. Only the first two (emitters 0 and 1 of the system's `Emitters` list) are enabled; the third beam
 emitter and both sprite emitters have `bEnabled` false on their LOD level **(V)**. Per enabled beam emitter:
-`ParticleModuleSize.StartSize` 4 (emitter 0) and 2 (emitter 1), constant — the beam widths in UU;
+`ParticleModuleSize.StartSize` 4 (emitter 0) and 2 (emitter 1), constant — the beams' sizes in UU, which the
+engine puts to each side of the centre line (the ribbons are 8 and 4 UU wide, see "Width" below);
 `ParticleModuleTypeDataBeam2`: 40 interpolation points, at most 2 beams, speed 0, no sheets, the texture laid once
 along the beam (`TextureTile` 1), no taper (method none, factor and scale 1: as wide at the anchor as at the hand);
 spawn rate and bursts zero (an always-on beam emitter keeps its beams alive itself; the converted emitters' peak
@@ -148,6 +149,18 @@ wide emitter, 0.5 to 1 s on the narrow) and the colour modules (a colour over li
 drive the particles' colour only, which the material does not read (below). The required module carries near and
 far fade and cull distances (150 / 10 and 2000 / 2100 UU) without the flags that would switch them on among its
 set properties: not applied [STRONG].
+
+**Width** (corrected 2026-10-13 by the verification of the beam; before, the runtime drew the ribbons `StartSize`
+wide, half of this) [CONFIRMED (native); read locally with `tools/ghidra-scripts/DecompileToLocal.java`, nothing
+quoted]. The beam's vertex builder runs once per frame per emitter (`FDynamicBeam2EmitterData::DoBufferFill`
+@ 0x100A505E0: `FillData_Noise` @ 0x100A509E0 for an emitter whose noise is on, else `FillVertexData_NoNoise`
+@ 0x100A546C0). Both write, for every point along the beam, two vertices: the point plus and the point minus the
+unit vector across the beam (perpendicular to the beam and to the line of sight) times the particle's size, times
+the taper value when tapering is on, times the scale the emitter's source carries. The size is therefore the
+ribbon's **half** width: 8 UU for the wide emitter and 4 UU for the narrow one. TENTATIVE: that the source's scale
+is 1 here (no scale is among the component's set properties; whether the field of view the component is given,
+above, reaches that scale was not read). A frame of the original with a held grapple would settle the width at
+the hand.
 
 **Material** [CONFIRMED (content): the expressions of `AdventureSuitEffects.MainBeam_Mat`, the parent of
 `GrappleBeam_inst`, read with `asamu-inspect props`; described, not transcribed]. Additive, unlit, two-sided. Its
@@ -214,9 +227,15 @@ beam colour ≥ 10, goat ≥ 15, Midas ≥ 20 (parkour ≥ 25) (`CheckIfUnlocked
   both with the renderer's own projection matrices (`vfx::emitter`: at most 0.05 pixel at the socket and 0.25 at
   the anchor over five window shapes and five FOVs; `vfx::tests::the_beam_meets_the_socket_and_the_anchor_on_screen`
   through the whole chain). The beam is hidden while the hand is not on screen (ours; the gun cannot fire then).
-  Without a converted hand the beam starts 24 UU ahead, 10 right and 12 below the eye and is drawn by the world
-  camera (PLACEHOLDER).
-- *Shape.* Four ribbons: two strands for each of the two emitters, 4 and 2 UU wide, each through 41 points of its
+  Without a converted hand (the graybox, the Sandbox's own levels without converted data) the beam is drawn by
+  the world camera from a start **outside the picture** (PLACEHOLDER, ours): 33 UU ahead (the socket's distance in
+  the grappling pose), 58 % of the half width right of the middle (where the socket is then), and below the bottom
+  edge by just enough that the first row of the widest ribbon is outside at any field of view and window shape.
+  Before 2026-10-13 it started at a fixed offset from the eye (24 UU ahead, 10 right, 12 below), which at 90° in a
+  16:9 window is inside the picture, 40 pixels above its bottom edge: with no hand to hide it the beam began in
+  mid-air with a cut end, and the place wandered with the field of view and the window's shape.
+- *Shape.* Four ribbons: two strands for each of the two emitters, 8 and 4 UU wide (their sizes, 4 and 2, to each
+  side: "Width" above), each through 41 points of its
   emitter's cubic Hermite curve (source tangent 1000 or 1250 along the socket's axis, target tangent 20 along the
   chord; TENTATIVE: that the engine normalises the source tangent, and the target's direction), displaced across
   the beam by 20 noise points drawn from the emitter's range, which glide to new places every 0.2 s (TENTATIVE:
@@ -743,6 +762,48 @@ and the self-test's options (`vfx/selftest.rs`: `_RANGE`, `_HOLD`, `_PIN`, `_TAR
 - the log's one line per grapple puts the socket, in the idle pose at the attach, at 58 % of the screen's half
   width to the right and 70 % of its half height below the middle, 33 UU ahead of the eye.
 
+Verification of the beam (2026-10-13, a second pass by another hand; hidden, silent runs on the same machine, the
+pictures kept outside every checkout). Two things changed after it: the ribbons are the emitters' size to each
+side ("Width", §2: at the hand the beam is now about two fingers wide, where the check above says one), and
+without a hand the beam comes in from below the picture (§2, "Runtime").
+
+- *How it was measured.* `ASAMU_VFX_PROBE` (`vfx/probe.rs`, developer-only) writes one line per frame the beam is
+  drawn: the pixel the overlay camera's own projection puts the socket node on, the pixel it puts the middle of
+  the first row of each ribbon's mesh on (the mesh as the renderer gets it that frame), the same for the anchor
+  under the world camera and the ribbons' last rows, and, on an actor the level moves, the pixel of the point of
+  the drawn actor that was under the anchor at the attach (from the placement `kismet::sync_actor_render` moves
+  the meshes by). It also draws dots, so that a window read-back can be measured by itself (a script finds them):
+  a ball that is a child of the socket node with a small one at the beam's first row in front of it, and a ball
+  at the anchor drawn by the world camera with a small one at the beam's last row drawn by the overlay camera.
+  `ASAMU_VFX_PROBE=nohand` hides the hand's meshes: the socket is behind the hand. The self-test got
+  `ASAMU_VFX_SELFTEST_VELOCITY=X,Y,Z` for a grapple fired while falling.
+- *The start.* 22 runs, 3,567 frames with the beam: AG-ParadiseCave, AG-IceCave and AG-Darkcave; windows of
+  1280 × 720, 1920 × 1080 and 800 × 1000; the field of view at 60°, 90° and 120° (the settings' range; the zoom is
+  story mode, where the gun does not fire: G-AC-0); standing, pinned, pulled, falling at 2,500 UU/s and held on a
+  rock of a turning wheel. The middle of the beam's first row is never further from the socket than **1.6 pixels**
+  (1.59 at 1920 × 1080; 1.28 at 1280 × 720; 0.54 at 800 × 1000), and in the nine read-backs with dots the two dots' centres
+  are 0.2 to 0.9 pixels apart. That distance is not the mapping's, which the tests hold to hundredths of a pixel:
+  it is the step of a single-precision world coordinate. AG-ParadiseCave's start is 210,000 UU from the origin
+  along one axis, where a coordinate is 1/41 UU coarse (half a millimetre of the renderer's metres), and a pixel
+  at the hand's distance is 1/28 UU (1280 wide) to 1/41 UU (1920 wide).
+  The hand's own vertices are rounded the same way by the renderer, so nothing in this module can do better;
+  rendering relative to the camera would (not done, and not the beam's to do).
+- *The end.* With the anchor inside the window the middle of the beam's last row is within **0.1 pixel** of the
+  anchor in each of 2,984 frames, and on the turning rock (`InterpActor_64`, held for 6 s from 1,500, 2,500,
+  3,000 and 4,000 UU, pinned and pulled) within **0.05 pixel** of the drawn rock's point in each of 1,494
+  frames. In a recording of a ride towards that rock (20 pictures a second) the beam's end stays on the
+  same spot of the rock from the attach until the rock passes behind the hand and out of the picture.
+- *By eye.* In every picture with the hand the beam comes out from behind it, between thumb and fingers or past
+  the knuckles according to where the anchor is, and never crosses in front of it; with the anchor behind the
+  player it leaves downwards past the wrist. Against the fog, the pale stone, the dark cave and the blue ice the
+  white core and the blue edge both read. At 60° the beam is 1.7 times as wide at the hand as at 90°, at 120°
+  0.6 times: it is a world-space beam next to a hand of constant size (the original's arrangement, §2).
+- *No hand.* The graybox and the Sandbox's own level: the beam comes in over the bottom edge right of the middle
+  and reads against white ground and a pale sky. Story mode (AG-Workshop) and a level's opening flight
+  (AG-ParadiseCave): the fire is not a grapple, nothing is drawn. A grapple that is held while the hand gets
+  hidden could not be produced in a run; the rule is held by `vfx::tests::the_beam_is_shown_with_the_gun_and_the_hand`
+  and the hand's own test of the flag.
+
 Not checked by eye: the HUD parts (crosshair ring, hand lamps, lens overlay) — the screenshot camera does not
 draw the HUD — and Kismet hiding, unhiding or moving a decal in play.
 
@@ -752,8 +813,8 @@ draw the HUD — and Kismet hiding, unhiding or moving a decal in play.
   the noise range's three components and the smoothing are applied, whether beam particles linger after release;
   the original's bloom around the beam (ours has a display mapping and a coverage term instead, §2); the
   goat-mode tongue systems. (The system's sprite emitters are disabled: nothing to draw.) NEEDS EVIDENCE: a
-  frame of the original with a held grapple would settle the palm-side start, the beam's width at the hand and
-  the place of the flash.
+  frame of the original with a held grapple would settle the palm-side start, the beam's width at the hand (the
+  engine draws the size to each side, §2 "Width"; whether a scale enters is TENTATIVE) and the place of the flash.
 - The flash and the impact: mesh and distortion emitters are not drawn; the impact does not turn with its actor;
   `Beam_Connect_Crystal_PS` / `Beam_connect_flower_PS` are not spawned.
 - The crosshair movie's art and fade timing; the pause menu's re-show of the crosshair (§5); the hand plate

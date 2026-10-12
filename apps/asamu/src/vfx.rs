@@ -1,7 +1,7 @@
 //! Gameplay visual effects and level decals (VFX_DECALS.md):
 //!
 //! - **grapple beam** (`GrappleGun.MyBeam`): the two enabled beam emitters
-//!   (4 and 2 UU wide, two strands each) as camera-facing noisy ribbons from
+//!   (8 and 4 UU wide, two strands each) as camera-facing noisy ribbons from
 //!   the hand mesh's socket to the anchor while attached, drawn with the hand
 //!   ([`emitter`]), with the beam material's three textures and the gun's
 //!   colour ([`beam`], [`beam_material`]);
@@ -47,6 +47,7 @@ mod hit_decals;
 mod level_decals;
 mod lights;
 mod materials;
+mod probe;
 mod selftest;
 
 use std::collections::HashMap;
@@ -80,11 +81,25 @@ pub(crate) use beam_material::BeamMaterial;
 pub(crate) use emitter::{BeamSocket, BeamView, SOCKET_NODE};
 
 /// PLACEHOLDER: where the beam starts when there is no hand to start it
-/// from (no converted hand mesh, or its socket is missing): this far from
-/// the eye, UU: forward, right, down, leaving straight ahead. The original
-/// always has the hand; with it the beam starts at the hand's socket
-/// ([`emitter`]).
-const BEAM_HAND_OFFSET_UU: [f32; 3] = [24.0, 10.0, 12.0];
+/// from (the graybox and the Sandbox's own levels without converted data, a
+/// hand mesh without its socket): a place **outside the picture**, just
+/// below its bottom edge ([`fallback_source`]), this far right of the middle
+/// as a fraction of the view's half width. The original always has the
+/// hand; with it the beam starts at the hand's socket ([`emitter`]).
+///
+/// Ours, and the least wrong picture found: with no hand to hide it, a start
+/// inside the picture is a beam that begins in mid-air with a cut end (at a
+/// fixed offset from the eye it also wandered over the screen with the field
+/// of view and the window's shape). From below the edge the beam comes from
+/// where the unseen hand would be: as far right of the middle as the hand's
+/// socket is in the grappling pose (58 % of the half width, read off the
+/// converted hand in a running level).
+const BEAM_FALLBACK_RIGHT: f32 = 0.58;
+/// PLACEHOLDER: how far in front of the eye the beam starts without a hand,
+/// UU: the socket's distance in the grappling pose (33 UU, read off the
+/// converted hand in a running level), so the beam is as wide on screen
+/// where it comes in as it is at the hand.
+const BEAM_FALLBACK_DEPTH_UU: f32 = 33.0;
 /// The narrowest a beam ribbon is drawn, pixels (ours: thinner strips break
 /// up into dots; see [`beam::ribbon`]).
 const BEAM_MIN_PIXELS: f32 = 1.5;
@@ -301,6 +316,7 @@ impl Plugin for VfxPlugin {
                     .before(AssetEventSystems),
             );
         selftest::add(app);
+        probe::add(app);
     }
 }
 
@@ -1243,16 +1259,15 @@ impl BeamFrame {
     }
 
     /// PLACEHOLDER: the frame of a beam without a hand, drawn by the world
-    /// camera from [`BEAM_HAND_OFFSET_UU`], leaving straight ahead.
+    /// camera from [`fallback_source`], leaving straight ahead.
     fn without_hand(
         end: Vec3,
         view: Vec2,
         world_from_view: bevy::math::Affine3A,
         viewport_height: f32,
     ) -> Self {
-        let [forward, right, down] = BEAM_HAND_OFFSET_UU;
         Self {
-            source: Vec3::new(right, -down, -forward) * SCALE.bevy_units_per_uu,
+            source: fallback_source(view),
             axis: Vec3::NEG_Z,
             end,
             map: emitter::FovMap::IDENTITY,
@@ -1260,6 +1275,39 @@ impl BeamFrame {
             pixel: emitter::pixel_size(1.0, view.y, viewport_height),
         }
     }
+}
+
+/// PLACEHOLDER: where the beam starts without a hand, in the world camera's
+/// space, for a view with these half extents ([`emitter::half_extents`]):
+/// [`BEAM_FALLBACK_DEPTH_UU`] in front of the eye, [`BEAM_FALLBACK_RIGHT`]
+/// of the half width right of the middle, and below the picture's bottom
+/// edge by just enough that the first row of the widest ribbon is outside
+/// the picture at any field of view and window shape.
+///
+/// A vertex of that row is at most the ribbon's half width `s` from the
+/// start, in any direction across the line of sight; it shows when its
+/// height over its depth is inside the view's half height `t`, and moving
+/// it by `(a, b)` up and away changes that by `a + t·b`, at most
+/// `s·√(1 + t²)`. A quarter more than that is kept.
+fn fallback_source(view: Vec2) -> Vec3 {
+    let unit = SCALE.bevy_units_per_uu;
+    let depth = BEAM_FALLBACK_DEPTH_UU * unit;
+    let view = if view.is_finite() {
+        view.abs()
+    } else {
+        Vec2::ONE
+    };
+    let half_width = beam::EMITTERS
+        .iter()
+        .map(|e| e.size_uu)
+        .fold(0.0f32, f32::max)
+        * unit;
+    let below = 1.25 * half_width * (1.0 + view.y * view.y).sqrt();
+    Vec3::new(
+        BEAM_FALLBACK_RIGHT * view.x * depth,
+        -(view.y * depth + below),
+        -depth,
+    )
 }
 
 /// One strand of the beam as a ribbon in world space: the emitter's curve
@@ -1280,7 +1328,7 @@ fn strand_ribbon(
         noise,
         unit,
     );
-    let mut ribbon = beam::ribbon(&path, emitter.width_uu * unit, |depth| {
+    let mut ribbon = beam::ribbon(&path, emitter.width_uu() * unit, |depth| {
         BEAM_MIN_PIXELS * frame.pixel * depth
     });
     for p in &mut ribbon.positions {
@@ -1424,10 +1472,10 @@ fn shape_bursts(
     };
     let hand = match hands.iter().next() {
         // No hand at all: the flash is where the beam's fallback start is,
-        // drawn by the world camera (PLACEHOLDER, as that start).
+        // drawn by the world camera (PLACEHOLDER, as that start: outside
+        // the picture, so only what reaches over the edge shows).
         None => {
-            let [forward, right, down] = BEAM_HAND_OFFSET_UU;
-            let source = Vec3::new(right, -down, -forward) * SCALE.bevy_units_per_uu;
+            let source = fallback_source(view_half);
             Some((
                 bursts::socket_transform(
                     view_tf.transform_point(source),
@@ -2104,27 +2152,103 @@ mod tests {
         );
     }
 
-    /// Without a hand the beam is drawn by the world camera from the
-    /// fallback start at the lower right of the view, leaving straight
-    /// ahead.
+    /// Without a hand the beam is drawn by the world camera, leaving straight
+    /// ahead from a start outside the picture: below the bottom edge, right
+    /// of the middle, with the whole first row of every strand's ribbon
+    /// outside (no cut end in mid-air), and the ribbon comes into the picture
+    /// on its way to the anchor. At the narrowest and the widest field of
+    /// view the settings offer and the default, in wide, narrow and upright
+    /// windows.
     #[test]
-    fn a_beam_without_a_hand_starts_at_the_lower_right_of_the_view() {
+    fn a_beam_without_a_hand_comes_in_from_below_the_picture() {
+        use bevy::camera::CameraProjection;
+        let unit = SCALE.bevy_units_per_uu;
+        let [lo, hi] = asamu_game::save::Settings::FOV_RANGE;
+        for (w, h) in [
+            (1280.0f32, 720.0f32),
+            (1920.0, 1080.0),
+            (1600.0, 1200.0),
+            (2560.0, 1080.0),
+            (800.0, 1000.0),
+        ] {
+            let viewport = Vec2::new(w, h);
+            let aspect = w / h;
+            for fov in [lo, 90.0, hi] {
+                let view = perspective(fov, aspect);
+                let half = emitter::half_extents(view.fov, aspect);
+                for anchor_uu in [
+                    Vec3::new(0.0, 0.0, -355.0),
+                    Vec3::new(-400.0, 300.0, -1500.0),
+                    Vec3::new(900.0, -100.0, -4800.0),
+                ] {
+                    let frame = BeamFrame::without_hand(
+                        anchor_uu * unit,
+                        half,
+                        bevy::math::Affine3A::IDENTITY,
+                        h,
+                    );
+                    assert_eq!(frame.axis, Vec3::NEG_Z);
+                    assert_eq!(frame.map, emitter::FovMap::IDENTITY);
+                    assert!((frame.source.z + BEAM_FALLBACK_DEPTH_UU * unit).abs() < 1e-6);
+                    let pixel = |p: Vec3| {
+                        emitter::pixel_of(view.get_clip_from_view(), p, viewport)
+                            .expect("in front of the eye")
+                    };
+                    let start = pixel(frame.source);
+                    assert!(
+                        start.x > w * 0.5 && start.x < w && start.y > h,
+                        "{w}x{h} fov {fov}: the start is at {start}"
+                    );
+                    for (i, e, _) in strands() {
+                        let noise = beam::BeamNoise::for_strand(e, i as u64).offsets();
+                        let rb = strand_ribbon(&frame, e, &noise);
+                        let at = |k: usize| pixel(Vec3::from_array(rb.positions[k]));
+                        let middle = (Vec3::from_array(rb.positions[0])
+                            + Vec3::from_array(rb.positions[1]))
+                            * 0.5;
+                        assert!(middle.distance(frame.source) < 1e-5);
+                        assert!(
+                            at(0).y > h && at(1).y > h,
+                            "{w}x{h} fov {fov}: the cut end shows at {} and {}",
+                            at(0),
+                            at(1)
+                        );
+                        let inside = (0..rb.positions.len()).any(|k| {
+                            let p = at(k);
+                            p.x >= 0.0 && p.x <= w && p.y >= 0.0 && p.y <= h
+                        });
+                        assert!(
+                            inside,
+                            "{w}x{h} fov {fov}: the beam never enters the picture"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// At the hand a strand's ribbon is twice its emitter's size wide, in the
+    /// world's view (the minimum width in pixels is far below that there).
+    #[test]
+    fn a_strand_is_twice_its_emitters_size_wide_at_the_hand() {
+        let unit = SCALE.bevy_units_per_uu;
         let half = emitter::half_extents(vertical(90.0, 16.0 / 9.0), 16.0 / 9.0);
         let frame = BeamFrame::without_hand(
-            Vec3::new(0.0, 0.0, -10.0),
+            Vec3::new(0.0, 0.0, -1500.0) * unit,
             half,
             bevy::math::Affine3A::IDENTITY,
             720.0,
         );
-        let [f, r, d] = BEAM_HAND_OFFSET_UU;
-        let unit = SCALE.bevy_units_per_uu;
-        assert!(frame.source.distance(Vec3::new(r, -d, -f) * unit) < 1e-6);
-        assert_eq!(frame.axis, Vec3::NEG_Z);
-        assert_eq!(frame.map, emitter::FovMap::IDENTITY);
-        let rb = strand_ribbon(&frame, &beam::EMITTERS[0], &[]);
-        let first = (Vec3::from_array(rb.positions[0]) + Vec3::from_array(rb.positions[1])) * 0.5;
-        assert!(first.distance(frame.source) < 1e-5);
-        assert!(first.x > 0.0 && first.y < 0.0 && first.z < 0.0);
+        for (_, e, _) in strands() {
+            let rb = strand_ribbon(&frame, e, &[]);
+            let wide =
+                Vec3::from_array(rb.positions[0]).distance(Vec3::from_array(rb.positions[1]));
+            assert!(
+                (wide - 2.0 * e.size_uu * unit).abs() < 1e-4 * unit,
+                "{wide} for size {}",
+                e.size_uu
+            );
+        }
     }
 
     #[test]
