@@ -13,6 +13,14 @@
 //! version-1 recording it checks that none of that changes its conversion,
 //! for a later one that the conversion uses it as documented, and prints
 //! the counts.
+//!
+//! The last four tests are identities of the recordings themselves, with no
+//! simulation (`docs/PARITY_FINDINGS.md` V17 and V18, and two questions of
+//! its sections 6 and 7 that the keyboard recording of 2026-10-12 settles):
+//! the float form of a walking pawn's velocity; that the grapple is attached
+//! exactly while the pawn's physics mode is flying; that the Workshop's
+//! console speed survives a held sprint key; and the two limits of the view
+//! pitch.
 
 #![allow(clippy::unwrap_used)]
 
@@ -705,6 +713,249 @@ fn optional_members_markers_and_dropped_frames_of_real_recordings() {
                 // "no entry" for one it does not explain and ends a run
                 // after a record without input wherever it is.)
             }
+        }
+    }
+}
+
+/// `true` if the pawn of `p` stands on a mover (an `InterpActor`).
+fn on_a_mover(p: &RawPlayer) -> bool {
+    p.base
+        .as_deref()
+        .is_some_and(|b| b.starts_with("InterpActor"))
+}
+
+/// Findings V17 (NATIVE_PHYSICS.md 2.4): after a walking tick the pawn's
+/// velocity is its displacement times the `f32` reciprocal of the frame
+/// length, component by component, with no vertical part; not the
+/// displacement divided by the frame length. Counted over every pair of
+/// consecutive walking records whose pawn does not stand on a mover.
+///
+/// - The three recordings of 2026-10-10 (about 61 frames a second): 27,443
+///   pairs, all of them in the reciprocal form and 23,839 in the division
+///   form too.
+/// - The recording of 2026-10-12 (78 frames a second): 25,630 pairs, all in
+///   the reciprocal form, 20,610 in the division form.
+///
+/// On a mover the velocity leaves the mover's own movement out while the
+/// displacement has it, so the identity does not hold there: of the 552
+/// pairs on an `InterpActor` in the recording of 2026-10-12, 55 are in the
+/// form (the mover stood still). Those pairs are counted apart and not
+/// judged.
+#[test]
+fn walking_velocity_is_the_displacement_times_the_reciprocal_of_the_frame_length() {
+    let Some(files) = recordings() else {
+        eprintln!("skipped: ASAMU_TRACE_RAW_DIR is not set to a directory with recordings");
+        return;
+    };
+    for (name, file) in &files {
+        let (mut pairs, mut reciprocal, mut division) = (0, 0, 0);
+        let (mut on_movers, mut on_movers_in_form) = (0, 0);
+        let mut first_miss = None;
+        for run in split_runs(&file.records) {
+            for w in run.windows(2) {
+                let (a, b) = (w[0].player.as_ref().unwrap(), w[1].player.as_ref().unwrap());
+                if a.physics != 1 || b.physics != 1 {
+                    continue;
+                }
+                let dt = w[1].world.as_ref().unwrap().delta_seconds;
+                let (dx, dy) = (b.location.x - a.location.x, b.location.y - a.location.y);
+                let r = 1.0_f32 / dt;
+                let is = |x: f32, y: f32| {
+                    b.velocity.x.to_bits() == x.to_bits()
+                        && b.velocity.y.to_bits() == y.to_bits()
+                        && b.velocity.z == 0.0
+                };
+                if on_a_mover(a) || on_a_mover(b) {
+                    on_movers += 1;
+                    on_movers_in_form += usize::from(is(dx * r, dy * r));
+                    continue;
+                }
+                pairs += 1;
+                if is(dx * r, dy * r) {
+                    reciprocal += 1;
+                } else if first_miss.is_none() {
+                    first_miss = Some(w[1].frame);
+                }
+                division += usize::from(is(dx / dt, dy / dt));
+            }
+        }
+        println!(
+            "{name}: {pairs} pairs of consecutive walking records off movers: velocity = \
+             displacement x (1/dt) on {reciprocal}, = displacement / dt on {division}; on a mover \
+             {on_movers} pairs, {on_movers_in_form} of them in the form"
+        );
+        assert_eq!(
+            reciprocal, pairs,
+            "{name}: first miss at frame {first_miss:?}"
+        );
+        // The counts the documentation quotes, by recording.
+        let expected = match (file.records.len(), name.as_str()) {
+            (3_001, n) if n.contains("WS1") => Some((3_000, 2_586, 0, 0)),
+            (14_311, n) if n.contains("DC1") => Some((8_187, 7_085, 0, 0)),
+            (27_925, n) if n.contains("PLAY2") => Some((16_256, 14_168, 0, 0)),
+            (52_266, n) if n.contains("KM1") => Some((25_630, 20_610, 552, 55)),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            assert_eq!(
+                (pairs, division, on_movers, on_movers_in_form),
+                expected,
+                "{name}"
+            );
+        }
+    }
+}
+
+/// Findings V18: the grapple is attached (the gun's `bGrappling`) exactly
+/// on the records whose physics mode is flying, and a flying record has no
+/// acceleration (GRAPPLE.md G-PH-1: no steering while attached), with one
+/// exception that only a recording of recorder 0.2.0 can show: the first
+/// record of a flight that the weapon's refire check attached keeps the
+/// acceleration of that tick's move (`attached_by_the_refire_check`; fact
+/// M3 above).
+///
+/// The three recordings of 2026-10-10: 9,601 flying records, none with
+/// acceleration. The recording of 2026-10-12: 8,077, one with acceleration
+/// (frame 38296, the first record of such a flight).
+#[test]
+fn the_grapple_is_attached_exactly_while_the_pawn_flies() {
+    let Some(files) = recordings() else {
+        eprintln!("skipped: ASAMU_TRACE_RAW_DIR is not set to a directory with recordings");
+        return;
+    };
+    for (name, file) in &files {
+        let (mut flying, mut with_acceleration) = (0, 0);
+        let mut before: Option<&asamu_trace::raw::RawRecord> = None;
+        for r in &file.records {
+            let Some(p) = r.player.as_ref() else {
+                before = None;
+                continue;
+            };
+            let grappling = p.gun.as_ref().is_some_and(|g| g.grappling);
+            flying += usize::from(p.physics == PHYS_FLYING);
+            assert_eq!(
+                grappling,
+                p.physics == PHYS_FLYING,
+                "{name} frame {}: physics {}",
+                r.frame,
+                p.physics
+            );
+            if grappling && magnitude(p) != 0.0 {
+                with_acceleration += 1;
+                // Only the first record of a flight, and only one the
+                // refire check attached.
+                let q = before
+                    .filter(|b| b.frame + 1 == r.frame)
+                    .and_then(|b| b.player.as_ref());
+                assert!(
+                    q.is_some_and(|q| attached_by_the_refire_check(q, p)),
+                    "{name} frame {}: a flying record with acceleration",
+                    r.frame
+                );
+            }
+            before = Some(r);
+        }
+        println!("{name}: {flying} flying records, {with_acceleration} with acceleration");
+        let expected = match (file.records.len(), name.as_str()) {
+            (3_001, n) if n.contains("WS1") => Some((0, 0)),
+            (14_311, n) if n.contains("DC1") => Some((3_822, 0)),
+            (27_925, n) if n.contains("PLAY2") => Some((5_779, 0)),
+            (52_266, n) if n.contains("KM1") => Some((8_077, 1)),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            assert_eq!((flying, with_acceleration), expected, "{name}");
+        }
+    }
+}
+
+/// `true` for a record of AG-Workshop.
+fn in_the_workshop(r: &asamu_trace::raw::RawRecord) -> bool {
+    r.world
+        .as_ref()
+        .and_then(|w| w.map.as_deref())
+        .is_some_and(|m| m.eq_ignore_ascii_case("AG-Workshop"))
+}
+
+/// Findings P6, its open point ("whether a sprint press in the Workshop
+/// overwrites 132"; session item 2 of section 6): it does not. The
+/// Workshop's level script sets the speed by the console command
+/// `setspeed 0.3`, and 440 × 0.3 = 132 (`GroundSpeed` class default 440,
+/// ABILITIES.md). In every Workshop record of every recording `GroundSpeed`
+/// is exactly that and the pawn's sprint flag is clear, also on the frames
+/// with the sprint key and a forward key held: the pawn is in story mode
+/// there, which ignores the sprint (A-ST-1).
+///
+/// The recording of 2026-10-10 (WS1, gamepad): 3,001 Workshop records, no
+/// sprint press. The recording of 2026-10-12 (keyboard): 14,017 Workshop
+/// records, 1,950 of them with `LeftShift` and `W` held.
+#[test]
+fn the_workshops_console_speed_survives_a_held_sprint_key() {
+    let Some(files) = recordings() else {
+        eprintln!("skipped: ASAMU_TRACE_RAW_DIR is not set to a directory with recordings");
+        return;
+    };
+    for (name, file) in &files {
+        let (mut records, mut sprint_held) = (0, 0);
+        for r in file.records.iter().filter(|r| in_the_workshop(r)) {
+            let Some(p) = r.player.as_ref() else { continue };
+            records += 1;
+            assert_eq!(p.ground_speed, 440.0 * 0.3, "{name} frame {}", r.frame);
+            assert!(
+                !p.pawn_flags.as_ref().is_some_and(|f| f.sprinting),
+                "{name} frame {}: the sprint flag",
+                r.frame
+            );
+            let held = |key: &str| p.keys.iter().any(|k| k == key);
+            sprint_held += usize::from(held("LeftShift") && held("W"));
+        }
+        if records == 0 {
+            continue;
+        }
+        println!(
+            "{name}: {records} Workshop records, GroundSpeed 132 and no sprint flag on all; \
+             LeftShift and W held on {sprint_held}"
+        );
+        if file.records.len() == 52_266 && name.contains("KM1") {
+            assert_eq!((records, sprint_held), (14_017, 1_950));
+        }
+    }
+}
+
+/// Findings section 3 ("ViewPitchMax +18000: CONFIRMED, upper limit only")
+/// and section 7 ("the lower pitch limit ... in no recording"): the view
+/// pitch, as a signed 16-bit angle, never leaves −18001 to +18000 rotator
+/// units. The lower limit is one unit beyond −18000 because the engine's
+/// rule adds the minimum to 65535, not to 65536 (the controller's view
+/// limit, read locally; `asamu_player::sim` has the same two numbers): the
+/// stored value is 47535.
+///
+/// The recording of 2026-10-12 is the first to reach the lower limit: 118
+/// records at exactly −18001 and 17 at exactly +18000 (session item 4 of
+/// section 6: "look fully down and fully up").
+#[test]
+fn the_view_pitch_stays_between_its_two_limits() {
+    let Some(files) = recordings() else {
+        eprintln!("skipped: ASAMU_TRACE_RAW_DIR is not set to a directory with recordings");
+        return;
+    };
+    for (name, file) in &files {
+        let (mut lowest, mut highest) = (0, 0);
+        for r in &file.records {
+            let Some(p) = r.player.as_ref() else { continue };
+            // The low 16 bits, as a signed angle.
+            let pitch = (p.view_rotation[0] + 32_768).rem_euclid(65_536) - 32_768;
+            assert!(
+                (-18_001..=18_000).contains(&pitch),
+                "{name} frame {}: view pitch {pitch}",
+                r.frame
+            );
+            lowest += usize::from(pitch == -18_001);
+            highest += usize::from(pitch == 18_000);
+        }
+        println!("{name}: view pitch at -18001 on {lowest} records, at +18000 on {highest}");
+        if file.records.len() == 52_266 && name.contains("KM1") {
+            assert_eq!((lowest, highest), (118, 17));
         }
     }
 }
