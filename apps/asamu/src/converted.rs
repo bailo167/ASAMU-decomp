@@ -571,21 +571,28 @@ impl Pictures<'_> {
     }
 
     fn compose(&self, spec: &ComposedTexture) -> Option<Image> {
-        let rgb = match &spec.rgb {
-            ComposedRgb::Texture(t) => Some(self.texels(t)?),
-            _ => None,
+        let (rgb, rgb_srgb) = match &spec.rgb {
+            ComposedRgb::Texture(t) | ComposedRgb::Channel { texture: t, .. } => {
+                (Some(self.texels(t)?), t.srgb)
+            }
+            _ => (None, false),
         };
         let (alpha, alpha_srgb) = match &spec.alpha {
             ComposedAlpha::Texture { texture, .. } => (Some(self.texels(texture)?), texture.srgb),
             _ => (None, false),
         };
-        let picture =
-            crate::material_pictures::compose(spec, rgb.as_ref(), alpha.as_ref(), alpha_srgb)?;
+        let picture = crate::material_pictures::compose(
+            spec,
+            rgb.as_ref(),
+            rgb_srgb,
+            alpha.as_ref(),
+            alpha_srgb,
+        )?;
         // The picture repeats as the texture that gives it its shape does;
         // one made of gradients alone ends at the mesh's edges.
         let modes = match (&spec.alpha, &spec.rgb) {
             (ComposedAlpha::Texture { texture, .. }, _) => texture.address,
-            (_, ComposedRgb::Texture(t)) => t.address,
+            (_, ComposedRgb::Texture(t) | ComposedRgb::Channel { texture: t, .. }) => t.address,
             _ => [AddressMode::Clamp; 2],
         };
         let mut image = Image::new_uninit(
@@ -648,6 +655,12 @@ impl ImageCache<'_> {
     /// The composed picture of `m`, if it needs one and it can be made.
     fn composed(&mut self, m: &RenderMaterial) -> Option<Handle<Image>> {
         let spec = m.composed.as_ref()?;
+        self.pictures.as_mut()?.get(spec, m.path.as_deref())
+    }
+
+    /// The composed emissive picture of `m`, likewise.
+    fn emissive_composed(&mut self, m: &RenderMaterial) -> Option<Handle<Image>> {
+        let spec = m.emissive_composed.as_ref()?;
         self.pictures.as_mut()?.get(spec, m.path.as_deref())
     }
 
@@ -718,7 +731,8 @@ fn standard_material(
     let picture = images.composed(m);
     let emissive_picture = picture
         .clone()
-        .filter(|_| m.composed.as_ref().is_some_and(|c| c.emissive));
+        .filter(|_| m.composed.as_ref().is_some_and(|c| c.emissive))
+        .or_else(|| images.emissive_composed(m));
     StandardMaterial {
         base_color: Color::linear_rgba(r, g, b, a),
         base_color_channel: channel.clone(),

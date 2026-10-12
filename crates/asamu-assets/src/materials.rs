@@ -123,7 +123,22 @@ pub enum ComposedRgb {
     Texture(TextureBinding),
     /// Grey, the value of a gradient (linear).
     Gradient(Gradient),
+    /// Grey, one channel of a texture as the GPU samples it (a colour
+    /// channel of an sRGB texture linearised, alpha as stored): a glow
+    /// whose shape is the alpha channel of the surface texture, a mask kept
+    /// in one colour channel.
+    Channel {
+        /// The texture.
+        texture: TextureBinding,
+        /// 0 red, 1 green, 2 blue, 3 alpha.
+        channel: usize,
+    },
 }
+
+/// Mean saturation below which the importer counts a texture as grey (its
+/// `GREY_CHROMA`; a grey texture's channels are all alike, so one of them
+/// shown through all three changes nothing).
+pub const GREY_CHROMA: f32 = 0.028;
 
 /// The alpha of a [`ComposedTexture`].
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +222,12 @@ pub struct RenderMaterial {
     /// A picture to compose in place of the base colour texture (a renderer
     /// that cannot uses `base_color_texture` and loses the cut-out or fade).
     pub composed: Option<ComposedTexture>,
+    /// A picture to compose in place of the emissive texture: the original
+    /// multiplies the emissive colour by one channel of a texture, and a
+    /// standard material would multiply it by the texture's colour (a
+    /// renderer that cannot uses `emissive_texture`, and the whole surface
+    /// glows in its own colours).
+    pub emissive_composed: Option<ComposedTexture>,
 }
 
 /// FNV-1a 64 (palette selection only).
@@ -283,6 +304,7 @@ pub fn fallback_material(path: Option<&str>) -> RenderMaterial {
         uv: UvTransform::default(),
         missing_textures: Vec::new(),
         composed: None,
+        emissive_composed: None,
     };
     let Some(path) = path else {
         return m;

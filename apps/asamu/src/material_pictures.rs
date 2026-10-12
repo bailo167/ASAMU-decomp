@@ -368,13 +368,15 @@ fn with_mips(mut w: usize, mut h: usize, rgba: Vec<u8>) -> (Vec<u8>, u32) {
 }
 
 /// Puts the picture of `spec` together. `rgb` and `alpha` are the decoded
-/// textures the specification names (`None` where it names none); `alpha_srgb`
-/// says whether the opacity texture's colour channels are sRGB-encoded.
-/// `None` when a texture the specification needs is missing or empty.
+/// textures the specification names (`None` where it names none);
+/// `rgb_srgb` and `alpha_srgb` say whether the colour channels of each are
+/// sRGB-encoded. `None` when a texture the specification needs is missing
+/// or empty.
 #[must_use]
 pub fn compose(
     spec: &ComposedTexture,
     rgb: Option<&Texels>,
+    rgb_srgb: bool,
     alpha: Option<&Texels>,
     alpha_srgb: bool,
 ) -> Option<Picture> {
@@ -386,8 +388,16 @@ pub fn compose(
         (t.width > 0 && t.height > 0 && t.rgba.len() == len).then(|| t.clone())
     };
     let rgb_texels = match &spec.rgb {
-        ComposedRgb::Texture(_) => Some(usable(rgb)?),
+        ComposedRgb::Texture(_) | ComposedRgb::Channel { .. } => Some(usable(rgb)?),
         _ => None,
+    };
+    // The value of channel `c` of a filtered texel as the GPU gives it.
+    let linear = |raw: f32, c: usize, srgb: bool| -> f32 {
+        if srgb && c < 3 {
+            srgb_to_linear(raw)
+        } else {
+            raw / 255.0
+        }
     };
     let alpha_texels = match &spec.alpha {
         ComposedAlpha::Texture { .. } => Some(usable(alpha)?),
@@ -421,6 +431,10 @@ pub fn compose(
                         to_byte(s[2] / 255.0),
                     ]
                 }
+                (ComposedRgb::Channel { channel, .. }, Some(t)) => {
+                    let c = (*channel).min(3);
+                    [to_byte(linear(sample(t, u, v)[c], c, rgb_srgb)); 3]
+                }
                 (ComposedRgb::Gradient(g), _) => [to_byte(g.eval(u, v)); 3],
                 _ => [255; 3],
             };
@@ -435,13 +449,7 @@ pub fn compose(
                     Some(t),
                 ) => {
                     let c = (*channel).min(3);
-                    let raw = sample(t, u, v)[c];
-                    let value = if alpha_srgb && c < 3 {
-                        srgb_to_linear(raw)
-                    } else {
-                        raw / 255.0
-                    };
-                    to_byte(value * scale + bias)
+                    to_byte(linear(sample(t, u, v)[c], c, alpha_srgb) * scale + bias)
                 }
                 (ComposedAlpha::Gradient(g), _) => to_byte(g.eval(u, v)),
                 _ => 255,
@@ -683,7 +691,7 @@ mod tests {
             },
             emissive: false,
         };
-        let p = compose(&spec, None, Some(&mask), false).unwrap();
+        let p = compose(&spec, None, false, Some(&mask), false).unwrap();
         assert_eq!((p.width, p.height, p.mips, p.srgb), (2, 2, 2, false));
         assert_eq!(&p.data[0..8], &[255, 255, 255, 255, 255, 255, 255, 51]);
         // The second mip is the average: (255 + 51 + 255 + 51) / 4.
@@ -691,7 +699,7 @@ mod tests {
         assert_eq!(p.data.len(), 20);
         // A colour channel of an sRGB texture is linearised, as the GPU
         // samples it; alpha never is.
-        let p = compose(&spec, None, Some(&mask), true).unwrap();
+        let p = compose(&spec, None, false, Some(&mask), true).unwrap();
         assert_eq!(p.data[3], 255);
         assert_eq!(p.data[7], 8, "sRGB 51 is 0.0331 linear");
         let alpha_spec = ComposedTexture {
@@ -703,16 +711,37 @@ mod tests {
             },
             ..spec.clone()
         };
-        let p = compose(&alpha_spec, None, Some(&mask), true).unwrap();
+        let p = compose(&alpha_spec, None, false, Some(&mask), true).unwrap();
         assert_eq!(p.data[3], 191, "1.0 * 0.5 + 0.25");
         // Without the texture there is no picture.
-        assert!(compose(&spec, None, None, false).is_none());
+        assert!(compose(&spec, None, false, None, false).is_none());
         let empty = Texels {
             width: 2,
             height: 2,
             rgba: vec![0; 3],
         };
-        assert!(compose(&spec, None, Some(&empty), false).is_none());
+        assert!(compose(&spec, None, false, Some(&empty), false).is_none());
+
+        // One channel as a grey colour: the alpha channel of a surface
+        // texture that shapes a glow (never linearised), or a colour
+        // channel (linearised when the texture is sRGB).
+        let surface = texels(2, 1, |x, _| [51, 200, 7, if x == 0 { 255 } else { 102 }]);
+        let glow = |channel: usize| ComposedTexture {
+            rgb: ComposedRgb::Channel {
+                texture: binding(true),
+                channel,
+            },
+            alpha: ComposedAlpha::One,
+            emissive: true,
+        };
+        let p = compose(&glow(3), Some(&surface), true, None, false).unwrap();
+        assert!(!p.srgb, "the value is stored linear");
+        assert_eq!(&p.data[0..8], &[255, 255, 255, 255, 102, 102, 102, 255]);
+        let p = compose(&glow(0), Some(&surface), true, None, false).unwrap();
+        assert_eq!(&p.data[0..4], &[8, 8, 8, 255]);
+        let p = compose(&glow(0), Some(&surface), false, None, false).unwrap();
+        assert_eq!(&p.data[0..4], &[51, 51, 51, 255]);
+        assert!(compose(&glow(0), None, true, None, false).is_none());
     }
 
     #[test]
@@ -729,7 +758,7 @@ mod tests {
             },
             emissive: false,
         };
-        let p = compose(&spec, Some(&colour), Some(&mask), false).unwrap();
+        let p = compose(&spec, Some(&colour), true, Some(&mask), false).unwrap();
         assert_eq!((p.width, p.height, p.mips, p.srgb), (4, 4, 3, true));
         // Colour texels are copied as stored; the mask is filtered up.
         assert_eq!(&p.data[0..3], &[0, 0, 9]);
@@ -755,7 +784,7 @@ mod tests {
             alpha: ComposedAlpha::Gradient(fade),
             emissive: true,
         };
-        let p = compose(&spec, None, None, false).unwrap();
+        let p = compose(&spec, None, false, None, false).unwrap();
         assert_eq!(
             (p.width, p.height, p.srgb),
             (GRADIENT_EDGE, GRADIENT_EDGE, false)

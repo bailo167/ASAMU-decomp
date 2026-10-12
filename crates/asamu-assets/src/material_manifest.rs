@@ -42,7 +42,7 @@ use crate::error::{AssetError, AssetResult};
 use crate::files::parse_json;
 use crate::manifest::TextureManifest;
 use crate::materials::{
-    BlendMode, ComposedAlpha, ComposedRgb, ComposedTexture, Gradient, GradientFactor,
+    BlendMode, ComposedAlpha, ComposedRgb, ComposedTexture, GREY_CHROMA, Gradient, GradientFactor,
     MAX_GRADIENT_FACTORS, MaterialSource, RenderMaterial, TextureBinding, UvTransform,
     bind_texture, fallback_material,
 };
@@ -148,6 +148,8 @@ struct RawGradient {
 struct RawStats {
     #[serde(default)]
     mean: [f32; 4],
+    #[serde(default)]
+    chroma: Option<f32>,
 }
 
 /// One entry of `materials.json` (the fields the renderer uses).
@@ -245,12 +247,36 @@ fn uv_transform(uv: &RawUv) -> UvTransform {
 }
 
 impl MaterialEntry {
-    /// The mean of a bound texture, when the file has it.
-    fn mean(&self, texture: &str) -> Option<[f32; 4]> {
+    fn stats(&self, texture: &str) -> Option<&RawStats> {
         self.texture_stats
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(texture))
-            .map(|(_, s)| s.mean)
+            .map(|(_, s)| s)
+    }
+
+    /// The mean of a bound texture, when the file has it.
+    fn mean(&self, texture: &str) -> Option<[f32; 4]> {
+        self.stats(texture).map(|s| s.mean)
+    }
+
+    /// The single texture channel a colour channel reads, when showing the
+    /// texture's own colour in its place would be wrong: the alpha channel
+    /// always, a colour channel when the texture is known to carry colour
+    /// (a grey texture's channels are alike; without statistics the
+    /// texture is shown as before).
+    fn lone_channel(&self, t: &RawTexture) -> Option<usize> {
+        let channels = t.channels.as_deref()?;
+        if channels.len() != 1 {
+            return None;
+        }
+        let index = channel_index(Some(channels), 0);
+        let coloured = t
+            .texture
+            .as_deref()
+            .and_then(|p| self.stats(p))
+            .and_then(|s| s.chroma)
+            .is_some_and(|c| c.is_finite() && c >= GREY_CHROMA);
+        (index == 3 || coloured).then_some(index)
     }
 
     /// The colour multiplier of a channel: its `value`, plus its `bias`
@@ -444,6 +470,16 @@ impl MaterialManifest {
                 m.emissive_texture = bind(c, false);
                 let v = e.multiplier(c);
                 m.emissive = [v[0], v[1], v[2]];
+                // The glow's shape is one channel of the texture: a picture
+                // of that channel, not the texture's colour.
+                let channel = c.texture.as_ref().and_then(|t| e.lone_channel(t));
+                if let (Some(channel), Some(texture)) = (channel, m.emissive_texture.clone()) {
+                    m.emissive_composed = Some(ComposedTexture {
+                        rgb: ComposedRgb::Channel { texture, channel },
+                        alpha: ComposedAlpha::One,
+                        emissive: true,
+                    });
+                }
             }
             m.normal_texture = e.normal.as_ref().and_then(|c| bind(c, true));
         }
@@ -484,7 +520,17 @@ impl MaterialManifest {
                 ..UvTransform::default()
             });
         } else if let Some(t) = &m.base_color_texture {
-            rgb = ComposedRgb::Texture(t.clone());
+            // An unlit colour read from one channel is that channel in grey.
+            let lone = shown_channel
+                .and_then(|c| c.texture.as_ref())
+                .and_then(|raw| e.lone_channel(raw));
+            rgb = match lone {
+                Some(channel) => ComposedRgb::Channel {
+                    texture: t.clone(),
+                    channel,
+                },
+                None => ComposedRgb::Texture(t.clone()),
+            };
             picture_uv = Some(m.uv);
         }
 
@@ -521,10 +567,13 @@ impl MaterialManifest {
                     m.base_color[3] = UNREPRESENTED_OPACITY;
                 }
                 (None, None) => m.base_color[3] = clamp01(value),
+                // The displayed texture's own alpha: the texture carries it
+                // (unless a picture of one of its channels replaces it).
                 (Some(t), None)
                     if same_as_shown(t)
                         && bias == 0.0
-                        && channel_index(t.channels.as_deref(), 0) == 3 =>
+                        && channel_index(t.channels.as_deref(), 0) == 3
+                        && !matches!(rgb, ComposedRgb::Channel { .. }) =>
                 {
                     m.base_color[3] = clamp01(value);
                 }
@@ -536,7 +585,9 @@ impl MaterialManifest {
                         .and_then(|p| bind_texture(textures, p, false));
                     let fits = match &rgb {
                         ComposedRgb::White => true,
-                        ComposedRgb::Texture(_) => picture_uv == Some(uv),
+                        ComposedRgb::Texture(_) | ComposedRgb::Channel { .. } => {
+                            picture_uv == Some(uv)
+                        }
                         ComposedRgb::Gradient(_) => false,
                     };
                     match bound {
@@ -565,7 +616,9 @@ impl MaterialManifest {
                 }
             }
         }
-        if !matches!(alpha, ComposedAlpha::One) || matches!(rgb, ComposedRgb::Gradient(_)) {
+        if !matches!(alpha, ComposedAlpha::One)
+            || matches!(rgb, ComposedRgb::Gradient(_) | ComposedRgb::Channel { .. })
+        {
             if let Some(uv) = picture_uv {
                 m.uv = uv;
             }
@@ -833,6 +886,30 @@ mod tests {
                          "texture": {"texture": "Pkg.T_D", "channels": "rgb"}},
           "texture_stats": {"Pkg.T_D": {"mean": [0.001, 0.001, 0.001, 1]}}
         },
+        "Pkg.M_Lamp": {
+          "status": "approximated", "alpha_mode": "opaque",
+          "base_color": {"value": [1, 1, 1, 1], "texture": {"texture": "Pkg.T_D", "channels": "rgb"}},
+          "emissive": {"value": [11.5, 6.5, 1.25, 1], "texture": {"texture": "Pkg.T_D", "channels": "a"}}
+        },
+        "Pkg.M_LampRed": {
+          "status": "approximated", "alpha_mode": "opaque",
+          "base_color": {"value": [1, 1, 1, 1], "texture": {"texture": "Pkg.T_D", "channels": "rgb"}},
+          "emissive": {"value": [2, 2, 2, 1], "texture": {"texture": "Pkg.T_E", "channels": "r"}},
+          "texture_stats": {"Pkg.T_E": {"mean": [0.5, 0.5, 0.5, 1], "chroma": 0.25}}
+        },
+        "Pkg.M_LampGrey": {
+          "status": "approximated", "alpha_mode": "opaque",
+          "base_color": {"value": [1, 1, 1, 1], "texture": {"texture": "Pkg.T_D", "channels": "rgb"}},
+          "emissive": {"value": [2, 2, 2, 1], "texture": {"texture": "Pkg.T_E", "channels": "r"}},
+          "texture_stats": {"Pkg.T_E": {"mean": [0.5, 0.5, 0.5, 1], "chroma": 0.001}}
+        },
+        "Pkg.M_GlowGreen": {
+          "status": "approximated", "alpha_mode": "add", "unlit": true,
+          "base_color": {"value": [0, 0, 0, 1]},
+          "emissive": {"value": [0.5, 1, 0.25, 1], "texture": {"texture": "Pkg.T_E", "channels": "g"}},
+          "opacity": {"value": [1, 1, 1, 1], "texture": {"texture": "Pkg.T_E", "channels": "a"}},
+          "texture_stats": {"Pkg.T_E": {"mean": [0.5, 0.25, 0.125, 1], "chroma": 0.3}}
+        },
         "Pkg.M_BadGradient": {
           "status": "approximated", "alpha_mode": "blend",
           "base_color": {"value": [0.5, 0.5, 0.5, 1]},
@@ -1027,6 +1104,64 @@ mod tests {
         let p = fallback_material(Some("Pkg.M_Monitor")).base_color;
         assert_eq!(plain.base_color, p);
         assert_eq!(plain.missing_textures, vec!["Pkg.T_Screen".to_owned()]);
+    }
+
+    #[test]
+    fn a_colour_read_from_one_channel_is_a_picture_of_that_channel() {
+        let (m, t) = (play(), textures());
+        // A lamp whose glow is shaped by the alpha channel of its surface
+        // texture: the emissive texture is that channel, not the colours.
+        let lamp = m.render_material("Pkg.M_Lamp", Some(&t)).unwrap();
+        assert_eq!(lamp.emissive, [11.5, 6.5, 1.25]);
+        assert_eq!(lamp.emissive_texture.as_ref().unwrap().texture, "Pkg.T_D");
+        let c = lamp.emissive_composed.as_ref().unwrap();
+        assert!(c.emissive && c.alpha == ComposedAlpha::One);
+        assert!(matches!(
+            &c.rgb,
+            ComposedRgb::Channel { texture, channel: 3 } if texture.texture == "Pkg.T_D"
+        ));
+        assert!(lamp.composed.is_none(), "the base colour is untouched");
+        // One colour channel of a coloured texture: the same.
+        let red = m.render_material("Pkg.M_LampRed", Some(&t)).unwrap();
+        assert!(matches!(
+            &red.emissive_composed.as_ref().unwrap().rgb,
+            ComposedRgb::Channel { channel: 0, .. }
+        ));
+        // Of a grey texture (or one without statistics): the texture
+        // itself says the same, as before.
+        let grey = m.render_material("Pkg.M_LampGrey", Some(&t)).unwrap();
+        assert!(grey.emissive_composed.is_none());
+        let doc = PLAY.replace("texture_stats", "other");
+        let plain = MaterialManifest::from_json(Path::new("m"), doc.as_bytes()).unwrap();
+        let unknown = plain.render_material("Pkg.M_LampRed", Some(&t)).unwrap();
+        assert!(unknown.emissive_composed.is_none());
+        assert!(
+            plain
+                .render_material("Pkg.M_Lamp", Some(&t))
+                .unwrap()
+                .emissive_composed
+                .is_some(),
+            "alpha needs no statistics"
+        );
+        // Without the texture converted there is nothing to compose.
+        assert!(
+            m.render_material("Pkg.M_Lamp", None)
+                .unwrap()
+                .emissive_composed
+                .is_none()
+        );
+
+        // An unlit glow: green channel as the colour, alpha as the opacity,
+        // of one texture.
+        let glow = m.render_material("Pkg.M_GlowGreen", Some(&t)).unwrap();
+        let c = glow.composed.as_ref().unwrap();
+        assert!(matches!(&c.rgb, ComposedRgb::Channel { channel: 1, .. }));
+        assert!(matches!(
+            &c.alpha,
+            ComposedAlpha::Texture { channel: 3, .. }
+        ));
+        assert_eq!(glow.base_color, [0.5, 1.0, 0.25, 1.0]);
+        assert!(glow.emissive_composed.is_none());
     }
 
     #[test]
