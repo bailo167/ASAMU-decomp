@@ -34,7 +34,16 @@
 //!    keeps the flat BSP;
 //! 6. reads the level's precomputed light volume (the baked light for
 //!    objects without a light map) and hands it to
-//!    [`crate::light_volume`], which lights those objects with it.
+//!    [`crate::light_volume`], which lights those objects with it;
+//! 7. takes every light-mapped draw with an alpha-masked material (leaves,
+//!    fences, grates) out of the renderer's automatic batching
+//!    ([`needs_own_draw`]). Bevy 0.20 keeps light map textures in groups of
+//!    four and binds one group per batch. Its opaque pass splits batches by
+//!    that group; its alpha-mask pass does not, so masked draws that share a
+//!    material group were drawn with the light maps of whichever draw came
+//!    first: a plant then showed a stranger's atlas at its own rectangle,
+//!    black in most places and different on every run (the "black plants"
+//!    of the first play session). Drawn one by one, each binds its own.
 //!
 //! Approximation: the original renders directional light maps (two
 //! coefficient textures combined with the per-pixel normal); the importer
@@ -59,6 +68,7 @@ use bevy::image::{ImageLoaderSettings, ImageSampler};
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::pbr::Lightmap;
 use bevy::prelude::*;
+use bevy::render::batching::NoAutomaticBatching;
 use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 
@@ -177,6 +187,9 @@ struct Applying {
     materials_done: Vec<AssetId<StandardMaterial>>,
     lit: usize,
     constant: usize,
+    /// Light-mapped draws taken out of automatic batching
+    /// ([`needs_own_draw`]).
+    own_draw: usize,
     unmatched: usize,
     no_uv: usize,
     lights_matched: bool,
@@ -571,6 +584,19 @@ fn assign_draws(
     }
 }
 
+/// Whether a light-mapped draw whose material has this alpha mode must be
+/// drawn on its own (`NoAutomaticBatching`) to get its own light map.
+///
+/// A property of the renderer, not of the original: Bevy 0.20 binds one
+/// group of light map textures per batch and tells batches apart by that
+/// group in the opaque and the sorted (blended) passes, but not in the
+/// alpha-mask pass (`AlphaMode::Mask`), whose batch key has no light map
+/// field. Alpha-to-coverage draws go through the opaque pass.
+#[must_use]
+pub fn needs_own_draw(alpha: &AlphaMode) -> bool {
+    matches!(alpha, AlphaMode::Mask(_))
+}
+
 /// A copy of `mesh` with `UV_1` taken from `UV_0` (or zeros).
 fn with_second_uv(mesh: &Mesh) -> Mesh {
     let mut m = mesh.clone();
@@ -639,6 +665,14 @@ fn resolve_pending(
             uv_rect: Rect::new(x0, y0, x1, y1),
             bicubic_sampling: settings.bicubic,
         });
+        if let Ok(mat) = mat_of.get(entity)
+            && materials
+                .get(&mat.0)
+                .is_some_and(|sm| needs_own_draw(&sm.alpha_mode))
+        {
+            e.insert(NoAutomaticBatching);
+            app.own_draw += 1;
+        }
         if let Ok(mat) = mat_of.get(entity)
             && !app.materials_done.contains(&mat.0.id())
         {
@@ -810,6 +844,10 @@ fn swap_bsp(
                 if tangents && let Err(e) = mesh.generate_tangents() {
                     warn!("light-mapped BSP tangents for {:?}: {e}", m.material);
                 }
+                let own_draw = m.lightmap.is_some()
+                    && materials
+                        .get(&material)
+                        .is_some_and(|sm| needs_own_draw(&sm.alpha_mode));
                 let mut e = commands.spawn((
                     Mesh3d(meshes.add(mesh)),
                     MeshMaterial3d(material),
@@ -825,6 +863,10 @@ fn swap_bsp(
                             uv_rect: Rect::new(x0, y0, x1, y1),
                             bicubic_sampling: settings.bicubic,
                         });
+                        if own_draw {
+                            e.insert(NoAutomaticBatching);
+                            app.own_draw += 1;
+                        }
                     }
                     None => unlit += 1,
                 }
@@ -845,6 +887,11 @@ fn swap_bsp(
             app.lit, app.constant, app.no_uv, app.unmatched
         );
         info!("{}", status.line);
+        info!(
+            "lightmaps: {} alpha-masked light-mapped draw(s) are drawn one by one (each binds \
+             its own light map)",
+            app.own_draw
+        );
         *state = LightmapState::Done;
     }
 }
@@ -883,6 +930,28 @@ fn drop_failed_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_alpha_masked_draws_leave_the_automatic_batches() {
+        // The alpha-mask pass is the one whose batches ignore the light map
+        // group; every cutoff counts.
+        for cutoff in [0.0, 0.3333, 0.5, 1.0] {
+            assert!(needs_own_draw(&AlphaMode::Mask(cutoff)), "{cutoff}");
+        }
+        // Opaque and alpha-to-coverage draws go through the opaque pass and
+        // the blended ones through the sorted pass; both keep light map
+        // groups apart, so they stay batched.
+        for alpha in [
+            AlphaMode::Opaque,
+            AlphaMode::AlphaToCoverage,
+            AlphaMode::Blend,
+            AlphaMode::Premultiplied,
+            AlphaMode::Add,
+            AlphaMode::Multiply,
+        ] {
+            assert!(!needs_own_draw(&alpha), "{alpha:?}");
+        }
+    }
 
     #[test]
     fn primitive_of_parses_converted_mesh_paths() {
