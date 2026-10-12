@@ -284,8 +284,10 @@ From `FColorMaterialInput::Compile`, `FScalarMaterialInput::Compile`, `FVectorMa
    (Fresnel, camera and reflection vectors), `coordinates` (texture coordinates used as a value that is not a
    gradient), `time` (time used as a value), `vertex_color`, `scene` (the colour behind the surface), `world`
    (world position, world normal, object placement: up-facing blends), `texture` (a second texture) and `other`.
-   The entry's `dropped` map lists them per channel. A renderer reads it to tell a value from a stand-in: an
-   opacity of 0 with `dropped: depth` is "nothing but depth decided this", not "invisible by design".
+   The entry's `dropped` map lists them per channel. A renderer can read it to tell a value from a stand-in: an
+   opacity of 0 with `dropped: depth` is "nothing but depth decided this", not "invisible by design". (Our reader
+   does not read the map yet: it draws the reduced value as it is. The outline shell is invisible because its
+   opacity reduces to the constant 0 its lerp starts from, not because the reader saw `depth`.)
 
 ### Results (T for the counts; the approximation itself is ours, not a parity claim)
 
@@ -410,9 +412,17 @@ Channel = {
 ```
 
 `dropped`, `gradients`, `texture_stats` and `runtime_textures` were added by the play-session pass as optional
-fields (absent when empty; the version stays 1: a file written before reads as before, and a reader that ignores
-unknown fields is unaffected). `<channel>` is `base_color`, `normal`, `emissive`, `specular`, `specular_power` or
-`opacity`. A channel with a gradient equals `value × clamp(product of max(scale × uv[uv_channel].component +
+fields (absent when empty; the version stays 1: a file written before still loads, and a reader that ignores
+unknown fields is unaffected). A file written before is **not drawn exactly as before**, because three of the
+reader's rules need none of the new fields: a mask or opacity kept in another texture or channel is composed into
+a picture (cut-outs appear), an unresolved translucent opacity is the faint placeholder instead of solid, and a
+glow shaped by a texture's alpha channel uses that channel. What such a file lacks is everything the importer
+changed: the rock families keep their occlusion maps, beams keep the folded depth constant (they are invisible),
+and the checkpoint effect has no gradient (a faint sheet). Checked on screen with the conversion of 2026-10-11 and
+the new reader in AG-ParadiseCave, AG-Workshop, AG-StarHaven and AG-BeautifulCity; re-run
+`asamu-import materials --force` for the full result.
+
+`<channel>` is `base_color`, `normal`, `emissive`, `specular`, `specular_power` or `opacity`. A channel with a gradient equals `value × clamp(product of max(scale × uv[uv_channel].component +
 offset, 0) ^ power, 0, 1)` and is `resolved`. `texture_stats.mean` is linear (sRGB texels linearised before
 averaging), alpha as stored; `chroma` is the mean of `max(R,G,B) − min(R,G,B)` over the stored texel values.
 
@@ -496,7 +506,23 @@ input. Discrepancies the re-check found and fixed: the single-channel tint, cons
 - Panning and rotation of texture coordinates are exported and not animated by the renderer.
 - A second texture layer in the renderer (the up-facing blend and the occlusion map of the rock families, a glow
   mask multiplied with a colour texture) and a view-dependent rim for outline shells and beams.
-- Whether the shipped meshes carry painted vertex colours where a material blends by them (white is assumed).
+- Whether the placed meshes carry painted vertex colours where a material blends by them (white is assumed).
+  What is known: 881 of the 882 converted static meshes have no colour stream of their own (`stats.colors` in
+  `meshes/manifest.json`), and none of the 3,374 draws in the six story maps whose material blends by vertex colour
+  uses a mesh that has one, so white is what the *mesh assets* give (STRONG). Colours painted per placed instance
+  in the level are not exported by the levels stage, so they are UNKNOWN; the village cave walls are the visible
+  candidate.
+- A cut-out whose mask is sparse fades out with distance: the composed picture's mips are box averages, and a
+  mask of small bright dots falls under the clip value in the small ones. The texture's own stored mips do the
+  same. Measured on them for the village's background-light cards in AG-BeautifulCity (masked at 0.3333 by the
+  linear red of a 1,024 texture): 0.17 % of the texels pass at full size, 0.10 % in the 128 mip, none from the 64
+  mip down, so the lights show close by and are gone from across the cave (about 77,000 uu, where a card is some
+  75 pixels wide at 1280 × 720; offscreen renders from both distances).
+  Before this pass the cards were opaque black with every light glowing, which hid the houses behind them. Whether
+  the original shows the lights from that far is not checked (UNKNOWN).
+- Skinned meshes and effects do not get composed pictures (only level meshes do): a character whose hair or face
+  keeps its shape in a separate mask texture (3 materials of the two characters, plus stock engine characters no
+  map uses) is still drawn without the cut-out, as before.
 
 ## How the renderer uses the description (runtime, ours)
 
@@ -546,5 +572,7 @@ on level load only when `SeqCond_IsTimeTrial` says yes; the goal arrow is visibl
 load when it says no (CONFIRMED, converted Kismet of AG-ParadiseCave: `SeqEvent_LevelLoaded` →
 `SeqCond_IsTimeTrial` → `SeqAct_ToggleHidden`, with a Matinee on the yes branch). Nothing in their materials hides
 them. Our level plan leaves hidden actors out and the app applies Kismet's hide and unhide, so in story play they
-are not drawn; a render without gameplay (the fly camera) shows the arrow, now as a cut-out instead of a faint
-quad.
+should not be drawn (the link is in the data: in AG-ParadiseCave the "no" output of the condition hides two
+actors, the arrow among them; a render of it in story play was not obtained, since an unattended run does not
+reach the end of the level). A render without a running game (the fly camera, or a level that was loaded and
+not yet started) shows the arrow, now as a bright cut-out instead of a faint quad.

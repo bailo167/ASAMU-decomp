@@ -30,8 +30,13 @@
 //!
 //! Unknown fields are ignored; an entry that does not match the shape is
 //! counted in [`MaterialManifest::unreadable`] and falls back. The optional
-//! fields (`dropped`, `gradients`, `texture_stats`, `runtime_textures`) are
-//! absent from files written before they existed, which read as before.
+//! fields (`gradients`, `texture_stats`, `runtime_textures`) are absent from
+//! files written before they existed. Such a file still loads; the rules of
+//! the table that need none of those fields (a composed picture for an
+//! opacity in another texture or channel, the placeholder for an unresolved
+//! translucent opacity, a glow shaped by an alpha channel) apply to it too,
+//! so it is not drawn exactly as the reader before them drew it. The
+//! importer's `dropped` map is not read here.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -1085,6 +1090,103 @@ mod tests {
         assert_eq!(add.base_color[3], UNREPRESENTED_OPACITY);
         let mask = m.render_material("Pkg.M_UnresolvedMask", Some(&t)).unwrap();
         assert_eq!(mask.base_color[3], 1.0);
+    }
+
+    /// Entries as the importer wrote them before `dropped`, `gradients`,
+    /// `texture_stats` and `runtime_textures` existed (hand-written; no game
+    /// data): a light card whose glow and mask are the colour channels of
+    /// one texture that is not the base colour, a beam whose opacity is a
+    /// falloff texture times a tiny constant, an effect whose opacity could
+    /// not be resolved, and a lamp whose glow is its texture's alpha.
+    const BEFORE: &str = r#"{
+      "format": "asamu-materials", "version": 1, "notice": "n",
+      "materials": {
+        "Pkg.M_Lights": {
+          "status": "approximated", "lossless": false, "alpha_mode": "mask", "alpha_cutoff": 0.3333,
+          "two_sided": false, "unlit": false,
+          "base_color": {"source": "default", "value": [0, 0, 0, 1], "bias": [0, 0, 0, 0], "resolved": true},
+          "emissive": {"source": "expression", "value": [200, 60, 20, 1], "bias": [0, 0, 0, 0],
+                       "texture": {"texture": "Pkg.T_E", "sampler": "2d", "channels": "rgb"}, "resolved": true},
+          "opacity": {"source": "expression", "value": [1, 1, 1, 1], "bias": [0, 0, 0, 0],
+                      "texture": {"texture": "Pkg.T_E", "sampler": "2d", "channels": "rgb"}, "resolved": true},
+          "notes": []
+        },
+        "Pkg.M_Beam": {
+          "status": "approximated", "alpha_mode": "blend", "unlit": true,
+          "base_color": {"value": [0, 0, 0, 1]},
+          "emissive": {"value": [1, 0.25, 0.125, 1]},
+          "opacity": {"value": [0.00025, 0.00025, 0.00025, 0.00025],
+                      "texture": {"texture": "Pkg.T_E", "channels": "rgb"}, "resolved": true}
+        },
+        "Pkg.M_Effect": {
+          "status": "approximated", "alpha_mode": "blend",
+          "base_color": {"value": [0, 0, 0, 1]},
+          "opacity": {"source": "default", "value": [1, 1, 1, 1], "resolved": false}
+        },
+        "Pkg.M_Lamp": {
+          "status": "approximated", "alpha_mode": "opaque",
+          "base_color": {"value": [1, 1, 1, 1], "bias": [0.25, 0.25, 0.25, 0],
+                         "texture": {"texture": "Pkg.T_D", "channels": "rgb"}},
+          "emissive": {"value": [11.5, 6.5, 1.25, 1], "texture": {"texture": "Pkg.T_D", "channels": "a"}}
+        }
+      },
+      "coverage": {}
+    }"#;
+
+    #[test]
+    fn a_file_written_before_the_optional_fields_loads_and_follows_the_same_rules() {
+        let m =
+            MaterialManifest::from_json(Path::new("materials.json"), BEFORE.as_bytes()).unwrap();
+        assert_eq!((m.len(), m.unreadable), (4, 0));
+        let t = textures();
+        // The card is cut out by the red channel of its glow texture (it
+        // was an opaque black card with the glow on it).
+        let lights = m.render_material("Pkg.M_Lights", Some(&t)).unwrap();
+        assert_eq!(lights.blend, BlendMode::Masked { cutoff: 0.3333 });
+        assert_eq!(lights.base_color, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(lights.emissive, [200.0, 60.0, 20.0]);
+        assert_eq!(lights.emissive_texture.as_ref().unwrap().texture, "Pkg.T_E");
+        assert!(lights.emissive_composed.is_none());
+        let c = lights.composed.as_ref().unwrap();
+        assert_eq!(c.rgb, ComposedRgb::White);
+        assert!(matches!(
+            &c.alpha,
+            ComposedAlpha::Texture { texture, channel: 0, scale, bias }
+                if texture.texture == "Pkg.T_E" && *scale == 1.0 && *bias == 0.0
+        ));
+        // The beam keeps the constant the old importer folded a depth into:
+        // it fades along its texture and is next to invisible (it was the
+        // flat placeholder).
+        let beam = m.render_material("Pkg.M_Beam", Some(&t)).unwrap();
+        assert_eq!(beam.base_color, [1.0, 0.25, 0.125, 0.00025]);
+        assert!(matches!(
+            &beam.composed.as_ref().unwrap().alpha,
+            ComposedAlpha::Texture { channel: 0, scale, .. } if *scale == 1.0
+        ));
+        // An opacity the old importer could not resolve is the faint
+        // placeholder (it was solid); the file has no gradient to draw.
+        let effect = m.render_material("Pkg.M_Effect", Some(&t)).unwrap();
+        assert_eq!(effect.base_color, [0.0, 0.0, 0.0, UNREPRESENTED_OPACITY]);
+        assert!(effect.composed.is_none());
+        // The glow follows the alpha channel; without statistics the added
+        // colour of the base is left out, as the reader before did.
+        let lamp = m.render_material("Pkg.M_Lamp", Some(&t)).unwrap();
+        assert_eq!(lamp.base_color, [1.0, 1.0, 1.0, 1.0]);
+        assert!(matches!(
+            &lamp.emissive_composed.as_ref().unwrap().rgb,
+            ComposedRgb::Channel { channel: 3, .. }
+        ));
+        assert!(lamp.composed.is_none());
+        // Nothing of it needs the textures: without them the file still
+        // gives materials, plain ones.
+        for name in ["Pkg.M_Lights", "Pkg.M_Beam", "Pkg.M_Effect", "Pkg.M_Lamp"] {
+            let plain = m.render_material(name, None).unwrap();
+            assert_eq!(plain.source, MaterialSource::Converted, "{name}");
+            assert!(
+                plain.composed.is_none() && plain.emissive_composed.is_none(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
