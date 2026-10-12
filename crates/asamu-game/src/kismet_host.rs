@@ -104,14 +104,45 @@
 //! (`asamu_world::scene::PlacedActor`: `PHYS_Rotating` and a rate). Each is
 //! a mover, with everything attached to it; it is taken out of the Matinee
 //! groups that name it (as a static mesh actor is out of a group that has
-//! only movement tracks), and step 2 turns it by [`rotation_step`] of the
-//! game's tick. The shipped story levels have 14: 7 in AG-ParadiseCave (3
-//! of them in Matinee groups), 2 in AG-BeautifulCity and 5 in AG-StarHaven,
-//! which has 8 more in that physics without a rate; those never turn
-//! (census of the level data; gated test `tests/parity_moving_anchor.rs`).
-//! An actor with a rate in another physics than these two is not modelled
-//! (none is placed). [`LevelScript::moved_actors`] reports the turning
-//! actors for drawing like the actors Kismet moves.
+//! only movement tracks), and step 2 turns it. The shipped story levels
+//! have 14: 7 in AG-ParadiseCave (3 of them in Matinee groups), 2 in
+//! AG-BeautifulCity and 5 in AG-StarHaven, which has 8 more in that physics
+//! without a rate; those never turn (census of the level data; gated test
+//! `tests/parity_moving_anchor.rs`). An actor with a rate in another
+//! physics than these two is not modelled (none is placed).
+//! [`LevelScript::moved_actors`] reports the turning actors for drawing
+//! like the actors Kismet moves.
+//!
+//! **By how much ours turn them: the designed rate (a deliberate difference
+//! from the original; the owner's decision of 2026-10-12).** The original's
+//! rule makes the speed of a turn a function of the frame time: what a frame
+//! drops is up to one unit, so an actor turns slower than its rate by up to
+//! one unit per frame, more at a high frame rate than at a low one, and by
+//! a different amount for every rate. The game runs a fixed tick, and at 60
+//! Hz that rule turns 2184 units/s as 36 units a tick, 2160 units/s, where
+//! the same level's Matinee tracks keep their own time: the two arms of
+//! AG-ParadiseCave's merry-go-round, one on a track and one turned by its
+//! rate, part by 0.131 degrees a second, which the owner did not see in the
+//! original (at the recorded 78 frames a second that arm's step is 28.0002
+//! units and loses nothing). So the game turns each actor at the rate its
+//! level gives it ([`TurnRule::DesignedRate`], [`carried_rotation_step`]):
+//! a tick's step is the rate times the tick plus the fraction the ticks
+//! before left over, in whole units as before, and the fraction that is
+//! left is kept for the next tick, for each actor and each member. Over any
+//! number of ticks the actor has turned by the truncation of its rate times
+//! the time that passed, at every tick rate. Against the original, whose
+//! frame time is not ours to choose, the turn is faster by what the
+//! original drops: at 60 frames a second 42 units/s for a rate of 9102
+//! (0.46 %), 51 for 4551 (1.13 %) and 24 for 2184 (1.11 %); at the recorded
+//! frames of 12.8206 ms 54 for 9102, 27 for 4551 (0.60 % each) and 0.015
+//! for 2184.
+//!
+//! The original's rule stays here as [`rotation_step`], and a host turns by
+//! it when it is told to ([`LevelScript::set_turn_rule`] with
+//! [`TurnRule::Native`]): a replay of a recording, stepped by the
+//! recording's own frame times, needs the turn the original made at those
+//! frame times, which is that rule and nothing else. Nothing in the app and
+//! no loader selects it; it is not a setting of the game.
 //!
 //! **Attached actors.** When an actor has moved, the original moves every
 //! actor in its attached list, by the attached actor's kind (CONFIRMED
@@ -420,11 +451,34 @@ impl BodySeed {
 }
 
 /// An actor the engine turns by itself (module docs, "Turning actors").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Spinner {
     actor: u32,
     /// `RotationRate` (pitch, yaw, roll), rotator units per second.
     rate: [i32; 3],
+    /// The fraction of a unit each member's turn has left over from the
+    /// ticks so far ([`carried_rotation_step`]; not used by
+    /// [`TurnRule::Native`]).
+    carry: [f64; 3],
+}
+
+/// The rule a [`LevelScript`] turns the actors of the rotating physics by
+/// (module docs, "Turning actors"). Both exist because the original's rule
+/// depends on the frame time and the game runs a fixed tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TurnRule {
+    /// Ours, and what the game plays with: each actor turns at the rate its
+    /// level gives it, at any tick rate. A tick's step is
+    /// [`carried_rotation_step`]: the rate times the tick plus the fraction
+    /// left over from the ticks before.
+    #[default]
+    DesignedRate,
+    /// The original's rule: a tick's step is [`rotation_step`], the rate
+    /// times the tick with the fraction dropped and nothing kept, so the
+    /// speed of the turn depends on the tick's length. For a replay of a
+    /// recording at the recording's own frame times, and for tests of the
+    /// rule; not for play.
+    Native,
 }
 
 /// An actor attached to an actor the host moves (the level's `Base`), with
@@ -538,6 +592,7 @@ fn host_driven(
             spinners.push(Spinner {
                 actor: *id,
                 rate: a.rotation_rate,
+                carry: [0.0; 3],
             });
         }
         let base = a
@@ -558,6 +613,11 @@ fn host_driven(
 /// member of its `RotationRate` times `dt`, the fraction dropped (towards
 /// zero), so a rate of 9102 units/s is 151 units in a 1/60 s tick and 116
 /// in a 12.82 ms frame (module docs, "Turning actors").
+///
+/// This is the original's rule ([`TurnRule::Native`]), kept as it is: the
+/// turn it gives depends on the frame time, so it is the rule for stepping
+/// a recording by its own frame times. The game turns its actors by
+/// [`carried_rotation_step`].
 #[must_use]
 pub fn rotation_step(rate: [i32; 3], dt: f32) -> [i32; 3] {
     // No turn in a tick without time (the original's routine returns at
@@ -570,6 +630,62 @@ pub fn rotation_step(rate: [i32; 3], dt: f32) -> [i32; 3] {
         // Truncation; a product that is not a number is no step.
         if step.is_finite() { step as i32 } else { 0 }
     })
+}
+
+/// One past the largest step a rotator's member can take in a tick, as a
+/// double: 2^31.
+const STEP_LIMIT: f64 = 2_147_483_648.0;
+
+/// The step an actor that turns at its designed rate takes in one tick of
+/// `dt` seconds ([`TurnRule::DesignedRate`]; ours, module docs "Turning
+/// actors"): for each member, `RotationRate` times `dt` plus the fraction
+/// of a unit in `carry`, in whole units (towards zero); what is left of it
+/// goes back into `carry` for the next tick. `carry` starts at zero and
+/// belongs to one actor.
+///
+/// Over any run of ticks the steps sum to the truncation of the rate times
+/// the sum of the ticks: the average speed is the rate, whatever the tick,
+/// and a member is never more than one unit behind it. A negative rate
+/// turns the other way by the same steps.
+///
+/// As in [`rotation_step`], a tick without time (zero, negative or not a
+/// number; here also an infinite one) is no turn, and it leaves `carry` as
+/// it is. A member whose step would not fit a rotator's member, which
+/// includes every product the original's single precision cannot hold, does
+/// not turn in that tick and keeps what it carried.
+///
+/// Precision: the tick is taken as the `f32` it is (the value every other
+/// part of the simulation steps by) and the arithmetic is in `f64`. An
+/// `f32` of 2^-10 (a millisecond) or more is a whole multiple of 2^-33; so
+/// is its product with an integer rate, so is the carried fraction, and so
+/// is their sum, and an `f64` holds every multiple of 2^-33 below 2^20
+/// exactly. For ticks of a millisecond or more and steps below a million
+/// units (15 turns a tick) no operation rounds at all: the sum of the steps
+/// is exactly the truncation of the rate times the sum of the ticks, for
+/// any number of ticks. Outside that range one tick rounds by at most
+/// 2^-53 of its step. The `f32` nearest 1/60 s is 28 parts in 2^29 longer
+/// than 1/60 s, which is the game's tick and not an error of the turn: at
+/// 9102 units/s it is 0.08 units in 10 000 ticks.
+#[must_use]
+pub fn carried_rotation_step(rate: [i32; 3], dt: f32, carry: &mut [f64; 3]) -> [i32; 3] {
+    let mut step = [0; 3];
+    if !dt.is_finite() || dt <= 0.0 {
+        return step;
+    }
+    let dt = f64::from(dt);
+    for ((step, carry), rate) in step.iter_mut().zip(carry.iter_mut()).zip(rate) {
+        // A carried fraction is less than one unit; anything else is not
+        // one this function left.
+        let carried = if carry.abs() < 1.0 { *carry } else { 0.0 };
+        let turn = f64::from(rate) * dt + carried;
+        let whole = turn.trunc();
+        if whole.abs() < STEP_LIMIT {
+            // In range, so the conversion is exact.
+            *step = whole as i32;
+            *carry = turn - whole;
+        }
+    }
+    step
 }
 
 /// `true` for an actor the engine turns by itself: in `PHYS_Rotating` with
@@ -675,6 +791,8 @@ pub struct LevelScript {
     movers: BTreeMap<u32, MoverBody>,
     /// The actors the engine turns by itself, by id.
     spinners: Vec<Spinner>,
+    /// The rule they turn by.
+    turn_rule: TurnRule,
     /// What is attached to each actor the host moves (base id → passengers).
     passengers: BTreeMap<u32, Vec<Passenger>>,
     /// Placement (location with the sub-level's offset, rotation) of every
@@ -1029,6 +1147,7 @@ impl LevelScript {
             by_world,
             movers,
             spinners,
+            turn_rule: TurnRule::default(),
             passengers,
             host_placements,
             host_moved: BTreeSet::new(),
@@ -1263,6 +1382,29 @@ impl LevelScript {
         self.spinners.iter().map(|s| (s.actor, s.rate)).collect()
     }
 
+    /// The rule the turning actors turn by: [`TurnRule::DesignedRate`]
+    /// unless [`Self::set_turn_rule`] chose another.
+    #[must_use]
+    pub fn turn_rule(&self) -> TurnRule {
+        self.turn_rule
+    }
+
+    /// Chooses the rule the turning actors turn by from the next tick on
+    /// (module docs, "Turning actors"). Every script starts with
+    /// [`TurnRule::DesignedRate`], which is what the game plays with;
+    /// [`TurnRule::Native`] is for stepping a recording of the original by
+    /// its own frame times, and for tests of the original's rule. The
+    /// actors stay where they are; a change of rule drops the fractions
+    /// carried so far.
+    pub fn set_turn_rule(&mut self, rule: TurnRule) {
+        if self.turn_rule != rule {
+            for spinner in &mut self.spinners {
+                spinner.carry = [0.0; 3];
+            }
+        }
+        self.turn_rule = rule;
+    }
+
     /// One Kismet-driven tick (see the module docs). `None` (and nothing
     /// runs) when the game is not playing.
     pub fn tick(&mut self, game: &mut Game, input: &InputFrame) -> Option<ScriptedTick> {
@@ -1436,15 +1578,25 @@ impl LevelScript {
         &self.console
     }
 
-    /// One tick of the actors the engine turns by itself: each turns by
-    /// [`rotation_step`] of its `RotationRate` about its location, and what
-    /// is attached to it rides along.
+    /// One tick of the actors the engine turns by itself: each turns about
+    /// its location by the step of its `RotationRate` under the script's
+    /// [`TurnRule`] ([`carried_rotation_step`], or [`rotation_step`] for
+    /// the original's rule), and what is attached to it rides along.
     fn turn_actors(&mut self, game: &mut Game, dt: f32) {
-        for spinner in self.spinners.clone() {
-            let Some(body) = self.movers.get(&spinner.actor) else {
+        for index in 0..self.spinners.len() {
+            let Some(spinner) = self.spinners.get_mut(index) else {
+                break;
+            };
+            let actor = spinner.actor;
+            let Some(body) = self.movers.get(&actor) else {
                 continue;
             };
-            let step = rotation_step(spinner.rate, dt);
+            let step = match self.turn_rule {
+                TurnRule::DesignedRate => {
+                    carried_rotation_step(spinner.rate, dt, &mut spinner.carry)
+                }
+                TurnRule::Native => rotation_step(spinner.rate, dt),
+            };
             if step == [0; 3] {
                 continue;
             }
@@ -1454,7 +1606,7 @@ impl LevelScript {
                 body.rotation[2].wrapping_add(step[2]),
             ];
             let location = body.location;
-            self.move_body(game, spinner.actor, location, rotation, 0);
+            self.move_body(game, actor, location, rotation, 0);
         }
     }
 
@@ -4618,9 +4770,14 @@ mod tests {
     }
 
     fn wheel_game(rate: i32, wall: bool) -> (Game, LevelScript) {
+        wheel_game_at(rate, wall, 60.0)
+    }
+
+    /// The wheel in a game that ticks `hz` times a second.
+    fn wheel_game_at(rate: i32, wall: bool, hz: f64) -> (Game, LevelScript) {
         let (mut map, s) = wheel_map(rate, wall);
         let movers = prepare_movers(&mut map, &s);
-        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), hz).unwrap();
         let script = LevelScript::attach(&mut game, s, movers);
         game.start();
         (game, script)
@@ -4655,10 +4812,315 @@ mod tests {
         assert_eq!(rotation_step([9102, 0, 0], -tick), [0; 3]);
     }
 
+    // --- The designed rate (ours): the carried step.
+
+    /// The game's tick at 60 Hz as the simulation has it: the `f32` nearest
+    /// 1/60 s, which is 8 947 849 / 2^29. Since 60 × 8 947 849 = 2^29 + 28,
+    /// it is 28 parts in 2^29 (5.2e-8) longer than 1/60 s.
+    const TICK_60: f32 = 1.0 / 60.0;
+
+    /// A tick as the fraction it is: `(m, k)` with `dt` = m / 2^k exactly
+    /// (the 24 bits of a positive, normal `f32` and its exponent).
+    fn dyadic(dt: f32) -> (i128, u32) {
+        let bits = dt.to_bits();
+        let exponent = (bits >> 23) & 0xFF;
+        assert!(
+            bits >> 31 == 0 && (86..=150).contains(&exponent),
+            "a positive tick from 2^-41 s to 2^24 s: {dt}"
+        );
+        (i128::from((bits & 0x7F_FFFF) | 0x80_0000), 150 - exponent)
+    }
+
+    /// What the rule of the designed rate says an actor of `rate` units/s
+    /// has turned by after the ticks `dts`: the truncation (towards zero)
+    /// of the rate times the time that passed. In whole numbers over 2^64,
+    /// so that nothing here rounds.
+    fn designed_turn_over(rate: i32, dts: impl IntoIterator<Item = f32>) -> i32 {
+        let mut total = 0_i128;
+        for dt in dts {
+            let (m, k) = dyadic(dt);
+            total += i128::from(rate) * (m << (64 - k));
+        }
+        i32::try_from(total / (1_i128 << 64)).unwrap()
+    }
+
+    /// [`designed_turn_over`] for `ticks` ticks of the 60 Hz game: the
+    /// truncation of rate × ticks × 8 947 849 / 2^29.
+    fn designed_turn(rate: i32, ticks: i32) -> i32 {
+        let (m, k) = dyadic(TICK_60);
+        i32::try_from(i128::from(rate) * i128::from(ticks) * m / (1_i128 << k)).unwrap()
+    }
+
+    /// The angle the 16 384-entry sine table takes for `units`: floored to
+    /// 4 units. What is hard-attached to a turning actor is placed through
+    /// the table's matrix of the actor's rotation.
+    fn table(units: i32) -> i32 {
+        units & !3
+    }
+
+    #[test]
+    fn the_tick_of_the_tests_is_the_fraction_they_say() {
+        assert_eq!(dyadic(TICK_60), (8_947_849, 29));
+        assert_eq!(60 * 8_947_849, (1 << 29) + 28);
+        // 100.5 units a tick: 64 ticks are 6432 and 28 parts in 2^29 of it.
+        assert_eq!(designed_turn(6030, 64), 6432);
+        assert_eq!(designed_turn(-6030, 64), -6432);
+        // One tick of 36.4 units is 36; five are 182.
+        assert_eq!(designed_turn(2184, 1), 36);
+        assert_eq!(designed_turn(2184, 5), 182);
+        assert_eq!(
+            designed_turn_over(2184, [TICK_60; 5]),
+            designed_turn(2184, 5)
+        );
+        assert_eq!(dyadic(1.0 / 64.0), (1 << 23, 29));
+        assert_eq!(table(1105), 1104);
+        assert_eq!(table(-1), -4);
+    }
+
+    #[test]
+    fn a_carried_turn_adds_up_to_the_rate_times_the_time() {
+        // 2184 units/s, the merry-go-round's rate: 36.4 units a tick, which
+        // the original's rule makes 36.
+        let mut carry = [0.0; 3];
+        let mut turned = 0_i32;
+        let mut steps = Vec::new();
+        for n in 1..=10_000_i32 {
+            let step = carried_rotation_step([0, 2184, 0], TICK_60, &mut carry);
+            assert_eq!((step[0], step[2]), (0, 0));
+            // Whole units, the one below or the one above the rate's 36.4.
+            assert!(step[1] == 36 || step[1] == 37, "tick {n}: {}", step[1]);
+            turned += step[1];
+            // The truncation of n × 36.4 = n × 2184 / 60, to the unit. In
+            // general the `f32` tick, 28 parts in 2^29 longer than 1/60 s,
+            // allows one unit more than that (never less) within 526 000
+            // ticks: by then it has added n × 36.4 × 28 / 2^29 = 1 unit.
+            // Here it has added 0.019 units at most, and n × 36.4 has a
+            // fraction of 0, 0.2, 0.4, 0.6 or 0.8: never close enough to
+            // the next unit for that to show.
+            assert_eq!(turned, n * 2184 / 60, "after {n} ticks");
+            assert_eq!(turned, designed_turn(2184, n), "after {n} ticks");
+            // What is carried is the fraction of a unit still owed.
+            assert!((0.0..1.0).contains(&carry[1]), "tick {n}: {}", carry[1]);
+            assert_eq!((carry[0], carry[2]), (0.0, 0.0));
+            if n <= 5 {
+                steps.push(step[1]);
+            }
+        }
+        // 36.4, 72.8, 109.2, 145.6, 182.0: the totals 36, 72, 109, 145, 182.
+        assert_eq!(steps, [36, 36, 37, 36, 37]);
+        // 10 000 ticks: 364 000 units, where the original's rule at this
+        // tick gives 10 000 × 36 = 360 000.
+        assert_eq!(turned, 364_000);
+        assert_eq!(10_000 * rotation_step([0, 2184, 0], TICK_60)[1], 360_000);
+        // A long run, a million ticks (4.6 hours): 36 400 000 × (1 + 28 /
+        // 2^29) = 36 400 001.898, so 36 400 001. Nothing drifts: the
+        // difference from n × 36.4 is the tick's own length.
+        for _ in 10_000..1_000_000 {
+            turned += carried_rotation_step([0, 2184, 0], TICK_60, &mut carry)[1];
+        }
+        assert_eq!(turned, 36_400_001);
+        assert_eq!(turned, designed_turn(2184, 1_000_000));
+    }
+
+    #[test]
+    fn a_carried_turn_of_the_fast_wheels_and_of_a_turn_the_other_way() {
+        // 9102 units/s: 151.7 units a tick, which the original's rule makes
+        // 151.
+        let mut carry = [0.0; 3];
+        let mut back = [0.0; 3];
+        let mut turned = 0_i32;
+        let mut steps = Vec::new();
+        for n in 1..=10_000_i32 {
+            let step = carried_rotation_step([9102, 0, 0], TICK_60, &mut carry);
+            turned += step[0];
+            // n × 151.7 has a fraction of a tenth's multiple, 0.9 at most,
+            // and the `f32` tick adds n × 151.7 × 28 / 2^29 = 0.079 units
+            // at most in these ticks: the truncation of n × 9102 / 60.
+            assert_eq!(turned, n * 9102 / 60, "after {n} ticks");
+            assert_eq!(turned, designed_turn(9102, n), "after {n} ticks");
+            // The other way: the same steps with the other sign, and what
+            // is carried is owed the other way.
+            let other = carried_rotation_step([-9102, 0, 0], TICK_60, &mut back);
+            assert_eq!(other, [-step[0], 0, 0], "tick {n}");
+            assert_eq!(back[0], -carry[0], "tick {n}");
+            if n <= 10 {
+                steps.push(step[0]);
+            }
+        }
+        // 151.7, 303.4, 455.1, 606.8, 758.5, 910.2, 1061.9, 1213.6, 1365.3,
+        // 1517.0: seven steps of 152 in ten.
+        assert_eq!(steps, [151, 152, 152, 151, 152, 152, 151, 152, 152, 152]);
+        assert_eq!(turned, 1_517_000);
+        assert_eq!(designed_turn(-9102, 10_000), -1_517_000);
+    }
+
+    #[test]
+    fn each_member_of_a_rate_carries_its_own_fraction() {
+        // The three rates of AG-ParadiseCave's rocks, in one rotator:
+        // 151.7, −75.85 and 36.4 units a tick.
+        let rate = [9102, -4551, 2184];
+        let mut carry = [0.0; 3];
+        let mut alone = [[0.0; 3]; 3];
+        let mut turned = [0_i32; 3];
+        for n in 1..=10_000_i32 {
+            let step = carried_rotation_step(rate, TICK_60, &mut carry);
+            for i in 0..3 {
+                turned[i] += step[i];
+                // A member turns as it would alone in its rotator.
+                let mut one = [0; 3];
+                one[i] = rate[i];
+                let single = carried_rotation_step(one, TICK_60, &mut alone[i]);
+                assert_eq!(single[i], step[i], "member {i}, tick {n}");
+                assert_eq!(alone[i][i], carry[i], "member {i}, tick {n}");
+                assert_eq!(turned[i], designed_turn(rate[i], n), "member {i}");
+            }
+            // n × 75.85 has a fraction of a twentieth's multiple, 0.95 at
+            // most, and the `f32` tick adds 0.04 units at most in these
+            // ticks: the truncation, towards zero, of n × 4551 / 60.
+            assert_eq!(turned[1], -(n * 4551 / 60), "after {n} ticks");
+        }
+        // 75.85, 151.7, 227.55, 303.4: the totals 75, 151, 227, 303.
+        assert_eq!(designed_turn(-4551, 4), -303);
+        assert_eq!(turned, [1_517_000, -758_500, 364_000]);
+    }
+
+    #[test]
+    fn a_carried_turn_takes_each_tick_s_own_time() {
+        // Ticks of 1/64, 1/128 and 1/32 s in turn at 100 units/s: 1.5625,
+        // 0.78125 and 3.125 units, all whole multiples of 2^-7. The totals
+        // 1.5625, 2.34375, 5.46875, 7.03125, 7.8125, 10.9375 are 1, 2, 5,
+        // 7, 7, 10: the steps below. The original's rule drops each tick's
+        // fraction: 1, 0, 3 every time.
+        let ticks = [1.0_f32 / 64.0, 1.0 / 128.0, 1.0 / 32.0];
+        let mut carry = [0.0; 3];
+        let mut steps = Vec::new();
+        for n in 0..6 {
+            steps.push(carried_rotation_step([0, 0, 100], ticks[n % 3], &mut carry)[2]);
+        }
+        assert_eq!(steps, [1, 1, 3, 2, 0, 3]);
+        assert_eq!(carry, [0.0, 0.0, 0.9375]);
+        let native: Vec<i32> = (0..6)
+            .map(|n| rotation_step([0, 0, 100], ticks[n % 3])[2])
+            .collect();
+        assert_eq!(native, [1, 0, 3, 1, 0, 3]);
+        // 3000 such ticks are 1000 × 7/128 s: 5468.75 units, so 5468.
+        let mut carry = [0.0; 3];
+        let turned: i32 = (0..3000)
+            .map(|n| carried_rotation_step([0, 0, 100], ticks[n % 3], &mut carry)[2])
+            .sum();
+        assert_eq!(turned, 5468);
+        // The game's tick and the recording's frame of 12.8206 ms in turn,
+        // at the rates of the level's rocks: the truncation of the rate
+        // times the time that passed, whatever the ticks were.
+        let mixed = |n: usize| if n % 2 == 0 { TICK_60 } else { 0.012_820_6 };
+        for rate in [9102, -4551, 2184, 59, -1] {
+            let mut carry = [0.0; 3];
+            let mut turned = 0;
+            for n in 0..5000 {
+                turned += carried_rotation_step([rate, 0, 0], mixed(n), &mut carry)[0];
+                if n % 499 == 0 || n == 4999 {
+                    let expected = designed_turn_over(rate, (0..=n).map(mixed));
+                    assert_eq!(turned, expected, "{rate} units/s after {} ticks", n + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_rate_below_one_unit_a_tick_turns_at_the_designed_rate() {
+        // 59 units/s is 0.983 units a tick: the original's rule never turns
+        // such an actor at 60 frames a second. Carried, the first tick owes
+        // 0.983 units and the second pays one: 59 units after 60 ticks
+        // (59.000003), and still 59 after 61 (59.98).
+        assert_eq!(rotation_step([59, 0, 0], TICK_60), [0; 3]);
+        let mut carry = [0.0; 3];
+        let steps: Vec<i32> = (0..61)
+            .map(|_| carried_rotation_step([59, 0, 0], TICK_60, &mut carry)[0])
+            .collect();
+        assert_eq!(steps[..3], [0, 1, 1]);
+        assert_eq!(steps[..60].iter().sum::<i32>(), 59);
+        assert_eq!(steps.iter().sum::<i32>(), 59);
+        assert!(steps.iter().all(|s| *s == 0 || *s == 1));
+    }
+
+    #[test]
+    fn a_tick_without_time_is_no_turn_and_keeps_what_was_carried() {
+        // One tick of 36.4 units: 36, and 0.4 units owed (the `f32` tick
+        // makes it 0.400002).
+        let mut carry = [0.0; 3];
+        assert_eq!(
+            carried_rotation_step([0, 2184, 0], TICK_60, &mut carry),
+            [0, 36, 0]
+        );
+        let owed = carry;
+        assert!((owed[1] - 0.4).abs() < 1e-5 && owed[0] == 0.0 && owed[2] == 0.0);
+        // No time, time that runs back, and time that is not a number or
+        // not finite: no turn, as in the original's rule, and nothing is
+        // forgotten.
+        for dt in [
+            0.0,
+            -0.0,
+            -TICK_60,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                carried_rotation_step([0, 2184, 0], dt, &mut carry),
+                [0; 3],
+                "a tick of {dt} s"
+            );
+            assert_eq!(carry, owed, "a tick of {dt} s");
+        }
+        // The next ticks go on as if those had not been: 72.8 is 72, 109.2
+        // is 109.
+        assert_eq!(
+            carried_rotation_step([0, 2184, 0], TICK_60, &mut carry),
+            [0, 36, 0]
+        );
+        assert_eq!(
+            carried_rotation_step([0, 2184, 0], TICK_60, &mut carry),
+            [0, 37, 0]
+        );
+        // A step no member of a rotator can hold (2^31 units or more; the
+        // original's single precision cannot hold the product of such a
+        // tick either) is no turn of that member, which keeps what it
+        // carried; the other members turn.
+        let before = carry;
+        assert_eq!(
+            carried_rotation_step([i32::MAX, 2184, i32::MIN], 1.0e30, &mut carry),
+            [0; 3]
+        );
+        assert_eq!(carry, before);
+        assert_eq!(
+            carried_rotation_step([i32::MAX, 120, 0], 2.0, &mut carry)[0],
+            0
+        );
+        // The largest rate there is fits at the game's tick: its step is
+        // the truncation of 2 147 483 647 × 8 947 849 / 2^29.
+        let mut carry = [0.0; 3];
+        assert_eq!(
+            carried_rotation_step([i32::MAX, i32::MIN, 0], TICK_60, &mut carry),
+            [designed_turn(i32::MAX, 1), designed_turn(i32::MIN, 1), 0]
+        );
+        assert_eq!(designed_turn(i32::MAX, 1), 35_791_395);
+        // What is handed in as carried and cannot be a fraction this
+        // function left counts as nothing.
+        let mut carry = [f64::NAN, 5.0, -1.0];
+        assert_eq!(
+            carried_rotation_step([2184, 2184, 2184], TICK_60, &mut carry),
+            [36; 3]
+        );
+        assert_eq!(carry, [owed[1]; 3]);
+    }
+
     #[test]
     fn the_engine_turns_an_actor_in_the_rotating_physics_and_what_is_attached() {
-        // 6030 units/s: 100.5 units in a tick of 1/60 s, so 100.
+        // 6030 units/s: 100.5 units in a tick of 1/60 s, so steps of 100
+        // and 101 in turn (the designed rate; the original's rule would
+        // make every one 100).
         let (mut game, mut script) = wheel_game(6030, false);
+        assert_eq!(script.turn_rule(), TurnRule::DesignedRate);
         assert_eq!(script.mover_ids(), vec![5, 6]);
         assert_eq!(script.turning_actors(), vec![(5, [0, 6030, 0])]);
         assert!(script.moved_actors().is_empty(), "nothing has moved yet");
@@ -4666,8 +5128,11 @@ mod tests {
         for _ in 0..TICKS {
             script.tick(&mut game, &InputFrame::default()).unwrap();
         }
-        // 64 ticks of 100 units: 6400 units of yaw, about its own location.
-        let yaw = TICKS * 100;
+        // 64 ticks of 100.5 units: 6432 units of yaw, about its own
+        // location (a multiple of the sine table's 4 units, so what is
+        // attached is where the angle itself puts it).
+        let yaw = designed_turn(6030, TICKS);
+        assert_eq!(yaw, 6432);
         assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, yaw, 0])));
         // The rock is hard-attached: it keeps its transform relative to the
         // hub, (300, 0, 100) without a turn of its own.
@@ -4734,6 +5199,106 @@ mod tests {
         );
     }
 
+    /// The original's rule is there for whoever asks for it, and only then:
+    /// the wheel of 6030 units/s turns 100.5 units a tick at its designed
+    /// rate and 100 by the original's rule at this tick.
+    #[test]
+    fn a_script_turns_by_the_original_s_rule_only_when_it_is_told_to() {
+        const TICKS: i32 = 64;
+        let run = |rule: Option<TurnRule>| {
+            let (mut game, mut script) = wheel_game(6030, false);
+            if let Some(rule) = rule {
+                script.set_turn_rule(rule);
+            }
+            for _ in 0..TICKS {
+                script.tick(&mut game, &InputFrame::default()).unwrap();
+            }
+            (script.turn_rule(), script.mover_transform(5).unwrap().1)
+        };
+        // 64 × 100.5 = 6432.
+        assert_eq!(run(None), (TurnRule::DesignedRate, [0, 6432, 0]));
+        assert_eq!(run(Some(TurnRule::DesignedRate)), run(None));
+        // 64 steps of the truncated 100: 6400, half a unit a tick (30
+        // units/s) slower than the level's rate.
+        assert_eq!(rotation_step([0, 6030, 0], TICK_60), [0, 100, 0]);
+        assert_eq!(
+            run(Some(TurnRule::Native)),
+            (TurnRule::Native, [0, 6400, 0])
+        );
+
+        // A change of rule in a running level: the wheel stays where it is,
+        // and what was carried is dropped. One tick at the designed rate is
+        // 100 units with half a unit owed; a tick by the original's rule is
+        // 100; back at the designed rate the half unit is gone: 100 again,
+        // and then 201 for the two ticks' 201.0.
+        let (mut game, mut script) = wheel_game(6030, false);
+        let idle = InputFrame::default();
+        let yaw = |script: &LevelScript| script.mover_transform(5).unwrap().1[1];
+        script.tick(&mut game, &idle).unwrap();
+        assert_eq!(yaw(&script), 100);
+        script.set_turn_rule(TurnRule::Native);
+        assert_eq!(yaw(&script), 100);
+        script.tick(&mut game, &idle).unwrap();
+        assert_eq!(yaw(&script), 200);
+        script.set_turn_rule(TurnRule::DesignedRate);
+        script.tick(&mut game, &idle).unwrap();
+        assert_eq!(yaw(&script), 300);
+        script.tick(&mut game, &idle).unwrap();
+        assert_eq!(yaw(&script), 401);
+        // Choosing the rule a script already has changes nothing: the half
+        // unit owed after the next tick (100.5) is paid in the one after.
+        let (mut game, mut script) = wheel_game(6030, false);
+        script.tick(&mut game, &idle).unwrap();
+        script.set_turn_rule(TurnRule::DesignedRate);
+        script.tick(&mut game, &idle).unwrap();
+        assert_eq!(yaw(&script), 201);
+    }
+
+    /// The designed rate is the same turn at every tick rate; the
+    /// original's rule is a different speed at each.
+    #[test]
+    fn a_turning_actor_turns_at_its_rate_at_every_tick_rate() {
+        // 6030 units/s for two seconds: 12 060 units.
+        for (hz, native_step) in [
+            // 6030 / 50 = 120.6 units a tick: 120 by the original's rule,
+            // 6000 units/s.
+            (50.0, 120),
+            // 100.5: 100, 6000 units/s.
+            (60.0, 100),
+            // 6030 / 144 = 41.875: 41, 5904 units/s.
+            (144.0, 41),
+        ] {
+            let ticks = 2 * hz as i32;
+            // The tick as the game's clock gives it to the simulation.
+            let dt = (1.0 / hz) as f32;
+            let run = |rule: TurnRule| {
+                let (mut game, mut script) = wheel_game_at(6030, false, hz);
+                script.set_turn_rule(rule);
+                for _ in 0..ticks {
+                    script.tick(&mut game, &InputFrame::default()).unwrap();
+                }
+                script.mover_transform(5).unwrap().1[1]
+            };
+            let designed = run(TurnRule::DesignedRate);
+            // The truncation of the rate times the time that passed, with
+            // each tick the `f32` it is ...
+            assert_eq!(
+                designed,
+                designed_turn_over(6030, (0..ticks).map(|_| dt)),
+                "{hz} Hz"
+            );
+            // ... which is two seconds to within half a step of the `f32`
+            // (6e-8 of it, 0.0007 units of the turn): 12 060 units, or one
+            // less where the ticks sum to just under two seconds.
+            assert!(
+                designed == 12_060 || designed == 12_059,
+                "{hz} Hz: {designed}"
+            );
+            assert_eq!(rotation_step([0, 6030, 0], dt), [0, native_step, 0]);
+            assert_eq!(run(TurnRule::Native), ticks * native_step, "{hz} Hz");
+        }
+    }
+
     /// Puts the pawn in the air outside the wheel, `out` uu from the hub's
     /// axis on the ray at `units` of yaw, its eye at the rock's mid height
     /// (125), looking at the axis.
@@ -4763,10 +5328,16 @@ mod tests {
         game.set_max_grapples(3);
         game.enable_grapple(true);
         // The fire tick turns the wheel once more before the trace (the
-        // movers move before the input events): the rock will be at 11
-        // steps, 1100 units. The pawn looks at it from 1025 uu out on that
-        // ray.
-        let at_fire = 11 * 100;
+        // movers move before the input events): the hub will be at 11
+        // steps, 11 × 100.5 = 1105.5, so 1105 units. The rock is placed
+        // through the sine table's matrix of that, the angle floored to 4
+        // units: it will be on the ray at 1104 units. The pawn looks at it
+        // along that ray from 1025 uu out (the fire trace's direction goes
+        // through the same table, GRAPPLE.md G-TG-1).
+        let turn = |ticks: i32| table(designed_turn(6030, ticks));
+        assert_eq!(designed_turn(6030, 11), 1105);
+        let at_fire = turn(11);
+        assert_eq!(at_fire, 1104);
         look_at_the_wheel(&mut game, 1025.0, at_fire);
         let t = script.tick(&mut game, &fire).unwrap();
         let attached = t.report.events.gun.attached.expect("the grapple attaches");
@@ -4783,13 +5354,15 @@ mod tests {
         );
         let follow = game.player().script.gun.follow.expect("the anchor follows");
         assert_eq!(follow.actor, 6);
-        // Held: the anchor rides the rock, which rides the hub: 100 units of
-        // yaw a tick about the hub's axis.
+        // Held: the anchor rides the rock, which rides the hub about the
+        // hub's axis: to the hub's yaw as the sine table takes it (100.5
+        // units a tick, floored to whole units and then to 4).
+        let ridden = |tick: i32| turn(11 + tick);
         let mut released = None;
         let mut previous = (anchor0 - game.player().position).length();
         for tick in 1..=60 {
             let t = script.tick(&mut game, &fire).unwrap();
-            let expected = at_yaw(354.0, at_fire + tick * 100, 125.0);
+            let expected = at_yaw(354.0, ridden(tick), 125.0);
             let gun = game.player().script.gun;
             assert!(
                 (gun.grapple_location - expected).length() < 0.05,
@@ -4818,13 +5391,16 @@ mod tests {
         assert_eq!(reason, asamu_player::grapple_gun::ReleaseReason::Proximity);
         assert!(d < 200.0 && previous >= 200.0, "{previous} then {d}");
         // By then the anchor has gone a long way from where the grapple hit.
-        let travelled = (at_yaw(354.0, at_fire + tick * 100, 125.0) - anchor0).length();
+        let travelled = (at_yaw(354.0, ridden(tick), 125.0) - anchor0).length();
         assert!(travelled > 30.0, "{travelled} uu in {tick} ticks");
     }
 
     #[test]
     fn a_grapple_stays_attached_when_its_rock_passes_behind_a_wall() {
-        // 12 000 units/s: 200 units a tick.
+        // 12 000 units/s: 200 units a tick with nothing left over (the
+        // `f32` tick adds a hundred-thousandth of a unit a tick, which is
+        // no unit in this test's 41 ticks).
+        assert_eq!(designed_turn(12_000, 41), 41 * 200);
         let (mut game, mut script) = wheel_game(12_000, true);
         let fire = InputFrame {
             grapple_held: true,
@@ -4892,7 +5468,7 @@ mod tests {
         map.placed = vec![
             PlacedActor {
                 physics: PlacedPhysics::Rotating,
-                // 630 / 60 = 10.5: 10 units a tick.
+                // 630 / 60 = 10.5 units a tick.
                 rotation_rate: [0, 630, 0],
                 ..placed(5, "Lift", Vec3::ZERO)
             },
@@ -4909,20 +5485,23 @@ mod tests {
         let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
         let mut script = LevelScript::attach(&mut game, s, movers);
         game.start();
-        for _ in 0..90 {
+        for _ in 0..96 {
             script.tick(&mut game, &InputFrame::default()).unwrap();
         }
-        // Not lifted (the track's 200 uu), turned 90 × 10 units.
-        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, 900, 0])));
+        // Not lifted (the track's 200 uu), turned 96 × 10.5 = 1008 units (a
+        // multiple of the sine table's 4 units).
+        let yaw = designed_turn(630, 96);
+        assert_eq!(yaw, 1008);
+        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, yaw, 0])));
         // The crate at (100, 100, 50) rode the turn: √2 × 100 uu out, at an
-        // eighth of a turn (8192 units) plus 900.
+        // eighth of a turn (8192 units) plus 1008.
         let (crate_at, crate_rotation) = script.mover_transform(6).unwrap();
-        let expected = at_yaw(100.0 * std::f64::consts::SQRT_2, 8192 + 900, 50.0);
+        let expected = at_yaw(100.0 * std::f64::consts::SQRT_2, 8192 + yaw, 50.0);
         assert!(
             (crate_at - expected).length() < 1e-2,
             "{crate_at} vs {expected}"
         );
-        assert_eq!(crate_rotation, [0, 900, 0]);
+        assert_eq!(crate_rotation, [0, yaw, 0]);
         // The Matinee ran to its end all the same: `Completed` set the
         // grapple limit.
         assert_eq!(game.player().script.gun.max_grapples, 2);
@@ -5090,15 +5669,18 @@ mod tests {
 
     #[test]
     fn a_wheel_and_what_it_carries_stay_together_for_ten_thousand_ticks() {
-        // 6030 units/s: 100 units a tick.
+        // 6030 units/s: 100.5 units a tick, steps of 100 and 101 in turn.
         let (mut game, mut script) = wheel_game_with_a_lamp(6030);
         assert_eq!(script.mover_ids(), vec![5, 6, 7]);
         const TICKS: i32 = 10_000;
         for _ in 0..TICKS {
             script.tick(&mut game, &InputFrame::default()).unwrap();
         }
-        // The rotation is not wrapped: 15 turns and a bit.
-        let yaw = TICKS * 100;
+        // The rotation is not wrapped: 15 turns and a bit, 10 000 × 100.5 =
+        // 1 005 000 units (the `f32` tick adds 0.05 units to that; a
+        // multiple of the sine table's 4 units).
+        let yaw = designed_turn(6030, TICKS);
+        assert_eq!(yaw, 1_005_000);
         assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, yaw, 0])));
         // The hard-attached rock is rebuilt from its kept transform every
         // tick: no error adds up.
@@ -5161,8 +5743,10 @@ mod tests {
             );
             assert!(p.velocity.length() < 1e-3, "tick {tick}: {}", p.velocity);
         }
-        // Around the axis with the hub, and turned with it.
-        let yaw = TICKS * 100;
+        // Around the axis with the hub, and turned with it: 2000 × 100.5
+        // units.
+        let yaw = designed_turn(6030, TICKS);
+        assert_eq!(yaw, 201_000);
         let p = game.player();
         let carried = at_yaw(100.0, yaw, f64::from(p.position.z));
         assert!(
@@ -5196,9 +5780,11 @@ mod tests {
         for _ in 0..TICKS {
             script.tick(&mut game, &InputFrame::default()).unwrap();
         }
-        // 6400 units of yaw on: the box comes down on the rock over the
-        // rock's centre as it is now ...
-        let centre = at_yaw(325.0, TICKS * 100, 0.0);
+        // 64 × 100.5 = 6432 units of yaw on: the box comes down on the rock
+        // over the rock's centre as it is now ...
+        let yaw = designed_turn(6030, TICKS);
+        assert_eq!(yaw, 6432);
+        let centre = at_yaw(325.0, yaw, 0.0);
         let hit = down(&game, centre.x, centre.y).expect("the rock");
         assert_eq!(hit.hit.surface.actor, Some(6));
         assert!((hit.hit.position.z - 194.0).abs() < 1e-2, "{:?}", hit.hit);
@@ -5210,7 +5796,7 @@ mod tests {
         // hub's axis along the rock's ray, the box (21 uu to its face on an
         // axis; here turned against the rock) stops outside the rock's
         // outer face, 350 uu out.
-        let out = at_yaw(600.0, TICKS * 100, 125.0);
+        let out = at_yaw(600.0, yaw, 125.0);
         let hit = game
             .world()
             .sweep_box(out, Vec3::new(0.0, 0.0, 125.0), half)
@@ -5256,18 +5842,27 @@ mod tests {
         for _ in 0..30 {
             script.tick(&mut game, &InputFrame::default()).unwrap();
         }
-        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, 6000, 0])));
+        // 60 ticks of 100.5 units: 6030, of which the first 30 made 3015.
+        let (yaw, half) = (designed_turn(6030, 60), designed_turn(6030, 30));
+        assert_eq!((yaw, half), (6030, 3015));
+        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, yaw, 0])));
+        // The rock is placed through the sine table's matrix of the hub's
+        // rotation: at the angle floored to 4 units, 6028.
         let (rock, _) = script.mover_transform(6).unwrap();
-        let expected = at_yaw(300.0, 6000, 100.0);
+        let expected = at_yaw(300.0, table(yaw), 100.0);
         assert!((rock - expected).length() < 1e-2, "{rock} vs {expected}");
-        // The pawn was carried again from where it was put: 3000 units of
+        // The pawn was carried again from where it was put: 3015 units of
         // yaw about the hub's axis (it may take a tick or two to stand; a
         // tick's carry is 0.0096 rad).
         let p = game.player();
         assert!(p.grounded, "standing on the hub");
         let radius = f64::from(put.truncate().length());
         let from = f64::from(put.y).atan2(f64::from(put.x)) * 65_536.0 / std::f64::consts::TAU;
-        let carried = at_yaw(radius, from.round() as i32 + 3000, f64::from(p.position.z));
+        let carried = at_yaw(
+            radius,
+            from.round() as i32 + (yaw - half),
+            f64::from(p.position.z),
+        );
         assert!(
             f64::from((p.position - carried).length()) < 0.03 * radius + 0.1,
             "the pawn is at {}, the hub took it from {put} to {carried}",
