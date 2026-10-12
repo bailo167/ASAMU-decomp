@@ -44,6 +44,7 @@ evidence for each so a later agent can confirm them against the script property 
 | 8 | Air control: if a pawn flag (Pawn+0x298 bit 51, hypothesis `bLimitFallAccel`) is set, air acceleration is clamped to `AccelRate·AirControl` (+ a low-speed boost below 10 uu/s, and a horizontal speed bound when already above GroundSpeed). If the flag is clear, the script acceleration is used unclamped. **The flag's default must be read from script.** | CONFIRMED logic; UNKNOWN default |
 | 9 | Landing happens on any hit whose normal Z ≥ `WalkableFloorZ` (Pawn+0x258). On a direct landing the unused sub-step time is carried into walking; a landing detected only after a wall/ceiling slide carries **zero** time. | CONFIRMED (disassembly of both call sites) |
 | 10 | Jumping is **not native** (no `DoJump` symbol); the jump impulse comes from script. Native code only provides `SuggestJumpVelocity` (AI) and landing bookkeeping. `SetMaxLandingVelocity` is an empty stub. | CONFIRMED |
+| 11 | Every hit the movement code sees is **reported short of the contact** (10.2): 0.1 uu for a trace under 1 uu, else a tenth of its length, at most 1.0 uu (BSP, brushes, simple bodies) or 4.0 uu (mesh triangles). The pawn therefore stands a true 3.15 or 4.95 uu above a floor, rests 0.1 uu from a wall and lands a tenth of its last fall step above the floor. It is swept as a box (10.1). | CONFIRMED (code; recordings) |
 
 ## 0. Evidence and reproduction
 
@@ -412,6 +413,28 @@ after loop:
 - Otherwise (no actor, the base, or step-up-able): `stepUp(down=(0,0,−1), DesiredDir=SafeNormal(Delta),
   Delta·(1 − Hit.Time), Hit)` (3.2.1). If that leaves the pawn falling → falling transition.
 
+**Wall contact, with the pull-back (10.2)** [CONFIRMED rule; measured at one wall]. Every `Hit.Time`
+above is a reported time, short of the contact. Walking square into a wall therefore takes this
+course, all moves being shorter than 10 uu:
+
+- The move `Delta` meets the wall and stops `pull(|Delta|)` short of it, `pull(L)` = 0.1 uu for
+  `L < 1`, else `0.1·L`.
+- `stepUp` then tries the rest, `R = Delta·(1 − Hit.Time)`, from `MaxStepHeight + 2` higher. Against the
+  same wall that shorter trace is pulled back less: the pawn advances `pull(|Delta|) − pull(|R|)` more
+  and is `pull(|R|)` from the wall. Its slide is zero for a head-on hit; the step-down brings it back
+  to the height it had (the floor check is longer than the step and finds nothing nearer).
+- Once the attempted moves are shorter than 1 uu the pawn is 0.1 uu from the wall and stays there: a
+  contact nearer than the pull-back is reported at time 0.
+- At an angle the pull-back is along the move, so the distance along the wall's normal is the
+  pull-back times the cosine of the angle of approach.
+
+Measured (`docs/PARITY_FINDINGS.md` V11, the Workshop door, WS1 ticks 1562 to 1565): from 0.4189 uu
+with attempted moves of 2.266, 0.788 and 0.662 uu the rule gives 0.2266 after the first sweep and
+0.2074 after the step-up's retry (an advance of 0.2115), then 0.1 (an advance of 0.1074), then no
+move; recorded advances 0.2114 and 0.1074, rest 0.0999 uu from the contact plane. That plane is where
+the pawn's centre is 21.025 uu from the door's face: the move's box is 1.001 × 21 = 21.021 wide (9.2).
+`crates/asamu-player/tests/parity_pull_back.rs` holds the derivation as a test.
+
 #### 3.2.1 APawn::stepUp @ 0x100ADCFA0 [CONFIRMED]
 
 `StepDown = down · (MaxStepHeight[+0x250] + 2.0)`.
@@ -474,6 +497,36 @@ also hit while the floor is unwalkable (this blocks the falling path below and r
 
 Constants: 2.0 (trace fudge), 2.4 @ 0x10173D2B0, 1.9 @ 0x10173D2B4, 2.15 @ 0x10173D2B8,
 0.1 @ 0x1016457B8.
+
+**`FloorDist` is a reported distance (10.2), so the pawn stands higher than 2.15**
+[CONFIRMED: native rule and recordings]. The floor trace is `P = MaxStepHeight + 2` long, 28 uu for
+the player, and its hit comes back `min(0.1·P, K)` short of the floor: 1.0 uu on BSP, on a brush and
+on a mesh's simple-collision body (K = 1.0), 2.8 uu on a mesh's triangles (K = 4.0). With `g` the true
+height of the pawn's bottom above the floor:
+
+```
+FloorDist = max(0, g − 1.0)        BSP, brushes, simple bodies
+FloorDist = max(0, g − 2.8)        mesh triangles
+```
+
+- The target 2.15 is a true 3.15 uu (4.95 on triangles) and the band 1.9 to 2.4 a true 2.9 to 3.4
+  (4.7 to 5.2). Measured: the centre at 72 + 44 + 2.15 + 1.0 = 119.150 on 1,817 of 1,817 Workshop
+  records over the BSP floor at 72 (V18); 3.151 uu above flat hull tops at 7 places (P2); 4.954 uu
+  (sd 0.113, n 23) under the box's footprint on triangle floors, standing gaps 4.72 to 5.17 (P4, V7).
+- A floor nearer than the pull-back is reported at distance 0 and not as penetrating, so the pawn is
+  moved up by the whole 2.15, wherever it is below 1.0 (2.8). From close to a floor it therefore
+  reaches the band **in stages**: on triangles from 0.466 to 2.616 and, at the next check, to 4.766,
+  where the floor is reported at 1.966 and the pawn stays (not at 4.95). On BSP the second check sees
+  1.616 and moves it to 3.15.
+- A pawn that stands still is not checked (the skip rule above), so it keeps whatever height its last
+  check or its landing left it, in or out of the band, until it moves. The pops of
+  `docs/PARITY_FINDINGS.md` P11 start as such a rise; why those pawns then fall is not explained by it.
+- The trace is the pawn's box (10.1), so on a slope `g` is the height of the box's lowest corner above
+  the floor under that corner: on a plane rising `a` per uu along X and `b` along Y the centre is
+  `44 + 21·(|a| + |b|) + 3.15` above the plane under it (a cylinder: `21·sqrt(a² + b²)`).
+- Not covered by the above [CONFIRMED rule, not measured]: with BSP within reach below a mesh or a
+  volume, their hit is pulled back on a shorter trace (10.2, "BSP first"), so a pawn standing on
+  triangles that lie a few uu above a BSP floor stands lower than 4.95 above them.
 
 ### 3.4 Fall / ledge decision
 
@@ -625,6 +678,18 @@ If `Hit.Normal.Z ≥ WalkableFloorZ` [+0x258]:
 
 (If the hit actor is a pawn, the move was upward, `Hit.Time = 0` and the normal is straight up, script
 `StuckOnPawn` is raised first.) Constants: 0.003 @ 0x10173D2D4, 0.1 @ 0x1016457B8.
+
+**Where a landing leaves the pawn** [CONFIRMED rule; measured, `docs/PARITY_FINDINGS.md` P3]. `Hit.Time`
+is the reported time (10.2): the pawn stops short of the floor by the pull-back of the falling move,
+along that move. For a move `L` uu long that is `0.1·L` (0.1 uu under 1 uu), at most 1.0 uu on BSP,
+brushes and simple bodies and 4.0 uu on a mesh's triangles; a fall of 600 uu/s at 60 Hz lands 1.0 uu
+above a BSP floor. Both conditions of the velocity rule above use the reported time. A floor nearer
+than the pull-back is reported at time 0: the pawn lands where it is, and the velocity is not
+re-derived (`Hit.Time ≤ 0.1`). The walking that follows in the same frame (carried time, forced floor
+check, 5.2) then moves the pawn up as described in 3.3: a landing with a 4.66 uu move on triangles
+rests at 0.466 + 2.15 = 2.616 uu (the after-landing rest of 2.62 at the Darkcave start, V7), and at
+4.766 after the next moving frame. A landing found only after a slide (4.5) carries no time: the pawn
+stays the slide's pull-back above the floor until the next frame.
 
 ### 4.5 Walls and ceilings (non-walkable hits)
 
@@ -1010,9 +1075,12 @@ DefaultGravityZ (−520.0 config).
 1. **Swept box move** (`MoveActor`): sweep the axis-aligned box of the collision cylinder's extent
    (radius ×1.001 on X and Y, half-height on Z; a box, not a cylinder: 10.1) by Delta; stop at the
    first blocking hit; return Time ∈ [0,1], Normal, hit actor,
-   material/physical-material friction, "started penetrating". The original's collision primitives
-   keep a small skin; the walking code relies on hovering 1.9–2.4 uu above floors, so our sweep must be
-   conservative in the same way [exact skin UNKNOWN].
+   material/physical-material friction, "started penetrating". `MoveActor` adds no skin of its own:
+   the pawn goes to `Location + Delta·Hit.Time` (0x1008E9DBF to 0x1008E9E39), and `Hit.Time` is the
+   time the primitive reported, already pulled back (10.2). The 1.001 widens X and Y only: the extent
+   from `AActor::GetCylinderExtent` is multiplied at 0x1008E9BF1 by the vector at 0x10171DA60, whose
+   first two floats are 1.001 [CONFIRMED]. Ours: `CollisionWorld::sweep_box` returns the exact
+   contact with the primitive's kind and the port applies `pull_back`.
 2. **Extent line check** (`SingleLineCheck` with extent; the same box, 10.1): floor probe (length MaxStepHeight + 2),
    air-control wall probe (world only), landing sanity probe (0.9× extent), base search (8 uu).
 3. **Point/small-extent probes** for ledge checks (only needed for crouch/slow walk).
@@ -1052,8 +1120,8 @@ tick(dt):
 4. What physics mode and forces the **grapple** uses (script); `physCustom` is empty natively.
 5. Exact return value of `CheckForLedges` (crouch/slow-walk ledge behaviour).
 6. Mesh root-motion mode of the player pawn (must be "ignore" for the UDK velocity path).
-7. Collision skin/pullback inside the original line checks (BSP/static mesh) — affects hover distances
-   and wall contact.
+7. ~~Collision skin/pullback inside the original line checks (BSP/static mesh) — affects hover
+   distances and wall contact.~~ Answered: 10.2.
 8. Per-map WorldGravityZ/GlobalGravityZ, GravityVolumes, PhysicsVolume GroundFriction/TerminalVelocity
    values in ASAMU maps.
 9. Default of UDKPawn+0x78C (slope boosting) and of the lean-roll limit (visual only).
@@ -1247,6 +1315,81 @@ the tie comparison or that order in the kernel fails these tests and no other.
 [TENTATIVE that nothing observable follows; a recording of a walk into the outer corner of a BSP
 wall at an angle, and one of a pawn pushed into geometry by a mover, would settle it.]
 
+### 10.2 The pull-back: every reported hit is short of the contact
+
+Each collision routine ends by moving the hit it found back along the trace, and the movement code
+only ever sees that reported hit. This is the "skin" of the original: there is no other
+(`UWorld::MoveActor`, 9.2). Read in the Mac executable on 2026-10-10 and again, independently, on
+2026-10-12 (`objdump -d --x86-asm-syntax=intel` over the ranges named below; constants from the file's
+bytes). [CONFIRMED]
+
+**Rule K.** With `L` the length of the trace (start to end, in `f32`: the square root of the sum of the
+three squared differences) and `t` the time of the contact:
+
+```
+t' = t − ( 0.1 < 0.1/L  ?  0.1/L  :  min(0.1, K/L) )
+t' = t' < 0 ? 0 : min(t', 1)
+Hit.Location = Start + (End − Start)·t'
+```
+
+In words: the hit is 0.1 uu short of the contact for a trace shorter than 1 uu, else a tenth of the
+trace's length short, but never more than K uu; and never before the start of the trace (a contact
+nearer than that is reported at time 0, which is not the "started penetrating" flag).
+
+| Routine | Where | Extent trace | Zero-extent trace |
+|---|---|---|---|
+| BSP: `UModel::LineCheck @ 0x10092BD20` | box path 0x10092BED7 to 0x10092BF7C; zero-extent path 0x10092C060 to 0x10092C11B | rule K, K = 1.0 | **0.5 uu at any length**: the time is recomputed from the hit location and `−0.5/L` is added, then the same clamp |
+| Brush: `UBrushComponent::LineCheck @ 0x100759CB0` | 0x100759D65 to 0x100759DFD | rule K, K = 1.0 | the same code |
+| Static mesh, simple body: `UStaticMeshComponent::LineCheck @ 0x100C58790` | 0x100C58909 to 0x100C589B0 | rule K, K = 1.0 | the same code |
+| Static mesh, triangles: the same routine | 0x100C5960D to 0x100C596C1, where its zero-extent and its box check of the triangles both end | rule K, K = 4.0 | the same code |
+| Pawn cylinder: `UCylinderComponent::LineCheck @ 0x100537920` | 0x100537D60 to 0x100537D8B | `t' = t − 0.001`, same clamp | the same code |
+
+Constants (`f32`): 0.1 @ 0x1016457B8, 1.0 @ 0x101633D88, 4.0 @ 0x1016457CC, −0.5 @ 0x10163926C,
+−0.001 @ 0x1016BC044, 0.0 @ 0x1016526A4. Each of the five skips its reduction (not the clamp) for a
+trace carrying flag 0x80000; none of the pawn's moves or checks carries it (`MoveActor`'s flags are
+0x2086 plus, depending on the actor's own flags, 0x20000 and 0x100000: 0x1008E98A1 to 0x1008E98CC; the
+floor check passes 0x20DF, 3.3). Which path a static mesh takes: 10.1 and
+`docs/PARITY_FINDINGS.md` V3.
+
+**BSP first** (`UWorld::MultiLineCheck @ 0x1008EB640`, which `MoveActor` at 0x1008E9C38 and
+`UWorld::SingleLineCheck @ 0x1008E8F10` both go through). The level's BSP is asked first, with the whole
+trace. If it reports a hit at time `T`, the trace given to everything else (the octree's primitives)
+is shortened to end 5 uu beyond that hit:
+
+```
+Dist     = |Hit.Location − Start|
+Dilation = min(1, (5.0 + Dist)·T / (Dist + 0.0001))
+End'     = Start + (End − Start)·Dilation
+```
+
+and the times those primitives report are multiplied by `Dilation` afterwards (0x1008EBC3D to
+0x1008EBDA9; 5.0 @ 0x101639278, 0.0001 @ 0x10163FED8). They are skipped altogether when `Dilation` is
+not above 1e-8. Their own pull-back therefore uses the shortened length `L·Dilation`. On the 28 uu
+floor check over a mesh's triangles with BSP `h` uu below them, and the pawn `g` above the triangles,
+the trace the mesh sees is `g + h − 1 + 5` long, and while that is under 28 the triangles are reported
+`0.1·(g + h + 4)` short instead of 2.8: the pawn then stands `(2.15 + 0.1·(h + 4)) / 0.9` above them,
+2.83 uu for `h` = 0 rising to 4.95 at `h` = 19.05. [CONFIRMED code; not compared with a recording: the
+four low standing gaps of V7 (1.18, 2.26, 2.38, 2.62) are candidates, 2.62 being a landing rest.]
+
+Which hit comes first is decided on the reported times, so it need not be the first surface touched:
+on the 28 uu check a mesh's triangles up to 1.8 uu below the top of a blocking volume are reported
+before it (2.8 uu back against 1.0).
+
+**Measured** (`docs/PARITY_FINDINGS.md` P3): BSP floor, simple-body floors and triangle floors (3.3
+here), one wall (3.2), landings (4.4), 47 grapple anchors 3.9967 uu short of the triangles (V16: a
+16,384 uu bullet trace, K = 4.0). Not measured: the zero-extent rows of BSP, brushes and simple bodies,
+the pawn cylinder, and "BSP first".
+
+**Ours.** `asamu_player::world::pull_back` is the rule, operation for operation in `f32`, for the five
+kinds and both sorts of trace; `bsp_checked_fraction` and `reported_time` are "BSP first".
+`CollisionWorld::sweep_box` and `trace_line` return the exact contact and the kind
+(`TraceHit`), and the caller applies the rule: the movement port does for every hit it consumes
+(`crates/asamu-player/src/ue3_movement.rs`: moves, the floor check, the air-control probe, and through
+them step-up, step-down, slides, landings and flying). The port's former 0.05 uu skin is gone. Open on
+our side: a world that mixes kinds has to return the hit that is first by reported time and the
+shortened fraction after a BSP hit; the test worlds here have one kind each, and the game's world
+reports what its scene query finds first by exact time.
+
 ## 11. Verification log
 
 An independent adversarial pass (2026-10-09) re-read the local decompilation, the disassembly and the
@@ -1311,3 +1454,8 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   elements, brushes and BSP: shape, axis order, contact normal, rules for a start in contact), from the
   disassembly and from running the triangle and convex routines in a local interpreter; 3 and 9.2
   now say "box" where they said "cylinder".
+- 2026-10-12: section 10.2 (the pull-back of every reported hit: the rule re-read at the five
+  routines, `MoveActor`'s use of the reported time and the extent it widens, and the shortening of a
+  trace after a BSP hit in `UWorld::MultiLineCheck`, which no earlier pass had read); what follows from
+  it in 3.2 (wall contact), 3.3 (the floor check's distances are reported ones; rising in stages) and
+  4.4 (where a landing leaves the pawn); 9.2 item 1 and 9.5 item 7 now point to it.
