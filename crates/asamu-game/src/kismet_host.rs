@@ -46,7 +46,9 @@
 //! instead.
 //!
 //! **Basing (TENTATIVE).** A grounded player standing on a mover (the actor
-//! a short downward sweep hits) is moved by the mover's change of transform
+//! a short downward sweep of the pawn's box hits: the shape its floor check
+//! stands it with, so a mover whose top leans along both X and Y is found
+//! under the box's corner) is moved by the mover's change of transform
 //! that frame (position through the full transform, yaw by the yaw change).
 //! UE3 bases pawns on movers and moves them in the mover's encroachment
 //! pass; that path (and pushing, crushing) is not modelled.
@@ -152,7 +154,10 @@ use thiserror::Error;
 use crate::npc::{NpcEvent, NpcOptions, NpcSystem};
 use crate::{Game, GameError, TickReport};
 
-/// Distance of the downward sweep that finds the base mover, UU.
+/// Distance of the downward sweep that finds the base mover, UU. Ours (the
+/// original keeps the base its floor check found): longer than the greatest
+/// height a pawn stands above its floor, 2.4 uu reported, which is at most
+/// 2.4 + 2.8 = 5.2 uu above mesh triangles (NATIVE_PHYSICS.md 3.3, 10.2).
 const BASE_PROBE: f32 = 8.0;
 
 /// Scene kind of a blocking volume in the level script's actor table (the
@@ -973,12 +978,15 @@ impl LevelScript {
         if self.movers.is_empty() || !game.player.grounded {
             return None;
         }
-        let shape = game.pawn_cylinder();
+        // The pawn's box, as its floor check sweeps it (P4): the original's
+        // base is the actor that check hits. An upright cylinder touches a
+        // floor that leans along both X and Y up to 21 × (|a| + |b| −
+        // √(a² + b²)) uu lower than the box's corner does, further than this
+        // probe reaches on a mover that leans enough.
+        let extent = crate::converted::extent_of(game.pawn_cylinder());
         let p = game.player.position;
-        let hit = game
-            .world
-            .sweep_capsule(p, p - Vec3::Z * BASE_PROBE, shape)?;
-        let id = hit.surface.actor?;
+        let hit = game.world.sweep_box(p, p - Vec3::Z * BASE_PROBE, extent)?;
+        let id = hit.hit.surface.actor?;
         self.movers.contains_key(&id).then_some(id)
     }
 
@@ -1549,6 +1557,16 @@ mod tests {
     /// the player starts on; Kismet plays a Matinee that lifts the platform
     /// by 200 UU in 1 s, and its `Completed` output sets the grapple limit.
     fn lift_map() -> (LoadedMap, asamu_kismet::LevelScripts) {
+        lift_map_tilted(0.0)
+    }
+
+    /// [`lift_map`] with the platform sheared so that its top rises by
+    /// `gradient` uu per uu along X and along Y: the top is the plane
+    /// z = 50 + 400 × gradient + gradient × (x + y). The player starts over
+    /// the origin, its box 2.15 uu above where it touches that plane (the
+    /// box touches with its corner at (21, 21): 21 × 2 × gradient above the
+    /// plane's height under its centre).
+    fn lift_map_tilted(gradient: f64) -> (LoadedMap, asamu_kismet::LevelScripts) {
         let mut b = CollisionSceneBuilder::new();
         let v: Vec<Vec3> = (0..8)
             .map(|i| Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32))
@@ -1584,11 +1602,18 @@ mod tests {
         b.add_static(cube, floor, info(None, CollisionClass::WorldGeometry))
             .unwrap();
         let platform = Affine {
-            rows: [DVec3::X * 400.0, DVec3::Y * 400.0, DVec3::Z * 50.0],
+            rows: [
+                DVec3::X * 400.0 + DVec3::Z * (400.0 * gradient),
+                DVec3::Y * 400.0 + DVec3::Z * (400.0 * gradient),
+                DVec3::Z * 50.0,
+            ],
             translation: DVec3::new(-200.0, -200.0, 0.0),
         };
         b.add_static(cube, platform, info(Some(5), CollisionClass::InterpActor))
             .unwrap();
+        // 50 + 44 + 2.15 over a level top (the sum as it always was here),
+        // plus the top's rise to the origin and to the box's corner.
+        let start_z = 50.0_f32 + 46.15 + (442.0 * gradient) as f32;
         // A 50 UU crate attached to the lift (a passenger: not bound to the
         // Matinee itself, carried through its `Base`).
         let crate_box = Affine {
@@ -1620,7 +1645,7 @@ mod tests {
                 player_starts: vec![PlayerStartDef {
                     id: 1,
                     name: "PlayerStart_0".into(),
-                    location: Vec3::new(0.0, 0.0, 50.0 + 46.15),
+                    location: Vec3::new(0.0, 0.0, start_z),
                     rotation: [0; 3],
                     enabled: true,
                     primary: true,
@@ -1773,6 +1798,58 @@ mod tests {
             "{:?}",
             script.runtime().errors()
         );
+    }
+
+    /// The base under a standing pawn is what its **box** stands on (the
+    /// original's base is the actor its floor check hits, and that check
+    /// sweeps the box, P4). On a mover whose top leans along both X and Y the
+    /// box rests on its corner, well above where an upright cylinder of the
+    /// same radius would touch, so a cylinder probe of a few uu misses the
+    /// mover.
+    #[test]
+    fn a_mover_whose_top_leans_both_ways_carries_the_player() {
+        // Gradient 0.4 along X and along Y: the floor's normal is
+        // (−0.4, −0.4, 1)/√1.32, z = 0.870, walkable (the limit is 0.7).
+        let (mut map, s) = lift_map_tilted(0.4);
+        let movers = prepare_movers(&mut map, &s);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        // The top under the origin is at 50 + 160 = 210; the box touches it
+        // with its corner at (21, 21), where the top is 0.4 × 42 = 16.8
+        // higher: the centre at 210 + 16.8 + 44 = 270.8 at contact, and the
+        // start is 2.15 uu above that.
+        let contact = 270.8_f32;
+        let start_z = game.player().position.z;
+        assert!((start_z - (contact + 2.15)).abs() < 1e-4, "{start_z}");
+        // An upright cylinder of radius 21 would touch 21 × √0.32 = 11.879
+        // above the top under its centre: its centre at 265.879, 4.921 uu
+        // lower than the box's. From where the pawn stands, at least 2.15 uu
+        // above the box's contact, a cylinder is more than 7 uu from the
+        // mover; after the first floor check (which reports the triangles
+        // 2.8 uu nearer than they are, at distance 0, and raises the pawn by
+        // 2.15) more than 9.
+        for _ in 0..90 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        let lift = script.mover_location(5).unwrap();
+        assert!((lift.z - 200.0).abs() < 1e-3, "lift at {lift:?}");
+        let p = game.player().position;
+        assert!(game.player().grounded, "still standing on the lift");
+        assert_eq!((p.x, p.y), (0.0, 0.0), "a standing pawn does not slide");
+        // Carried by the lift's 200 uu. Above the lifted contact it stands
+        // where the floor checks leave it: 4.30 uu after the first one (the
+        // start's 2.15 plus the check's 2.15), and at most the standing
+        // height on mesh triangles, 2.15 + 2.8 = 4.95 uu, if a later check
+        // (a moved base forces one) raises it once more.
+        let above = p.z - (contact + 200.0);
+        assert!(
+            (4.30 - 1e-3..=4.95 + 1e-3).contains(&above),
+            "{above} uu above the lifted mover (carried by {})",
+            p.z - start_z
+        );
+        let extent = crate::converted::extent_of(game.pawn_cylinder());
+        assert!(!game.world().overlaps_box(p, extent), "inside the mover");
     }
 
     #[test]
