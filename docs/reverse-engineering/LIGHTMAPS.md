@@ -271,6 +271,12 @@ ignored `research/`, never the install, never through symlinks):
 - Each light-mapped draw gets a Bevy `Lightmap` (the atlas and the component's rectangle). Bevy samples light maps
   through `UV_1`; meshes whose light map is channel 0 and vertex-light-mapped meshes get a copy with a second UV set
   (for the constant kind the rectangle is a point, so any UV reads the component's constant).
+- A light-mapped draw whose material is alpha-masked (leaves, fences, grates: 1,768 draws in AG-ParadiseCave) is
+  taken out of the renderer's automatic batching (`needs_own_draw`; added 2026-10-12). Bevy 0.20 keeps light map
+  textures in groups of four and binds one group per batch; its opaque pass keeps batches of different groups
+  apart, its alpha-mask pass does not, so batched masked draws were drawn with the light maps of whichever draw
+  came first: black or wrongly lit plants, different on every run (`LIGHTING.md`, section 2.2). Drawn one by one,
+  each binds its own. Cost at one view of AG-ParadiseCave: 33 to 27 frames per second offscreen.
 - Bevy adds `lightmap x lightmap_exposure x diffuse colour` as indirect light. `lightmap_exposure` is set to
   `directional_lux_per_brightness / pi` of the app's dynamic-light mapping (`asamu_assets::lighting`), because a
   Lambertian surface turns `E` lux into `albedo x E / pi`: a baked brightness-1 light and a dynamic brightness-1
@@ -293,7 +299,8 @@ ignored `research/`, never the install, never through symlinks):
   those surfaces are brighter here than in the original.
 - The ambient term, which reaches only surfaces without a light map, follows the level's precomputed light volume
   at the viewer when that is converted (`LIGHTING.md`, section 4.3; added 2026-10-12); otherwise it is the constant
-  stand-in.
+  stand-in. The renderer gives a diffuse surface about 0.45 of the ambient brightness, so ambient light of a given
+  number is worth a little under half a light map texel of the same irradiance (`LIGHTING.md`, section 4.3).
 - What is lost: per-pixel directionality (normal-mapped detail in the baked light), the static shadow maps of
   dominant lights (Bevy's real-time shadows stand in), instanced meshes (not drawn), decal light maps.
 

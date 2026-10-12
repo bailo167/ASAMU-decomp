@@ -12,10 +12,24 @@
 //! (`lightmaps.rs` reads it next to the light maps), the ambient light of
 //! everything without a light map follows the volume **at the viewer's
 //! position**: its interpolated radiance reduced to one irradiance
-//! ([`asamu_assets::lighting::IncidentLight::irradiance`]), on the same
-//! scale as the light maps, plus the level's sky lights. That replaces the
+//! ([`asamu_assets::lighting::IncidentLight::irradiance`]), multiplied by
+//! the light maps' exposure, plus the level's sky lights. That replaces the
 //! constant stand-in (`LightMapping::base_ambient`), a number of ours, with
 //! the level's own data.
+//!
+//! How bright that is on screen (a property of the renderer, read from
+//! Bevy 0.20's shader): a light map adds `texel x exposure x diffuse
+//! colour`, but the ambient term adds only about 0.45 of `brightness x
+//! diffuse colour` (it treats ambient light as a fully rough reflection),
+//! plus a reflection that does not depend on the diffuse colour: about 0.03
+//! of the brightness seen head-on and up to about 0.2 at a grazing angle for
+//! an ordinary non-metal. So a surface without a light map in baked
+//! irradiance `E` gets a little under half the diffuse light of a
+//! light-mapped surface whose texel is `E`, and a sheen on top that
+//! outweighs it on dark materials. The brightness is deliberately not raised
+//! to close the diffuse gap: the sheen would grow with it. (The stand-in of
+//! 150 is likewise worth a baked irradiance of about 0.021 in diffuse light,
+//! not the 0.047 its number suggests.)
 //!
 //! Approximations, all render-only:
 //!
@@ -54,7 +68,8 @@ const QUERY_STEP_UU: f32 = 16.0;
 pub struct VolumeAmbient {
     /// The level's volume (`None`: the constant stand-in is used).
     volume: Option<LightVolume>,
-    /// Render ambient per unit of baked irradiance (the light maps' scale).
+    /// Ambient brightness per unit of baked irradiance: the light maps'
+    /// exposure (see the module docs for what the renderer makes of it).
     per_irradiance: f32,
     /// Ambient of the level's sky lights (render units).
     sky: f32,
