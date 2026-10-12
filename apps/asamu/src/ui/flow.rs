@@ -11,10 +11,19 @@
 //! When it is ready the save session decides the level start
 //! ([`asamu_game::save::SaveSession::begin_level`]: chapter unlock + chapter
 //! pointer in story mode), the snapshot is applied at the spawn
-//! ([`Game::apply_snapshot`]: abilities, checkpoint table, reset to the
-//! latest checkpoint), the level script learns the loaded checkpoint index
-//! (`SavedGameStateLoaded`) and the Kismet save strings
+//! ([`Game::apply_snapshot`]: abilities, checkpoint table, collectibles,
+//! reset to the latest checkpoint), the level script is given the loaded
+//! checkpoint index (`SavedGameStateLoaded`), the script state the snapshot
+//! holds (events, variables, Matinees: what keeps a level's opening from
+//! playing again after Continue) and the Kismet save strings
 //! ([`prepare_script`]), the game starts and the mouse is captured.
+//!
+//! "Restart from checkpoint" ([`FlowRequest::Restart`]) is the original's
+//! pause-menu rule: in Workshop and Epilogue the level is loaded again (its
+//! `restartlevel`), which goes through the same level start as Continue;
+//! in every other level it is the death sequence, which puts the pawn at
+//! the latest checkpoint and loads nothing (CONFIRMED (src);
+//! `docs/UI_AND_SAVES.md`, "What a load from a checkpoint restores").
 
 use asamu_assets::LevelPlan;
 use asamu_game::save::{
@@ -51,8 +60,9 @@ pub(crate) enum FlowRequest {
     Graybox,
     /// Close the menu and play on.
     Resume,
-    /// Back to the latest checkpoint (the death sequence, as the original's
-    /// quick load), then play on.
+    /// The pause menu's "Restart from checkpoint": the death sequence, then
+    /// the latest checkpoint, and play on; in Workshop and Epilogue the
+    /// level is loaded again instead ([`restart_reloads_level`]).
     Restart,
     /// Stop a level load.
     CancelLoad,
@@ -69,6 +79,16 @@ pub(crate) enum FlowRequest {
 #[must_use]
 pub(crate) fn open_target(map: &str) -> &str {
     map.split_once('?').map_or(map, |(m, _)| m).trim()
+}
+
+/// The pause menu's restart loads the level again (the original runs
+/// `restartlevel` there) instead of running the death sequence: Workshop
+/// and Epilogue, the levels whose index the original's menu tests (1 and 7).
+/// CONFIRMED (src). The reload starts the level as any story load does, from
+/// the snapshot as it is.
+#[must_use]
+pub(crate) fn restart_reloads_level(chapter: Option<ChapterId>) -> bool {
+    matches!(chapter, Some(ChapterId::Workshop | ChapterId::Epilogue))
 }
 
 /// A loaded converted map: the game and its level script.
@@ -286,11 +306,25 @@ pub(crate) fn run_flow(mut requests: MessageReader<FlowRequest>, mut ctx: FlowCt
                 ctx.play_on();
             }
             FlowRequest::Restart => {
+                if ctx.sim.is_none() {
+                    continue;
+                }
+                // Workshop and Epilogue: the level again, from its start.
+                if restart_reloads_level(ctx.play.chapter)
+                    && ctx.play.mode == PlayMode::Story
+                    && let Some(map) = ctx.play.map.clone()
+                {
+                    match ctx.start_load(&map, PlayMode::Story) {
+                        Ok(()) => continue,
+                        Err(e) => warn!("restart: {e}"),
+                    }
+                }
                 let Some(sim) = ctx.sim.as_mut() else {
                     continue;
                 };
-                // The original's quick load: the death sequence, then the
-                // latest checkpoint (converted levels; graybox: at once).
+                // Elsewhere, the original's death sequence, then the latest
+                // checkpoint (converted levels; graybox: at once). Nothing
+                // is loaded: the level script runs on.
                 sim.game.kill_player();
                 match sim.game.state() {
                     GameState::Boot => sim.game.start(),
@@ -350,17 +384,36 @@ pub(crate) fn level_start(
 }
 
 /// The level script's side of a level start: the checkpoint index the
-/// saved-game-state events receive (`None`: no event, time trial), and the
-/// Kismet save strings kept in the general save (the original keeps them in
-/// `GeneralSave.bin` across maps).
+/// saved-game-state events receive (`None`: no event, time trial), the
+/// script state of the snapshot the level starts from
+/// ([`LevelScript::start_from_save`]), and the Kismet save strings kept in
+/// the general save (the original keeps them in `GeneralSave.bin` across
+/// maps).
 pub(crate) fn prepare_script(
     script: &mut LevelScript,
     saves: &asamu_game::save::SaveSession,
     index: Option<i32>,
+    snapshot: Option<&asamu_game::save::Snapshot>,
 ) {
-    let rt = script.runtime_mut();
-    rt.set_start_save_index(index);
-    rt.set_save_strings(saves.general.flags.clone());
+    use asamu_game::kismet_host::ScriptRestore;
+    match script.start_from_save(snapshot, index) {
+        ScriptRestore::Nothing => {}
+        ScriptRestore::Saved {
+            events,
+            variables,
+            matinees,
+        } => info!(
+            "level script: the save holds {events} events, {variables} variables and {matinees} \
+             Matinees"
+        ),
+        ScriptRestore::LevelStartVariables { variables } => info!(
+            "level script: the save holds no script state (written by an earlier build); the \
+             level's {variables} variables are taken from its own start"
+        ),
+    }
+    script
+        .runtime_mut()
+        .set_save_strings(saves.general.flags.clone());
 }
 
 /// Finishes a level load: save-session level start, snapshot, start.
@@ -409,7 +462,7 @@ pub(crate) fn poll_level_load(
         toasts.push(format!("Could not write the save: {e}"));
     }
     if let Some(script) = script.as_mut() {
-        prepare_script(script, &saves.0, loaded_index);
+        prepare_script(script, &saves.0, loaded_index, start.snapshot.as_ref());
     }
     game.start();
     info!(
@@ -475,7 +528,12 @@ pub(crate) fn process_ticks(
             && saves.0.mode() == PlayMode::Story
             && sim.game.chapter().is_some()
         {
-            let snapshot = sim.game.capture_snapshot(saves.0.snapshot.as_ref());
+            // The world's part, then the level script's (events, variables,
+            // Matinees: what a later Continue restores).
+            let mut snapshot = sim.game.capture_snapshot(saves.0.snapshot.as_ref());
+            if let Some(script) = sim.script.as_ref() {
+                script.save_into(&mut snapshot);
+            }
             match saves.0.on_checkpoint_saved(snapshot) {
                 Ok(()) => {
                     info!("checkpoint {index} saved");

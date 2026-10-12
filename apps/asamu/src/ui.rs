@@ -358,7 +358,7 @@ pub(crate) fn start_direct_level(
         warn!("save failed: {e}");
     }
     if let Some(script) = script {
-        flow::prepare_script(script, &saves.0, index);
+        flow::prepare_script(script, &saves.0, index, start.snapshot.as_ref());
     }
     *play = Play {
         chapter: start.chapter,
