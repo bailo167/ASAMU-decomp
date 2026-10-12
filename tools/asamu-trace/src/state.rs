@@ -32,6 +32,39 @@
 //! | `grappling`, `released`, `can_grapple`, `times_grappled`, `max_grapples` | `gun` | grapple gun (`null` without one) |
 //! | `boots_enabled`, `boots_finished` | `boots` | rocket boots (`null` without them) |
 //!
+//! # Fields of recorder 0.2.0
+//!
+//! A recording with optional members (docs/TRACE_CAPTURE.md 6.10) gets more
+//! fields, each only in a run in which at least one record carries its
+//! member, so the line of a version-1 recording is what it was:
+//!
+//! | Field | Raw record | |
+//! |---|---|---|
+//! | `base_level` | `base_level` | package of the level the base actor lies in (base names are not unique across streamed levels) |
+//! | `base_eye_height` | `base_eye_height` | pawn `BaseEyeHeight` |
+//! | `cylinder_radius`, `cylinder_half_height` | `cylinder` | the pawn's collision cylinder |
+//! | `floor` | `floor` | pawn `Floor` as `[x, y, z]`: the normal the walking physics keeps |
+//! | `weapon_state` | `gun.state` | name of the weapon's script state |
+//! | `gun_timers` | `gun.timers` | number of entries in the weapon's timer list (`null`: the list was not read, so nothing is known about the refire timer) |
+//! | `refire_rate`, `refire_count` | `gun.timers` | period and elapsed time of the weapon's refire check ([`crate::raw::REFIRE_TIMER`]); `null` while no such timer exists |
+//!
+//! A field is `null` on a tick whose record lacks the member. The walk bob
+//! and the camera's cached view are not in the line (they change on every
+//! frame of a moving pawn and no replay starts from them yet); the camera's
+//! FOV lock is in the samples' FOV column ([`crate::convert`]).
+//!
+//! # The budget of the line
+//!
+//! Three fields can change on most ticks: `eye_height`, `refire_count`
+//! (while the weapon fires) and `floor` (on uneven ground). They share
+//! [`STATE_BULK_BUDGET`] bytes of the line, the amount `eye_height` alone
+//! was allowed before the others existed ([`EYE_HEIGHT_MAX_CHANGES`] changes
+//! of [`EYE_HEIGHT_COST`] bytes). They are admitted in that order, each if
+//! its changes × its cost fit into what the fields before it left; one that
+//! does not fit is left out of the run's line and named in a `check:` note
+//! ([`StateFields`]). So the rule for `eye_height` is the one it had, and a
+//! line never grows beyond what it could before.
+//!
 //! `tools/trace-recorder/asamu_recorder_core.py` (`_state_note`) writes the
 //! same line; `tests/python_crosscheck.rs` compares the two as JSON.
 
@@ -43,7 +76,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::convert::InitState;
-use crate::raw::RawPlayer;
+use crate::raw::{RawGun, RawPlayer};
 
 /// Prefix of the notes line carrying the state timeline.
 pub const STATE_NOTE_PREFIX: &str = "state: ";
@@ -52,6 +85,26 @@ pub const STATE_NOTE_VERSION: u64 = 1;
 /// Most changes of `eye_height` a run may have for the field to be written
 /// (see the module docs: a limit of the notes line, not a game value).
 pub const EYE_HEIGHT_MAX_CHANGES: usize = 16_000;
+/// Bytes one change of `eye_height` takes in a trace's meta line, rounded
+/// up: an entry `[tick,{"eye_height":value}],` with a five-digit tick, the
+/// value's seventeen digits and the quotes escaped is 44.2 bytes on average
+/// in the longest run of the first recordings (277,015 bytes for 6,265
+/// changes, everything else included).
+pub const EYE_HEIGHT_COST: usize = 45;
+/// Bytes one change of `refire_count` takes at most: the key with its
+/// escaped quotes and colon (17), a value of up to 23 characters (a time
+/// below 1 s with seventeen significant digits), and an entry of its own
+/// (`[tick,{` … `}],` with a six-digit tick: 12) when nothing else changes
+/// on the tick.
+pub const REFIRE_COUNT_COST: usize = 52;
+/// Bytes one change of `floor` takes at most: the key with its escaped
+/// quotes, colon and bracket (11), three values of up to 24 characters
+/// (seventeen significant digits and a sign) with two commas and the
+/// closing bracket (75), and an entry of its own (12), rounded up.
+pub const FLOOR_COST: usize = 100;
+/// Bytes of a `state:` line that the fields changing on most ticks may take
+/// together (see the module docs): what `eye_height` alone could take.
+pub const STATE_BULK_BUDGET: usize = EYE_HEIGHT_MAX_CHANGES * EYE_HEIGHT_COST;
 
 /// The recorded script state at one tick. A `None` field was not recorded
 /// (no gun, flags or boots data; a trace with only an `init:` note).
@@ -114,6 +167,36 @@ pub struct TickState {
     /// Gun `iTimesGrappled`.
     #[serde(default)]
     pub times_grappled: Option<i32>,
+    /// Package of the level the base actor lies in (recorder 0.2.0).
+    #[serde(default)]
+    pub base_level: Option<String>,
+    /// Pawn `BaseEyeHeight` (recorder 0.2.0).
+    #[serde(default)]
+    pub base_eye_height: Option<f32>,
+    /// `CollisionRadius` of the pawn's cylinder (recorder 0.2.0).
+    #[serde(default)]
+    pub cylinder_radius: Option<f32>,
+    /// `CollisionHeight` (the half height) of the pawn's cylinder
+    /// (recorder 0.2.0).
+    #[serde(default)]
+    pub cylinder_half_height: Option<f32>,
+    /// Pawn `Floor`: the normal the walking physics keeps (recorder 0.2.0).
+    #[serde(default)]
+    pub floor: Option<[f32; 3]>,
+    /// Name of the weapon's script state (recorder 0.2.0).
+    #[serde(default)]
+    pub weapon_state: Option<String>,
+    /// Entries in the weapon's timer list; `None` when it was not read
+    /// (recorder 0.2.0).
+    #[serde(default)]
+    pub gun_timers: Option<u32>,
+    /// Period of the weapon's refire check, seconds; `None` while no such
+    /// timer exists (recorder 0.2.0).
+    #[serde(default)]
+    pub refire_rate: Option<f32>,
+    /// Time the weapon's refire check has run, seconds (recorder 0.2.0).
+    #[serde(default)]
+    pub refire_count: Option<f32>,
 }
 
 fn float(v: f32, what: &str) -> Result<Value> {
@@ -133,33 +216,162 @@ pub fn eye_height_kept(players: &[&RawPlayer]) -> bool {
     eye_height_changes(players) <= EYE_HEIGHT_MAX_CHANGES
 }
 
-/// Ticks of the run whose `eye_height` differs from the tick before.
-#[must_use]
-pub fn eye_height_changes(players: &[&RawPlayer]) -> usize {
+/// Ticks of the run on which `value` differs from the tick before.
+fn changes_of<T: PartialEq>(players: &[&RawPlayer], value: impl Fn(&RawPlayer) -> T) -> usize {
     players
         .windows(2)
-        .filter(|w| matches!(w, [a, b] if a.eye_height != b.eye_height))
+        .filter(|w| matches!(w, [a, b] if value(a) != value(b)))
         .count()
 }
 
-/// The timeline fields of one raw record, by name (sorted); `eye_height`
-/// only when asked for.
-fn fields_of(p: &RawPlayer, with_eye_height: bool) -> Result<BTreeMap<&'static str, Value>> {
+/// Ticks of the run whose `eye_height` differs from the tick before.
+#[must_use]
+pub fn eye_height_changes(players: &[&RawPlayer]) -> usize {
+    changes_of(players, |p| p.eye_height)
+}
+
+/// The elapsed time of the weapon's refire check, where the record has one.
+fn refire_count(p: &RawPlayer) -> Option<f32> {
+    p.gun
+        .as_ref()
+        .and_then(RawGun::refire_timer)
+        .map(|t| t.count)
+}
+
+/// A field left out of a run's `state:` line because the line's budget
+/// for often-changing values was used up ([`StateFields`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeftOut {
+    /// What the field is, for a note.
+    pub what: &'static str,
+    /// Ticks on which it changes.
+    pub changes: usize,
+    /// Bytes one change costs.
+    pub cost: usize,
+    /// Bytes of [`STATE_BULK_BUDGET`] that were left for it.
+    pub left: usize,
+}
+
+impl LeftOut {
+    /// The converter's `check:` note (the Python converter writes the same).
+    #[must_use]
+    pub fn note(&self) -> String {
+        format!(
+            "check: {} left out of the state: note ({} changes of {} bytes; {} of the {} bytes \
+             for values that change on most ticks were left)",
+            self.what, self.changes, self.cost, self.left, STATE_BULK_BUDGET
+        )
+    }
+}
+
+/// Which fields the `state:` line of a run has beyond the version-1 ones
+/// (see the module docs: a field of recorder 0.2.0 only when a record of the
+/// run carries its member, an often-changing one only within the budget).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StateFields {
+    /// `eye_height`.
+    pub eye_height: bool,
+    /// `base_level`.
+    pub base_level: bool,
+    /// `base_eye_height`.
+    pub base_eye_height: bool,
+    /// `cylinder_radius` and `cylinder_half_height`.
+    pub cylinder: bool,
+    /// `floor`.
+    pub floor: bool,
+    /// `weapon_state`.
+    pub weapon_state: bool,
+    /// `gun_timers` and `refire_rate`.
+    pub timers: bool,
+    /// `refire_count`.
+    pub refire_count: bool,
+    /// The refire timer's count, left out for the budget.
+    pub refire_count_left_out: Option<LeftOut>,
+    /// The floor normal, left out for the budget.
+    pub floor_left_out: Option<LeftOut>,
+}
+
+impl StateFields {
+    /// The fields for the players of a run.
+    #[must_use]
+    pub fn of(players: &[&RawPlayer]) -> Self {
+        let any = |has: &dyn Fn(&RawPlayer) -> bool| players.iter().any(|p| has(p));
+        let mut f = Self {
+            eye_height: eye_height_kept(players),
+            base_level: any(&|p| p.base_level.is_some()),
+            base_eye_height: any(&|p| p.base_eye_height.is_some()),
+            cylinder: any(&|p| p.cylinder.is_some()),
+            weapon_state: any(&|p| p.gun.as_ref().is_some_and(|g| g.state.is_some())),
+            timers: any(&|p| p.gun.as_ref().is_some_and(|g| g.timers.is_some())),
+            ..Self::default()
+        };
+        let mut left = STATE_BULK_BUDGET;
+        if f.eye_height {
+            left = left.saturating_sub(eye_height_changes(players).saturating_mul(EYE_HEIGHT_COST));
+        }
+        // Whether a field that costs `cost` bytes per change fits, and what
+        // it leaves.
+        let mut admit = |what: &'static str, changes: usize, cost: usize| -> Option<LeftOut> {
+            let needed = changes.saturating_mul(cost);
+            if needed <= left {
+                left -= needed;
+                None
+            } else {
+                Some(LeftOut {
+                    what,
+                    changes,
+                    cost,
+                    left,
+                })
+            }
+        };
+        if f.timers {
+            f.refire_count_left_out = admit(
+                "the refire timer's count",
+                changes_of(players, refire_count),
+                REFIRE_COUNT_COST,
+            );
+            f.refire_count = f.refire_count_left_out.is_none();
+        }
+        if any(&|p| p.floor.is_some()) {
+            f.floor_left_out = admit(
+                "the floor normal",
+                changes_of(players, |p| p.floor),
+                FLOOR_COST,
+            );
+            f.floor = f.floor_left_out.is_none();
+        }
+        f
+    }
+
+    /// The fields left out for the budget, in the order they were tried.
+    #[must_use]
+    pub fn left_out(&self) -> Vec<LeftOut> {
+        [self.refire_count_left_out, self.floor_left_out]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
+fn opt_float(v: Option<f32>, what: &str) -> Result<Value> {
+    v.map_or(Ok(Value::Null), |v| float(v, what))
+}
+
+/// The timeline fields of one raw record, by name (sorted).
+fn fields_of(p: &RawPlayer, with: &StateFields) -> Result<BTreeMap<&'static str, Value>> {
+    let gun = p.gun.as_ref();
     let mut m = BTreeMap::new();
     m.insert("air_control", float(p.air_control, "AirControl")?);
     m.insert("air_speed", float(p.air_speed, "AirSpeed")?);
     m.insert("base", opt(p.base.clone()));
     m.insert("boots_enabled", opt(p.boots.map(|b| b.enabled)));
     m.insert("boots_finished", opt(p.boots.map(|b| b.finished)));
-    m.insert("can_grapple", opt(p.gun.map(|g| g.can_grapple)));
-    if with_eye_height {
-        let eye = match p.eye_height {
-            Some(v) => float(v, "EyeHeight")?,
-            None => Value::Null,
-        };
-        m.insert("eye_height", eye);
+    m.insert("can_grapple", opt(gun.map(|g| g.can_grapple)));
+    if with.eye_height {
+        m.insert("eye_height", opt_float(p.eye_height, "EyeHeight")?);
     }
-    m.insert("grappling", opt(p.gun.map(|g| g.grappling)));
+    m.insert("grappling", opt(gun.map(|g| g.grappling)));
     m.insert("ground_speed", float(p.ground_speed, "GroundSpeed")?);
     m.insert("has_jumped", opt(p.pawn_flags.map(|f| f.has_jumped)));
     m.insert(
@@ -168,12 +380,64 @@ fn fields_of(p: &RawPlayer, with_eye_height: bool) -> Result<BTreeMap<&'static s
     );
     m.insert("is_falling", opt(p.pawn_flags.map(|f| f.is_falling)));
     m.insert("jump_z", float(p.jump_z, "JumpZ")?);
-    m.insert("max_grapples", opt(p.gun.map(|g| g.max_grapples)));
+    m.insert("max_grapples", opt(gun.map(|g| g.max_grapples)));
     m.insert("physics", Value::from(p.physics));
     m.insert("power_jumped", opt(p.pawn_flags.map(|f| f.power_jumped)));
-    m.insert("released", opt(p.gun.map(|g| g.released)));
+    m.insert("released", opt(gun.map(|g| g.released)));
     m.insert("sprinting", opt(p.pawn_flags.map(|f| f.sprinting)));
-    m.insert("times_grappled", opt(p.gun.map(|g| g.times_grappled)));
+    m.insert("times_grappled", opt(gun.map(|g| g.times_grappled)));
+    // The fields of recorder 0.2.0.
+    if with.base_level {
+        m.insert("base_level", opt(p.base_level.clone().flatten()));
+    }
+    if with.base_eye_height {
+        m.insert(
+            "base_eye_height",
+            opt_float(p.base_eye_height, "BaseEyeHeight")?,
+        );
+    }
+    if with.cylinder {
+        m.insert(
+            "cylinder_half_height",
+            opt_float(p.cylinder.map(|c| c.half_height), "CollisionHeight")?,
+        );
+        m.insert(
+            "cylinder_radius",
+            opt_float(p.cylinder.map(|c| c.radius), "CollisionRadius")?,
+        );
+    }
+    if with.floor {
+        let floor = match p.floor {
+            Some(n) => Value::Array(vec![
+                float(n.x, "Floor")?,
+                float(n.y, "Floor")?,
+                float(n.z, "Floor")?,
+            ]),
+            None => Value::Null,
+        };
+        m.insert("floor", floor);
+    }
+    if with.weapon_state {
+        m.insert(
+            "weapon_state",
+            opt(gun.and_then(|g| g.state.clone()).flatten()),
+        );
+    }
+    if with.timers {
+        let timers = gun.and_then(|g| g.timers.as_ref());
+        let refire = gun.and_then(RawGun::refire_timer);
+        m.insert("gun_timers", opt(timers.map(|t| t.len() as u64)));
+        m.insert(
+            "refire_rate",
+            opt_float(refire.map(|t| t.rate), "the refire timer's rate")?,
+        );
+        if with.refire_count {
+            m.insert(
+                "refire_count",
+                opt_float(refire.map(|t| t.count), "the refire timer's count")?,
+            );
+        }
+    }
     Ok(m)
 }
 
@@ -183,11 +447,11 @@ fn fields_of(p: &RawPlayer, with_eye_height: bool) -> Result<BTreeMap<&'static s
 /// # Errors
 /// A value that is not finite.
 pub fn state_note(players: &[&RawPlayer]) -> Result<String> {
-    let with_eye_height = eye_height_kept(players);
+    let with = StateFields::of(players);
     let mut changes: Vec<(u64, BTreeMap<&'static str, Value>)> = Vec::new();
     let mut last: Option<BTreeMap<&'static str, Value>> = None;
     for (k, p) in players.iter().enumerate() {
-        let cur = fields_of(p, with_eye_height)?;
+        let cur = fields_of(p, &with)?;
         let diff: BTreeMap<&'static str, Value> = match &last {
             None => cur.clone(),
             Some(prev) => cur
@@ -626,5 +890,246 @@ mod tests {
         assert_eq!(s.boots_enabled, Some(true));
         assert_eq!(s.air_speed, None);
         assert_eq!(s.can_grapple, None);
+    }
+
+    /// The fields of recorder 0.2.0: in the line when a record of the run
+    /// carries the member, `null` on a tick whose record lacks it, and not
+    /// in the line of a version-1 run at all.
+    #[test]
+    fn optional_members_in_the_timeline() {
+        use crate::raw::tests::with_optional;
+        use asamu_core::glam::Vec3;
+        let a = with_optional(player(0.0, 0, &[]), false);
+        let b = with_optional(player(1.0, 0, &[]), true);
+        let mut c = b.clone();
+        c.floor = Some(Vec3::new(0.6, 0.0, 0.8));
+        c.base_level = Some(None);
+        c.gun.as_mut().unwrap().timers.as_mut().unwrap()[0].count = 0.125;
+        c.gun.as_mut().unwrap().state = Some(None);
+        let plain = player(2.0, 0, &[]);
+        let mut renamed = a.clone();
+        // The engine compares names without case; a timer list without a
+        // refire check has no refire values.
+        renamed.gun.as_mut().unwrap().timers.as_mut().unwrap()[0].name = "refirechecktimer".into();
+        let mut other = a.clone();
+        other
+            .gun
+            .as_mut()
+            .unwrap()
+            .timers
+            .as_mut()
+            .unwrap()
+            .remove(0);
+        let run = [&a, &b, &c, &plain, &renamed, &other];
+        let fields = StateFields::of(&run);
+        assert!(
+            fields.eye_height
+                && fields.base_level
+                && fields.base_eye_height
+                && fields.cylinder
+                && fields.floor
+                && fields.weapon_state
+                && fields.timers
+                && fields.refire_count
+        );
+        assert!(fields.left_out().is_empty());
+        let t = StateTimeline::from_notes(&[state_note(&run).unwrap()])
+            .unwrap()
+            .unwrap();
+        let at = |k: u64| t.at(k).unwrap().unwrap();
+        // Record 0: unlocked, standing on the Workshop's floor.
+        let s = at(0);
+        assert_eq!(s.base_level.as_deref(), Some("AG-Workshop"));
+        assert_eq!(s.base_eye_height, Some(38.0));
+        assert_eq!(
+            (s.cylinder_radius, s.cylinder_half_height),
+            (Some(21.0), Some(44.0))
+        );
+        assert_eq!(s.floor, Some([0.0, 0.0, 1.0]));
+        assert_eq!(s.weapon_state.as_deref(), Some("Active"));
+        assert_eq!(
+            (s.gun_timers, s.refire_rate, s.refire_count),
+            (Some(2), Some(0.0), Some(0.0))
+        );
+        // Record 1: the weapon fires, its refire check has run 0.0625 s of 0.1.
+        let s = at(1);
+        assert_eq!(s.weapon_state.as_deref(), Some("WeaponFiring"));
+        assert_eq!((s.refire_rate, s.refire_count), (Some(0.1), Some(0.0625)));
+        assert_eq!(s.floor, Some([0.0, 0.0, 1.0]));
+        // Record 2: a tilted floor, no base, no weapon state.
+        let s = at(2);
+        assert_eq!(s.floor, Some([0.6, 0.0, 0.8]));
+        assert_eq!((s.base_level, s.weapon_state), (None, None));
+        assert_eq!(s.refire_count, Some(0.125));
+        assert_eq!(s.cylinder_half_height, Some(44.0));
+        // Record 3 has no optional member: nothing is known on that tick.
+        let s = at(3);
+        assert_eq!(
+            (s.floor, s.base_eye_height, s.cylinder_radius, s.gun_timers),
+            (None, None, None, None)
+        );
+        assert_eq!((s.refire_rate, s.refire_count), (None, None));
+        assert_eq!(
+            s.ground_speed,
+            Some(440.0),
+            "the version-1 fields are there"
+        );
+        // Record 4: the same timer under another spelling.
+        assert_eq!(at(4).refire_rate, Some(0.0));
+        // Record 5: a timer list (one entry) without a refire check.
+        let s = at(5);
+        assert_eq!(
+            (s.gun_timers, s.refire_rate, s.refire_count),
+            (Some(1), None, None)
+        );
+
+        // A version-1 run: the line has none of these keys.
+        let v1 = state_note(&[&plain, &plain]).unwrap();
+        for key in [
+            "base_level",
+            "base_eye_height",
+            "cylinder",
+            "floor",
+            "weapon_state",
+            "gun_timers",
+            "refire",
+        ] {
+            assert!(!v1.contains(key), "{key}: {v1}");
+        }
+        assert_eq!(
+            StateFields::of(&[&plain, &plain]),
+            StateFields {
+                eye_height: true,
+                ..StateFields::default()
+            }
+        );
+        // One member alone brings its own fields only.
+        let mut floor_only = plain.clone();
+        floor_only.floor = Some(Vec3::Z);
+        let line = state_note(&[&plain, &floor_only]).unwrap();
+        assert!(
+            line.contains("\"floor\":null") && line.contains("\"floor\":[0.0,0.0,1.0]"),
+            "{line}"
+        );
+        assert!(!line.contains("cylinder") && !line.contains("refire"));
+        // A value that is not finite cannot be written.
+        let mut bad = a.clone();
+        bad.floor = Some(Vec3::new(f32::INFINITY, 0.0, 0.0));
+        assert!(state_note(&[&bad]).is_err());
+    }
+
+    /// The three fields that can change on most ticks share the bytes the
+    /// eye height alone had: 16,000 changes × 45 bytes = 720,000.
+    #[test]
+    fn often_changing_fields_share_the_budget() {
+        use crate::raw::tests::with_optional;
+        use asamu_core::glam::Vec3;
+        assert_eq!(STATE_BULK_BUDGET, 720_000);
+        let base = with_optional(player(0.0, 0, &[]), true);
+        let variant = |eye: f32, count: f32, floor: Vec3| {
+            let mut p = base.clone();
+            p.eye_height = Some(eye);
+            p.gun.as_mut().unwrap().timers.as_mut().unwrap()[0].count = count;
+            p.floor = Some(floor);
+            p
+        };
+        let tilted = Vec3::new(0.6, 0.0, 0.8);
+        // `changes` changes of the chosen values, everything else constant.
+        let run_of = |a: &RawPlayer, b: &RawPlayer, changes: usize| -> Vec<RawPlayer> {
+            (0..=changes)
+                .map(|k| if k % 2 == 0 { a.clone() } else { b.clone() })
+                .collect()
+        };
+        let fields = |run: &[RawPlayer]| StateFields::of(&run.iter().collect::<Vec<_>>());
+        let still = variant(38.0, 0.0, Vec3::Z);
+
+        // The refire count alone: 13,846 changes cost 719,992 bytes and fit;
+        // one more (720,044) does not.
+        let counting = variant(38.0, 0.05, Vec3::Z);
+        let f = fields(&run_of(&still, &counting, 13_846));
+        assert!(f.eye_height && f.refire_count && f.floor && f.left_out().is_empty());
+        let f = fields(&run_of(&still, &counting, 13_847));
+        assert!(f.eye_height && !f.refire_count && f.timers);
+        assert_eq!(
+            f.left_out(),
+            [LeftOut {
+                what: "the refire timer's count",
+                changes: 13_847,
+                cost: 52,
+                left: 720_000
+            }]
+        );
+        assert_eq!(
+            f.left_out()[0].note(),
+            "check: the refire timer's count left out of the state: note (13847 changes of 52 \
+             bytes; 720000 of the 720000 bytes for values that change on most ticks were left)"
+        );
+        assert!(f.floor, "what it did not take is there for the floor");
+
+        // The floor alone: 7,200 changes × 100 bytes are the whole budget.
+        let leaning = variant(38.0, 0.0, tilted);
+        assert!(fields(&run_of(&still, &leaning, 7_200)).floor);
+        let f = fields(&run_of(&still, &leaning, 7_201));
+        assert!(!f.floor && f.refire_count);
+        assert_eq!(f.left_out()[0].what, "the floor normal");
+
+        // In order: the eye height first, then the refire count, then the
+        // floor. 10,000 eye changes take 450,000; 5,000 refire changes
+        // 260,000; 10,000 are left, which 100 floor changes use up and 101
+        // do not fit.
+        let mixed = |floor_changes: usize| -> Vec<RawPlayer> {
+            (0..=10_000)
+                .map(|k| {
+                    variant(
+                        if k % 2 == 0 { 38.0 } else { 37.0 },
+                        if k <= 5_000 && k % 2 == 1 { 0.05 } else { 0.0 },
+                        if k <= floor_changes && k % 2 == 1 {
+                            tilted
+                        } else {
+                            Vec3::Z
+                        },
+                    )
+                })
+                .collect()
+        };
+        let run = mixed(100);
+        let refs: Vec<&RawPlayer> = run.iter().collect();
+        assert_eq!(eye_height_changes(&refs), 10_000);
+        assert_eq!(changes_of(&refs, refire_count), 5_000);
+        assert_eq!(changes_of(&refs, |p| p.floor), 100);
+        let f = StateFields::of(&refs);
+        assert!(f.eye_height && f.refire_count && f.floor);
+        let f = fields(&mixed(101));
+        assert!(f.eye_height && f.refire_count && !f.floor);
+        assert_eq!(
+            f.left_out(),
+            [LeftOut {
+                what: "the floor normal",
+                changes: 102,
+                cost: 100,
+                left: 10_000
+            }]
+        );
+        // The line of the fullest of these fits a trace's meta line.
+        let note = state_note(&refs).unwrap();
+        assert!(
+            note.len() < asamu_player::trace::MAX_LINE_BYTES,
+            "{} bytes",
+            note.len()
+        );
+
+        // An eye height that is left out itself (more than 16,000 changes)
+        // takes nothing from the others.
+        let blinking = variant(37.0, 0.0, Vec3::Z);
+        let f = fields(&run_of(&still, &blinking, EYE_HEIGHT_MAX_CHANGES + 1));
+        assert!(!f.eye_height && f.refire_count && f.floor);
+        // At its limit it takes everything: a single change of another
+        // field no longer fits, a constant one does.
+        let mut run = run_of(&still, &blinking, EYE_HEIGHT_MAX_CHANGES);
+        assert!(fields(&run).refire_count && fields(&run).floor);
+        run[7].floor = Some(tilted);
+        let f = fields(&run);
+        assert!(f.eye_height && f.refire_count && !f.floor);
+        assert_eq!(f.left_out()[0].left, 0);
     }
 }

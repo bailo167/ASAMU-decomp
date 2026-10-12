@@ -7,6 +7,12 @@
 //! `ASAMU_CONVERTED_DIR` (an `asamu-import` output) a segment of each map
 //! that has a converted level is also replayed. Run with `--nocapture` to
 //! see the counts the documentation quotes.
+//!
+//! The last test reads what recorder 0.2.0 adds (optional members, and the
+//! markers and dropped-frame log of each recording's `.stats.json`): for a
+//! version-1 recording it checks that none of that changes its conversion,
+//! for a later one that the conversion uses it as documented, and prints
+//! the counts.
 
 #![allow(clippy::unwrap_used)]
 
@@ -47,7 +53,7 @@ fn recordings() -> Option<Vec<(String, RawFile)>> {
 }
 
 fn attached(p: &RawPlayer) -> bool {
-    p.physics == PHYS_FLYING || p.gun.is_some_and(|g| g.grappling)
+    p.physics == PHYS_FLYING || p.gun.as_ref().is_some_and(|g| g.grappling)
 }
 
 fn magnitude(p: &RawPlayer) -> f64 {
@@ -174,7 +180,8 @@ fn recordings_agree_with_the_acceleration_mapping() {
                     largest_lean_effect = largest_lean_effect.max(effect);
                 }
                 // A release: the record after the last attached one.
-                if before.gun.is_some_and(|g| g.grappling) && !now.gun.is_some_and(|g| g.grappling)
+                if before.gun.as_ref().is_some_and(|g| g.grappling)
+                    && !now.gun.as_ref().is_some_and(|g| g.grappling)
                 {
                     let held = before.keys.iter().any(|key| key.contains("RightTrigger"));
                     let mut zero = 0;
@@ -300,7 +307,7 @@ fn the_guns_distance_is_measured_to_its_hit_location() {
     for (_, file) in &files {
         let mut before = false;
         for p in file.records.iter().filter_map(|r| r.player.as_ref()) {
-            let Some(g) = p.gun.filter(|g| g.grappling) else {
+            let Some(g) = p.gun.as_ref().filter(|g| g.grappling) else {
                 before = false;
                 continue;
             };
@@ -465,4 +472,178 @@ fn recordings_convert_and_replay_from_a_standing_start() {
          of those"
     );
     assert!(moving == 0 || moved_too > 0, "no replay moves");
+}
+
+/// The recorder's sidecar of a recording in `ASAMU_TRACE_RAW_DIR`, if it has
+/// one.
+fn sidecar(name: &str) -> Option<asamu_trace::sidecar::RecorderLog> {
+    let dir = PathBuf::from(std::env::var_os("ASAMU_TRACE_RAW_DIR")?);
+    let path = asamu_trace::sidecar::sidecar_path(&dir.join(name))?;
+    path.is_file()
+        .then(|| asamu_trace::sidecar::RecorderLog::read(&path).unwrap())
+}
+
+/// What recorder 0.2.0 adds, on real recordings. A version-1 recording has
+/// none of it, and its conversion with its (0.1.0) sidecar is its
+/// conversion without. A recording with optional members converts with the
+/// camera's FOV rule; its markers are all placed; and the counts say how
+/// many of its frame gaps the dropped-frame log explains.
+#[test]
+fn optional_members_markers_and_dropped_frames_of_real_recordings() {
+    let Some(files) = recordings() else {
+        eprintln!("skipped: ASAMU_TRACE_RAW_DIR is not set to a directory with recordings");
+        return;
+    };
+    for (name, file) in &files {
+        let counts = file.optional_counts();
+        let plain = convert(file, &ConvertOptions::default()).unwrap();
+        let log = sidecar(name);
+        println!(
+            "{name}: recorder {:?}, {} records, optional members {counts:?}, sidecar: {}",
+            file.header.recorder,
+            file.records.len(),
+            match &log {
+                None => "none".to_owned(),
+                Some(l) => format!(
+                    "{} marker(s), dropped-frame log {}",
+                    l.markers.len(),
+                    l.drops
+                        .as_ref()
+                        .map_or("not kept".to_owned(), |d| format!("{} entries", d.len()))
+                ),
+            }
+        );
+        let converted = match &log {
+            None => plain.clone(),
+            Some(l) => {
+                l.check_belongs_to(file).unwrap();
+                let opts = ConvertOptions {
+                    log: Some(l.clone()),
+                    ..ConvertOptions::default()
+                };
+                convert(file, &opts).unwrap()
+            }
+        };
+        if log
+            .as_ref()
+            .is_none_or(asamu_trace::sidecar::RecorderLog::is_empty)
+        {
+            assert_eq!(
+                converted, plain,
+                "{name}: a sidecar without lists changes nothing"
+            );
+        }
+        let samples: usize = converted.iter().map(|s| s.trace.samples.len()).sum();
+        if counts.is_empty() {
+            // Version 1: the FOV column is the cached view FOV wherever the
+            // camera's FOV was read, and the state line has the version-1
+            // fields only.
+            assert!(file.header.optional_fields.is_empty(), "{name}");
+            for seg in &converted {
+                let notes = &seg.trace.meta.notes;
+                assert!(!notes.iter().any(|n| n.starts_with("fov: camera FOV lock")));
+                let state = notes.iter().find(|n| n.starts_with("state: ")).unwrap();
+                for key in [
+                    "floor",
+                    "weapon_state",
+                    "refire",
+                    "gun_timers",
+                    "cylinder",
+                    "base_level",
+                    "base_eye_height",
+                ] {
+                    assert!(
+                        !state.contains(key),
+                        "{name}: {key} in a version-1 state note"
+                    );
+                }
+            }
+        } else {
+            // The camera's rule on every sample, and how often it zoomed.
+            let (mut read, mut locked) = (0, 0);
+            let mut locked_fovs: BTreeMap<String, usize> = BTreeMap::new();
+            for seg in &converted {
+                let first = file
+                    .records
+                    .iter()
+                    .position(|r| r.frame == seg.first_frame)
+                    .unwrap();
+                for (k, s) in seg.trace.samples.iter().enumerate() {
+                    let p = file.records[first + k].player.as_ref().unwrap();
+                    let usable = |f: f32| f > 0.0 && f < 180.0;
+                    match (p.fov_locked, p.fov_lock) {
+                        (Some(true), Some(lock)) if usable(lock) => {
+                            assert_eq!(s.fov, lock, "{name}: frame {}", seg.first_frame + k as u64);
+                            read += 1;
+                            locked += 1;
+                            *locked_fovs.entry(format!("{lock}")).or_insert(0) += 1;
+                        }
+                        (Some(false), _) => {
+                            read += 1;
+                            if let Some(f) = p.fov_camera.filter(|f| usable(*f)) {
+                                assert_eq!(s.fov, f, "{name}");
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            println!(
+                "    camera FOV lock read on {read} of {samples} samples, set on {locked}; locked FOVs: {locked_fovs:?}"
+            );
+        }
+        if let Some(l) = &log {
+            // Every marker is in exactly one run's notes.
+            let placed: usize = converted
+                .iter()
+                .map(|s| {
+                    asamu_trace::segments::markers_of(&s.trace.meta.notes)
+                        .unwrap()
+                        .len()
+                })
+                .sum();
+            if !converted.is_empty() {
+                assert_eq!(placed, l.markers.len(), "{name}: markers placed");
+            }
+            for seg in &converted {
+                for m in asamu_trace::segments::markers_of(&seg.trace.meta.notes).unwrap() {
+                    println!(
+                        "    marker {:?}: frames {}..={}, tick {} ({:?})",
+                        m.name, seg.first_frame, seg.last_frame, m.tick, m.place
+                    );
+                }
+            }
+            if let Some(drops) = &l.drops {
+                // The recorder logs every frame it has no record for.
+                let (mut gaps, mut explained) = (0, 0);
+                for w in file.records.windows(2) {
+                    let (a, b) = (w[0].frame, w[1].frame);
+                    if b > a + 1 {
+                        gaps += 1;
+                        explained +=
+                            usize::from((a + 1..b).all(|f| {
+                                drops.iter().any(|d| !d.is_no_input() && d.overlaps(f, f))
+                            }));
+                    }
+                }
+                let no_input = l.no_input_frames();
+                let in_the_middle = file
+                    .records
+                    .windows(2)
+                    .filter(|w| no_input.contains(&w[0].frame) && w[1].frame == w[0].frame + 1)
+                    .count();
+                println!(
+                    "    {gaps} frame gap(s) between records, {explained} with a log entry for every frame; \
+                     {} record(s) without input, {in_the_middle} of them followed by the next frame's record; \
+                     {} frame(s) not logged",
+                    no_input.len(),
+                    l.drops_omitted
+                );
+                // (Counted, not asserted: that the log accounts for every
+                // gap is the recorder's own test; the converter writes
+                // "no entry" for one it does not explain and ends a run
+                // after a record without input wherever it is.)
+            }
+        }
+    }
 }

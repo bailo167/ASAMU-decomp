@@ -35,17 +35,35 @@
 //! gun data (the pawn's weapon is not a `GrappleGun`) no anchor is known, so
 //! the sample is idle even in `PHYS_Flying (4)`; such samples are counted in
 //! a `check:` note. `rope_length` is always `null` (the original grapple has
-//! no rope). FOV = the camera's POV FOV, else the controller's `FOVAngle`.
+//! no rope). FOV: see below.
 //!
-//! **The FOV column is the cached view FOV.** `Camera.CameraCache.POV.FOV`
-//! is written from the camera's default FOV on every view update, while the
-//! zoom locks the camera's FOV in other fields (`bLockedFOV`, `LockedFOV`)
-//! that the recorder does not read (PARITY_FINDINGS.md N1 and V19: the field
+//! # The FOV column
+//!
+//! The camera's FOV accessor returns the locked FOV (`LockedFOV`) while its
+//! lock flag (`bLockedFOV`) is set, else the cached view FOV
+//! (`CameraCache.POV.FOV`); the zoom sets the lock, and the view update
+//! writes the camera's default FOV into the cached field every time
+//! (PARITY_FINDINGS.md V19, N1). The converter applies that rule to every
+//! record:
+//!
+//! | Record has | FOV of the sample |
+//! |---|---|
+//! | `fov_locked` true and a usable `fov_lock` (recorder 0.2.0) | `fov_lock` |
+//! | `fov_locked` false | `fov_camera`, else the controller's `FOVAngle` |
+//! | no lock members (version 1) | `fov_camera`, else the controller's `FOVAngle`: **the cached view FOV, which cannot show the zoom** |
+//!
+//! (usable: above 0 and below 180 degrees). For the samples of the last row
+//! the converter says so in a note that starts with
+//! [`FOV_CACHED_NOTE_PREFIX`] and counts them (`on N of M samples`: the field
 //! is constant on all 45,237 records of 2026-10-10, through zoom-button
-//! holds). The converter says on how many samples the column is that field
-//! (a note that starts with [`FOV_CACHED_NOTE_PREFIX`]);
-//! [`crate::compare`] leaves the FOV out of the verdict of such a trace
-//! unless told otherwise.
+//! holds), and [`crate::compare`] leaves the FOV out of the verdict of a
+//! trace whose note covers every sample. A sample whose record has the lock
+//! members is never counted there, so a run recorded with them has no such
+//! note and its FOV counts; a `fov: camera FOV lock read …` note says on how
+//! many samples the lock was read and on how many it was set. A lock that is
+//! set without a usable locked FOV is not believed: the sample gets the
+//! cached view FOV, is counted with the last row and named in a `check:`
+//! note.
 //!
 //! # Move axes
 //!
@@ -63,7 +81,9 @@
 //!
 //! The `state:` note ([`crate::state`]) holds what the recorder read beyond
 //! the sample fields (`GroundSpeed`, `AirControl`, the sprint flag, the
-//! grapple budget, the eye height, ...) for every tick, so that
+//! grapple budget, the eye height, and from a recording of recorder 0.2.0
+//! the floor normal, the weapon's state and refire timer, the cylinder's
+//! size and the base actor's level) for every tick, so that
 //! [`crate::replay`] can start from any tick; the `init:` note is the older
 //! form for tick 0 only.
 //!
@@ -79,6 +99,29 @@
 //! are text for people; readers compute the same events from the samples
 //! and the `state:` note ([`crate::segments::recorded_events`]). The schema
 //! stays v1.
+//!
+//! # Markers and dropped frames (the recorder's sidecar)
+//!
+//! With the recorder's `<recording>.stats.json` ([`crate::sidecar`];
+//! [`ConvertOptions::log`]) two more things are known that no record holds.
+//!
+//! **Markers.** A marker set with the recorder's `mark NAME` command carries
+//! the frame number of the last record written then. It becomes an event of
+//! the run that holds that frame, at tick `frame − first frame of the run`
+//! (sample `k` is the state of record `k`). A marker whose frame is in no
+//! run (set before the first record, in a pause, or on a record that became
+//! no run) goes to the next run at tick 0, or after the last run to its last
+//! tick, and says so. The run's notes get an `event:` line for people and a
+//! `markers:` line as JSON ([`crate::segments::MARKERS_NOTE_PREFIX`]) that
+//! `asamu-trace starts` reads.
+//!
+//! **Dropped frames.** A frame without a record is a frame gap, which ends
+//! a run as before; with the recorder's dropped-frame log the notes of the
+//! runs on both sides say which frames are missing and why (`dropped:`
+//! lines). A record the log lists as written **without its input** ends its
+//! run even if the next record has the next frame number: its keys are not
+//! its frame's, and as the last record of a run they are not used (sample
+//! `k` takes its input from record `k − 1`).
 //!
 //! # Frame lengths
 //!
@@ -97,7 +140,8 @@
 //!
 //! # Segments
 //!
-//! A run ends at a frame gap (missed or paused frames), at a frame without a
+//! A run ends at a frame gap (missed or paused frames), after a record
+//! written without its input (see above), at a frame without a
 //! player, when the map, the pawn object or the controller/pawn class
 //! changes, and when the world's clock (`WorldInfo.TimeSeconds`) goes back.
 //! A world's clock never does; a smaller value is another world: the level
@@ -113,6 +157,8 @@
 //! the same conversion for the recorder; `tests/python_crosscheck.rs` checks
 //! that both produce the same traces.
 
+use std::collections::BTreeSet;
+
 use anyhow::{Result, bail};
 use asamu_core::glam::Vec3;
 use asamu_core::rotator::{normalize_rotator_axis, rotator_units_to_radians};
@@ -123,9 +169,14 @@ use serde::Serialize;
 use crate::bindings::{Actions, KeyMap};
 use crate::move_input::{AXES_TABLE_STEP, MoveFrame, horizontal_magnitude, move_direction};
 use crate::raw::{RawFile, RawPlayer, RawRecord};
-use crate::segments::{event_notes, recorded_events};
+use crate::segments::{
+    EVENT_NOTE_PREFIX, MAX_LISTED, MarkerPlace, TraceMarker, event_notes, markers_note,
+    recorded_events,
+};
+use crate::sidecar::{DroppedFrames, RecorderLog};
 use crate::state::{
-    EYE_HEIGHT_MAX_CHANGES, StateTimeline, eye_height_changes, eye_height_kept, state_note,
+    EYE_HEIGHT_MAX_CHANGES, StateFields, StateTimeline, eye_height_changes, eye_height_kept,
+    state_note,
 };
 use crate::timestep::StepStats;
 
@@ -138,6 +189,11 @@ pub const INIT_NOTE_PREFIX: &str = "init: ";
 /// Start of the note that says the FOV column is the camera's cached view
 /// FOV, which cannot show the zoom (see the module docs).
 pub const FOV_CACHED_NOTE_PREFIX: &str = "fov: cached view FOV";
+/// Start of the note that says on how many samples the camera's FOV lock
+/// was read (recorder 0.2.0), so that the FOV column is the camera's FOV.
+pub const FOV_LOCK_NOTE_PREFIX: &str = "fov: camera FOV lock read";
+/// Start of the notes about frames the recorder dropped next to a run.
+pub const DROPPED_NOTE_PREFIX: &str = "dropped: ";
 
 /// One converted run.
 #[derive(Clone, Debug, PartialEq)]
@@ -173,6 +229,10 @@ pub struct ConvertOptions {
     pub move_input: MoveInput,
     /// Axes an acceleration is read in.
     pub move_frame: MoveFrame,
+    /// The recording's markers and dropped-frame log, from the recorder's
+    /// sidecar file (see the module docs). `None`, or a sidecar that has
+    /// neither, converts as before.
+    pub log: Option<RecorderLog>,
 }
 
 /// The initial script state written as the `init:` note (keys sorted).
@@ -208,11 +268,11 @@ impl InitState {
             base: p.base.clone(),
             ground_speed: p.ground_speed,
             jump_z: p.jump_z,
-            max_grapples: p.gun.map(|g| g.max_grapples),
+            max_grapples: p.gun.as_ref().map(|g| g.max_grapples),
             physics: p.physics,
             rocket_boots: p.boots.map(|b| b.enabled),
             sprinting: p.pawn_flags.map(|f| f.sprinting),
-            times_grappled: p.gun.map(|g| g.times_grappled),
+            times_grappled: p.gun.as_ref().map(|g| g.times_grappled),
         }
     }
 
@@ -240,30 +300,42 @@ fn delta_radians(to: i32, from: i32) -> f32 {
 /// Splits records into convertible runs (see the module docs).
 #[must_use]
 pub fn split_runs(records: &[RawRecord]) -> Vec<&[RawRecord]> {
-    let mut runs = Vec::new();
+    run_ranges(records, &BTreeSet::new())
+        .into_iter()
+        .map(|(a, b)| &records[a..=b])
+        .collect()
+}
+
+/// The convertible runs of `records` as inclusive index ranges. A record
+/// whose frame is in `no_input` (written without its frame's input: the
+/// recorder's dropped-frame log, [`RecorderLog::no_input_frames`]) is the
+/// last of its run.
+#[must_use]
+pub fn run_ranges(records: &[RawRecord], no_input: &BTreeSet<u64>) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut start: Option<usize> = None;
     for (i, r) in records.iter().enumerate() {
         if !r.usable() {
             if let Some(s) = start.take() {
-                runs.push(&records[s..i]);
+                runs.push((s, i - 1));
             }
             continue;
         }
         if let Some(s) = start
             && let Some(prev) = i.checked_sub(1).and_then(|j| records.get(j))
-            && !continues(prev, r)
+            && !(continues(prev, r) && !no_input.contains(&prev.frame))
         {
-            runs.push(&records[s..i]);
+            runs.push((s, i - 1));
             start = None;
         }
         if start.is_none() {
             start = Some(i);
         }
     }
-    if let Some(s) = start {
-        runs.push(&records[s..]);
+    if let (Some(s), Some(last)) = (start, records.len().checked_sub(1)) {
+        runs.push((s, last));
     }
-    runs.retain(|r| r.len() >= 2);
+    runs.retain(|(a, b)| b - a >= 1);
     runs
 }
 
@@ -284,6 +356,16 @@ fn continues(prev: &RawRecord, r: &RawRecord) -> bool {
 #[derive(Default)]
 struct Counters {
     fov_controller: usize,
+    /// Samples whose FOV is the camera's cached view FOV with nothing known
+    /// about the camera's lock.
+    fov_cached: usize,
+    /// Samples whose record has the camera's lock (and a usable locked FOV
+    /// where the lock is set).
+    fov_lock_read: usize,
+    /// Of those, the lock is set: the FOV is the locked FOV.
+    fov_locked: usize,
+    /// The lock is set without a usable locked FOV.
+    fov_lock_unusable: usize,
     grapple_physics: usize,
     flying_without_gun: usize,
     axis_mismatch: usize,
@@ -338,7 +420,7 @@ impl MoveSource {
 
 /// The grapple holds the pawn (no steering is read then, GRAPPLE.md G-PH-1).
 fn is_attached(p: &RawPlayer) -> bool {
-    p.physics == PHYS_FLYING || p.gun.is_some_and(|g| g.grappling)
+    p.physics == PHYS_FLYING || p.gun.as_ref().is_some_and(|g| g.grappling)
 }
 
 /// `floor(x + 0.5)` as an integer for a note (saturating; mirrored by the
@@ -376,8 +458,31 @@ struct State {
 fn state(r: &RawRecord, c: &mut Counters) -> Result<State> {
     let p = player(r)?;
     let valid = |f: f32| f > 0.0 && f < 180.0;
-    let fov = match p.fov_camera {
-        Some(f) if valid(f) => f,
+    // The camera's own rule (module docs, "The FOV column"): the locked FOV
+    // while the lock is set, else the cached view FOV.
+    let lock = match (p.fov_locked, p.fov_lock) {
+        (Some(true), Some(f)) if valid(f) => Some(Some(f)),
+        (Some(true), _) => {
+            c.fov_lock_unusable += 1;
+            None
+        }
+        (Some(false), _) => Some(None),
+        (None, _) => None,
+    };
+    if lock.is_some() {
+        c.fov_lock_read += 1;
+    }
+    let fov = match (lock, p.fov_camera) {
+        (Some(Some(locked)), _) => {
+            c.fov_locked += 1;
+            locked
+        }
+        (known, Some(f)) if valid(f) => {
+            if known.is_none() {
+                c.fov_cached += 1;
+            }
+            f
+        }
         _ => {
             c.fov_controller += 1;
             if !valid(p.fov_controller) {
@@ -588,10 +693,21 @@ pub fn raw_timing(raw: &RawFile) -> RawTiming {
 pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
     let h = &raw.header;
     let keymap = (!h.bindings.is_empty()).then(|| KeyMap::from_bindings(&h.bindings));
-    let runs = split_runs(&raw.records);
-    let total = runs.len();
+    let log = opts.log.as_ref();
+    if let Some(log) = log {
+        log.check_belongs_to(raw)?;
+    }
+    let no_input = log.map(RecorderLog::no_input_frames).unwrap_or_default();
+    let ranges = run_ranges(&raw.records, &no_input);
+    let frames: Vec<(u64, u64)> = ranges
+        .iter()
+        .map(|(a, b)| (raw.records[*a].frame, raw.records[*b].frame))
+        .collect();
+    let markers = log.map_or_else(Vec::new, |l| place_markers(&frames, l));
+    let total = ranges.len();
     let mut out = Vec::with_capacity(total);
-    for (si, run) in runs.iter().enumerate() {
+    for (si, range) in ranges.iter().enumerate() {
+        let run = &raw.records[range.0..=range.1];
         let mut c = Counters::default();
         let players: Vec<&RawPlayer> = run.iter().map(player).collect::<Result<_>>()?;
         // Samples with an input: every one but the first.
@@ -799,12 +915,28 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
                 c.fov_controller
             ));
         }
-        let cached = run.len().saturating_sub(c.fov_controller);
-        if cached > 0 {
+        if c.fov_cached > 0 {
             notes.push(format!(
-                "{FOV_CACHED_NOTE_PREFIX} (the camera's CameraCache.POV.FOV) on {cached} of {} \
+                "{FOV_CACHED_NOTE_PREFIX} (the camera's CameraCache.POV.FOV) on {} of {} \
                  samples: a locked camera FOV (the zoom) does not show in it",
+                c.fov_cached,
                 run.len()
+            ));
+        }
+        if c.fov_lock_read > 0 {
+            notes.push(format!(
+                "{FOV_LOCK_NOTE_PREFIX} (bLockedFOV, LockedFOV) on {} of {} samples: the FOV is \
+                 the locked FOV while the lock is set ({} samples), else the cached view FOV",
+                c.fov_lock_read,
+                run.len(),
+                c.fov_locked
+            ));
+        }
+        if c.fov_lock_unusable > 0 {
+            notes.push(format!(
+                "check: the camera's FOV lock is set without a usable LockedFOV on {} samples \
+                 (not believed: the cached view FOV is written)",
+                c.fov_lock_unusable
             ));
         }
         if !eye_height_kept(&players) {
@@ -814,9 +946,26 @@ pub fn convert(raw: &RawFile, opts: &ConvertOptions) -> Result<Vec<Segment>> {
                 eye_height_changes(&players)
             ));
         }
+        notes.extend(
+            StateFields::of(&players)
+                .left_out()
+                .iter()
+                .map(|l| l.note()),
+        );
+        if let Some(n) = paused_refire_note(&players) {
+            notes.push(n);
+        }
         let state = state_note(&players)?;
         let timeline = StateTimeline::from_notes(std::slice::from_ref(&state))?;
         notes.extend(event_notes(&recorded_events(&samples, timeline.as_ref())?));
+        let run_markers: &[TraceMarker] = markers.get(si).map_or(&[], Vec::as_slice);
+        if !run_markers.is_empty() {
+            notes.push(marker_event_note(run_markers));
+            notes.push(markers_note(run_markers)?);
+        }
+        if let Some(log) = log {
+            notes.extend(dropped_notes(&raw.records, *range, log));
+        }
         notes.extend(h.notes.iter().cloned());
         notes.push(state);
         let init = InitState::of(players[0]);
@@ -935,6 +1084,145 @@ fn move_notes(
             c.yaw_differs
         ));
     }
+}
+
+/// A `check:` note when the weapon's refire timer is paused on some sample
+/// of the run (its count then stands still, which the `state:` line's
+/// `refire_count` alone does not show).
+fn paused_refire_note(players: &[&RawPlayer]) -> Option<String> {
+    let paused = players
+        .iter()
+        .filter(|p| {
+            p.gun
+                .as_ref()
+                .and_then(|g| g.refire_timer())
+                .is_some_and(|t| t.paused)
+        })
+        .count();
+    (paused > 0).then(|| {
+        format!("check: the weapon's refire timer is paused on {paused} samples (its count stands still)")
+    })
+}
+
+/// The markers of `log` by run: `frames[i]` is the first and last frame
+/// number of run `i` (see the module docs, "Markers and dropped frames").
+fn place_markers(frames: &[(u64, u64)], log: &RecorderLog) -> Vec<Vec<TraceMarker>> {
+    let mut by_run: Vec<Vec<TraceMarker>> = vec![Vec::new(); frames.len()];
+    for m in &log.markers {
+        let inside = m
+            .frame
+            .and_then(|f| frames.iter().position(|(a, b)| *a <= f && f <= *b));
+        let (run, tick, place) = if let (Some(i), Some(f)) = (inside, m.frame) {
+            (i, f - frames[i].0, MarkerPlace::At)
+        } else if let Some(i) = frames
+            .iter()
+            .position(|(a, _)| m.frame.is_none_or(|f| *a > f))
+        {
+            (i, 0, MarkerPlace::Before)
+        } else if let Some((i, (a, b))) = frames.iter().enumerate().next_back() {
+            (i, b - a, MarkerPlace::After)
+        } else {
+            continue;
+        };
+        by_run[run].push(TraceMarker {
+            tick,
+            name: m.label(),
+            frame: m.frame,
+            place,
+        });
+    }
+    for list in &mut by_run {
+        // In tick order; markers of one tick stay in the order they were set.
+        list.sort_by_key(|m| m.tick);
+    }
+    by_run
+}
+
+/// The `event:` line about a run's markers, for people (the Python converter
+/// writes the same; readers take the `markers:` line).
+fn marker_event_note(markers: &[TraceMarker]) -> String {
+    let items: Vec<String> = markers.iter().map(TraceMarker::describe).collect();
+    format!(
+        "{EVENT_NOTE_PREFIX}{} marker(s) (set with the recorder's mark command; the tick is that \
+         of the last record written when the marker was taken): {}",
+        markers.len(),
+        bounded(&items, ", ")
+    )
+}
+
+/// `items` joined with `separator`, at most [`MAX_LISTED`] of them, then how
+/// many more there are.
+fn bounded(items: &[String], separator: &str) -> String {
+    let shown = items.len().min(MAX_LISTED);
+    let mut text = items.get(..shown).unwrap_or(items).join(separator);
+    if items.len() > shown {
+        text.push_str(&format!(" and {} more", items.len() - shown));
+    }
+    text
+}
+
+/// The `dropped:` notes of the run `range` (inclusive indices into
+/// `records`): the frames without a record between it and the records
+/// before and after it, with the entries of the recorder's dropped-frame
+/// log that cover them, and a last record that was written without its
+/// input. Empty when the recorder kept no log.
+fn dropped_notes(records: &[RawRecord], range: (usize, usize), log: &RecorderLog) -> Vec<String> {
+    let Some(drops) = log.drops.as_deref() else {
+        return Vec::new();
+    };
+    let (Some(first), Some(last)) = (records.get(range.0), records.get(range.1)) else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    let gap = |side: &str, lo: u64, hi: u64| -> String {
+        let entries: Vec<String> = drops
+            .iter()
+            .filter(|d| !d.is_no_input() && d.overlaps(lo, hi))
+            .map(DroppedFrames::describe)
+            .collect();
+        let why = if entries.is_empty() {
+            let mut text = "no entry in the recorder's dropped-frame log".to_owned();
+            if log.drops_omitted > 0 {
+                text.push_str(&format!(
+                    " ({} frames were not logged: the log was full)",
+                    log.drops_omitted
+                ));
+            }
+            text
+        } else {
+            bounded(&entries, "; ")
+        };
+        format!(
+            "{DROPPED_NOTE_PREFIX}{} frame(s) without a record {side} this run (frames \
+             {lo}..={hi}): {why}",
+            hi - lo + 1
+        )
+    };
+    if let Some(prev) = range.0.checked_sub(1).and_then(|i| records.get(i))
+        && let Some(lo) = prev.frame.checked_add(1)
+        && lo < first.frame
+    {
+        notes.push(gap("before", lo, first.frame - 1));
+    }
+    if let Some(d) = drops
+        .iter()
+        .find(|d| d.is_no_input() && d.overlaps(last.frame, last.frame))
+    {
+        let detail = d.detail.as_deref().filter(|t| !t.is_empty());
+        notes.push(format!(
+            "{DROPPED_NOTE_PREFIX}the run ends with frame {}, whose record was written without \
+             its frame's input ({}): its keys are not used",
+            last.frame,
+            detail.unwrap_or("no reason given")
+        ));
+    }
+    if let Some(next) = records.get(range.1 + 1)
+        && let Some(lo) = last.frame.checked_add(1)
+        && lo < next.frame
+    {
+        notes.push(gap("after", lo, next.frame - 1));
+    }
+    notes
 }
 
 /// Output file names for `count` segments of `raw_name` (mirrors the Python
@@ -1742,5 +2030,506 @@ mod tests {
         assert_eq!(units_to_radians(65536 + 16384), units_to_radians(16384));
         assert!(units_to_radians(32768) < 0.0, "half a turn maps to −π");
         assert_eq!(delta_radians(i32::MIN, i32::MAX), units_to_radians(1));
+    }
+
+    // ---- recorder 0.2.0: optional members, markers, dropped frames
+
+    use crate::raw::tests::with_optional;
+    use crate::sidecar::RecorderLog;
+
+    /// Six standing records, frames 100..=105, each with every optional
+    /// member; the camera's FOV lock is set on the frames in `locked`.
+    fn zooming(locked: &[u64]) -> Vec<RawRecord> {
+        (100..=105)
+            .map(|f| {
+                let mut p = with_optional(player(0.0, 0, &[]), locked.contains(&f));
+                p.velocity = Vec3::ZERO;
+                record(f, p)
+            })
+            .collect()
+    }
+
+    fn fovs(t: &Trace) -> Vec<f32> {
+        t.samples.iter().map(|s| s.fov).collect()
+    }
+
+    fn fov_notes(t: &Trace) -> Vec<&str> {
+        t.meta
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("fov:") || n.contains("FOV lock"))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The camera's rule: the locked FOV while the lock is set, else the
+    /// cached view FOV. A zoom to 50 shows in the samples, and such a trace
+    /// does not say that its FOV column cannot show the zoom.
+    #[test]
+    fn a_zoom_is_the_locked_fov() {
+        let t = &convert(&raw(zooming(&[102, 103])), &ConvertOptions::default()).unwrap()[0].trace;
+        assert_eq!(fovs(t), [90.0, 90.0, 50.0, 50.0, 90.0, 90.0]);
+        assert_eq!(
+            fov_notes(t),
+            [
+                "fov: camera FOV lock read (bLockedFOV, LockedFOV) on 6 of 6 samples: the FOV is \
+              the locked FOV while the lock is set (2 samples), else the cached view FOV"
+            ]
+        );
+        assert!(
+            !t.meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with(FOV_CACHED_NOTE_PREFIX))
+        );
+        // So a comparison counts the FOV: against a copy that never zooms
+        // the two locked samples differ by 40 degrees and decide the verdict.
+        let never = &convert(&raw(zooming(&[])), &ConvertOptions::default()).unwrap()[0].trace;
+        let tol = asamu_player::trace::CompareTolerances::default();
+        let s = crate::compare::compare_traces("zoom", t, "none", never, &tol);
+        assert!(s.fov.as_ref().unwrap().counted, "{:?}", s.fov);
+        assert_eq!(s.verdict, crate::compare::Verdict::Diverged);
+        // The same records as a version-1 recorder leaves them: the column
+        // is the cached view FOV on every sample, says so, and is left out.
+        let mut v1 = zooming(&[102, 103]);
+        for r in &mut v1 {
+            let p = r.player.as_mut().unwrap();
+            p.fov_default = None;
+            p.fov_locked = None;
+            p.fov_lock = None;
+        }
+        let blind = &convert(&raw(v1), &ConvertOptions::default()).unwrap()[0].trace;
+        assert_eq!(fovs(blind), [90.0; 6]);
+        assert_eq!(
+            fov_notes(blind),
+            [
+                "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 6 of 6 samples: a \
+              locked camera FOV (the zoom) does not show in it"
+            ]
+        );
+        // Against the zooming trace only the FOV differs, and it is left out.
+        let s = crate::compare::compare_traces("v1", blind, "zoom", t, &tol);
+        assert!(!s.fov.as_ref().unwrap().counted);
+        assert_eq!(s.verdict, crate::compare::Verdict::Exact);
+    }
+
+    /// Records without the lock among records with it, a lock without a
+    /// usable locked FOV, and an unlocked camera without a cached FOV.
+    #[test]
+    fn fov_sources_are_counted_per_sample() {
+        let mut r = zooming(&[101, 102, 103]);
+        // Frame 100: the group was left out of this record (version 1).
+        {
+            let p = r[0].player.as_mut().unwrap();
+            p.fov_default = None;
+            p.fov_locked = None;
+            p.fov_lock = None;
+        }
+        // Frame 102: locked, but LockedFOV is 0; frame 103: 250 degrees.
+        r[2].player.as_mut().unwrap().fov_lock = Some(0.0);
+        r[3].player.as_mut().unwrap().fov_lock = Some(250.0);
+        // Frame 104: unlocked and no cached view FOV: the controller's.
+        {
+            let p = r[4].player.as_mut().unwrap();
+            p.fov_camera = None;
+            p.fov_controller = 85.0;
+        }
+        // Frame 105: unlocked; the locked FOV of an earlier zoom is still in
+        // the field and is not used.
+        r[5].player.as_mut().unwrap().fov_lock = Some(50.0);
+        let t = &convert(&raw(r), &ConvertOptions::default()).unwrap()[0].trace;
+        assert_eq!(fovs(t), [90.0, 50.0, 90.0, 90.0, 85.0, 90.0]);
+        assert_eq!(
+            fov_notes(t),
+            [
+                "fov: controller FOVAngle used on 1 samples (camera POV FOV unavailable)",
+                // Frames 100 (no lock members), 102 and 103 (lock not believed).
+                "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 3 of 6 samples: a \
+                 locked camera FOV (the zoom) does not show in it",
+                // Frames 101 (locked), 104 and 105 (unlocked).
+                "fov: camera FOV lock read (bLockedFOV, LockedFOV) on 3 of 6 samples: the FOV is \
+                 the locked FOV while the lock is set (1 samples), else the cached view FOV",
+                "check: the camera's FOV lock is set without a usable LockedFOV on 2 samples \
+                 (not believed: the cached view FOV is written)",
+            ]
+        );
+        // The cached note covers only part of the samples: the FOV counts.
+        let s = crate::compare::compare_traces(
+            "a",
+            t,
+            "b",
+            t,
+            &asamu_player::trace::CompareTolerances::default(),
+        );
+        assert!(s.fov.as_ref().unwrap().counted);
+    }
+
+    /// The optional members reach the `state:` note of a converted run, and
+    /// a version-1 recording's notes are the ones it had.
+    #[test]
+    fn optional_members_reach_the_state_note() {
+        let mut r = zooming(&[103]);
+        r[4].player.as_mut().unwrap().floor = Some(Vec3::new(0.6, 0.0, 0.8));
+        let t = &convert(&raw(r), &ConvertOptions::default()).unwrap()[0].trace;
+        let timeline = StateTimeline::from_notes(&t.meta.notes).unwrap().unwrap();
+        let s = timeline.at(0).unwrap().unwrap();
+        assert_eq!(s.eye_height, Some(38.0));
+        assert_eq!(s.floor, Some([0.0, 0.0, 1.0]));
+        assert_eq!(s.weapon_state.as_deref(), Some("Active"));
+        assert_eq!(
+            (s.cylinder_radius, s.cylinder_half_height),
+            (Some(21.0), Some(44.0))
+        );
+        assert_eq!(s.base_level.as_deref(), Some("AG-Workshop"));
+        let s = timeline.at(3).unwrap().unwrap();
+        assert_eq!(s.weapon_state.as_deref(), Some("WeaponFiring"));
+        assert_eq!((s.refire_rate, s.refire_count), (Some(0.1), Some(0.0625)));
+        assert_eq!(
+            timeline.at(4).unwrap().unwrap().floor,
+            Some([0.6, 0.0, 0.8])
+        );
+        assert_eq!(
+            timeline.at(5).unwrap().unwrap().floor,
+            Some([0.0, 0.0, 1.0])
+        );
+        // The fixture's second timer is paused, the refire check is not.
+        assert!(!t.meta.notes.iter().any(|n| n.contains("paused")));
+        let mut held = zooming(&[103]);
+        held[3]
+            .player
+            .as_mut()
+            .unwrap()
+            .gun
+            .as_mut()
+            .unwrap()
+            .timers
+            .as_mut()
+            .unwrap()[0]
+            .paused = true;
+        let t = &convert(&raw(held), &ConvertOptions::default()).unwrap()[0].trace;
+        assert!(t.meta.notes.iter().any(|n| n
+            == "check: the weapon's refire timer is paused on 1 samples (its count stands still)"));
+
+        // A version-1 recording: exactly the notes it had before the
+        // optional members existed, in their order.
+        let v1 = &convert(&raw(scripted()), &ConvertOptions::default()).unwrap()[0].trace;
+        let starts: Vec<&str> = v1
+            .meta
+            .notes
+            .iter()
+            .map(|n| n.split([':', ' ']).next().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                "raw", "launch", "scenario", "frames", "input", "move", "anchor", "fov", "event",
+                "state", "init"
+            ],
+            "{:#?}",
+            v1.meta.notes
+        );
+        let state = v1
+            .meta
+            .notes
+            .iter()
+            .find(|n| n.starts_with("state: "))
+            .unwrap();
+        let first: serde_json::Value = serde_json::from_str(&state["state: ".len()..]).unwrap();
+        let keys: Vec<&str> = first["changes"][0][1]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // The nineteen fields of the version-1 line (state.rs, module docs).
+        assert_eq!(
+            keys,
+            [
+                "air_control",
+                "air_speed",
+                "base",
+                "boots_enabled",
+                "boots_finished",
+                "can_grapple",
+                "eye_height",
+                "grappling",
+                "ground_speed",
+                "has_jumped",
+                "has_released_jump",
+                "is_falling",
+                "jump_z",
+                "max_grapples",
+                "physics",
+                "power_jumped",
+                "released",
+                "sprinting",
+                "times_grappled"
+            ]
+        );
+    }
+
+    /// Frames 100..=103, a lone record at 105, frames 107..=110: two runs
+    /// (a single record is none), with the frames 104 and 106 missing.
+    fn gapped() -> Vec<RawRecord> {
+        [100, 101, 102, 103, 105, 107, 108, 109, 110]
+            .into_iter()
+            .map(|f| record(f, player(0.0, 0, &[])))
+            .collect()
+    }
+
+    fn log(markers: &str, drops: &str) -> RecorderLog {
+        RecorderLog::from_json_str(&format!(
+            r#"{{"recorder":"asamu_win 0.2.0","records":9,"first_frame":100,"last_frame":110,
+                "markers":[{markers}],"markers_omitted":0,
+                "stats":{{"drops":[{drops}],"drops_omitted":0}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn marker(name: &str, frame: Option<u64>) -> String {
+        format!(
+            r#"{{"name":{},"id":"x","frame":{},"records":0,"state":"recording","utc":"2026-10-12T00:00:00Z"}}"#,
+            serde_json::to_string(name).unwrap(),
+            frame.map_or("null".to_owned(), |f| f.to_string())
+        )
+    }
+
+    fn with_log(records: Vec<RawRecord>, log: RecorderLog) -> Vec<Segment> {
+        let opts = ConvertOptions {
+            log: Some(log),
+            ..ConvertOptions::default()
+        };
+        convert(&raw(records), &opts).unwrap()
+    }
+
+    /// A marker is an event of the run that holds its frame, at the tick of
+    /// that record; one set outside every run goes to the next run's first
+    /// tick, or to the last run's last tick.
+    #[test]
+    fn markers_become_events_with_their_ticks() {
+        let markers = [
+            marker("after the end", Some(500)),
+            marker("wall 45", Some(110)),
+            marker("zoom hold 1", Some(102)),
+            marker("in the pause", Some(105)),
+            marker("early", None),
+            marker("zoom\thold 2", Some(102)),
+        ]
+        .join(",");
+        let segs = with_log(gapped(), log(&markers, ""));
+        assert_eq!(segs.len(), 2);
+        assert_eq!((segs[0].first_frame, segs[0].last_frame), (100, 103));
+        assert_eq!((segs[1].first_frame, segs[1].last_frame), (107, 110));
+        // Run 0: "early" (no record yet) at its first tick; the two markers
+        // of frame 102 at tick 102 − 100 = 2, in the order they were set.
+        let m0 = crate::segments::markers_of(&segs[0].trace.meta.notes).unwrap();
+        let got: Vec<(u64, &str, MarkerPlace)> = m0
+            .iter()
+            .map(|m| (m.tick, m.name.as_str(), m.place))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, "early", MarkerPlace::Before),
+                (2, "zoom hold 1", MarkerPlace::At),
+                (2, "zoom hold 2", MarkerPlace::At),
+            ]
+        );
+        assert!(segs[0].trace.meta.notes.iter().any(|n| n
+            == "event: 3 marker(s) (set with the recorder's mark command; the tick is that of \
+                the last record written when the marker was taken): 0 \"early\" (set before \
+                the first record), 2 \"zoom hold 1\", 2 \"zoom hold 2\""));
+        // Run 1: frame 105 is a record of no run, so its marker is at the
+        // first tick of the run after it; frame 110 is tick 110 − 107 = 3;
+        // frame 500 is after everything: the last tick, 3.
+        let m1 = crate::segments::markers_of(&segs[1].trace.meta.notes).unwrap();
+        let got: Vec<(u64, &str, MarkerPlace, Option<u64>)> = m1
+            .iter()
+            .map(|m| (m.tick, m.name.as_str(), m.place, m.frame))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, "in the pause", MarkerPlace::Before, Some(105)),
+                (3, "after the end", MarkerPlace::After, Some(500)),
+                (3, "wall 45", MarkerPlace::At, Some(110)),
+            ]
+        );
+        assert!(segs[1].trace.meta.notes.iter().any(|n| n
+            == "event: 3 marker(s) (set with the recorder's mark command; the tick is that of \
+                the last record written when the marker was taken): 0 \"in the pause\" (set \
+                before this run, at frame 105), 3 \"after the end\" (set after this run, at \
+                frame 500), 3 \"wall 45\""));
+        // The listing names them at their ticks.
+        let listing = crate::segments::describe(&segs[0].trace, true).unwrap();
+        assert!(listing.contains(", 3 marker(s)\n"), "{listing}");
+        assert!(
+            listing.contains("\n        0 marker \"early\" (set before the first record)\n"),
+            "{listing}"
+        );
+        assert!(
+            listing.contains("\n        2 marker \"zoom hold 1\"\n"),
+            "{listing}"
+        );
+        // The state and init notes are still the last two, and the samples
+        // are those of a conversion without the log.
+        let plain = convert(&raw(gapped()), &ConvertOptions::default()).unwrap();
+        for (a, b) in segs.iter().zip(&plain) {
+            assert_eq!(a.trace.samples, b.trace.samples);
+            let n = &a.trace.meta.notes;
+            assert!(n[n.len() - 2].starts_with(crate::state::STATE_NOTE_PREFIX));
+            assert!(n[n.len() - 1].starts_with(INIT_NOTE_PREFIX));
+            a.trace.validate().unwrap();
+        }
+        assert!(plain.iter().all(|s| {
+            crate::segments::markers_of(&s.trace.meta.notes)
+                .unwrap()
+                .is_empty()
+        }));
+        // Without a run there is nothing to carry a marker.
+        let lone = RecorderLog::from_json_str(&format!(
+            r#"{{"records":1,"markers":[{}]}}"#,
+            marker("x", Some(100))
+        ))
+        .unwrap();
+        let opts = ConvertOptions {
+            log: Some(lone),
+            ..ConvertOptions::default()
+        };
+        assert!(
+            convert(&raw(vec![record(100, player(0.0, 0, &[]))]), &opts)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The dropped-frame log says why a run ended: the missing frames on
+    /// both sides of a run, each with the recorder's reason.
+    #[test]
+    fn dropped_frames_end_a_run_with_the_reason() {
+        let drops = r#"
+            {"frame":90,"last":99,"count":4,"reason":"skipped","detail":"no-player"},
+            {"frame":103,"last":103,"count":1,"reason":"no-input",
+             "detail":"record written without its input: the tick start of its frame was not seen"},
+            {"frame":104,"last":104,"count":1,"reason":"torn",
+             "detail":"the counter moved while the sample was read"},
+            {"frame":106,"last":106,"count":1,"reason":"unconfirmed","detail":null}"#;
+        let segs = with_log(gapped(), log("", drops));
+        assert_eq!(segs.len(), 2);
+        let dropped = |i: usize| -> Vec<&str> {
+            segs[i]
+                .trace
+                .meta
+                .notes
+                .iter()
+                .filter(|n| n.starts_with(DROPPED_NOTE_PREFIX))
+                .map(String::as_str)
+                .collect()
+        };
+        // Run 0 (frames 100..=103): its last record has no input, and frame
+        // 104 (before the lone record 105) is missing. The frames before the
+        // first record of the file are not a gap between records.
+        assert_eq!(
+            dropped(0),
+            [
+                "dropped: the run ends with frame 103, whose record was written without its \
+                 frame's input (record written without its input: the tick start of its frame \
+                 was not seen): its keys are not used",
+                "dropped: 1 frame(s) without a record after this run (frames 104..=104): 104 \
+                 torn: the counter moved while the sample was read",
+            ]
+        );
+        // Run 1 (frames 107..=110): frame 106 is missing before it; nothing
+        // follows it.
+        assert_eq!(
+            dropped(1),
+            [
+                "dropped: 1 frame(s) without a record before this run (frames 106..=106): 106 \
+              unconfirmed"
+            ]
+        );
+        // A gap the log does not explain is said to be unexplained; a
+        // recorder without a log (0.1.0) gets no such note at all.
+        let silent = with_log(gapped(), log("", ""));
+        assert!(silent[0].trace.meta.notes.iter().any(|n| n
+            == "dropped: 1 frame(s) without a record after this run (frames 104..=104): no \
+                entry in the recorder's dropped-frame log"));
+        let old = RecorderLog::from_json_str(
+            r#"{"recorder":"asamu_win 0.1.0","records":9,"first_frame":100,"last_frame":110,"stats":{"torn":1}}"#,
+        )
+        .unwrap();
+        let without = convert(&raw(gapped()), &ConvertOptions::default()).unwrap();
+        assert_eq!(
+            with_log(gapped(), old),
+            without,
+            "an empty sidecar changes nothing"
+        );
+        assert!(
+            !without
+                .iter()
+                .flat_map(|s| &s.trace.meta.notes)
+                .any(|n| n.starts_with(DROPPED_NOTE_PREFIX) || n.starts_with("markers"))
+        );
+        // A sidecar of another recording is refused.
+        let other = RecorderLog::from_json_str(r#"{"records":8}"#).unwrap();
+        let opts = ConvertOptions {
+            log: Some(other),
+            ..ConvertOptions::default()
+        };
+        let e = format!("{:#}", convert(&raw(gapped()), &opts).unwrap_err());
+        assert!(e.contains("not this recording's"), "{e}");
+    }
+
+    /// A record written without its input ends its run even when the next
+    /// frame has a record: sample `k` takes its input from record `k − 1`,
+    /// and that record's keys are not its frame's.
+    #[test]
+    fn a_record_without_its_input_ends_its_run() {
+        let records = || -> Vec<RawRecord> {
+            (100..=105)
+                .map(|f| record(f, player(0.0, 0, if f == 102 { &["W"] } else { &[] })))
+                .collect()
+        };
+        // Without the log: one run of six, and the sample after record 102
+        // moves forward on its keys.
+        let whole = convert(&raw(records()), &ConvertOptions::default()).unwrap();
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].trace.samples.len(), 6);
+        assert_eq!(whole[0].trace.samples[3].input.move_forward, 1.0);
+        // With it: frames 100..=102 and 103..=105, and no sample has those keys.
+        let log = RecorderLog::from_json_str(
+            r#"{"records":6,"first_frame":100,"last_frame":105,"stats":{"drops":[
+                {"frame":102,"last":102,"count":1,"reason":"no-input","detail":"record written without its input: the frame ended while its input was read"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            run_ranges(&records(), &log.no_input_frames()),
+            [(0, 2), (3, 5)]
+        );
+        assert_eq!(split_runs(&records()).len(), 1);
+        let split = with_log(records(), log);
+        let frames: Vec<(u64, u64)> = split
+            .iter()
+            .map(|s| (s.first_frame, s.last_frame))
+            .collect();
+        assert_eq!(frames, [(100, 102), (103, 105)]);
+        assert!(
+            split
+                .iter()
+                .flat_map(|s| &s.trace.samples)
+                .all(|s| s.input.move_forward == 0.0)
+        );
+        assert!(split[0].trace.meta.notes.iter().any(|n| n
+            == "dropped: the run ends with frame 102, whose record was written without its \
+                frame's input (record written without its input: the frame ended while its \
+                input was read): its keys are not used"));
+        assert!(
+            !split[1]
+                .trace
+                .meta
+                .notes
+                .iter()
+                .any(|n| n.starts_with(DROPPED_NOTE_PREFIX))
+        );
     }
 }

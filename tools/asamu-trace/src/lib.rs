@@ -11,7 +11,10 @@
 //! ```
 //!
 //! - [`raw`]: the recorder's lossless per-frame format (engine units: rotator
-//!   units, raw key names, physics mode numbers).
+//!   units, raw key names, physics mode numbers), with the optional members
+//!   of recorder 0.2.0.
+//! - [`sidecar`]: the markers and the dropped-frame log the recorder writes
+//!   next to a recording.
 //! - [`bindings`]: key names → logical actions through the game's own key
 //!   bindings (recorded from the running game).
 //! - [`convert`]: raw → canonical trace (unit normalisation, frame alignment,
@@ -58,6 +61,7 @@ pub mod raw;
 pub mod replay;
 pub mod report;
 pub mod segments;
+pub mod sidecar;
 pub mod state;
 pub mod stepper;
 pub mod timestep;

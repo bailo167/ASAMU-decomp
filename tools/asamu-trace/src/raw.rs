@@ -10,6 +10,31 @@
 //!
 //! A raw file never contains addresses or pointers: objects are identified by
 //! class name, object name and a per-recording pawn number.
+//!
+//! # Optional members (recorder 0.2.0)
+//!
+//! The Windows recorder 0.2.0 adds members to the player and gun parts of a
+//! record without raising the version (docs/TRACE_CAPTURE.md 6.10): the
+//! camera's FOV lock, its cached view, the pawn's floor normal, base eye
+//! height, walk bob and collision cylinder, the level of the base actor, and
+//! the weapon's script state and timers. The header names them in
+//! `optional_fields` ([`OPTIONAL_FIELDS`] lists every name this reader
+//! knows) and the file the offsets came from in `optional_layout`.
+//!
+//! Every one of them is typed here and **absent by default**: a file without
+//! them is a plain version-1 file and is read, and written again, exactly as
+//! before. A member this reader does not know is still refused, in a record
+//! as in the header's list. A record may lack a member its header announces
+//! (the recorder leaves a group out of a record whose value it could not
+//! read or check) and may carry one the header does not announce (a group
+//! whose check failed on the first object and passed on a later one), so
+//! neither is an error; [`RawFile::optional_counts`] says what is there.
+//! Where the recorder writes `null` as a value (`base_level` without a base,
+//! `gun.state` without a state) the member is an `Option` inside the outer
+//! `Option`; everywhere else `null` is refused.
+//!
+//! Markers and the dropped-frame log are not in the raw file: the recorder
+//! writes them to `<recording>.stats.json` ([`crate::sidecar`]).
 
 use std::io::{BufRead, Read};
 
@@ -23,6 +48,79 @@ pub const RAW_FORMAT: &str = "asamu-trace-raw";
 pub const RAW_VERSION: u32 = 1;
 /// Longest accepted line (bytes).
 pub const MAX_LINE_BYTES: usize = 1 << 20;
+/// Every name a header's `optional_fields` may hold, sorted: the members
+/// recorder 0.2.0 can add to a record (`Optional.MEMBERS` in
+/// `tools/trace-recorder/asamu_recorder_core.py`; `tests/python_crosscheck.rs`
+/// compares the two lists).
+pub const OPTIONAL_FIELDS: [&str; 12] = [
+    "player.base_eye_height",
+    "player.base_level",
+    "player.bob",
+    "player.camera_pov",
+    "player.cylinder",
+    "player.floor",
+    "player.fov_default",
+    "player.fov_lock",
+    "player.fov_locked",
+    "player.gun.state",
+    "player.gun.timers",
+    "player.walk_bob",
+];
+
+/// Serde for a member that is either absent (`None`) or present with a
+/// value of its type: `null` is accepted only where the type itself takes
+/// it. Used with `default` and `skip_serializing_if = "Option::is_none"`, so
+/// an absent member stays absent when the file is written again.
+mod present {
+    use serde::{Deserialize, Deserializer};
+
+    /// # Errors
+    /// Propagates deserializer errors.
+    pub fn value<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        T::deserialize(d).map(Some)
+    }
+
+    /// An `f32` written as its exact `f64` value (as `asamu_core::exact_f32`).
+    pub mod float {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        /// # Errors
+        /// Propagates serializer errors.
+        pub fn serialize<S: Serializer>(v: &Option<f32>, s: S) -> Result<S::Ok, S::Error> {
+            v.map(f64::from).serialize(s)
+        }
+
+        /// # Errors
+        /// Propagates deserializer errors (`null` is one).
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+            f64::deserialize(d).map(|v| Some(v as f32))
+        }
+    }
+
+    /// A vector written as `[x, y, z]` of exact values.
+    pub mod vec3 {
+        use asamu_core::glam::Vec3;
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        /// # Errors
+        /// Propagates serializer errors.
+        pub fn serialize<S: Serializer>(v: &Option<Vec3>, s: S) -> Result<S::Ok, S::Error> {
+            v.map(|v| [f64::from(v.x), f64::from(v.y), f64::from(v.z)])
+                .serialize(s)
+        }
+
+        /// # Errors
+        /// Propagates deserializer errors (`null` and a wrong length are).
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec3>, D::Error> {
+            let [x, y, z] = <[f64; 3]>::deserialize(d)?;
+            Ok(Some(Vec3::new(x as f32, y as f32, z as f32)))
+        }
+    }
+}
 
 /// One key binding of the running game (`Engine.Input.Bindings`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +167,19 @@ pub struct RawHeader {
     /// Free-form notes.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// The optional record members the recording has, sorted (each one of
+    /// [`OPTIONAL_FIELDS`]); empty for a plain version-1 header.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_fields: Vec<String>,
+    /// Id of the file the optional members' offsets came from (`null` when
+    /// only members that need no offset are written); absent from a plain
+    /// version-1 header.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub optional_layout: Option<Option<String>>,
 }
 
 /// World timing at the start of the frame.
@@ -122,8 +233,27 @@ pub struct RawAxes {
     pub mouse_y: f32,
 }
 
+/// One entry of an actor's `Timers` (optional member `gun.timers`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawTimer {
+    /// Name of the function the timer calls.
+    pub name: String,
+    /// `Rate`: the timer's period, seconds.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub rate: f32,
+    /// `Count`: the time the timer has run, seconds.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub count: f32,
+    /// `bLoop`.
+    #[serde(rename = "loop")]
+    pub looping: bool,
+    /// `bPaused`.
+    pub paused: bool,
+}
+
 /// The grapple gun (`asamu.GrappleGun`).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawGun {
     /// `bIsGrappling`.
@@ -145,6 +275,94 @@ pub struct RawGun {
     pub times_grappled: i32,
     /// `iMaxGrapples`.
     pub max_grapples: i32,
+    /// Optional: name of the weapon's script state (`Active`,
+    /// `WeaponFiring`, ...); `Some(None)` without a state.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub state: Option<Option<String>>,
+    /// Optional: the weapon's `Timers`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub timers: Option<Vec<RawTimer>>,
+}
+
+impl RawGun {
+    /// The weapon's refire check among its recorded timers: the first entry
+    /// named [`REFIRE_TIMER`] (names compare without ASCII case, as the
+    /// engine's names do). `None` when the timers were not recorded or hold
+    /// no such entry.
+    #[must_use]
+    pub fn refire_timer(&self) -> Option<&RawTimer> {
+        self.timers
+            .as_ref()?
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(REFIRE_TIMER))
+    }
+}
+
+/// Name of the weapon timer that is its refire check: the stock weapon sets
+/// a timer of this name when it fires, with the fire interval as its period
+/// (docs/TRACE_CAPTURE.md 6.10; GRAPPLE.md, "Firing state": the refire check
+/// of the `WeaponFiring` state, period `FireInterval[0]` = 0.1 s).
+pub const REFIRE_TIMER: &str = "RefireCheckTimer";
+
+/// The camera's cached view (optional member `camera_pov`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCameraPov {
+    /// `CameraCache.POV.Location`, UU.
+    #[serde(with = "asamu_core::exact_f32::vec3")]
+    pub location: Vec3,
+    /// `CameraCache.POV.Rotation` (pitch, yaw, roll), rotator units.
+    pub rotation: [i32; 3],
+}
+
+/// `UTPawn` view bob values (optional member `bob`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawBob {
+    /// `Bob`.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub bob: f32,
+    /// `LandBob`.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub land: f32,
+    /// `JumpBob`.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub jump: f32,
+    /// `AppliedBob`.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub applied: f32,
+    /// `BobTime`.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub time: f32,
+    /// `bJustLanded`.
+    pub just_landed: bool,
+    /// `bLandRecovery`.
+    pub land_recovery: bool,
+}
+
+/// The pawn's `CylinderComponent` (optional member `cylinder`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCylinder {
+    /// `CollisionRadius`, UU.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub radius: f32,
+    /// `CollisionHeight` (the half height), UU.
+    #[serde(with = "asamu_core::exact_f32")]
+    pub half_height: f32,
+    /// The component's `Translation`, UU.
+    #[serde(with = "asamu_core::exact_f32::vec3")]
+    pub translation: Vec3,
+    /// The component is the actor's `CollisionComponent`.
+    pub collision_component: bool,
 }
 
 /// Script flags of `asamu.ASAMUPawn`.
@@ -243,6 +461,107 @@ pub struct RawPlayer {
     /// Rocket boots.
     #[serde(default)]
     pub boots: Option<RawBoots>,
+    /// Optional: name of the outermost object of the `Base` actor (the
+    /// package of the level it lies in); `Some(None)` without a base.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub base_level: Option<Option<String>>,
+    /// Optional: camera `DefaultFOV`, degrees.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "present::float"
+    )]
+    pub fov_default: Option<f32>,
+    /// Optional: camera `bLockedFOV`. While it is set the camera's FOV is
+    /// `fov_lock`, else the cached view FOV `fov_camera`
+    /// (PARITY_FINDINGS.md V19).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub fov_locked: Option<bool>,
+    /// Optional: camera `LockedFOV`, degrees.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "present::float"
+    )]
+    pub fov_lock: Option<f32>,
+    /// Optional: the camera's cached view.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub camera_pov: Option<RawCameraPov>,
+    /// Optional: pawn `Floor`, the normal the walking physics keeps (zero
+    /// until the pawn has walked).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "present::vec3"
+    )]
+    pub floor: Option<Vec3>,
+    /// Optional: pawn `BaseEyeHeight`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "present::float"
+    )]
+    pub base_eye_height: Option<f32>,
+    /// Optional: `UTPawn.WalkBob`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "present::vec3"
+    )]
+    pub walk_bob: Option<Vec3>,
+    /// Optional: the other bob values.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub bob: Option<RawBob>,
+    /// Optional: the pawn's collision cylinder.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present::value"
+    )]
+    pub cylinder: Option<RawCylinder>,
+}
+
+impl RawPlayer {
+    /// The names ([`OPTIONAL_FIELDS`]) of the optional members this player
+    /// part carries, sorted.
+    #[must_use]
+    pub fn optional_members(&self) -> Vec<&'static str> {
+        let gun = self.gun.as_ref();
+        [
+            ("player.base_eye_height", self.base_eye_height.is_some()),
+            ("player.base_level", self.base_level.is_some()),
+            ("player.bob", self.bob.is_some()),
+            ("player.camera_pov", self.camera_pov.is_some()),
+            ("player.cylinder", self.cylinder.is_some()),
+            ("player.floor", self.floor.is_some()),
+            ("player.fov_default", self.fov_default.is_some()),
+            ("player.fov_lock", self.fov_lock.is_some()),
+            ("player.fov_locked", self.fov_locked.is_some()),
+            ("player.gun.state", gun.is_some_and(|g| g.state.is_some())),
+            ("player.gun.timers", gun.is_some_and(|g| g.timers.is_some())),
+            ("player.walk_bob", self.walk_bob.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, there)| *there)
+        .map(|(name, _)| name)
+        .collect()
+    }
 }
 
 /// One frame.
@@ -330,6 +649,17 @@ impl RawFile {
                         h.version
                     );
                 }
+                if let Some(unknown) = h
+                    .optional_fields
+                    .iter()
+                    .find(|f| !OPTIONAL_FIELDS.contains(&f.as_str()))
+                {
+                    bail!(
+                        "line {number}: the header announces an optional field this reader does \
+                         not know: {unknown:?} (known: {})",
+                        OPTIONAL_FIELDS.join(", ")
+                    );
+                }
                 header = Some(h);
             } else {
                 let rec: RawRecord = serde_json::from_str(line)
@@ -362,6 +692,19 @@ impl RawFile {
         }
         w.flush()?;
         Ok(())
+    }
+
+    /// How many records carry each optional member (by its name in
+    /// [`OPTIONAL_FIELDS`]); empty for a plain version-1 recording.
+    #[must_use]
+    pub fn optional_counts(&self) -> std::collections::BTreeMap<&'static str, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for p in self.records.iter().filter_map(|r| r.player.as_ref()) {
+            for name in p.optional_members() {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        counts
     }
 
     /// JSON Lines as a string.
@@ -434,6 +777,8 @@ pub(crate) mod tests {
             })
             .collect(),
             notes: vec![],
+            optional_fields: vec![],
+            optional_layout: None,
         }
     }
 
@@ -468,6 +813,8 @@ pub(crate) mod tests {
                 distance: 0.0,
                 times_grappled: 0,
                 max_grapples: 2,
+                state: None,
+                timers: None,
             }),
             pawn_flags: Some(RawPawnFlags {
                 has_jumped: false,
@@ -480,7 +827,69 @@ pub(crate) mod tests {
                 enabled: true,
                 finished: false,
             }),
+            base_level: None,
+            fov_default: None,
+            fov_locked: None,
+            fov_lock: None,
+            camera_pov: None,
+            floor: None,
+            base_eye_height: None,
+            walk_bob: None,
+            bob: None,
+            cylinder: None,
         }
+    }
+
+    /// `p` with every optional member of recorder 0.2.0, as that recorder
+    /// writes them for a pawn that stands on `base_level` with the camera's
+    /// FOV lock at `locked`.
+    pub(crate) fn with_optional(mut p: RawPlayer, locked: bool) -> RawPlayer {
+        p.base_level = Some(Some("AG-Workshop".into()));
+        p.fov_default = Some(90.0);
+        p.fov_locked = Some(locked);
+        p.fov_lock = Some(if locked { 50.0 } else { 0.0 });
+        p.camera_pov = Some(RawCameraPov {
+            location: p.location + Vec3::new(0.0, 0.0, 38.0),
+            rotation: p.view_rotation,
+        });
+        p.floor = Some(Vec3::Z);
+        p.base_eye_height = Some(38.0);
+        p.walk_bob = Some(Vec3::new(0.0, 0.25, -0.5));
+        p.bob = Some(RawBob {
+            bob: 0.01,
+            land: 0.0,
+            jump: 0.0,
+            applied: 0.125,
+            time: 2.5,
+            just_landed: false,
+            land_recovery: true,
+        });
+        p.cylinder = Some(RawCylinder {
+            radius: 21.0,
+            half_height: 44.0,
+            translation: Vec3::ZERO,
+            collision_component: true,
+        });
+        if let Some(g) = p.gun.as_mut() {
+            g.state = Some(Some(if locked { "WeaponFiring" } else { "Active" }.into()));
+            g.timers = Some(vec![
+                RawTimer {
+                    name: REFIRE_TIMER.into(),
+                    rate: if locked { 0.1 } else { 0.0 },
+                    count: if locked { 0.0625 } else { 0.0 },
+                    looping: false,
+                    paused: false,
+                },
+                RawTimer {
+                    name: "InstantReleaseTimer".into(),
+                    rate: 0.05,
+                    count: 0.0,
+                    looping: true,
+                    paused: true,
+                },
+            ]);
+        }
+        p
     }
 
     pub(crate) fn record(frame: u64, p: RawPlayer) -> RawRecord {
@@ -569,5 +978,266 @@ pub(crate) mod tests {
                 "{rec}"
             );
         }
+    }
+
+    /// The optional members of recorder 0.2.0: read as the recorder writes
+    /// them, written back member for member, absent when absent.
+    #[test]
+    fn optional_members_round_trip() {
+        let mut h = header();
+        h.recorder = "asamu_win 0.2.0".into();
+        h.optional_fields = OPTIONAL_FIELDS.iter().map(|s| (*s).to_owned()).collect();
+        h.optional_layout = Some(Some("win-x86-steam-1822049-optional".into()));
+        let mut unbased = with_optional(player(2.5, 7, &[]), true);
+        unbased.base_level = Some(None);
+        unbased.gun.as_mut().unwrap().state = Some(None);
+        unbased.gun.as_mut().unwrap().timers = Some(vec![]);
+        let f = RawFile {
+            header: h,
+            records: vec![
+                record(5, with_optional(player(1.0, 0, &["W"]), false)),
+                record(6, unbased),
+                // A record may lack what the header announces.
+                record(7, player(3.0, 7, &[])),
+            ],
+        };
+        let s = f.to_jsonl_string().unwrap();
+        let back = RawFile::from_str_lines(&s).unwrap();
+        assert_eq!(back, f);
+        let lines: Vec<&str> = s.lines().collect();
+        // The members are where the recorder puts them, under its names.
+        let first: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        let p = &first["player"];
+        assert_eq!(p["base_level"], "AG-Workshop");
+        assert_eq!(p["fov_default"], 90.0);
+        assert_eq!(p["fov_locked"], false);
+        assert_eq!(p["fov_lock"], 0.0);
+        assert_eq!(p["camera_pov"]["rotation"], serde_json::json!([0, 0, 0]));
+        assert_eq!(p["floor"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(p["base_eye_height"], 38.0);
+        assert_eq!(p["walk_bob"], serde_json::json!([0.0, 0.25, -0.5]));
+        assert_eq!(p["bob"]["land_recovery"], true);
+        assert_eq!(p["cylinder"]["half_height"], 44.0);
+        assert_eq!(p["gun"]["state"], "Active");
+        assert_eq!(p["gun"]["timers"][0]["name"], "RefireCheckTimer");
+        assert_eq!(p["gun"]["timers"][1]["loop"], true);
+        // A recorded null is a value, not an absence.
+        let second: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        assert!(second["player"]["base_level"].is_null());
+        assert!(second["player"]["gun"]["state"].is_null());
+        assert_eq!(second["player"]["gun"]["timers"], serde_json::json!([]));
+        // A record without them has no such member at all (a version-1 line).
+        let third: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+        let members = |v: &serde_json::Value| -> Vec<String> {
+            v.as_object().unwrap().keys().cloned().collect()
+        };
+        let plain = serde_json::to_value(record(7, player(3.0, 7, &[]))).unwrap();
+        assert_eq!(members(&third["player"]), members(&plain["player"]));
+        assert_eq!(members(&third["player"]).len(), 23, "the version-1 members");
+        assert_eq!(members(&third["player"]["gun"]).len(), 8);
+        // What is there, counted.
+        let counts = back.optional_counts();
+        assert_eq!(counts.len(), OPTIONAL_FIELDS.len());
+        assert!(counts.values().all(|n| *n == 2), "{counts:?}");
+        assert_eq!(
+            back.records[0].player.as_ref().unwrap().optional_members(),
+            OPTIONAL_FIELDS
+        );
+        let gun = back.records[0].player.as_ref().unwrap().gun.as_ref();
+        assert_eq!(gun.unwrap().refire_timer().unwrap().rate, 0.0);
+        assert!(
+            back.records[2]
+                .player
+                .as_ref()
+                .unwrap()
+                .gun
+                .as_ref()
+                .unwrap()
+                .refire_timer()
+                .is_none()
+        );
+        // A plain version-1 file has none, and its header stays as it was.
+        let v1 = RawFile {
+            header: header(),
+            records: vec![record(1, player(1.0, 0, &[]))],
+        };
+        assert!(v1.optional_counts().is_empty());
+        let text = v1.to_jsonl_string().unwrap();
+        assert!(
+            !text.contains("optional") && !text.contains("fov_lock"),
+            "{text}"
+        );
+        assert_eq!(
+            members(&serde_json::from_str(text.lines().next().unwrap()).unwrap()).len(),
+            12
+        );
+    }
+
+    /// Each optional member on its own, and what is still refused: unknown
+    /// members, wrong types, and `null` where the recorder writes none.
+    #[test]
+    fn optional_members_are_typed_and_strict() {
+        let h = serde_json::to_string(&header()).unwrap();
+        let plain = serde_json::to_value(record(1, player(1.0, 0, &[]))).unwrap();
+        let read = |player: &dyn Fn(&mut serde_json::Value)| {
+            let mut v = plain.clone();
+            player(&mut v["player"]);
+            RawFile::from_str_lines(&format!("{h}\n{v}\n"))
+        };
+        use serde_json::json;
+        let timer = json!({"name": "RefireCheckTimer", "rate": 0.125, "count": 0.0625, "loop": false, "paused": false});
+        let good: Vec<(&str, serde_json::Value)> = vec![
+            ("base_level", json!("freds_place")),
+            ("base_level", json!(null)),
+            ("fov_default", json!(90.0)),
+            ("fov_locked", json!(true)),
+            ("fov_lock", json!(50.0)),
+            (
+                "camera_pov",
+                json!({"location": [1.0, 2.0, 3.0], "rotation": [-100, 16, 0]}),
+            ),
+            ("floor", json!([0.0, 0.0, 1.0])),
+            ("base_eye_height", json!(38.0)),
+            ("walk_bob", json!([0.0, 0.25, -0.5])),
+            (
+                "bob",
+                json!({"bob": 0.015625, "land": 0.0, "jump": 0.0, "applied": 0.125, "time": 3.0, "just_landed": false, "land_recovery": true}),
+            ),
+            (
+                "cylinder",
+                json!({"radius": 21.0, "half_height": 44.0, "translation": [0.0, 0.0, 0.0], "collision_component": true}),
+            ),
+        ];
+        for (name, value) in &good {
+            let f = read(&|p| p[*name] = value.clone()).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            let p = f.records[0].player.as_ref().unwrap();
+            assert_eq!(p.optional_members(), [format!("player.{name}")], "{name}");
+            // Written back as read (the values here are exact in f32).
+            let again = serde_json::to_value(&f.records[0]).unwrap();
+            assert_eq!(&again["player"][*name], value, "{name}");
+        }
+        for (name, value) in [
+            ("state", json!("WeaponFiring")),
+            ("state", json!(null)),
+            ("timers", json!([timer.clone()])),
+            ("timers", json!([])),
+        ] {
+            let f = read(&|p| p["gun"][name] = value.clone())
+                .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            let p = f.records[0].player.as_ref().unwrap();
+            assert_eq!(p.optional_members(), [format!("player.gun.{name}")]);
+            assert_eq!(
+                serde_json::to_value(&f.records[0]).unwrap()["player"]["gun"][name],
+                value
+            );
+        }
+        let f = read(&|p| p["fov_lock"] = json!(50.0)).unwrap();
+        assert_eq!(f.records[0].player.as_ref().unwrap().fov_lock, Some(50.0));
+        let f = read(&|p| p["floor"] = json!([0.6, 0.0, 0.8])).unwrap();
+        assert_eq!(
+            f.records[0].player.as_ref().unwrap().floor,
+            Some(Vec3::new(0.6, 0.0, 0.8)),
+            "values are narrowed to the f32 the game holds"
+        );
+        // Refused: a null where the recorder writes a value, a wrong type, a
+        // wrong shape, a member nobody writes.
+        let bad: Vec<(&str, serde_json::Value)> = vec![
+            ("fov_default", json!(null)),
+            ("fov_locked", json!(null)),
+            ("fov_locked", json!(1)),
+            ("fov_lock", json!("50")),
+            ("camera_pov", json!(null)),
+            ("camera_pov", json!({"location": [1.0, 2.0, 3.0]})),
+            (
+                "camera_pov",
+                json!({"location": [1.0, 2.0, 3.0], "rotation": [0.5, 0, 0]}),
+            ),
+            (
+                "camera_pov",
+                json!({"location": [1.0, 2.0, 3.0], "rotation": [0, 0, 0], "fov": 90.0}),
+            ),
+            ("floor", json!(null)),
+            ("floor", json!([0.0, 1.0])),
+            ("floor", json!([0.0, 0.0, 1.0, 0.0])),
+            ("base_eye_height", json!(null)),
+            ("walk_bob", json!({"x": 0})),
+            ("bob", json!({"bob": 0.01})),
+            ("bob", json!(null)),
+            (
+                "cylinder",
+                json!({"radius": 21.0, "half_height": 44.0, "translation": [0.0, 0.0, 0.0]}),
+            ),
+            (
+                "cylinder",
+                json!({"radius": 21.0, "height": 44.0, "translation": [0.0, 0.0, 0.0], "collision_component": true}),
+            ),
+            ("base_level", json!(12)),
+            ("fov_zoom", json!(50.0)),
+            ("marker", json!("x")),
+        ];
+        for (name, value) in &bad {
+            assert!(
+                read(&|p| p[*name] = value.clone()).is_err(),
+                "{name} = {value}"
+            );
+        }
+        let mut broken = timer.clone();
+        broken["extra"] = json!(1);
+        let mut unnamed = timer.clone();
+        unnamed.as_object_mut().unwrap().remove("name");
+        for (name, value) in [
+            ("state", json!(3)),
+            ("timers", json!(null)),
+            ("timers", json!({})),
+            ("timers", json!([broken])),
+            ("timers", json!([unnamed])),
+            ("refire", json!(0.1)),
+        ] {
+            assert!(
+                read(&|p| p["gun"][name] = value.clone()).is_err(),
+                "gun.{name} = {value}"
+            );
+        }
+        // The header: its two members, and a name this reader does not know.
+        let rec = serde_json::to_string(&plain).unwrap();
+        let with = |extra: &str| {
+            let line = h.replacen('{', &format!("{{{extra},"), 1);
+            RawFile::from_str_lines(&format!("{line}\n{rec}\n"))
+        };
+        let ok = with(r#""optional_fields":["player.floor","player.gun.state"],"optional_layout":"win-x86-steam-1822049-optional""#).unwrap();
+        assert_eq!(
+            ok.header.optional_fields,
+            ["player.floor", "player.gun.state"]
+        );
+        assert_eq!(
+            ok.header.optional_layout,
+            Some(Some("win-x86-steam-1822049-optional".into()))
+        );
+        // Only the member that needs no offset: the layout id is null.
+        let old =
+            with(r#""optional_fields":["player.base_level"],"optional_layout":null"#).unwrap();
+        assert_eq!(old.header.optional_layout, Some(None));
+        assert!(
+            old.to_jsonl_string()
+                .unwrap()
+                .contains(r#""optional_layout":null"#)
+        );
+        let e = format!(
+            "{:#}",
+            with(r#""optional_fields":["player.floor","player.mood"]"#).unwrap_err()
+        );
+        assert!(
+            e.contains("line 1") && e.contains("player.mood") && e.contains("does not know"),
+            "{e}"
+        );
+        assert!(with(r#""optional_fields":"player.floor""#).is_err());
+        assert!(with(r#""optional_fields":[1]"#).is_err());
+        assert!(with(r#""optional_layout":7"#).is_err());
+        assert!(
+            with(r#""optional":true"#).is_err(),
+            "an unknown header member"
+        );
+        // The list this reader knows is sorted and has no doubles.
+        assert!(OPTIONAL_FIELDS.windows(2).all(|w| w[0] < w[1]));
     }
 }

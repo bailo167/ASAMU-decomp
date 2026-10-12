@@ -21,12 +21,18 @@ What it does
   takes from a second file; ``v1_record`` removes them again.
 * ``convert_raw`` turns a raw recording into canonical ``asamu-trace`` v1
   traces (``crates/asamu-player/src/trace.rs``), exactly as
-  ``asamu-trace convert`` (Rust, the reference implementation) does.
+  ``asamu-trace convert`` (Rust, the reference implementation) does: with
+  the optional members where a record has them (the camera's FOV lock in
+  the FOV column; floor normal, weapon state and refire timer, cylinder
+  size and the base actor's level in the ``state:`` note), and with the
+  markers and the dropped-frame log of the recorder's ``.stats.json``
+  (``read_stats``) when it is given.
 
 Command line (no debugger needed)::
 
     python3 -I asamu_recorder_core.py convert RAW.raw.jsonl [--out-dir DIR]
         [--move-input auto|keys|acceleration] [--move-frame original|yaw]
+        [--stats FILE.stats.json | --no-stats]
     python3 -I asamu_recorder_core.py selftest [--layout layout_win_x86.json]
 
 Raw records never contain addresses or pointers; see docs/TRACE_CAPTURE.md.
@@ -90,6 +96,23 @@ STORY_SPEED = 264.0
 # not game values; state.rs).
 MAX_LISTED = 20
 EYE_HEIGHT_MAX_CHANGES = 16000
+# The budget of the state: note for values that change on most ticks, and
+# what one change of each costs (state.rs: STATE_BULK_BUDGET, EYE_HEIGHT_COST,
+# REFIRE_COUNT_COST, FLOOR_COST; a limit of the notes line, not game values).
+EYE_HEIGHT_COST = 45
+REFIRE_COUNT_COST = 52
+FLOOR_COST = 100
+STATE_BULK_BUDGET = EYE_HEIGHT_MAX_CHANGES * EYE_HEIGHT_COST
+# The weapon timer that is its refire check (raw.rs: REFIRE_TIMER), compared
+# without ASCII case as the engine compares names.
+REFIRE_TIMER = "refirechecktimer"
+# The recorder's sidecar (sidecar.rs).
+RAW_SUFFIX = ".raw.jsonl"
+STATS_SUFFIX = ".stats.json"
+REASON_NO_INPUT = "no-input"
+MAX_NO_INPUT_SPAN = 64
+MAX_MARKER_NAME = 64
+MARKERS_NOTE_VERSION = 1
 
 
 class LayoutError(Exception):
@@ -1517,19 +1540,29 @@ def usable(rec):
     return rec.get("player") is not None and w is not None and not w.get("paused", False)
 
 
-def split_runs(records):
+def split_runs(records, no_input=()):
+    """The convertible runs. A record whose frame is in ``no_input`` (written
+    without its frame's input: the recorder's dropped-frame log) is the last
+    of its run."""
+    return [records[a:b + 1] for a, b in run_ranges(records, no_input)]
+
+
+def run_ranges(records, no_input=()):
+    """The convertible runs as inclusive index ranges (convert.rs,
+    run_ranges)."""
     runs = []
-    cur = []
-    for r in records:
+    start = None
+    for i, r in enumerate(records):
         if not usable(r):
-            if cur:
-                runs.append(cur)
-            cur = []
+            if start is not None:
+                runs.append((start, i - 1))
+            start = None
             continue
-        if cur:
-            prev = cur[-1]
+        if start is not None:
+            prev = records[i - 1]
             same = (
                 r["frame"] == prev["frame"] + 1
+                and prev["frame"] not in no_input
                 and r["world"].get("map") == prev["world"].get("map")
                 and r["player"]["pawn_id"] == prev["player"]["pawn_id"]
                 and r["player"]["controller_class"] == prev["player"]["controller_class"]
@@ -1540,12 +1573,13 @@ def split_runs(records):
                 and r["world"]["time_seconds"] >= prev["world"]["time_seconds"]
             )
             if not same:
-                runs.append(cur)
-                cur = []
-        cur.append(r)
-    if cur:
-        runs.append(cur)
-    return [r for r in runs if len(r) >= 2]
+                runs.append((start, i - 1))
+                start = None
+        if start is None:
+            start = i
+    if start is not None:
+        runs.append((start, len(records) - 1))
+    return [(a, b) for a, b in runs if b - a >= 1]
 
 
 def _distance_squared(a, b):
@@ -1557,12 +1591,33 @@ def _distance_squared(a, b):
 
 def _state(rec, counters):
     p = rec["player"]
-    fov = p.get("fov_camera")
-    if fov is None or not (0.0 < fov < 180.0):
-        fov = p["fov_controller"]
-        counters["fov_controller"] += 1
-        if not (0.0 < fov < 180.0):
-            raise ValueError("frame %d: no usable field of view" % rec["frame"])
+    # The camera's own rule (convert.rs, "The FOV column"): the locked FOV
+    # while the lock is set, else the cached view FOV.
+    fov = None
+    lock_known = False
+    locked = p.get("fov_locked")
+    if locked is True:
+        lock = p.get("fov_lock")
+        lock = f32(lock) if lock is not None else None
+        if lock is not None and 0.0 < lock < 180.0:
+            lock_known = True
+            fov = lock
+            counters["fov_locked"] += 1
+        else:
+            counters["fov_lock_unusable"] += 1
+    elif locked is False:
+        lock_known = True
+    if lock_known:
+        counters["fov_lock_read"] += 1
+    if fov is None:
+        fov = p.get("fov_camera")
+        if fov is None or not (0.0 < fov < 180.0):
+            fov = p["fov_controller"]
+            counters["fov_controller"] += 1
+            if not (0.0 < fov < 180.0):
+                raise ValueError("frame %d: no usable field of view" % rec["frame"])
+        elif not lock_known:
+            counters["fov_cached"] += 1
     physics = p["physics"]
     flying = physics == PHYS_FLYING
     gun = p.get("gun")
@@ -1631,7 +1686,89 @@ def eye_height_changes(run):
     return sum(1 for k in range(1, len(run)) if _eye_height(run[k]) != _eye_height(run[k - 1]))
 
 
-def _tick_fields(rec, with_eye_height):
+def _refire_timer(p):
+    """The weapon's refire check among its recorded timers (raw.rs,
+    RawGun::refire_timer), or None."""
+    gun = p.get("gun")
+    timers = gun.get("timers") if gun else None
+    for t in timers or ():
+        if ascii_lower(t["name"]) == REFIRE_TIMER:
+            return t
+    return None
+
+
+def _refire_count(p):
+    t = _refire_timer(p)
+    return f32(t["count"]) if t is not None else None
+
+
+def _floor(p):
+    n = p.get("floor")
+    return [f32(x) for x in n] if n is not None else None
+
+
+def _changes(run, value):
+    """Ticks of the run on which ``value(player)`` differs from the tick before."""
+    return sum(
+        1 for k in range(1, len(run)) if value(run[k]["player"]) != value(run[k - 1]["player"])
+    )
+
+
+def state_fields(run):
+    """Which fields the run's ``state:`` line has beyond the version-1 ones
+    (state.rs, StateFields): a field of recorder 0.2.0 only when a record of
+    the run carries its member, an often-changing one only within the
+    budget. ``left_out`` lists (what, changes, cost, bytes left) of the
+    fields the budget left out."""
+    players = [r["player"] for r in run]
+
+    def any_has(has):
+        return any(has(p) for p in players)
+
+    def gun_has(name):
+        return any_has(lambda p: bool(p.get("gun")) and name in p["gun"])
+
+    f = {
+        "eye_height": eye_height_changes(run) <= EYE_HEIGHT_MAX_CHANGES,
+        "base_level": any_has(lambda p: "base_level" in p),
+        "base_eye_height": any_has(lambda p: "base_eye_height" in p),
+        "cylinder": any_has(lambda p: "cylinder" in p),
+        "floor": False,
+        "weapon_state": gun_has("state"),
+        "timers": gun_has("timers"),
+        "refire_count": False,
+        "left_out": [],
+    }
+    left = STATE_BULK_BUDGET
+    if f["eye_height"]:
+        left = max(0, left - eye_height_changes(run) * EYE_HEIGHT_COST)
+    for name, wanted, what, value, cost in (
+        ("refire_count", f["timers"], "the refire timer's count", _refire_count, REFIRE_COUNT_COST),
+        ("floor", any_has(lambda p: "floor" in p), "the floor normal", _floor, FLOOR_COST),
+    ):
+        if not wanted:
+            continue
+        changes = _changes(run, value)
+        if changes * cost <= left:
+            left -= changes * cost
+            f[name] = True
+        else:
+            f["left_out"].append((what, changes, cost, left))
+    return f
+
+
+def _left_out_note(what, changes, cost, left):
+    return (
+        "check: %s left out of the state: note (%d changes of %d bytes; %d of the %d bytes "
+        "for values that change on most ticks were left)" % (what, changes, cost, left, STATE_BULK_BUDGET)
+    )
+
+
+def _opt_f32(v):
+    return f32(v) if v is not None else None
+
+
+def _tick_fields(rec, with_):
     p = rec["player"]
     gun = p.get("gun")
     flags = p.get("pawn_flags")
@@ -1656,20 +1793,41 @@ def _tick_fields(rec, with_eye_height):
         "sprinting": flags["sprinting"] if flags else None,
         "times_grappled": gun["times_grappled"] if gun else None,
     }
-    if with_eye_height:
+    if with_["eye_height"]:
         fields["eye_height"] = _eye_height(rec)
+    # The fields of recorder 0.2.0.
+    if with_["base_level"]:
+        fields["base_level"] = p.get("base_level")
+    if with_["base_eye_height"]:
+        fields["base_eye_height"] = _opt_f32(p.get("base_eye_height"))
+    if with_["cylinder"]:
+        cylinder = p.get("cylinder")
+        fields["cylinder_half_height"] = f32(cylinder["half_height"]) if cylinder else None
+        fields["cylinder_radius"] = f32(cylinder["radius"]) if cylinder else None
+    if with_["floor"]:
+        fields["floor"] = _floor(p)
+    if with_["weapon_state"]:
+        fields["weapon_state"] = gun.get("state") if gun else None
+    if with_["timers"]:
+        timers = gun.get("timers") if gun else None
+        refire = _refire_timer(p)
+        fields["gun_timers"] = len(timers) if timers is not None else None
+        fields["refire_rate"] = f32(refire["rate"]) if refire is not None else None
+        if with_["refire_count"]:
+            fields["refire_count"] = f32(refire["count"]) if refire is not None else None
     return fields
 
 
 def _state_note(run):
     """The ``state:`` notes line (tools/asamu-trace/src/state.rs): the script
     state of every tick as a list of [tick, {changed fields}]. EyeHeight is
-    in it unless it changes on more than EYE_HEIGHT_MAX_CHANGES ticks."""
-    with_eye_height = eye_height_changes(run) <= EYE_HEIGHT_MAX_CHANGES
+    in it unless it changes on more than EYE_HEIGHT_MAX_CHANGES ticks; the
+    fields of recorder 0.2.0 as ``state_fields`` says."""
+    with_ = state_fields(run)
     changes = []
     last = None
     for k, rec in enumerate(run):
-        cur = _tick_fields(rec, with_eye_height)
+        cur = _tick_fields(rec, with_)
         if last is None:
             diff = cur
         else:
@@ -1768,6 +1926,129 @@ def _event_notes(run, samples):
     return notes
 
 
+def marker_label(name):
+    """A marker's name as the converters write it (sidecar.rs, Marker::label)."""
+    return "".join(" " if (c < " " or c == "\x7f") else c for c in str(name)[:MAX_MARKER_NAME])
+
+
+def no_input_frames(stats):
+    """Frames whose record was written without its input (sidecar.rs)."""
+    frames = set()
+    for d in (stats or {}).get("drops") or ():
+        if d["reason"] == REASON_NO_INPUT:
+            frames.update(range(d["frame"], min(d["last"], d["frame"] + MAX_NO_INPUT_SPAN) + 1))
+    return frames
+
+
+def place_markers(frames, stats):
+    """The markers of the sidecar by run (convert.rs, place_markers):
+    ``frames[i]`` is the first and last frame number of run ``i``. Each
+    marker is a dict {tick, name, frame, where}."""
+    by_run = [[] for _ in frames]
+    for m in (stats or {}).get("markers") or ():
+        f = m["frame"]
+        inside = None
+        if f is not None:
+            inside = next((i for i, (a, b) in enumerate(frames) if a <= f <= b), None)
+        if inside is not None:
+            run, tick, where = inside, f - frames[inside][0], "at"
+        else:
+            later = next((i for i, (a, _) in enumerate(frames) if f is None or a > f), None)
+            if later is not None:
+                run, tick, where = later, 0, "before"
+            elif frames:
+                run, tick, where = len(frames) - 1, frames[-1][1] - frames[-1][0], "after"
+            else:
+                continue
+        by_run[run].append({"frame": f, "name": marker_label(m["name"]), "tick": tick, "where": where})
+    for markers in by_run:
+        markers.sort(key=lambda m: m["tick"])  # stable: one tick's markers stay in their order
+    return by_run
+
+
+def _marker_aside(m):
+    if m["where"] == "at":
+        return ""
+    if m["frame"] is None:
+        return " (set before the first record)" if m["where"] == "before" else " (set after this run)"
+    return " (set %s this run, at frame %d)" % (m["where"], m["frame"])
+
+
+def _bounded(items, separator):
+    text = separator.join(items[:MAX_LISTED])
+    if len(items) > MAX_LISTED:
+        text += " and %d more" % (len(items) - MAX_LISTED)
+    return text
+
+
+def _marker_notes(markers):
+    """The ``event:`` line (for people) and the ``markers:`` line (JSON, for
+    readers) of a run's markers."""
+    if not markers:
+        return []
+    items = ['%d "%s"%s' % (m["tick"], m["name"], _marker_aside(m)) for m in markers]
+    return [
+        "event: %d marker(s) (set with the recorder's mark command; the tick is that of the last "
+        "record written when the marker was taken): %s" % (len(markers), _bounded(items, ", ")),
+        "markers: " + json.dumps(
+            {"markers": markers, "v": MARKERS_NOTE_VERSION},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ),
+    ]
+
+
+def _describe_drop(d):
+    text = "%d %s" % (d["frame"], d["reason"]) if d["frame"] == d["last"] else (
+        "%d..=%d %s" % (d["frame"], d["last"], d["reason"]))
+    if d.get("detail"):
+        text += ": " + d["detail"]
+    return text
+
+
+def _dropped_notes(records, first_index, last_index, stats):
+    """The ``dropped:`` notes of the run ``records[first_index..=last_index]``
+    (convert.rs, dropped_notes). Empty when the recorder kept no log."""
+    drops = (stats or {}).get("drops")
+    if drops is None:
+        return []
+    first, last = records[first_index]["frame"], records[last_index]["frame"]
+    notes = []
+
+    def gap(side, lo, hi):
+        entries = [
+            _describe_drop(d) for d in drops
+            if d["reason"] != REASON_NO_INPUT and d["frame"] <= hi and d["last"] >= lo
+        ]
+        if entries:
+            why = _bounded(entries, "; ")
+        else:
+            why = "no entry in the recorder's dropped-frame log"
+            if stats.get("drops_omitted", 0) > 0:
+                why += " (%d frames were not logged: the log was full)" % stats["drops_omitted"]
+        return "dropped: %d frame(s) without a record %s this run (frames %d..=%d): %s" % (
+            hi - lo + 1, side, lo, hi, why)
+
+    if first_index > 0 and records[first_index - 1]["frame"] + 1 < first:
+        notes.append(gap("before", records[first_index - 1]["frame"] + 1, first - 1))
+    for d in drops:
+        if d["reason"] == REASON_NO_INPUT and d["frame"] <= last <= d["last"]:
+            notes.append(
+                "dropped: the run ends with frame %d, whose record was written without its frame's "
+                "input (%s): its keys are not used" % (last, d.get("detail") or "no reason given")
+            )
+            break
+    if last_index + 1 < len(records) and last + 1 < records[last_index + 1]["frame"]:
+        notes.append(gap("after", last + 1, records[last_index + 1]["frame"] - 1))
+    return notes
+
+
+def _paused_refire_note(run):
+    paused = sum(1 for r in run if (_refire_timer(r["player"]) or {}).get("paused"))
+    if not paused:
+        return None
+    return "check: the weapon's refire timer is paused on %d samples (its count stands still)" % paused
+
+
 def _move_notes(notes, source, why_count, frame, c, magnitudes, total):
     if source == "no-bindings":
         return
@@ -1852,8 +2133,11 @@ def tick_rate_of(dts):
     return f32(rate)
 
 
-def convert_raw(header, records, level=None, move_input="auto", move_frame="original"):
+def convert_raw(header, records, level=None, move_input="auto", move_frame="original", stats=None):
     """List of (meta, samples) for every usable run.
+
+    ``stats``: the markers and the dropped-frame log of the recording
+    (``read_stats``), or None.
 
     ``move_input``: where the move axes come from. "keys": the held keys
     through the bindings; "acceleration": the pawn's acceleration
@@ -1867,11 +2151,16 @@ def convert_raw(header, records, level=None, move_input="auto", move_frame="orig
         raise ValueError("unknown move input %r or move frame %r" % (move_input, move_frame))
     bindings = header.get("bindings") or []
     kmap = key_actions(bindings) if bindings else None
-    runs = split_runs(records)
+    if stats is not None:
+        check_stats(stats, records)
+    ranges = run_ranges(records, no_input_frames(stats))
+    runs = [records[a:b + 1] for a, b in ranges]
+    markers = place_markers([(records[a]["frame"], records[b]["frame"]) for a, b in ranges], stats)
     out = []
     for si, run in enumerate(runs):
         counters = {
-            "fov_controller": 0, "grapple_physics": 0, "flying_without_gun": 0, "axis_mismatch": 0,
+            "fov_controller": 0, "fov_cached": 0, "fov_lock_read": 0, "fov_locked": 0,
+            "fov_lock_unusable": 0, "grapple_physics": 0, "flying_without_gun": 0, "axis_mismatch": 0,
             "accel_without_key": 0, "derived": 0, "steep": 0, "yaw_differs": 0,
             "zero_attached": 0, "zero_release": 0, "zero_other": 0, "accel_attached": 0,
             "attached": 0, "helper_elsewhere": 0, "anchor_distance": 0,
@@ -2029,11 +2318,21 @@ def convert_raw(header, records, level=None, move_input="auto", move_frame="orig
                 "fov: controller FOVAngle used on %d samples (camera POV FOV unavailable)"
                 % counters["fov_controller"]
             )
-        cached = len(run) - counters["fov_controller"]
-        if cached > 0:
+        if counters["fov_cached"] > 0:
             notes.append(
                 "fov: cached view FOV (the camera's CameraCache.POV.FOV) on %d of %d samples: "
-                "a locked camera FOV (the zoom) does not show in it" % (cached, len(run))
+                "a locked camera FOV (the zoom) does not show in it" % (counters["fov_cached"], len(run))
+            )
+        if counters["fov_lock_read"] > 0:
+            notes.append(
+                "fov: camera FOV lock read (bLockedFOV, LockedFOV) on %d of %d samples: the FOV is "
+                "the locked FOV while the lock is set (%d samples), else the cached view FOV"
+                % (counters["fov_lock_read"], len(run), counters["fov_locked"])
+            )
+        if counters["fov_lock_unusable"] > 0:
+            notes.append(
+                "check: the camera's FOV lock is set without a usable LockedFOV on %d samples "
+                "(not believed: the cached view FOV is written)" % counters["fov_lock_unusable"]
             )
         eye_changes = eye_height_changes(run)
         if eye_changes > EYE_HEIGHT_MAX_CHANGES:
@@ -2041,7 +2340,13 @@ def convert_raw(header, records, level=None, move_input="auto", move_frame="orig
                 "check: EyeHeight left out of the state: note (%d changes; at most %d fit a "
                 "notes line)" % (eye_changes, EYE_HEIGHT_MAX_CHANGES)
             )
+        notes.extend(_left_out_note(*entry) for entry in state_fields(run)["left_out"])
+        paused = _paused_refire_note(run)
+        if paused:
+            notes.append(paused)
         notes.extend(_event_notes(run, samples))
+        notes.extend(_marker_notes(markers[si]))
+        notes.extend(_dropped_notes(records, ranges[si][0], ranges[si][1], stats))
         notes.extend(header.get("notes") or [])
         notes.append(_state_note(run))
         notes.append(_init_note(run[0]))
@@ -2077,6 +2382,59 @@ def read_raw(path):
     if header is None:
         raise ValueError("empty raw file")
     return header, records
+
+
+def stats_path(raw_path):
+    """Where the recorder writes the sidecar of ``raw_path``:
+    ``<stem>.stats.json`` next to ``<stem>.raw.jsonl``; None for a file that
+    is not named like a raw recording."""
+    base = os.path.basename(raw_path)
+    if not base.endswith(RAW_SUFFIX):
+        return None
+    return os.path.join(os.path.dirname(raw_path), base[: -len(RAW_SUFFIX)] + STATS_SUFFIX)
+
+
+def read_stats(path):
+    """The markers and the dropped-frame log of a recording, from its
+    ``.stats.json`` (sidecar.rs, RecorderLog): a dict with ``markers``,
+    ``drops`` (None when the recorder kept no log), ``drops_omitted`` and the
+    three numbers that tie the file to its recording."""
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("%s: not a recorder stats file" % path)
+    inner = data.get("stats") or {}
+    drops = inner.get("drops")
+    for d in drops or ():
+        if d["last"] < d["frame"]:
+            raise ValueError("%s: a dropped-frame entry ends before it starts" % path)
+    return {
+        "records": data.get("records"),
+        "first_frame": data.get("first_frame"),
+        "last_frame": data.get("last_frame"),
+        "markers": list(data.get("markers") or []),
+        "drops": list(drops) if drops is not None else None,
+        "drops_omitted": inner.get("drops_omitted") or 0,
+    }
+
+
+def check_stats(stats, records):
+    """Raises unless the sidecar is this recording's (sidecar.rs,
+    check_belongs_to): markers and log entries are frame numbers, which mean
+    nothing in another recording."""
+    n = stats.get("records")
+    if n is not None and n != len(records):
+        raise ValueError(
+            "the recorder stats are not this recording's: they count %d records, the raw file has %d"
+            % (n, len(records)))
+    for what, stated, found in (
+        ("first", stats.get("first_frame"), records[0]["frame"] if records else None),
+        ("last", stats.get("last_frame"), records[-1]["frame"] if records else None),
+    ):
+        if stated is not None and found is not None and stated != found:
+            raise ValueError(
+                "the recorder stats are not this recording's: their %s frame is %d, the raw file's is %d"
+                % (what, stated, found))
 
 
 def output_paths(raw_path, count, out_dir=None):
@@ -2140,9 +2498,17 @@ def write_trace(meta, samples, path):
             fh.write(dumps(s) + "\n")
 
 
-def convert_file(raw_path, out_dir=None, move_input="auto", move_frame="original"):
+def convert_file(raw_path, out_dir=None, move_input="auto", move_frame="original", stats="auto"):
+    """Converts a raw file next to itself (or into ``out_dir``). ``stats``:
+    the path of the recorder's ``.stats.json``; "auto" for the one next to
+    the raw file if there is one; None for none."""
     header, records = read_raw(raw_path)
-    traces = convert_raw(header, records, move_input=move_input, move_frame=move_frame)
+    if stats == "auto":
+        stats = stats_path(raw_path)
+        if stats is not None and not os.path.isfile(stats):
+            stats = None
+    log = read_stats(stats) if stats is not None else None
+    traces = convert_raw(header, records, move_input=move_input, move_frame=move_frame, stats=log)
     paths = output_paths(raw_path, len(traces), out_dir)
     for (meta, samples), p in zip(traces, paths):
         write_trace(meta, samples, p)
@@ -2714,11 +3080,15 @@ def main(argv):
                         "else the pawn's acceleration)")
     c.add_argument("--move-frame", choices=MOVE_FRAMES, default="original",
                    help="axes an acceleration is read in (yaw: diagnostic)")
+    c.add_argument("--stats", help="the recorder's .stats.json (markers, dropped frames); "
+                                   "default: the one next to the raw file, if any")
+    c.add_argument("--no-stats", action="store_true", help="convert without the recorder's .stats.json")
     t = sub.add_parser("selftest", help="exercise sampler and converter on a fake memory image")
     t.add_argument("--layout", help="layout file to build the image from (default: the Mac layout)")
     args = ap.parse_args(argv)
     if args.cmd == "convert":
-        for p in convert_file(args.raw, args.out_dir, args.move_input, args.move_frame):
+        stats = None if args.no_stats else (args.stats or "auto")
+        for p in convert_file(args.raw, args.out_dir, args.move_input, args.move_frame, stats):
             print(p)
         return 0
     if args.cmd == "selftest":

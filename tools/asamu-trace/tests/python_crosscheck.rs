@@ -9,45 +9,14 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
-use asamu_player::Trace;
-use asamu_trace::convert::{ConvertOptions, INIT_NOTE_PREFIX, MoveInput, convert, output_names};
+use asamu_trace::convert::{ConvertOptions, MoveInput, convert};
 use asamu_trace::move_input::MoveFrame;
-use asamu_trace::raw::{RawBinding, RawFile};
-use asamu_trace::state::STATE_NOTE_PREFIX;
+use asamu_trace::raw::{OPTIONAL_FIELDS, RawBinding, RawFile, RawTimer};
+use asamu_trace::sidecar::RecorderLog;
 
-fn python() -> Option<&'static str> {
-    ["python3", "python"].into_iter().find(|p| {
-        Command::new(p)
-            .args([
-                "-c",
-                "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)",
-            ])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
-}
-
-fn recorder_dir() -> PathBuf {
-    common::repo_root().join("tools/trace-recorder")
-}
-
-fn run_python(py: &str, args: &[&std::ffi::OsStr]) -> String {
-    let out = Command::new(py)
-        .args(["-I", "-B"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "python {args:?} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
+use common::{python, recorder_dir, run_python};
 
 #[test]
 fn python_self_tests() {
@@ -92,32 +61,14 @@ fn python_windows_front_end_tests() {
     assert!(out.contains("win glue test ok"), "{out}");
 }
 
-/// The notes agree: text for text, and the two JSON notes (the state
-/// timeline and the older `init:` note) value for value.
-fn same_notes(py: &[String], rs: &[String]) {
-    assert_eq!(py.len(), rs.len(), "notes differ:\n{py:#?}\n{rs:#?}");
-    for (a, b) in py.iter().zip(rs) {
-        let json = [INIT_NOTE_PREFIX, STATE_NOTE_PREFIX]
-            .into_iter()
-            .find_map(|p| Some((a.strip_prefix(p)?, b.strip_prefix(p)?)));
-        match json {
-            Some((ja, jb)) => {
-                let va: serde_json::Value = serde_json::from_str(ja).unwrap();
-                let vb: serde_json::Value = serde_json::from_str(jb).unwrap();
-                assert_eq!(va, vb, "JSON notes differ");
-            }
-            None => assert_eq!(a, b),
-        }
-    }
-}
-
 fn crosscheck(py: &str, raw: &RawFile, dir: &Path, stem: &str) -> usize {
     crosscheck_with(py, raw, dir, stem, &ConvertOptions::default())
 }
 
 /// Converts `raw` with both converters under `opts` and compares every
 /// trace: samples bit for bit, metadata and notes. Returns the number of
-/// traces.
+/// traces. With `opts.log` the sidecar's text is `stats`, which the Python
+/// converter finds next to the raw file as the recorder leaves it there.
 fn crosscheck_with(
     py: &str,
     raw: &RawFile,
@@ -125,11 +76,24 @@ fn crosscheck_with(
     stem: &str,
     opts: &ConvertOptions,
 ) -> usize {
+    crosscheck_files(py, raw, None, dir, stem, opts)
+}
+
+fn crosscheck_files(
+    py: &str,
+    raw: &RawFile,
+    stats: Option<&str>,
+    dir: &Path,
+    stem: &str,
+    opts: &ConvertOptions,
+) -> usize {
     let raw_path = dir.join(format!("{stem}.raw.jsonl"));
     std::fs::write(&raw_path, raw.to_jsonl_string().unwrap()).unwrap();
-    let core = recorder_dir().join("asamu_recorder_core.py");
-    let out_dir = dir.join(stem);
-    std::fs::create_dir_all(&out_dir).unwrap();
+    let mut opts = opts.clone();
+    if let Some(text) = stats {
+        std::fs::write(dir.join(format!("{stem}.stats.json")), text).unwrap();
+        opts.log = Some(RecorderLog::from_json_str(text).unwrap());
+    }
     let move_input = match opts.move_input {
         MoveInput::Auto => "auto",
         MoveInput::Keys => "keys",
@@ -139,37 +103,20 @@ fn crosscheck_with(
         MoveFrame::Original => "original",
         MoveFrame::Yaw => "yaw",
     };
-    let printed = run_python(
+    let rust = convert(raw, &opts).unwrap();
+    let python = common::python_convert(
         py,
+        &raw_path,
+        &dir.join(stem),
         &[
-            core.as_os_str(),
-            "convert".as_ref(),
-            raw_path.as_os_str(),
-            "--out-dir".as_ref(),
-            out_dir.as_os_str(),
             "--move-input".as_ref(),
             move_input.as_ref(),
             "--move-frame".as_ref(),
             move_frame.as_ref(),
         ],
+        rust.len(),
     );
-    let rust = convert(raw, opts).unwrap();
-    let names = output_names(&format!("{stem}.raw.jsonl"), rust.len());
-    assert_eq!(printed.lines().count(), rust.len(), "{printed}");
-    for (seg, name) in rust.iter().zip(&names) {
-        let text = std::fs::read_to_string(out_dir.join(name)).unwrap();
-        let p = Trace::from_jsonl_str(&text).unwrap();
-        let r = &seg.trace;
-        assert_eq!(p.samples, r.samples, "{name}: samples differ");
-        assert_eq!(p.meta.format, r.meta.format);
-        assert_eq!(p.meta.schema_version, r.meta.schema_version);
-        assert_eq!(p.meta.source, r.meta.source);
-        assert_eq!(p.meta.game_build, r.meta.game_build);
-        assert_eq!(p.meta.level, r.meta.level);
-        assert_eq!(p.meta.tick_rate, r.meta.tick_rate);
-        assert_eq!(p.meta.units, r.meta.units);
-        same_notes(&p.meta.notes, &r.meta.notes);
-    }
+    common::same_traces(&python, &rust);
     rust.len()
 }
 
@@ -349,9 +296,9 @@ fn python_and_rust_converters_agree() {
             (MoveInput::Keys, MoveFrame::Original),
         ] {
             let opts = ConvertOptions {
-                level: None,
                 move_input,
                 move_frame,
+                ..ConvertOptions::default()
             };
             let stem = format!("accel{seed}-{move_input:?}-{move_frame:?}");
             crosscheck_with(py, &raw, dir.path(), &stem, &opts);
@@ -395,4 +342,259 @@ fn python_and_rust_converters_agree() {
         }),
     );
     assert!(crosscheck(py, &raw, dir.path(), "hostile") >= 1);
+}
+
+/// The names of the optional members are the recorder's: this reader's list
+/// is `Optional.MEMBERS` of the Python core, and the version-1 members the
+/// recorder strips for its version-1 view are the ones the Rust structures
+/// write for a record without optional members.
+#[test]
+fn optional_member_names_are_the_recorders() {
+    let Some(py) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let script = "import sys, json\nsys.path.insert(0, sys.argv[1])\nimport asamu_recorder_core as core\n\
+         print(json.dumps({'optional': sorted(m for ms in core.Optional.MEMBERS.values() for m in ms), \
+         'header': sorted(core.V1_HEADER), 'player': sorted(core.V1_PLAYER), 'gun': sorted(core.V1_GUN)}))";
+    let dir = recorder_dir();
+    let out = run_python(py, &["-c".as_ref(), script.as_ref(), dir.as_os_str()]);
+    let lists: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let strings = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(strings(&lists["optional"]), OPTIONAL_FIELDS);
+    // A recording without optional members, written by the Rust structures.
+    let (plain, _) = common::scripted_recording(3, 10);
+    let text = plain.to_jsonl_string().unwrap();
+    let mut lines = text.lines();
+    let members = |line: &str, path: &[&str]| -> Vec<String> {
+        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+        for key in path {
+            v = v[*key].take();
+        }
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        members(lines.next().unwrap(), &[]),
+        strings(&lists["header"])
+    );
+    let record = lines.next().unwrap();
+    assert_eq!(members(record, &["player"]), strings(&lists["player"]));
+    assert_eq!(members(record, &["player", "gun"]), strings(&lists["gun"]));
+}
+
+/// Recordings with the optional members of recorder 0.2.0 and its sidecar
+/// (markers, the dropped-frame log): both converters write the same traces,
+/// samples bit for bit, notes text for text.
+#[test]
+fn python_and_rust_agree_on_recorder_0_2_0_recordings() {
+    let Some(py) = python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    let wanted = [
+        "fov: camera FOV lock read",
+        "fov: cached view FOV",
+        "fov: controller FOVAngle used",
+        "check: the camera's FOV lock is set without a usable LockedFOV",
+        "check: the weapon's refire timer is paused",
+        "without a record before this run",
+        "without a record after this run",
+        "whose record was written without its frame's input",
+        "no entry in the recorder's dropped-frame log",
+        "frames were not logged: the log was full",
+        " marker(s) (set with the recorder's mark command",
+        "(set before the first record)",
+        "(set before this run, at frame ",
+        "(set after this run, at frame ",
+        "markers: {",
+        "\"refire_count\":",
+        "\"refire_rate\":null",
+        "\"floor\":[",
+        "\"weapon_state\":\"WeaponFiring\"",
+        "\"weapon_state\":null",
+        "\"base_level\":\"freds_place\"",
+        "\"cylinder_half_height\":",
+        "\"gun_timers\":0",
+    ];
+    let mut segments = 0;
+    let mut zoomed = 0;
+    for (i, seed) in [41_u64, 42, 43, 44, 45, 46].into_iter().enumerate() {
+        let mut raw = common::varied_recording(seed, 400, i % 2 == 0);
+        common::with_optional_members(&mut raw, seed);
+        if i >= 3 {
+            common::with_accelerations(&mut raw, seed);
+            common::with_frame_lengths(&mut raw, seed);
+        }
+        let stats = common::recorder_stats(&raw, seed);
+        let opts = ConvertOptions {
+            move_input: if i >= 3 {
+                MoveInput::Acceleration
+            } else {
+                MoveInput::Auto
+            },
+            ..ConvertOptions::default()
+        };
+        let stem = format!("optional{seed}");
+        segments += crosscheck_files(py, &raw, Some(&stats), dir.path(), &stem, &opts);
+        // The same recording without its sidecar, and with the sidecar the
+        // Python converter is told to ignore.
+        crosscheck_files(py, &raw, None, dir.path(), &format!("bare{seed}"), &opts);
+        let log = RecorderLog::from_json_str(&stats).unwrap();
+        let with_log = ConvertOptions {
+            log: Some(log),
+            ..opts.clone()
+        };
+        let segs = convert(&raw, &with_log).unwrap();
+        // The log's no-input records split runs that the frame numbers
+        // alone would keep whole.
+        assert!(segs.len() >= convert(&raw, &opts).unwrap().len());
+        for seg in &segs {
+            for n in &seg.trace.meta.notes {
+                for w in wanted {
+                    if n.contains(w) {
+                        seen.insert(w);
+                    }
+                }
+            }
+        }
+        // The zoom is in the samples: where a record's lock is set with a
+        // usable locked FOV, the sample has that FOV.
+        for seg in &segs {
+            let first = raw
+                .records
+                .iter()
+                .position(|r| r.frame == seg.first_frame)
+                .unwrap();
+            for (k, s) in seg.trace.samples.iter().enumerate() {
+                let p = raw.records[first + k].player.as_ref().unwrap();
+                if let (Some(true), Some(lock)) = (p.fov_locked, p.fov_lock)
+                    && lock > 0.0
+                    && lock < 180.0
+                {
+                    assert_eq!(
+                        s.fov,
+                        lock,
+                        "seed {seed}, frame {}",
+                        raw.records[first + k].frame
+                    );
+                    zoomed += 1;
+                }
+            }
+        }
+    }
+    assert!(segments >= 12, "only {segments} segments exercised");
+    assert!(zoomed > 200, "only {zoomed} zoomed samples exercised");
+    let missing: Vec<&str> = wanted
+        .iter()
+        .filter(|w| !seen.contains(*w))
+        .copied()
+        .collect();
+    assert!(missing.is_empty(), "not exercised: {missing:#?}");
+
+    // The Python converter without the sidecar (`--no-stats`) and with one
+    // named on the command line (`--stats`) is the Rust one without and with.
+    let mut raw = common::varied_recording(47, 300, true);
+    common::with_optional_members(&mut raw, 47);
+    let stats = common::recorder_stats(&raw, 47);
+    let raw_path = dir.path().join("named.raw.jsonl");
+    std::fs::write(&raw_path, raw.to_jsonl_string().unwrap()).unwrap();
+    std::fs::write(dir.path().join("named.stats.json"), &stats).unwrap();
+    let elsewhere = dir.path().join("elsewhere.json");
+    std::fs::write(&elsewhere, &stats).unwrap();
+    let without = convert(&raw, &ConvertOptions::default()).unwrap();
+    let python = common::python_convert(
+        py,
+        &raw_path,
+        &dir.path().join("named-no-stats"),
+        &["--no-stats".as_ref()],
+        without.len(),
+    );
+    common::same_traces(&python, &without);
+    let with = convert(
+        &raw,
+        &ConvertOptions {
+            log: Some(RecorderLog::from_json_str(&stats).unwrap()),
+            ..ConvertOptions::default()
+        },
+    )
+    .unwrap();
+    assert_ne!(
+        with.iter().map(|s| &s.trace.meta.notes).collect::<Vec<_>>(),
+        without
+            .iter()
+            .map(|s| &s.trace.meta.notes)
+            .collect::<Vec<_>>()
+    );
+    let python = common::python_convert(
+        py,
+        &raw_path,
+        &dir.path().join("named-stats"),
+        &["--stats".as_ref(), elsewhere.as_os_str()],
+        with.len(),
+    );
+    common::same_traces(&python, &with);
+
+    // The budget of the state note: a refire count and a floor normal that
+    // change on every tick of a long run. 14,000 changes of the count cost
+    // 728,000 bytes, more than the 720,000 there are: left out. The floor's
+    // 7,000 changes (700,000 bytes) then fit. Both converters agree.
+    let mut long = common::varied_recording(48, 60, true);
+    let template = long
+        .records
+        .iter()
+        .find(|r| {
+            r.world.as_ref().is_some_and(|w| !w.paused)
+                && r.player.as_ref().is_some_and(|p| p.gun.is_some())
+        })
+        .unwrap()
+        .clone();
+    long.records = (0..=14_000_u64)
+        .map(|i| {
+            let mut r = template.clone();
+            r.frame = 10 + i;
+            let p = r.player.as_mut().unwrap();
+            p.eye_height = Some(38.0);
+            p.floor = Some(if i <= 7_000 && i % 2 == 1 {
+                asamu_core::glam::Vec3::new(0.6, 0.0, 0.8)
+            } else {
+                asamu_core::glam::Vec3::Z
+            });
+            p.gun.as_mut().unwrap().timers = Some(vec![RawTimer {
+                name: "RefireCheckTimer".into(),
+                rate: 0.1,
+                count: (i % 6) as f32 / 60.0,
+                looping: true,
+                paused: false,
+            }]);
+            r
+        })
+        .collect();
+    assert_eq!(crosscheck(py, &long, dir.path(), "budget"), 1);
+    let t = &convert(&long, &ConvertOptions::default()).unwrap()[0].trace;
+    assert!(
+        t.meta.notes.iter().any(|n| n
+            == "check: the refire timer's count left out of the state: note (14000 changes of \
+                52 bytes; 720000 of the 720000 bytes for values that change on most ticks were \
+                left)"),
+        "{:#?}",
+        &t.meta.notes[..t.meta.notes.len().saturating_sub(2)]
+    );
+    let state = t
+        .meta
+        .notes
+        .iter()
+        .find(|n| n.starts_with("state: "))
+        .unwrap();
+    assert!(state.contains("\"floor\":[") && !state.contains("refire_count"));
+    assert!(state.contains("\"refire_rate\":"), "the timer's rate stays");
 }

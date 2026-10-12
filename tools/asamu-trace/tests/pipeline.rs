@@ -1496,3 +1496,501 @@ fn check_recorder_command() {
     );
     assert!(text.contains(" 0 failed"), "{text}");
 }
+
+/// The `state:` note of `trace` carries, tick for tick, what the optional
+/// members of the raw records `records` hold (record `k` is sample `k`).
+fn state_note_has_the_optional_members(trace: &Trace, records: &[asamu_trace::raw::RawRecord]) {
+    let timeline = StateTimeline::from_notes(&trace.meta.notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(trace.samples.len(), records.len());
+    for (k, r) in records.iter().enumerate() {
+        let p = r.player.as_ref().unwrap();
+        let gun = p.gun.as_ref().unwrap();
+        let s = timeline.at(k as u64).unwrap().unwrap();
+        assert_eq!(s.eye_height, p.eye_height, "tick {k}");
+        assert_eq!(s.base_eye_height, p.base_eye_height, "tick {k}");
+        assert_eq!(s.base_level, p.base_level.clone().flatten(), "tick {k}");
+        assert_eq!(s.floor, p.floor.map(|n| n.to_array()), "tick {k}");
+        assert_eq!(
+            (s.cylinder_radius, s.cylinder_half_height),
+            (
+                p.cylinder.map(|c| c.radius),
+                p.cylinder.map(|c| c.half_height)
+            ),
+            "tick {k}"
+        );
+        assert_eq!(s.weapon_state, gun.state.clone().flatten(), "tick {k}");
+        assert_eq!(
+            s.gun_timers,
+            gun.timers.as_ref().map(|t| t.len() as u32),
+            "tick {k}"
+        );
+        let refire = gun.refire_timer();
+        assert_eq!(s.refire_rate, refire.map(|t| t.rate), "tick {k}");
+        assert_eq!(s.refire_count, refire.map(|t| t.count), "tick {k}");
+    }
+}
+
+/// The recorder's own test records a fake game with recorder 0.2.0, every
+/// optional member in every record (`test_win_glue.py --keep`). The Rust
+/// tool reads that file as it is, converts it with the camera's FOV rule
+/// and the recorded state, and agrees with the Python converter; the
+/// version-1 view of the same recording converts to the same samples but
+/// for the FOV it cannot show.
+#[test]
+fn a_recording_of_recorder_0_2_0_converts_with_the_rust_tool() {
+    let Some(py) = common::python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let kept = d.join("kept");
+    let glue = common::recorder_dir().join("test_win_glue.py");
+    let out = common::run_python(py, &[glue.as_os_str(), "--keep".as_ref(), kept.as_os_str()]);
+    assert!(out.contains("win glue test ok"), "{out}");
+    let raw_path = kept.join("win-glue-optional.raw.jsonl");
+    if !raw_path.is_file() {
+        // The glue test says so when the optional layout is not deployed.
+        assert!(out.contains("optional-field tests skipped"), "{out}");
+        eprintln!("skipped: the recorder's optional layout file is not there");
+        return;
+    }
+
+    // Read as it is: typed, nothing refused.
+    let raw = RawFile::from_str_lines(&std::fs::read_to_string(&raw_path).unwrap()).unwrap();
+    assert_eq!(raw.header.recorder, "asamu_win 0.2.0");
+    assert_eq!(raw.header.version, 1);
+    assert_eq!(
+        raw.header.optional_fields,
+        asamu_trace::raw::OPTIONAL_FIELDS
+    );
+    assert!(
+        raw.header
+            .optional_layout
+            .clone()
+            .flatten()
+            .is_some_and(|id| id.ends_with("-optional"))
+    );
+    assert_eq!(raw.records.len(), 70);
+    let counts = raw.optional_counts();
+    assert_eq!(counts.len(), asamu_trace::raw::OPTIONAL_FIELDS.len());
+    assert!(counts.values().all(|n| *n == 70), "{counts:?}");
+    let v = run_ok(bin().arg("validate").arg(&raw_path));
+    assert!(
+        v.contains("raw v1 (asamu_win 0.2.0), 70 records, 70 usable, 1 convertible segment(s)"),
+        "{v}"
+    );
+    assert!(
+        v.contains("optional members (layout ")
+            && v.contains("-optional), of 70 records with a player: "),
+        "{v}"
+    );
+    assert!(
+        v.contains("player.fov_locked on 70") && v.contains("player.gun.timers on 70"),
+        "{v}"
+    );
+    assert!(
+        !v.contains("not announced") && !v.contains("in no record"),
+        "{v}"
+    );
+
+    // Converted by the Rust tool.
+    let out_dir = d.join("rust");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&raw_path)
+            .arg("--out-dir")
+            .arg(&out_dir),
+    );
+    let trace = asamu_trace::read_trace(&out_dir.join("win-glue-optional.trace.jsonl")).unwrap();
+    assert_eq!(trace.samples.len(), 70);
+    // The camera's rule, record by record: the fake game locks the FOV at
+    // 50 while its grapple button is held (two holds, 12 frames) and leaves
+    // the cached view FOV at 90.
+    let mut locked = 0;
+    for (s, r) in trace.samples.iter().zip(&raw.records) {
+        let p = r.player.as_ref().unwrap();
+        assert_eq!(p.fov_camera, Some(90.0));
+        if p.fov_locked == Some(true) {
+            assert_eq!(p.fov_lock, Some(50.0));
+            assert_eq!(s.fov, 50.0, "frame {}", r.frame);
+            locked += 1;
+        } else {
+            assert_eq!(s.fov, 90.0, "frame {}", r.frame);
+        }
+    }
+    assert_eq!(locked, 12, "the two holds of the fake game's script");
+    let notes = &trace.meta.notes;
+    assert!(
+        notes.iter().any(|n| n
+            == "fov: camera FOV lock read (bLockedFOV, LockedFOV) on 70 of 70 samples: the FOV \
+                is the locked FOV while the lock is set (12 samples), else the cached view FOV"),
+        "{notes:#?}"
+    );
+    assert!(!notes.iter().any(|n| n.starts_with("fov: cached view FOV")));
+    assert!(!notes.iter().any(|n| n.starts_with("check:")), "{notes:#?}");
+    state_note_has_the_optional_members(&trace, &raw.records);
+    // The values vary in that recording (a constant would prove little).
+    let timeline = StateTimeline::from_notes(notes).unwrap().unwrap();
+    let states: Vec<_> = (0..70).map(|k| timeline.at(k).unwrap().unwrap()).collect();
+    let distinct = |f: &dyn Fn(&asamu_trace::state::TickState) -> String| {
+        states
+            .iter()
+            .map(f)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    };
+    assert_eq!(distinct(&|s| format!("{:?}", s.weapon_state)), 2);
+    assert_eq!(distinct(&|s| format!("{:?}", s.base_level)), 2);
+    assert_eq!(distinct(&|s| format!("{:?}", s.floor)), 2);
+    assert!(distinct(&|s| format!("{:?}", s.refire_count)) >= 6);
+    assert_eq!(
+        (states[0].cylinder_radius, states[0].cylinder_half_height),
+        (Some(21.0), Some(44.0))
+    );
+
+    // The Python converter writes the same trace.
+    let python = common::python_convert(py, &raw_path, &d.join("python"), &[], 1);
+    assert_eq!(python[0].samples, trace.samples);
+    common::same_notes(&python[0].meta.notes, &trace.meta.notes);
+
+    // The recorder's version-1 view of the same recording: the same
+    // samples, but its FOV column is the cached view FOV and says so.
+    let view_path = kept.join("v1").join("win-glue-optional.raw.jsonl");
+    let view = RawFile::from_str_lines(&std::fs::read_to_string(&view_path).unwrap()).unwrap();
+    assert!(view.optional_counts().is_empty() && view.header.optional_fields.is_empty());
+    let view_dir = d.join("view");
+    std::fs::create_dir_all(&view_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&view_path)
+            .arg("--out-dir")
+            .arg(&view_dir),
+    );
+    let plain = asamu_trace::read_trace(&view_dir.join("win-glue-optional.trace.jsonl")).unwrap();
+    assert_eq!(plain.samples.len(), 70);
+    for (a, b) in trace.samples.iter().zip(&plain.samples) {
+        assert_eq!(b.fov, 90.0);
+        let mut same = *a;
+        same.fov = b.fov;
+        assert_eq!(&same, b, "tick {}", a.tick);
+    }
+    assert!(plain.meta.notes.iter().any(|n| n
+        == "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 70 of 70 samples: a \
+            locked camera FOV (the zoom) does not show in it"));
+    let state = plain
+        .meta
+        .notes
+        .iter()
+        .find(|n| n.starts_with("state: "))
+        .unwrap();
+    for key in ["floor", "weapon_state", "refire", "cylinder", "base_level"] {
+        assert!(!state.contains(key), "{key} in a version-1 state note");
+    }
+    // In a comparison the zoom now counts: against the view, the 12 locked
+    // samples differ by 40 degrees and the FOV is in the verdict.
+    let s = compare_traces(
+        "0.2.0",
+        &trace,
+        "trace made blind",
+        &{
+            let mut t = plain.clone();
+            t.meta.notes.retain(|n| !n.starts_with("fov:"));
+            t
+        },
+        &CompareTolerances::default(),
+    );
+    assert!(s.fov.as_ref().unwrap().counted);
+    assert_eq!(s.verdict, Verdict::Diverged);
+
+    // With a sidecar next to it (as the recorder leaves one): the markers
+    // are in the listing, at the tick of their record.
+    let marked = d.join("marked");
+    std::fs::create_dir_all(&marked).unwrap();
+    let session = marked.join("session.raw.jsonl");
+    std::fs::copy(&raw_path, &session).unwrap();
+    let frame = |k: usize| raw.records[k].frame;
+    std::fs::write(
+        marked.join("session.stats.json"),
+        format!(
+            r#"{{"recorder":"asamu_win 0.2.0","records":70,"first_frame":{},"last_frame":{},
+                "stats":{{"drops":[],"drops_omitted":0}},
+                "markers":[
+                 {{"name":"zoom hold 1","id":"a","frame":{},"records":36,"state":"recording","utc":"2026-10-12T10:15:01Z"}},
+                 {{"name":"wall 45","id":"b","frame":{},"records":60,"state":"recording","utc":"2026-10-12T10:15:02Z"}}],
+                "markers_omitted":0}}"#,
+            frame(0),
+            frame(69),
+            frame(35),
+            frame(59)
+        ),
+    )
+    .unwrap();
+    run_ok(bin().arg("convert").arg(&session));
+    let listing = run_ok(
+        bin()
+            .arg("starts")
+            .arg(marked.join("session.trace.jsonl"))
+            .arg("--events"),
+    );
+    assert!(listing.contains(", 2 marker(s)\n"), "{listing}");
+    assert!(
+        listing.contains("\n        35 marker \"zoom hold 1\"\n"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("\n        59 marker \"wall 45\"\n"),
+        "{listing}"
+    );
+    let python = common::python_convert(py, &session, &d.join("python-marked"), &[], 1);
+    let rust = asamu_trace::read_trace(&marked.join("session.trace.jsonl")).unwrap();
+    assert_eq!(python[0].samples, rust.samples);
+    common::same_notes(&python[0].meta.notes, &rust.meta.notes);
+}
+
+/// The command line with a recording of recorder 0.2.0 and its sidecar: the
+/// zoom in the samples, the markers in the listing, the reason of a gap in
+/// the notes; and what is refused.
+#[test]
+fn command_line_zoom_markers_and_dropped_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let (mut raw, _) = common::scripted_recording(90, 1_000);
+    // Two frames are missing after record 60: frames 1000..=1060, 1063..=1092.
+    for r in raw.records.iter_mut().skip(61) {
+        r.frame += 2;
+    }
+    // The camera's FOV lock in every record, set on records 20..=29 with a
+    // locked FOV of 50 degrees.
+    let cached: Vec<f32> = raw
+        .records
+        .iter()
+        .map(|r| r.player.as_ref().unwrap().fov_camera.unwrap())
+        .collect();
+    for (i, r) in raw.records.iter_mut().enumerate() {
+        let p = r.player.as_mut().unwrap();
+        let locked = (20..30).contains(&i);
+        p.fov_default = Some(90.0);
+        p.fov_locked = Some(locked);
+        p.fov_lock = Some(if locked { 50.0 } else { 0.0 });
+    }
+    raw.header.recorder = "asamu_win 0.2.0".into();
+    raw.header.optional_fields = ["player.fov_default", "player.fov_lock", "player.fov_locked"]
+        .map(str::to_owned)
+        .to_vec();
+    raw.header.optional_layout = Some(Some("test-optional".into()));
+    let raw_path = d.join("walk.raw.jsonl");
+    write_raw(&raw, &raw_path);
+    let stats = r#"{"recorder":"asamu_win 0.2.0","records":91,"first_frame":1000,"last_frame":1092,
+        "stats":{"missed":2,"drops":[
+          {"frame":1061,"last":1062,"count":2,"reason":"missed","detail":"the counter advanced by 3 between two polls"}],
+          "drops_omitted":0},
+        "markers":[
+          {"name":"zoom hold 1","id":"a","frame":1020,"records":21,"state":"recording","utc":"2026-10-12T10:15:01Z"},
+          {"name":"second act","id":"b","frame":1062,"records":61,"state":"recording","utc":"2026-10-12T10:15:02Z"},
+          {"name":"wall","id":"c","frame":1070,"records":69,"state":"recording","utc":"2026-10-12T10:15:03Z"}],
+        "markers_omitted":0}"#;
+    std::fs::write(d.join("walk.stats.json"), stats).unwrap();
+
+    let listed = run_ok(bin().args(["convert", "--list"]).arg(&raw_path));
+    for want in [
+        "segment 0: frames 1000..=1060 (61 samples",
+        "segment 1: frames 1063..=1092 (30 samples",
+        "    fov: camera FOV lock read (bLockedFOV, LockedFOV) on 61 of 61 samples: the FOV is \
+         the locked FOV while the lock is set (10 samples), else the cached view FOV",
+        "    fov: camera FOV lock read (bLockedFOV, LockedFOV) on 30 of 30 samples: the FOV is \
+         the locked FOV while the lock is set (0 samples), else the cached view FOV",
+        // Frame 1020 is record 20 of the first run.
+        "    event: 1 marker(s) (set with the recorder's mark command; the tick is that of the \
+         last record written when the marker was taken): 20 \"zoom hold 1\"",
+        // Frame 1062 has no record: the next run's first tick. Frame 1070
+        // is record 1070 − 1063 = 7 of the second run.
+        "    event: 2 marker(s) (set with the recorder's mark command; the tick is that of the \
+         last record written when the marker was taken): 0 \"second act\" (set before this \
+         run, at frame 1062), 7 \"wall\"",
+        "    dropped: 2 frame(s) without a record after this run (frames 1061..=1062): \
+         1061..=1062 missed: the counter advanced by 3 between two polls",
+        "    dropped: 2 frame(s) without a record before this run (frames 1061..=1062): \
+         1061..=1062 missed: the counter advanced by 3 between two polls",
+    ] {
+        assert!(listed.contains(want), "{want}\n{listed}");
+    }
+    assert!(
+        !listed.contains("cached view FOV (the camera's"),
+        "{listed}"
+    );
+
+    run_ok(bin().arg("convert").arg(&raw_path));
+    let seg0 = asamu_trace::read_trace(&d.join("walk.seg0.trace.jsonl")).unwrap();
+    for (k, s) in seg0.samples.iter().enumerate() {
+        let want = if (20..30).contains(&k) {
+            50.0
+        } else {
+            cached[k]
+        };
+        assert_eq!(s.fov, want, "tick {k}");
+    }
+    let starts = |name: &str| run_ok(bin().arg("starts").arg(d.join(name)).arg("--events"));
+    let l0 = starts("walk.seg0.trace.jsonl");
+    assert!(l0.contains(", 1 marker(s)\n"), "{l0}");
+    assert!(l0.contains("\n        20 marker \"zoom hold 1\"\n"), "{l0}");
+    let l1 = starts("walk.seg1.trace.jsonl");
+    assert!(
+        l1.contains("\n        0 marker \"second act\" (set before this run, at frame 1062)\n"),
+        "{l1}"
+    );
+    assert!(l1.contains("\n        7 marker \"wall\"\n"), "{l1}");
+
+    // Without the sidecar: the same samples, no marker, no reason.
+    let bare = d.join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    run_ok(
+        bin()
+            .args(["convert", "--no-stats", "--out-dir"])
+            .arg(&bare)
+            .arg(&raw_path),
+    );
+    let b0 = asamu_trace::read_trace(&bare.join("walk.seg0.trace.jsonl")).unwrap();
+    assert_eq!(b0.samples, seg0.samples);
+    assert!(!b0.meta.notes.iter().any(|n| n.starts_with("markers: ")
+        || n.starts_with("dropped: ")
+        || n.contains("marker(s)")));
+    let expected: Vec<&String> = seg0
+        .meta
+        .notes
+        .iter()
+        .filter(|n| {
+            !(n.starts_with("markers: ") || n.starts_with("dropped: ") || n.contains("marker(s)"))
+        })
+        .collect();
+    assert_eq!(b0.meta.notes.iter().collect::<Vec<_>>(), expected);
+    assert!(!starts("bare/walk.seg0.trace.jsonl").contains("marker"));
+
+    // A sidecar named on the command line; one of another recording is
+    // refused, and the message says how to go on without it.
+    let named = d.join("named");
+    std::fs::create_dir_all(&named).unwrap();
+    let elsewhere = d.join("elsewhere.json");
+    std::fs::write(&elsewhere, stats).unwrap();
+    let copy = named.join("copy.raw.jsonl");
+    write_raw(&raw, &copy);
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&copy)
+            .arg("--stats")
+            .arg(&elsewhere),
+    );
+    assert_eq!(
+        asamu_trace::read_trace(&named.join("copy.seg0.trace.jsonl")).unwrap(),
+        seg0
+    );
+    let wrong = d.join("wrong.json");
+    std::fs::write(&wrong, stats.replace("\"records\":91", "\"records\":90")).unwrap();
+    let refused = bin()
+        .arg("convert")
+        .arg(&copy)
+        .arg("--stats")
+        .arg(&wrong)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("not this recording's: they count 90 records, the raw file has 91")
+            && err.contains("--no-stats"),
+        "{err}"
+    );
+    let both = bin()
+        .arg("convert")
+        .arg(&copy)
+        .arg("--no-stats")
+        .arg("--stats")
+        .arg(&wrong)
+        .output()
+        .unwrap();
+    assert_eq!(both.status.code(), Some(2));
+    std::fs::write(&wrong, "{\"markers\":[{\"name\":\"x\"}]}").unwrap();
+    let broken = bin()
+        .arg("convert")
+        .arg(&copy)
+        .arg("--stats")
+        .arg(&wrong)
+        .output()
+        .unwrap();
+    assert_eq!(broken.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&broken.stderr).contains("invalid recorder stats"),
+        "{}",
+        String::from_utf8_lossy(&broken.stderr)
+    );
+
+    // validate: what the recording has, and what its sidecar holds.
+    let v = run_ok(bin().arg("validate").arg(&raw_path));
+    assert!(
+        v.contains("raw v1 (asamu_win 0.2.0), 91 records, 91 usable, 2 convertible segment(s)"),
+        "{v}"
+    );
+    assert!(
+        v.contains(
+            "    optional members (layout test-optional), of 91 records with a player: \
+             player.fov_default on 91, player.fov_lock on 91, player.fov_locked on 91\n"
+        ),
+        "{v}"
+    );
+    assert!(
+        v.contains(
+            "walk.stats.json: 3 marker(s), dropped-frame log with 1 entries for 2 frame(s)\n"
+        ),
+        "{v}"
+    );
+    // A member the header does not announce is read and named; one nobody
+    // writes is refused, as is a header that announces one.
+    let mut extra = raw.clone();
+    extra.records[5].player.as_mut().unwrap().base_eye_height = Some(38.0);
+    extra.header.optional_fields.push("player.walk_bob".into());
+    extra.header.optional_fields.sort();
+    let extra_path = d.join("extra.raw.jsonl");
+    write_raw(&extra, &extra_path);
+    let v = run_ok(bin().arg("validate").arg(&extra_path));
+    assert!(
+        v.contains("player.base_eye_height on 1 (not announced in the header)")
+            && v.contains("; announced but in no record: player.walk_bob\n"),
+        "{v}"
+    );
+    let text = raw.to_jsonl_string().unwrap();
+    for (bad, why) in [
+        (
+            text.replacen(
+                "\"fov_locked\":false",
+                "\"fov_locked\":false,\"fov_zoom\":50.0",
+                1,
+            ),
+            "unknown field `fov_zoom`",
+        ),
+        (
+            text.replacen("\"player.fov_default\"", "\"player.fov_zoom\"", 1),
+            "does not know: \"player.fov_zoom\"",
+        ),
+        (
+            text.replacen("\"fov_locked\":false", "\"fov_locked\":null", 1),
+            "invalid raw record",
+        ),
+    ] {
+        assert_ne!(bad, text);
+        let path = d.join("bad.raw.jsonl");
+        std::fs::write(&path, bad).unwrap();
+        let out = bin().arg("validate").arg(&path).output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("INVALID raw recording") && said.contains(why),
+            "{said}"
+        );
+    }
+}
