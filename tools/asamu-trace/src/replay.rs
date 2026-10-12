@@ -48,10 +48,14 @@
 //! say nothing when that already decides the first tick. Whenever the start
 //! state is written, the notes now carry:
 //!
-//! - `start: our floor is … uu below the pawn …`: the distance our own
-//!   floor check will measure, what it hits (the actor's name on a
-//!   converted level) and whether that is the recorded base actor (by name;
-//!   world geometry against the original's `WorldInfo`);
+//! - `start: our floor is … uu below the pawn …, which our floor check
+//!   reports as … uu`: the distance from the bottom of the pawn's box to
+//!   our floor and the distance our own floor check will measure (the
+//!   check's trace reports its hit short of the contact, NATIVE_PHYSICS.md
+//!   10.2, and its band and target are reported distances), what it hits
+//!   (the actor's name on a converted level) and whether that is the
+//!   recorded base actor (by name; world geometry against the original's
+//!   `WorldInfo`);
 //! - `warning: the start position overlaps our collision …`: with what, and
 //!   how far above the recorded height a pawn lowered onto that place comes
 //!   to rest. Our pawn usually cannot move from such a start;
@@ -129,15 +133,21 @@
 //! warning:` note with the count and the first ticks,
 //! [`ReplayResult::resync_overlaps`] with all of them): read the one-step
 //! numbers of the other ticks apart from these. The test is the same as for
-//! the start position (the pawn's shape at the recorded position against
+//! the start position (the pawn's box at the recorded position against
 //! our collision as it was when the replay started: on the per-sample path,
 //! level objects that moved since are not followed). Measured on the
-//! recordings of 2026-10-10 (CONFIRMED, `tests/findings_comparisons.rs`):
-//! 185 of the 3,000 ticks of the Workshop walk start that way (from tick
-//! 1798; our pawn stands still in some of them and reports falling), and 5
-//! of 150 in the flight through a blocking volume that is switched off in
-//! the original (PARITY_FINDINGS.md P5), where the largest one-step
-//! horizontal error is 18.2 uu with them and 6.1 uu without.
+//! recordings of 2026-10-10 (CONFIRMED, `tests/findings_comparisons.rs`).
+//! Before the second parity wave, with every mesh's triangles as pawn
+//! collision and the test made with an upright cylinder: 185 of the 3,000
+//! ticks of the Workshop walk started that way (from tick 1798; our pawn
+//! stood still in some of them and reported falling), and 5 of 150 in the
+//! flight through a blocking volume that is switched off in the original
+//! (PARITY_FINDINGS.md P5), where the largest one-step horizontal error was
+//! 18.2 uu with them and 6.1 uu without. Since that wave (the meshes'
+//! simple collision, switched volumes; the test made with the pawn's box,
+//! measured 2026-10-12): 3 of the 3,000 (ticks 1609 to 1611: the recorded
+//! pawn's box at samples 1608 to 1610 overlaps our collision at a Workshop
+//! wall) and none of the 150.
 //!
 //! The overlap test does **not** separate every collision difference: a
 //! walking tick that starts above or below our floor (the original stands
@@ -209,7 +219,7 @@ use asamu_player::grapple_gun::{Attachment, ReleaseReason};
 use asamu_player::pawn::{PawnStateName, SprintState};
 use asamu_player::trace::{TraceGrappleState, TraceSample, TraceSource};
 use asamu_player::ue3_movement::{MAX_FLOOR_DIST, MIN_FLOOR_DIST, STEP_FUDGE, TARGET_FLOOR_DIST};
-use asamu_player::world::{ActorClass, CollisionShape, CollisionWorld, Surface};
+use asamu_player::world::{ActorClass, CollisionWorld, Surface, TraceExtent};
 use asamu_player::{
     InputFrame, MAX_STEP_DT, MovementModelKind, PawnPhysicsState, PlayerParams, PlayerState, Trace,
     grapple_gun, pawn, rocket_boots,
@@ -665,6 +675,14 @@ fn base_comparison(recorded: Option<&str>, ours: &SurfaceText) -> String {
 /// recorded position (a search ladder of the harness, not a game value).
 const OVERLAP_PROBE_LIFTS: [f32; 9] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
 
+/// Half sizes of the box the original collides the pawn as: its collision
+/// cylinder's radius on X and Y and its half height on Z
+/// (PARITY_FINDINGS.md P4; NATIVE_PHYSICS.md 10.1).
+fn pawn_extent(params: &PlayerParams) -> Vec3 {
+    let radius = params.movement.capsule_radius.value;
+    Vec3::new(radius, radius, params.movement.capsule_half_height.value)
+}
+
 /// The notes about the start position on our collision (see the module
 /// docs, "What the start notes say"). Returns whether the pawn's shape
 /// overlaps our collision there.
@@ -676,22 +694,25 @@ fn start_position_notes(
     names: &mut ActorNames,
     notes: &mut Vec<String>,
 ) -> bool {
-    let shape = CollisionShape {
-        radius: params.movement.capsule_radius.value,
-        half_height: params.movement.capsule_half_height.value,
-    };
+    // The pawn's shape is the box the original sweeps it as
+    // (PARITY_FINDINGS.md P4), not an upright cylinder: a cylinder fits in
+    // places the box does not, and rests lower on a floor that leans.
+    let extent = pawn_extent(params);
     let at = s0.position;
-    let overlaps = world.overlaps(at, shape);
+    let overlaps = world.overlaps_box(at, extent);
     if overlaps {
         let free = OVERLAP_PROBE_LIFTS
             .into_iter()
-            .find(|lift| !world.overlaps(at + Vec3::Z * *lift, shape));
+            .find(|lift| !world.overlaps_box(at + Vec3::Z * *lift, extent));
         let rest = match free {
             None => format!(
                 "no free place for it up to {} uu above",
                 OVERLAP_PROBE_LIFTS[OVERLAP_PROBE_LIFTS.len() - 1]
             ),
-            Some(lift) => match world.sweep_capsule(at + Vec3::Z * lift, at, shape) {
+            Some(lift) => match world
+                .sweep_box(at + Vec3::Z * lift, at, extent)
+                .map(|trace| trace.hit)
+            {
                 Some(hit) => format!(
                     "lowered from {lift} uu above, it comes to rest {:.3} uu above the recorded \
                      height, on {}",
@@ -717,13 +738,19 @@ fn start_position_notes(
             || "the recording names no base actor at this tick".to_owned(),
             |r| format!("the recorded base actor is {r}"),
         );
-        match world.sweep_capsule(at, at - Vec3::Z * probe, shape) {
-            Some(hit) => {
+        match world.sweep_box(at, at - Vec3::Z * probe, extent) {
+            Some(trace) => {
+                // The floor check works with the distance its trace
+                // reports, which is short of the contact by the pull-back
+                // of the routine that answered (NATIVE_PHYSICS.md 10.2).
+                let reported = trace.reported_time(TraceExtent::Box, probe) * probe;
+                let hit = trace.hit;
                 let ours = surface_text(&hit.surface, names);
                 notes.push(format!(
-                    "start: our floor is {:.3} uu below the pawn at the recorded position (our \
-                     floor check rests a pawn {TARGET_FLOOR_DIST} uu above its floor and leaves \
-                     a based one alone between {MIN_FLOOR_DIST} and {MAX_FLOOR_DIST}): {}; {}",
+                    "start: our floor is {:.3} uu below the pawn at the recorded position, \
+                     which our floor check reports as {reported:.3} uu (it holds a pawn at a \
+                     reported {TARGET_FLOOR_DIST} uu and leaves a based one alone between \
+                     {MIN_FLOOR_DIST} and {MAX_FLOOR_DIST}): {}; {}",
                     hit.distance,
                     ours.text,
                     base_comparison(recorded_base, &ours)
@@ -1494,10 +1521,7 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
     let mut check = StateCheck::default();
     let mut counts = ResyncCounts::default();
     let mut resync_overlaps: Vec<u64> = Vec::new();
-    let pawn_shape = CollisionShape {
-        radius: run_params.movement.capsule_radius.value,
-        half_height: run_params.movement.capsule_half_height.value,
-    };
+    let pawn_box = pawn_extent(&run_params);
     let mut state_prev = state_at_start;
     let mut prev = s0;
     let mut simulated = 0_usize;
@@ -1539,7 +1563,7 @@ pub fn replay(original: &Trace, opts: &ReplayOptions) -> Result<ReplayResult> {
         if opts.one_step {
             // The recording's position on our collision: a tick that starts
             // inside it is not one tick of our movement rules.
-            if run.game.world().overlaps(prev.position, pawn_shape) {
+            if run.game.world().overlaps_box(prev.position, pawn_box) {
                 resync_overlaps.push(s.tick);
             }
             // Without the recorded start state (`use_init` off) the recorded
@@ -2929,6 +2953,85 @@ mod tests {
         event_notes(&[], None, 5, 5, &mut notes);
         assert!(notes.is_empty());
         assert_eq!(bounded(&[]), "");
+    }
+
+    /// The start notes judge the pawn as the box the original sweeps it as
+    /// (PARITY_FINDINGS.md P4), and give the floor distance both as it is
+    /// and as the floor check reports it (NATIVE_PHYSICS.md 10.2).
+    #[test]
+    fn start_notes_use_the_pawns_box_and_the_reported_floor_distance() {
+        use asamu_player::BoxWorld;
+        use asamu_player::world::CollisionShape;
+
+        let params = PlayerParams::asamu_original();
+        let radius = params.movement.capsule_radius.value;
+        let half_height = params.movement.capsule_half_height.value;
+        assert_eq!((radius, half_height), (21.0, 44.0));
+        assert_eq!(params.movement.step_height.value + STEP_FUDGE, 28.0);
+        // A flat floor at z = 0 (a box world answers as BSP), and the same
+        // with a post whose nearest corner is at (18, 18): 18 uu from the
+        // pawn's axis along X and along Y, 18 x sqrt(2) = 25.46 uu from it
+        // in a straight line.
+        let floor = BoxWorld::new().with_ground(0.0, false);
+        let post = floor.clone().with_box(
+            Vec3::new(18.0, 18.0, 0.0),
+            Vec3::new(60.0, 60.0, 200.0),
+            false,
+        );
+        // Standing with the bottom of the box 3.15 uu above the floor.
+        let standing = TraceSample {
+            tick: 0,
+            time: 0.0,
+            input: InputFrame::default(),
+            position: Vec3::new(0.0, 0.0, half_height + 3.15),
+            velocity: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov: 90.0,
+            grapple_state: TraceGrappleState::Idle,
+            grapple_anchor: None,
+            rope_length: None,
+            grounded: true,
+        };
+        let notes_of = |boxes: &BoxWorld| {
+            let world = GameWorld::from_boxes(boxes.clone());
+            let mut names = ActorNames {
+                source: None,
+                levels: BTreeMap::new(),
+            };
+            let mut notes = Vec::new();
+            let overlaps =
+                start_position_notes(&world, &params, &standing, None, &mut names, &mut notes);
+            (overlaps, notes)
+        };
+        // On the open floor: 3.15 uu below, and the 28 uu floor check reports
+        // a BSP floor min(0.1 x 28, 1.0) = 1.0 uu nearer than it is: 2.15.
+        let (overlaps, notes) = notes_of(&floor);
+        assert!(!overlaps);
+        assert!(
+            notes.iter().any(|n| n.starts_with(
+                "start: our floor is 3.150 uu below the pawn at the recorded position, which \
+                 our floor check reports as 2.150 uu (it holds a pawn at a reported 2.15 uu"
+            )),
+            "{notes:#?}"
+        );
+        // Next to the post: an upright cylinder of radius 21 clears the
+        // corner (25.46 > 21); the box, 21 uu wide each way, does not
+        // (18 < 21). The start is inside our collision.
+        let cylinder = CollisionShape {
+            radius,
+            half_height,
+        };
+        assert!(!post.overlaps(standing.position, cylinder));
+        let (overlaps, notes) = notes_of(&post);
+        assert!(overlaps);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with("warning: the start position overlaps our collision")),
+            "{notes:#?}"
+        );
+        assert!(!notes.iter().any(|n| n.starts_with("start: our floor is")));
     }
 
     /// A state: note that cannot be read is an error when the start state

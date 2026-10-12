@@ -901,11 +901,15 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
     assert!(
         has(
             &r,
+            // The true distance, and the one the floor check reports: the
+            // 28 uu trace against this BSP-kind floor is reported
+            // min(0.1 x 28, 1.0) = 1.0 uu short (`PULL_BACK_MAX`).
             &format!(
-                "start: our floor is {:.3} uu below the pawn at the recorded position (our floor \
-                 check rests a pawn 2.15 uu above its floor and leaves a based one alone between \
-                 1.9 and 2.4)",
-                z0 - half_height
+                "start: our floor is {:.3} uu below the pawn at the recorded position, which \
+                 our floor check reports as {:.3} uu (it holds a pawn at a reported 2.15 uu and \
+                 leaves a based one alone between 1.9 and 2.4)",
+                z0 - half_height,
+                z0 - half_height - PULL_BACK_MAX
             )
         ),
         "{:#?}",
