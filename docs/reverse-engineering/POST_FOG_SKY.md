@@ -141,9 +141,15 @@ scaled to the volume. The export (`atmosphere.fog_volumes`) has the component va
 - The stored half-space plane has a vertical normal in all eleven cases, and its `W` is minus the actor's height
   (also where the normal points down, `…HalfspaceDensityInfo_4` of AG-IceCave).
 - No level script touches a fog volume: no Kismet object and no Matinee track of any map names one (search of the
-  converted `kismet/` and `matinee/` data for the actor names; AG-IceCave's Kismet does name its
-  `ExponentialHeightFog_0`, which is the height fog, not handled here). The volumes are static: what `bEnabled`
-  says at load is what the level shows.
+  converted `kismet/` and `matinee/` data for the actor names). The volumes are static: what `bEnabled` says at
+  load is what the level shows.
+- One level script switches a height fog — CONFIRMED (the converted Kismet graph): in AG-IceCave the touch event of
+  `TriggerVolume_4` drives `SeqAct_Toggle_2`, whose only target is `ExponentialHeightFog_0`: "Touched" goes to
+  "Turn Off" and "UnTouched" to "Turn On". The trigger is a box around the streamed-in TheCore (x 108,280 to
+  119,096, y −134,370 to −123,554, z −53,826 to −3,234), so the original has no height fog while the player is
+  inside the core. **Not handled**: ours keeps the height fog on there. By the data that is nothing in a level
+  view (the core is some 13,000 UU above the fog height) and up to about 70 % fog at the bottom of the core's
+  shaft, 25,000 UU below, when looking straight down.
 - The actors inherit `bHidden = true` from `Engine.Info`; only AG-ParadiseCave's stores `bHidden = false`. That
   makes no difference in the original (next section).
 
@@ -231,7 +237,9 @@ AG-IceCave volumes on the engine's own material have its default, (0.5, 0.5, 0.7
   original sorts them as translucent primitives; TENTATIVE where two overlap).
 - Colours are scaled like the height fog's (`render_per_ue`). At most eight volumes reach the shader (AG-Darkcave
   has seven); with more, the ones nearest the camera are kept.
-- `--no-fog` and `ASAMU_POST=no-fog` turn the volumes off together with the height fog.
+- `--no-fog` and `ASAMU_POST=no-fog` turn the volumes off together with the height fog;
+  `ASAMU_POST=no-fog-volumes` and `ASAMU_POST=no-height-fog` leave out one of the two (developer switches, for
+  telling which of them a mist is).
 - Our approximations: the pixel's own depth instead of the average of four neighbours; translucent surfaces get
   the fog of what is behind them; spherical and cone volumes and `FogVolumeActors` shapes are not drawn (the log
   says so if a scene has one).
@@ -423,7 +431,8 @@ with a later order and no clear) to clear to transparent and blend over the wind
 Checked on a window capture: scene, hands and HUD composite correctly.
 
 `ASAMU_POST=off` restores Bevy's default look for comparisons; `ASAMU_POST=no-fog,no-bloom,no-lut,no-tonemap`
-leaves out single parts; `--no-fog` disables the height fog and the fog volumes. When no atmosphere applies to the current level (it is
+leaves out single parts (`no-height-fog` and `no-fog-volumes` for one kind of fog only); `--no-fog` disables the
+height fog and the fog volumes. When no atmosphere applies to the current level (it is
 still loading, failed to load, or another level is current) the plugin takes its components off the cameras and
 gives back Bevy's tonemapping, so another level's fog and grade never linger. A scene whose `atmosphere` block has
 an unexpected shape still loads (the block is ignored and the reason logged). The uber pass is skipped on frames
@@ -544,10 +553,73 @@ disabled).
   half-space volume there fills the bottom with a pale violet pool that the ice columns sink into, (12, 14, 22) to
   (145, 146, 176) in the middle; above its plane nothing changes.
 - **AG-Darkcave**: no difference in the views tried (the start, the start looking down, checkpoint 33, two places
-  above the long crossings). Its seven volumes are black and act under their planes only, 1,300 UU or more below
-  every checkpoint, where those views are black already. What they do is hide whatever light would reach the
-  bottom of the pits.
-- **AG-BeautifulCity**: at most 2.4 % beyond 30,000 UU; not told apart from the view without it.
+  above the long crossings). Its seven volumes are black and act under their planes only. Most checkpoints stand
+  1,500 UU or more above the plane under them; four stand nearer to the level-wide plane at height 2,885:
+  `ASAMUCheckpoint_36` 296 UU above it, `_1` 806, `_38` 1,045 and `_35` 1,275. Rendered from those four as well
+  (level and looking down, with and without fog): at most 0.2 % of the pixels differ, so what lies under the
+  planes there is black already. What the volumes do is hide whatever light would reach the bottom of the pits.
+- **AG-BeautifulCity**: at most 2.4 % beyond 30,000 UU; not told apart from the view without it at the start. In
+  open views (checkpoints 2, 3 and 6) the fog pass as a whole — height fog and volume — lifts the dark distance by
+  a few counts of blue.
+
+**Independent check of the fog volumes (verification pass, 2026-10-13).** Done on the Windows machine with the
+converted data, a build of this tree and scripts of the verifier's own; every run hidden and silent; images stay
+local.
+
+- *Recount.* A separate script over the twelve scene files (actors whose class names a fog, their mesh components
+  and `bHidden`, the `atmosphere` block's entries) and over the converted Kismet and Matinee files gives the tables
+  of sections 1 to 3 again: 4 height-fog actors and 21 fog volume actors (10 constant, one of them disabled, and
+  11 half-space) — per map: AG-Workshop, AG-Epilogue and ASAMUFrontEndMap 2 constant each;
+  AG-ParadiseCave 1 constant; AG-BeautifulCity 1 constant; AG-Darkcave 7 half-space; AG-StarHaven 1 constant
+  (disabled); AG-IceCave 1 constant and 4 half-space; none in the other four maps. Every volume actor has two
+  components, one of them an `EngineMeshes.Cube` mesh; densities, colours, distances and planes are as tabled.
+  The one script reference to any fog actor is AG-IceCave's toggle of its height fog (section 3, not handled).
+- *The original's shaders, read again* (`RefShaderCache-PC-OpenGL.upk`, decompressed locally and deleted): the
+  apply pass's pixel shader takes nothing from its vertex shader but the screen position, and that vertex shader
+  computes no fog; so a fog volume's colour is not dimmed by the height fog in front of it (CONFIRMED). The
+  constant-density integral is the density times the view depth beyond the start distance, the depth being the
+  smallest of the face's own, the average of four scene samples each limited to the maximum distance, and 65,535;
+  the half-space integral is the closed form of section 3 (both CONFIRMED as described there).
+- *The height fog pass is unchanged.* With `ASAMU_POST=no-fog-volumes` the picture is the played build's, pixel
+  for pixel, at the two cameras compared below the fog actor (1600 x 900, every second pixel, largest difference
+  0) and but for 0.01 % of the pixels at the start platform. That also confirms that the cube drawn by the played
+  build showed nothing from inside it.
+- *Which mist is which* (AG-ParadiseCave, the route from the checkpoint the owner continued at to the last
+  wheels; mean sRGB of the middle of the view; `no-fog-volumes`, `no-height-fog`, `--no-fog`):
+
+  | Place | No fog | Height fog only (as played) | Volume only | Both (now) |
+  |---|---|---|---|---|
+  | crossing between the second and third checkpoint of that route, 1,500 UU below the fog actor | (16, 20, 15) | (51, 87, 100) | (69, 115, 89) | (85, 143, 136) |
+  | fourth checkpoint, 3,200 UU below | — | (46, 82, 94) | (40, 69, 50) | (65, 114, 115) |
+  | in the air on the climb out, 1,100 UU above the fog actor, looking up 15° | — | (52, 90, 107) | (23, 38, 25) | (59, 103, 114) |
+  | sixth checkpoint, 6,100 UU above: the fog sea at the horizon | — | (36, 62, 71) | (38, 64, 46) | (55, 96, 93) |
+
+  Below the fog actor the height fog alone is a dark teal murk in which far rock is no brighter than the gaps
+  between it; the volume alone is the green mist of the original's bridge still with near things in full colour;
+  the two together are a paler teal-green mist in which far walls, pillars, floating rocks and the next island
+  stand as darker shapes. In fourteen views on that route (nine from below the fog actor, three from above it,
+  the start platform and the bridge) the next foothold and the far walls can be told apart every time; the
+  flattest is the climb out of the lower cave, where the means of the twelve parts of the frame all lie between
+  (52, 91, 99) and (80, 137, 142).
+- *The original's second still against the height fog — TENTATIVE.* Its even far fog is about (40, 70, 79). Ours
+  at a comparable place (the sixth checkpoint: near things clear, the fog sea at the horizon) is (36, 62, 71) with
+  the height fog alone — the same hue, a little darker — and (55, 96, 93) with the volume added, greener and
+  brighter. So the height fog's colour and strength through our tonemapper and `LUT_Night` agree with that still
+  to about a tenth, which is the best evidence there is that the veil below the fog actor has the right colour;
+  and in that still the volume adds less than our render does at the place tried. Its place is unknown: a view
+  that leaves the volume's box sooner (the box ends 36,700 UU beyond the last checkpoint along −X) or an earlier build
+  would both explain it. OPEN.
+- *An older conversion still loads.* A copy of the converted data with AG-ParadiseCave's `atmosphere` block cut
+  out starts and renders: no height fog, no fog volume, no tonemapper data, Bevy's tone curve, the log line that
+  says to run `asamu-import levels` again, and no cube. (It no longer gets the invented distance fog, so its
+  distance is black.) Unit tests cover the same and a block whose volume lacks the material and mesh values.
+- *Other maps.* AG-IceCave at its last checkpoint: the half-space volume whose stored plane points down fills the
+  shaft above with pale violet mist from about 6,700 UU over the checkpoint upwards, growing denser with height;
+  the floating stones of the climb are clear nearby and fade into it further up (without the volumes the whole
+  column of stones is visible against black). That is the plane as the engine evaluates it (section 3); it is
+  the one volume whose picture depends on that reading. AG-StarHaven (its volume is disabled): the height fog's
+  sea below the islands as before. From outside AG-ParadiseCave's box (a camera above its top face) the volume
+  shows no edge.
 
 **AG-Workshop brightness (2026-10-12).** The owner found the Workshop very dark away from its lamps. Checked on
 the Windows machine with the converted data (`--level AG-Workshop --fly --screenshot`, offscreen 1600 x 900, the
