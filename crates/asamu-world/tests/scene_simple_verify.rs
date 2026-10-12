@@ -60,6 +60,9 @@ fn load(dir: &Path, map: &str) -> LoadedMap {
     scene::load_map(&DirSource::new(dir), map, &LoadOptions::default()).expect("map loads")
 }
 
+/// A loaded map with the names of its actors by actor id.
+type Loaded = (LoadedMap, BTreeMap<u32, String>);
+
 /// Names of the actors of a loaded map by actor id.
 fn actor_names(dir: &Path, map: &LoadedMap) -> BTreeMap<u32, String> {
     let mut names = BTreeMap::new();
@@ -211,7 +214,8 @@ const STUCK_STARTS: [Stand; 4] = [
     Stand {
         tick: "PLAY2 seg6 tick 95 (redrock_04)",
         map: "AG-Darkcave",
-        at: [93182.594, 2750.8962, 4482.1963],
+        // 93182.59375 as recorded.
+        at: [93_182.59, 2750.8962, 4482.1963],
         base: "StaticMeshActor_5",
         // zeth_darkcave.darkcavepart1: box switch stored false.
         kind: PrimitiveKind::TriangleMesh,
@@ -251,7 +255,7 @@ fn the_four_stuck_starts_are_free_and_stand_where_the_rule_says() {
         eprintln!("mesh manifest without simple collision: skipping");
         return;
     }
-    let mut maps: BTreeMap<&str, (LoadedMap, BTreeMap<u32, String>)> = BTreeMap::new();
+    let mut maps: BTreeMap<&str, Loaded> = BTreeMap::new();
     for stand in &STUCK_STARTS {
         if scene_file(&dir, stand.map).is_none() {
             eprintln!("{}: not converted, skipped", stand.map);
@@ -389,7 +393,7 @@ fn recorded_positions_against_the_new_world() {
         ("PLAY2", 3138 + 3950),
         ("PLAY2", 1868),
     ];
-    let mut maps: BTreeMap<String, Option<(LoadedMap, BTreeMap<u32, String>)>> = BTreeMap::new();
+    let mut maps: BTreeMap<String, Option<Loaded>> = BTreeMap::new();
     for scenario in ["WS1", "DC1", "PLAY2"] {
         let Some(records) = recording(&raw, scenario) else {
             eprintln!("{scenario}: no recording, skipped");
