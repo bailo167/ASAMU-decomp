@@ -46,6 +46,8 @@ cargo test -p asamu-kismet                                   # synthetic + hosti
 ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-kismet --test real_data -- --nocapture
 ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-game --lib kismet_host -- --nocapture
 cargo test -p asamu-kismet --test save_state                 # §12 on hand-made scripts
+# §12 on every chapter: continued games against the game that played on, the story chain from them
+ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-game --release --test continue_story_maps -- --ignored --nocapture
 ASAMU_CONVERTED_DIR=$OUT cargo test -p asamu-game --test continue_from_checkpoint -- --nocapture
 ```
 
@@ -704,14 +706,63 @@ starts none of the opening's three Matinees, and keeps the saved grapple limit 2
 The same holds for that save with its script state removed (the stand-in above), and the control (the same
 start with nothing restored) plays the opening.
 
+**Measured on every chapter** (ours; gated and ignored test `crates/asamu-game/tests/continue_story_maps.rs`,
+optimized build, 60 Hz; added by the verification of 2026-10-13). A scripted walk plays each level from a
+fresh start: the opening, then the checkpoints in index order, the pawn put into every Kismet touch trigger
+on the way (the story exits excepted) with five seconds of play after each. Every checkpoint that becomes
+the latest writes the save the app writes, and the running game is kept as it was at that tick. The level
+is then started again from the save, next to the kept game that simply plays on.
+
+| Level | Checkpoints that wrote a save | Fresh start shows | Continued games compared |
+|---|---|---|---|
+| AG-Workshop, AG-Epilogue | none: one checkpoint each, the first, which never registers (A-CP-3) | cinematic mode, a Matinee fade | none: a Continue there is a first start, opening included, as in the original (its save is another map's) |
+| AG-ParadiseCave | 23 of 24 | cinematic mode from tick 1, a director cut at tick 106, the narrator's `Land` | 9 |
+| AG-BeautifulCity | 11 of 12 | a Matinee fade | 9 |
+| AG-Darkcave | 16 of 17 | a Matinee fade, the narrator's `EnteredTheChasms` | 9 |
+| AG-StarHaven | 24 of 25 | the player's view | 9 |
+| AG-IceCave | 26 of 28 (the first, and one a Kismet action triggers) | the player's view | 9 |
+
+In all 45 continued games: no director cut, no cinematic mode, no view target and no line of the opening's
+narration in 900 ticks; every saved variable has its saved value after the first tick; no mover that is at
+rest in both games is in another place; the abilities are those of the game that played on; a death respawns
+at the saved checkpoint and shows nothing of the opening; no value becomes non-finite and the script reports
+no new error. The smoke harness's story chain, started from 15 continued games (the first, a late and the
+last saved checkpoint of each of the five levels), reaches the next map each time, AG-IceCave with `TheCore`
+streamed in and the credits run.
+
+**What a continued game does not have.** Where the continued game differs from the one that played on, the
+difference follows from what the save holds (the table at the top of this section). None of it was compared
+with a recording of the original: the rule is CONFIRMED (src, native), its consequences in these levels are
+ours to observe, NEEDS EVIDENCE.
+
+| Difference | Where it was measured | Why, by the rule |
+|---|---|---|
+| A loop that a level-loaded event starts runs again, also where play had stopped it | AG-BeautifulCity: the paper plane's Matinee (the plane flies again, 337 uu from where it had come to rest), Samuel's and Maddie's idle; AG-Darkcave: Maddie reading; AG-StarHaven: the sway and the strays' idle (5 to 29 uu) | level-loaded events fire on every load; the touch event that stopped the loop keeps its restored trigger count |
+| Actors that one-time script had hidden are visible again, and the other way round | AG-BeautifulCity: up to 3 (the plane, two characters); AG-StarHaven: 37 hidden there and visible here (a level-loaded chain hides them behind a bool that the load restores as set), 4 the other way | hidden, destroyed and toggled states are not in the save |
+| Story mode is off | every stretch of AG-BeautifulCity, AG-Darkcave, AG-StarHaven and AG-IceCave where the first-start branch or a one-time trigger had switched it on | not in the save; the branch that sets it does not run again |
+| The event keys of a Matinee that was playing at the save fire again, all at once, up to the saved position | AG-BeautifulCity's first registered checkpoint is not touched: the `End` key of the first-encounter cutscene triggers it 55.0 s into that Matinee, which is still playing. Continued from that save, the cutscene's two narrator lines are queued again and the key's chain runs again. Also the cutscenes of Samuel's cove (AG-BeautifulCity) and of finding Maddie (AG-Darkcave) when a checkpoint is saved during them | a playing Matinee is put at its position without a jump, from position 0 of the freshly loaded action, and the event track fires the keys in between; the output impulses are delivered when the forced Play is processed (§3, the op's processing step) |
+
+**`TheCore` in AG-IceCave.** `Trigger_7`, whose one-time touch streams the sub-level in, lies 22,778 uu
+beyond the level's last checkpoint (index 27); the checkpoint before that is 78,262 uu from it. So play
+saves no checkpoint behind the trigger: a Continue starts before it with the touch event unspent, and the
+chain from the last checkpoint's save reaches the Epilogue. Only a save written at the last checkpoint
+after the trigger (the checkpoint missed on the way and touched afterwards) leaves the continued level
+without `TheCore` and without a way out, here as by the original's rule (measured, not asserted). STRONG
+for the order of trigger and checkpoint (distances; not walked).
+
 ## Open items
 
 - §12: a checkpoint that a `SeqAct_TriggerCheckpoint` activates is saved by the original in the middle of
   the sequence update; ours saves at the end of the tick (the ops after the trigger action have run).
 - §12: AG-IceCave streams `TheCore` in from a one-time touch event (`Trigger_7`), and nothing in the
-  original's load reads the saved list of streamed levels. Whether a checkpoint lies behind that trigger,
-  and what a Continue from it does in the original (by the rules above the restored trigger count keeps
-  the event from firing again), is not established. NEEDS EVIDENCE: a recording of such a Continue.
+  original's load reads the saved list of streamed levels. The trigger lies beyond the last checkpoint
+  (§12, "`TheCore` in AG-IceCave"), so play does not produce a save behind it; a save made there by
+  touching the last checkpoint late continues without the sub-level.
+- §12: the differences of a continued game listed under "What a continued game does not have" (loops
+  that start again, hidden actors, story mode, the event keys of a Matinee that was playing at the save)
+  follow from the original's rule as read. NEEDS EVIDENCE: recordings of a Continue in the original at
+  AG-BeautifulCity's first checkpoint (is the first encounter's narration spoken again?) and inside a
+  story-mode stretch (is the hand out?).
 - §12: recharge crystals and falling rocks are savable actors of the original that ours does not save
   yet (`docs/UI_AND_SAVES.md`).
 - AG-Epilogue: the order of its two speed commands in the original (66 or 132 uu/s), and the effect of

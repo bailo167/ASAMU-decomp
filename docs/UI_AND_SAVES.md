@@ -138,6 +138,7 @@ Workshop and Epilogue), in order:
 |---|---|---|
 | The level's opening (camera flight, cinematic mode, opening narration) | does not play: the script's flag is restored | same, by the same flag |
 | One-time prompts, music cues and cutscenes on touch events | do not repeat: trigger counts and `bEnabled` restored | same |
+| A cutscene whose Matinee was still playing at the save (AG-BeautifulCity's first checkpoint is triggered by its first cutscene's own `End` key) | plays on from the saved position, and its event keys up to there fire again at once: the cutscene's narrator lines are queued again | same by the rule as read (KISMET_RUNTIME.md §12, "What a continued game does not have"); NEEDS EVIDENCE |
 | Script variables (bool, int, float, object, string) | restored | same; plus vector variables (none in the shipped levels) |
 | Doors, lifts and other Matinee-moved actors | at their saved Matinee position; a Matinee that was playing plays on | same |
 | Grapple capacity, grapple latch, rocket boots | restored, then whatever the level-loaded script sets | same |
@@ -320,6 +321,8 @@ cargo test -p asamu-kismet --test save_state          # the rule, hand-made scri
 cargo test -p asamu-game --lib kismet_host            # save, load, older saves, a death, hostile entries
 ASAMU_CONVERTED_DIR=<converted dir> cargo test -p asamu-game --test continue_from_checkpoint -- --nocapture
 ASAMU_CONVERTED_DIR=<converted dir> cargo test -p asamu continue_starts_in_the_player_s_view
+# every chapter: continued games against the game that played on, and the story chain from them (minutes)
+ASAMU_CONVERTED_DIR=<converted dir> cargo test -p asamu-game --release --test continue_story_maps -- --ignored --nocapture
 # the same Continue on screen: the gated test writes its save when asked to, the app continues from it
 ASAMU_CONVERTED_DIR=<converted dir> ASAMU_CONTINUE_SAVE_OUT=<scratch dir> \
   cargo test -p asamu-game --test continue_from_checkpoint
