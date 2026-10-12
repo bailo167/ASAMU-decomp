@@ -370,6 +370,119 @@ fn the_beautiful_city_cutscene_switches_all_its_blocking_volumes() {
     );
 }
 
+#[test]
+fn the_beautiful_city_first_cutscene_switches_its_two_blocking_volumes() {
+    let dir = converted_dir_or_skip!();
+    let (mut g, script) = load_level_with_kismet(&dir, "AG-BeautifulCity").expect("loads");
+    let mut script = script.expect("AG-BeautifulCity has Kismet");
+    g.apply_snapshot(&Snapshot::fresh());
+    g.start();
+    let ids: Vec<u32> = (0..7)
+        .map(|n| {
+            script
+                .actor_id_by_path(&format!(
+                    "AG-BeautifulCity.TheWorld.PersistentLevel.DynamicBlockingVolume_{n}"
+                ))
+                .expect("the volume is in the level script's actor table")
+        })
+        .collect();
+    let state =
+        |g: &Game| -> Vec<Option<bool>> { ids.iter().map(|i| g.actor_collision(*i)).collect() };
+    let on = Some(true);
+    let off = Some(false);
+    // The level script (read from the user's converted graph): the touch
+    // event of `Trigger_12` pulses "Turn On" of a toggle action on
+    // `DynamicBlockingVolume_3` and starts a cutscene; the cutscene's "End"
+    // output pulses "Turn Off" of that action and of one on
+    // `DynamicBlockingVolume_2`, and turns the level's story mode off.
+    //
+    // The recording (DC1; the level starts at record 7795 in story mode):
+    // - records 9873 to 9899: the pawn walks through `_3`, at record 9886
+    //   with its whole box inside it at (−57667.246, 43885.992, 53270.047).
+    //   `_3` stores `bEnabled = false` and the cutscene has not begun;
+    // - record 13213: `GroundSpeed` goes from 264 to 440 (story mode off:
+    //   the cutscene's end);
+    // - records 13289 to 13510: the pawn walks through `_2`, at record
+    //   13320 with its whole box inside it at (−57812.703, 43337.707,
+    //   53156.914). `_2` stores `bEnabled = true`: it was switched off by
+    //   then.
+    let in_3 = Vec3::new(-57_667.246, 43_885.992, 53_270.047);
+    let in_2 = Vec3::new(-57_812.703, 43_337.707, 53_156.914);
+    assert_eq!(state(&g), [on, on, on, off, on, on, off]);
+    // The two ids are those two volumes: each recorded place is blocked
+    // exactly while its volume is switched on, by nothing else.
+    assert!(g.world().overlaps_box(in_2, BOX), "`_2` as placed");
+    assert!(g.set_actor_collision(ids[2], false));
+    assert!(!g.world().overlaps_box(in_2, BOX), "nothing else is there");
+    assert!(g.set_actor_collision(ids[2], true));
+    assert!(
+        !g.world().overlaps_box(in_3, BOX),
+        "`_3` starts switched off"
+    );
+    assert!(g.set_actor_collision(ids[3], true));
+    assert!(g.world().overlaps_box(in_3, BOX), "`_3` switched on");
+    assert!(g.set_actor_collision(ids[3], false));
+    // The level start: nothing switches (the pawn lands, in story mode).
+    for _ in 0..120 {
+        script.tick(&mut g, &idle()).unwrap();
+    }
+    assert!(g.in_story_mode());
+    assert_eq!(state(&g), [on, on, on, off, on, on, off]);
+    // Into the trigger; a touch takes effect in the next frame.
+    let (trigger, _) = script
+        .actor_transform_by_path("AG-BeautifulCity.TheWorld.PersistentLevel.Trigger_12")
+        .expect("the trigger is in the level script's actor table");
+    {
+        let p = g.player_mut();
+        p.position = trigger;
+        p.velocity = Vec3::ZERO;
+    }
+    script.tick(&mut g, &idle()).unwrap();
+    script.tick(&mut g, &idle()).unwrap();
+    assert_eq!(
+        state(&g),
+        [on, on, on, on, on, on, off],
+        "`_3` goes on with the touch"
+    );
+    assert!(g.world().overlaps_box(in_3, BOX));
+    // To the cutscene's end: `_2` and `_3` stay on while it runs and go off
+    // in the frame the story mode goes off.
+    let mut ended = None;
+    for tick in 3..=20_000 {
+        script.tick(&mut g, &idle()).unwrap();
+        if !g.in_story_mode() {
+            ended = Some(tick);
+            break;
+        }
+        assert_eq!(
+            state(&g),
+            [on, on, on, on, on, on, off],
+            "tick {tick} of the cutscene"
+        );
+    }
+    let ended = ended.expect("the cutscene ends");
+    eprintln!(
+        "AG-BeautifulCity: the Trigger_12 cutscene ends {ended} ticks after the touch; volumes \
+         then: {:?}",
+        state(&g)
+    );
+    assert_eq!(
+        state(&g),
+        [on, on, off, off, on, on, off],
+        "`_2` and `_3` are off, the others as they were"
+    );
+    // Where the recorded pawn walked afterwards is free.
+    assert!(!g.world().overlaps_box(in_2, BOX));
+    assert!(!g.world().overlaps_box(in_3, BOX));
+    assert_eq!(g.respawn_count(), 0, "the pawn did not die on the way");
+    assert!(
+        script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+        "{:?} {:?}",
+        script.runtime().errors(),
+        script.host_errors()
+    );
+}
+
 /// A recorded respawn: where the checkpoint's spawn point is, and the
 /// pawn's first record after the teleport.
 struct Respawn {
