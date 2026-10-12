@@ -94,7 +94,12 @@ fn synthetic_map_loads_with_collision_and_gameplay() {
         assert_eq!(map.stats.bsp_triangles, 2);
         assert_eq!(map.stats.blocking_hulls, 1);
         assert_eq!(map.dynamic.len(), 1, "the rock is dynamic");
-        assert!(map.warnings.is_empty(), "{:?}", map.warnings);
+        // The fixture is a conversion from before the simple collision
+        // (mesh manifest version 1): the one warning says that the pawn then
+        // collides with every mesh's triangles.
+        assert_eq!(map.warnings.len(), 1, "{:?}", map.warnings);
+        assert!(map.warnings[0].contains("no simple-collision data"));
+        assert_eq!(map.stats.pawn_approximate, map.stats.pawn_components);
         let c = &map.collision;
         // Landing on the BSP floor.
         let hit = c

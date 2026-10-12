@@ -54,7 +54,7 @@ use crate::pawn::{self, PawnStateName, ScriptConstant, poll_timer};
 use crate::rocket_boots::BootsStateName;
 use crate::sim::{PlayerState, StepEvents};
 use crate::ue3_movement::safe_normal;
-use crate::world::{ActorClass, ActorTag, CollisionWorld, Surface};
+use crate::world::{ActorClass, ActorTag, CollisionWorld, Surface, TraceExtent};
 
 // ---------------------------------------------------------------------------
 // Literal constants of the original script code (provenance: ScriptCode).
@@ -388,7 +388,8 @@ pub struct GunEvents {
 pub struct Impact {
     /// Trace start (the view location, eye height plus walk bob).
     pub start: Vec3,
-    /// Hit location, or the trace end when nothing was hit.
+    /// Hit location as the original reports it (short of the surface, see
+    /// [`fire_trace`]), or the trace end when nothing was hit.
     pub location: Vec3,
     /// What was hit (`None`: the impact has no actor).
     pub hit: Option<ImpactHit>,
@@ -416,6 +417,30 @@ pub struct ImpactHit {
 /// ([`crate::sim::rotator_vector`]; measured: 47 of 52 recorded airborne
 /// anchors lie within 0.05 uu of that ray, with exact angles the median
 /// distance is 0.74 uu).
+///
+/// # Where the hit location is (G-AT-4, P3)
+///
+/// The trace is the stock weapon's instant-fire trace: zero extent, with
+/// the script's bullet flag (CONFIRMED (src)), so the world answers it with
+/// a mesh's triangles whatever the mesh's simple-collision switches are
+/// ([`CollisionWorld::trace_line`]). Like every line check of the original
+/// it reports its hit **short of the surface**: the routine that answers
+/// moves the hit back along the trace ([`crate::world::pull_back`] with
+/// [`TraceExtent::Zero`] on the trace's whole length, `WeaponRange`), and
+/// the hit location the script receives, which becomes the anchor, is the
+/// trace's start plus that reported fraction of the trace. On a static
+/// mesh's triangles that is the smaller of a tenth of the trace and 4.0 uu,
+/// so 4.0 uu at this range; on BSP a flat 0.5 uu; on a brush the smaller of
+/// a tenth and 1.0 uu (all three CONFIRMED in the user's executable,
+/// NATIVE_PHYSICS.md 10.2). Measured for triangles on the first
+/// recordings: at 47 airborne presses the recorded anchor is 3.9967 uu
+/// (median 3.9988, 3.892 to 4.088) before the triangle our exact ray hits
+/// (`docs/PARITY_FINDINGS.md` V16). The BSP and brush amounts are not
+/// measured: no recording has such an anchor.
+///
+/// Everything measured from the hit location follows: the range test
+/// (G-AC-5) and the pull's distance and proximity release (G-PH-2, G-RL-2)
+/// see the anchor 4 uu nearer than the surface.
 #[must_use]
 pub fn fire_trace<W: CollisionWorld + ?Sized>(
     state: &PlayerState,
@@ -436,19 +461,26 @@ fn fire_trace_along<W: CollisionWorld + ?Sized>(
 ) -> Impact {
     let start = state.view_location(params);
     let range = gun.weapon_range.value;
-    match world.raycast(start, dir, range) {
-        Some(h) => Impact {
-            start,
-            location: h.position,
-            hit: Some(ImpactHit {
-                normal: h.normal,
-                grapple_able: h.grapple_able,
-                surface: h.surface,
-            }),
-        },
+    let end = start + dir * range;
+    match world.trace_line(start, dir, range) {
+        Some(trace) => {
+            // The original's hit location: the reported time along the
+            // trace from its start to its end.
+            let time = trace.reported_time(TraceExtent::Zero, range);
+            let h = trace.hit;
+            Impact {
+                start,
+                location: start + (end - start) * time,
+                hit: Some(ImpactHit {
+                    normal: h.normal,
+                    grapple_able: h.grapple_able,
+                    surface: h.surface,
+                }),
+            }
+        }
         None => Impact {
             start,
-            location: start + dir * range,
+            location: end,
             hit: None,
         },
     }
@@ -880,6 +912,15 @@ fn update_grapple(
 /// with no hit at all the hit location stays the zero vector (UnrealScript
 /// locals start zeroed), so the range test then measures the eye's distance
 /// from the world origin.
+///
+/// The trace is a zero-extent bullet trace like the fire trace (CONFIRMED
+/// (src): the call passes the same bullet flag), so the world answers it
+/// with a mesh's triangles and its hit location is the reported one, short
+/// of the surface (G-AT-4; [`crate::world::pull_back`] with
+/// [`TraceExtent::Zero`] on this trace's own length, `fMaxDistance` + 1000:
+/// 4.0 uu before mesh triangles, 0.5 uu before BSP, 1.0 uu before a brush).
+/// The range tests below therefore pass for a surface up to that much
+/// beyond their limit. Not measured: no recording has the crosshair's state.
 fn crosshair<W: CollisionWorld + ?Sized>(
     state: &PlayerState,
     params: &PlayerParams,
@@ -889,8 +930,15 @@ fn crosshair<W: CollisionWorld + ?Sized>(
     let previous = state.script.gun.crosshair;
     let start = state.view_location(params);
     let dir = state.aim_direction();
-    let hit = world.raycast(start, dir, gun.max_distance.value + CROSSHAIR_EXTRA_RANGE);
-    let location = hit.map_or(Vec3::ZERO, |h| h.position);
+    let range = gun.max_distance.value + CROSSHAIR_EXTRA_RANGE;
+    let trace = world.trace_line(start, dir, range);
+    let hit = trace.map(|t| t.hit);
+    // The original's hit location: the reported time along the trace from
+    // its start to its end (as in `fire_trace_along`).
+    let location = trace.map_or(Vec3::ZERO, |t| {
+        let end = start + dir * range;
+        start + (end - start) * t.reported_time(TraceExtent::Zero, range)
+    });
     let distance = (location - start).length();
     let g = &state.script.gun;
     if state.script.is_story() {

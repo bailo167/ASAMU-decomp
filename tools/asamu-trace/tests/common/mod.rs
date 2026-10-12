@@ -12,7 +12,9 @@
 //! without benchmark mode), on `asamu_trace::stepper`. `varied_recording` is
 //! a pseudo-random recording that exercises every conversion branch, for the
 //! Python/Rust cross-check; `with_frame_lengths` gives any recording
-//! variable frame lengths.
+//! variable frame lengths; `with_optional_members` gives one the optional
+//! members of recorder 0.2.0 and `recorder_stats` the sidecar that recorder
+//! writes next to it (markers, the dropped-frame log).
 
 #![allow(dead_code)]
 
@@ -24,8 +26,9 @@ use asamu_player::{InputFrame, PlayerState, Trace};
 use asamu_player::{TraceMeta, TraceSample};
 use asamu_trace::convert::units_to_radians;
 use asamu_trace::raw::{
-    RAW_FORMAT, RAW_VERSION, RawAxes, RawBinding, RawBoots, RawFile, RawGun, RawHeader,
-    RawPawnFlags, RawPlayer, RawRecord, RawWorld,
+    OPTIONAL_FIELDS, RAW_FORMAT, RAW_VERSION, RawAxes, RawBinding, RawBob, RawBoots, RawCameraPov,
+    RawCylinder, RawFile, RawGun, RawHeader, RawPawnFlags, RawPlayer, RawRecord, RawTimer,
+    RawWorld,
 };
 use asamu_trace::stepper::VariableStepper;
 use asamu_trace::timestep::FrameLength;
@@ -132,6 +135,8 @@ pub fn header(bindings: Vec<RawBinding>) -> RawHeader {
         fixed_delta_time: Some(f64::from(1.0_f32 / 60.0)),
         bindings,
         notes: vec!["made by the asamu-trace tests".into()],
+        optional_fields: vec![],
+        optional_layout: None,
     }
 }
 
@@ -280,6 +285,16 @@ fn base_player() -> RawPlayer {
         gun: None,
         pawn_flags: None,
         boots: None,
+        base_level: None,
+        fov_default: None,
+        fov_locked: None,
+        fov_lock: None,
+        camera_pov: None,
+        floor: None,
+        base_eye_height: None,
+        walk_bob: None,
+        bob: None,
+        cylinder: None,
     }
 }
 
@@ -357,6 +372,8 @@ fn records_of(
             distance: 0.0,
             times_grappled: script.gun.times_grappled,
             max_grapples: script.gun.max_grapples,
+            state: None,
+            timers: None,
         });
         p.boots = Some(RawBoots {
             enabled: script.boots.enabled,
@@ -716,6 +733,8 @@ pub fn varied_recording(seed: u64, n: usize, with_bindings: bool) -> RawFile {
             distance: r.f32(1000.0).abs(),
             times_grappled: r.below(3) as i32,
             max_grapples: r.below(5) as i32 - 1,
+            state: None,
+            timers: None,
         });
         p.boots = (r.below(2) == 0).then(|| RawBoots {
             enabled: r.below(2) == 0,
@@ -747,4 +766,394 @@ pub fn varied_recording(seed: u64, n: usize, with_bindings: bool) -> RawFile {
         h.scenario = Some(String::new());
     }
     RawFile { header: h, records }
+}
+
+/// Gives the records of `raw` the optional members of recorder 0.2.0
+/// (docs/TRACE_CAPTURE.md 6.10), each group on most records and missing on
+/// some, with every kind of value a converter has to read: a camera FOV
+/// lock that is off, on with a usable locked FOV, on with 0 or 250 degrees;
+/// a base level that is a name or null; floor normals that are zero, up or
+/// tilted; a weapon state that is a name or null; timer lists that are
+/// empty, hold a refire check under either spelling (running or paused) or
+/// only another timer.
+pub fn with_optional_members(raw: &mut RawFile, seed: u64) {
+    let mut r = Lcg(seed ^ 0x0200_0BAD_5EED);
+    let mut count = 0.0_f32;
+    for rec in &mut raw.records {
+        let Some(p) = rec.player.as_mut() else {
+            continue;
+        };
+        if r.below(12) != 0 {
+            p.fov_default = Some(90.0);
+            p.fov_locked = Some(r.below(3) == 0);
+            p.fov_lock = Some(match r.below(8) {
+                0 => 0.0,
+                1 => 250.0,
+                n => 40.0 + n as f32 * 2.5,
+            });
+        }
+        if r.below(10) != 0 {
+            let level = ["AG-Workshop", "freds_place"][r.below(2) as usize];
+            p.base_level = Some(p.base.as_ref().map(|_| level.to_owned()));
+        }
+        if r.below(10) != 0 {
+            p.floor = Some(match r.below(4) {
+                0 => Vec3::ZERO,
+                1 => Vec3::new(0.6, 0.0, 0.8),
+                _ => Vec3::Z,
+            });
+        }
+        if r.below(10) != 0 {
+            p.base_eye_height = Some(if r.below(6) == 0 { 43.0 } else { 38.0 });
+        }
+        if r.below(10) != 0 {
+            p.walk_bob = Some(Vec3::new(0.0, r.f32(0.5), r.f32(2.0)));
+            p.bob = Some(RawBob {
+                bob: 0.01,
+                land: r.f32(1.0),
+                jump: 0.0,
+                applied: r.f32(1.0),
+                time: r.f32(100.0).abs(),
+                just_landed: r.below(9) == 0,
+                land_recovery: r.below(3) == 0,
+            });
+        }
+        if r.below(10) != 0 {
+            p.camera_pov = Some(RawCameraPov {
+                location: p.location + Vec3::new(0.0, 0.0, 38.0),
+                rotation: p.view_rotation,
+            });
+        }
+        if r.below(10) != 0 {
+            p.cylinder = Some(RawCylinder {
+                radius: 21.0,
+                half_height: if r.below(20) == 0 { 61.6 } else { 44.0 },
+                translation: Vec3::ZERO,
+                collision_component: true,
+            });
+        }
+        if let Some(g) = p.gun.as_mut() {
+            if r.below(10) != 0 {
+                g.state = Some(match r.below(5) {
+                    0 => None,
+                    1 => Some("WeaponFiring".to_owned()),
+                    2 => Some("WeaponEquipping".to_owned()),
+                    _ => Some("Active".to_owned()),
+                });
+            }
+            if r.below(10) != 0 {
+                let mut timers = Vec::new();
+                if r.below(3) != 0 {
+                    count = if r.below(4) == 0 {
+                        0.0
+                    } else {
+                        count + 1.0 / 60.0
+                    };
+                    let name = if r.below(5) == 0 {
+                        "refirechecktimer"
+                    } else {
+                        "RefireCheckTimer"
+                    };
+                    timers.push(RawTimer {
+                        name: name.to_owned(),
+                        rate: 0.1,
+                        count,
+                        looping: r.below(2) == 0,
+                        paused: r.below(15) == 0,
+                    });
+                }
+                if r.below(2) == 0 {
+                    timers.push(RawTimer {
+                        name: "InstantReleaseTimer".to_owned(),
+                        rate: 0.05,
+                        count: r.f32(0.05).abs(),
+                        looping: false,
+                        paused: false,
+                    });
+                }
+                g.timers = Some(timers);
+            }
+        }
+    }
+    raw.header.recorder = "asamu_win 0.2.0".to_owned();
+    raw.header.optional_fields = OPTIONAL_FIELDS.iter().map(|s| (*s).to_owned()).collect();
+    raw.header.optional_layout = Some(Some("win-x86-steam-1822049-optional".to_owned()));
+}
+
+/// The sidecar recorder 0.2.0 would write next to `raw` (`<name>.stats.json`,
+/// see `asamu_trace::sidecar`), as JSON text: the three numbers that tie it
+/// to the recording, a dropped-frame log, and markers.
+///
+/// The log: frames without a player before the first record; for the gaps
+/// between records one entry, two entries of different reasons, or none (a
+/// gap the log does not explain); `no-input` entries for records before a
+/// gap and, as no recorder writes them, for a few records in the middle of
+/// consecutive frames. The markers: at records, before the first record
+/// (`frame` null), in frames that have no record, and after the last
+/// record, with names that need care in a notes line.
+pub fn recorder_stats(raw: &RawFile, seed: u64) -> String {
+    use serde_json::json;
+    let mut r = Lcg(seed ^ 0x5747_A754);
+    let frames: Vec<u64> = raw.records.iter().map(|rec| rec.frame).collect();
+    let (first, last) = (frames.first().copied(), frames.last().copied());
+    let mut drops = Vec::new();
+    if let Some(f) = first {
+        drops.push(
+            json!({"frame": f.saturating_sub(50), "last": f.saturating_sub(1), "count": 7,
+                          "reason": "skipped", "detail": "no-player"}),
+        );
+    }
+    let reasons = [
+        (
+            "missed",
+            Some("the counter advanced by 3 between two polls"),
+        ),
+        ("torn", Some("the counter moved while the sample was read")),
+        (
+            "late",
+            Some(
+                "GDeltaTime changed before the sample was complete (the next frame's time update had run)",
+            ),
+        ),
+        ("unconfirmed", None),
+        ("skipped", Some("paused")),
+    ];
+    let entry = |r: &mut Lcg, lo: u64, hi: u64| {
+        let (reason, detail) = reasons[r.below(reasons.len() as u32) as usize];
+        json!({"frame": lo, "last": hi, "count": hi - lo + 1, "reason": reason, "detail": detail})
+    };
+    for w in frames.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if b > a + 1 {
+            if r.below(3) == 0 {
+                drops.push(json!({"frame": a, "last": a, "count": 1, "reason": "no-input",
+                    "detail": "record written without its input: the tick start of its frame was not seen"}));
+            }
+            match r.below(4) {
+                0 => {}
+                1 if b > a + 2 => {
+                    drops.push(entry(&mut r, a + 1, a + 1));
+                    drops.push(entry(&mut r, a + 2, b - 1));
+                }
+                _ => drops.push(entry(&mut r, a + 1, b - 1)),
+            }
+        } else if b == a + 1 && r.below(45) == 0 {
+            drops.push(
+                json!({"frame": a, "last": a, "count": 1, "reason": "no-input", "detail": null}),
+            );
+        }
+    }
+    let names = [
+        "zoom hold 1",
+        "wall 45",
+        "say \"cheese\", twice",
+        "Zürich → 東京",
+        "tab\tand\nbreak",
+        "a name that is much longer than the sixty-four characters the recorder keeps of it",
+        "stairs",
+        "end",
+    ];
+    let mut markers = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let frame = match (i, first, last) {
+            (0, _, _) | (_, None, _) | (_, _, None) => None,
+            (1, Some(f), _) => Some(f),
+            (7, _, Some(l)) => Some(l + 100),
+            (_, Some(f), Some(l)) => Some(f + u64::from(r.below((l - f + 1) as u32))),
+        };
+        markers.push((frame, i, *name));
+    }
+    // The recorder lists them in the order they were set.
+    markers.sort_by_key(|(frame, i, _)| (frame.map_or(0, |f| f + 1), *i));
+    // (Shown only where a gap has no entry.)
+    let omitted = if seed.is_multiple_of(2) { 0 } else { 3 };
+    let markers: Vec<serde_json::Value> = markers
+        .into_iter()
+        .map(|(frame, i, name)| {
+            json!({"name": name, "id": format!("m{i}"), "frame": frame,
+                   "records": frame.map_or(0, |f| frames.iter().filter(|x| **x <= f).count()),
+                   "state": if frame.is_some() { "recording" } else { "waiting-for-player" },
+                   "utc": "2026-10-12T10:15:00Z"})
+        })
+        .collect();
+    json!({
+        "recorder": "asamu_win 0.2.0", "state": "finished", "file": "synthetic.raw.jsonl",
+        "records": frames.len(), "gaps": frames.windows(2).filter(|w| w[1] != w[0] + 1).count(),
+        "first_frame": first, "last_frame": last,
+        "stats": {"written": frames.len(), "torn": 0, "skipped": {"no-player": 7},
+                  "window_ms": {"mean": 9.5, "p99": 12.0, "max": 13.25},
+                  "drops": drops, "drops_omitted": omitted},
+        "optional": null, "markers": markers, "markers_omitted": 0,
+        "updated_utc": "2026-10-12T10:16:00Z"
+    })
+    .to_string()
+}
+
+/// Our simulation's state at every record of the fake original that
+/// [`scripted_steps`] makes of `steps` (the same deterministic run again).
+pub fn our_states(steps: &[Step]) -> Vec<PlayerState> {
+    let mut g = Game::graybox().expect("graybox");
+    let mut states = vec![*g.player()];
+    g.start();
+    for (i, s) in steps.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| &steps[j]);
+        g.tick(&input(s, prev)).expect("tick");
+        states.push(*g.player());
+    }
+    states
+}
+
+/// Gives the records of a fake original of our own run what recorder 0.2.0
+/// reads of the weapon: its script state (`Active` or `WeaponFiring`) and
+/// its timer list, with the refire check while ours runs (`states[i]` is
+/// our state at record `i`; `fire_interval` is the timer's period).
+pub fn with_our_weapon(raw: &mut RawFile, states: &[PlayerState], fire_interval: f32) {
+    assert_eq!(raw.records.len(), states.len());
+    for (rec, st) in raw.records.iter_mut().zip(states) {
+        let gun = &st.script.gun;
+        let g = rec
+            .player
+            .as_mut()
+            .and_then(|p| p.gun.as_mut())
+            .expect("gun data");
+        let name = match gun.weapon {
+            asamu_player::grapple_gun::WeaponState::Active => "Active",
+            asamu_player::grapple_gun::WeaponState::Firing => "WeaponFiring",
+        };
+        g.state = Some(Some(name.to_owned()));
+        g.timers = Some(
+            gun.refire_timer
+                .map(|count| RawTimer {
+                    name: "RefireCheckTimer".to_owned(),
+                    rate: fire_interval,
+                    count,
+                    looping: true,
+                    paused: false,
+                })
+                .into_iter()
+                .collect(),
+        );
+    }
+    raw.header.recorder = "asamu_win 0.2.0".to_owned();
+    raw.header.optional_fields = vec![
+        "player.gun.state".to_owned(),
+        "player.gun.timers".to_owned(),
+    ];
+}
+
+// ---- the Python recorder (tools/trace-recorder)
+
+/// A Python 3.8+ interpreter on the PATH, if any.
+pub fn python() -> Option<&'static str> {
+    ["python3", "python"].into_iter().find(|p| {
+        std::process::Command::new(p)
+            .args([
+                "-c",
+                "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)",
+            ])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}
+
+/// `tools/trace-recorder`.
+pub fn recorder_dir() -> std::path::PathBuf {
+    repo_root().join("tools/trace-recorder")
+}
+
+/// Runs `py -I -B args...` and returns its standard output; panics with
+/// both streams when it fails.
+pub fn run_python(py: &str, args: &[&std::ffi::OsStr]) -> String {
+    let out = std::process::Command::new(py)
+        .args(["-I", "-B"])
+        .args(args)
+        .output()
+        .expect("python");
+    assert!(
+        out.status.success(),
+        "python {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The notes of the two converters agree: text for text, and the JSON notes
+/// (the state timeline, the older `init:` note, the markers) value for
+/// value. A line that begins like one of those and holds no JSON object is
+/// a note of the recording's header (a person's text, such as the session
+/// note `markers: see the stats file …` of every real recording made with
+/// recorder 0.2.0) and is compared as text.
+pub fn same_notes(py: &[String], rs: &[String]) {
+    assert_eq!(py.len(), rs.len(), "notes differ:\n{py:#?}\n{rs:#?}");
+    for (a, b) in py.iter().zip(rs) {
+        let json = [
+            asamu_trace::convert::INIT_NOTE_PREFIX,
+            asamu_trace::state::STATE_NOTE_PREFIX,
+            asamu_trace::segments::MARKERS_NOTE_PREFIX,
+        ]
+        .into_iter()
+        .find_map(|p| Some((a.strip_prefix(p)?, b.strip_prefix(p)?)))
+        .filter(|(ja, jb)| ja.starts_with('{') && jb.starts_with('{'));
+        match json {
+            Some((ja, jb)) => {
+                let va: serde_json::Value = serde_json::from_str(ja).expect("JSON note");
+                let vb: serde_json::Value = serde_json::from_str(jb).expect("JSON note");
+                assert_eq!(va, vb, "JSON notes differ");
+            }
+            None => assert_eq!(a, b),
+        }
+    }
+}
+
+/// The Python converter's traces for the raw file at `raw_path` (written
+/// into `out_dir`), with `extra` arguments; `count` traces are expected.
+pub fn python_convert(
+    py: &str,
+    raw_path: &std::path::Path,
+    out_dir: &std::path::Path,
+    extra: &[&std::ffi::OsStr],
+    count: usize,
+) -> Vec<Trace> {
+    std::fs::create_dir_all(out_dir).expect("out dir");
+    let core = recorder_dir().join("asamu_recorder_core.py");
+    let mut args: Vec<&std::ffi::OsStr> = vec![
+        core.as_os_str(),
+        "convert".as_ref(),
+        raw_path.as_os_str(),
+        "--out-dir".as_ref(),
+        out_dir.as_os_str(),
+    ];
+    args.extend_from_slice(extra);
+    let printed = run_python(py, &args);
+    assert_eq!(printed.lines().count(), count, "{printed}");
+    let name = raw_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("file name");
+    asamu_trace::convert::output_names(name, count)
+        .iter()
+        .map(|n| {
+            let text = std::fs::read_to_string(out_dir.join(n)).expect("trace");
+            Trace::from_jsonl_str(&text).expect("valid trace")
+        })
+        .collect()
+}
+
+/// Both converters' traces of one recording are the same: samples bit for
+/// bit, metadata, notes.
+pub fn same_traces(python: &[Trace], rust: &[asamu_trace::convert::Segment]) {
+    assert_eq!(python.len(), rust.len());
+    for (i, (p, seg)) in python.iter().zip(rust).enumerate() {
+        let r = &seg.trace;
+        assert_eq!(p.samples, r.samples, "segment {i}: samples differ");
+        assert_eq!(p.meta.format, r.meta.format);
+        assert_eq!(p.meta.schema_version, r.meta.schema_version);
+        assert_eq!(p.meta.source, r.meta.source);
+        assert_eq!(p.meta.game_build, r.meta.game_build);
+        assert_eq!(p.meta.level, r.meta.level);
+        assert_eq!(p.meta.tick_rate, r.meta.tick_rate);
+        assert_eq!(p.meta.units, r.meta.units);
+        same_notes(&p.meta.notes, &r.meta.notes);
+    }
 }

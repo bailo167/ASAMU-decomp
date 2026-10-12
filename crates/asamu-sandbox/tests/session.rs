@@ -690,8 +690,20 @@ fn teleport_to_the_crosshair_places_the_player_against_the_surface() {
     let settled = *game.player();
     assert!(settled.grounded);
     assert!((settled.position.truncate() - p.position.truncate()).length() < 0.01);
+    // Where it stands, measured from the crosshair's hit location. That
+    // location is the fire trace's hit as the original reports it: 0.5 uu
+    // before the surface along the trace on this BSP-kind floor (GRAPPLE.md
+    // G-AT-4), so `0.5 × |dir.z|` above the floor. The teleport puts the
+    // pawn's bottom 4 × 0.05 uu above that point, in the air; it falls the
+    // 0.27 uu and lands with a move under 1 uu, which is reported 0.1 uu
+    // short, and the landing tick's floor check adds 2.15 (NATIVE_PHYSICS.md
+    // 3.3, 4.4): 2.25 uu above the floor. (Before the fire trace reported
+    // its hit short, the location was on the floor, the pawn landed from
+    // 0.2 uu and stood within 0.01 uu of a spawned pawn's 2.20.)
+    let down = (aim.impact.location - aim.impact.start).normalize().z.abs();
     let height = settled.position.z - aim.impact.location.z;
-    assert!((height - resting_height()).abs() < 0.01, "{height}");
+    let expected = half_height + 0.1 + 2.15 - 0.5 * down;
+    assert!((height - expected).abs() < 0.01, "{height} vs {expected}");
 
     // Looking at the sky: nothing to stand against.
     let sky = game.eye_position() + Vec3::new(0.0, -1.0, 5.0);

@@ -68,9 +68,11 @@
 //!   `1 / s⁴` and are skipped for `s` above 100, and an edge axis is
 //!   skipped when the edge is within `asin(1e-4·s)` of the box's edge
 //!   (0.57° at scale 100). The consequence is the one described for convex
-//!   hulls below, at scales ten times larger. In the user's data 127
-//!   pawn-blocking placements of a mesh without a simple body are scaled
-//!   above 100 (NATIVE_PHYSICS.md 10.1).
+//!   hulls below, at scales ten times larger. For a scale that is not
+//!   uniform, a face axis goes when the scales on the other two axes
+//!   multiply to more than 10,000. In the user's data 20 pawn-blocking
+//!   placements of a mesh that is met at its triangles are that large (see
+//!   "Ours").
 //!
 //! **Convex hulls** (the simple-collision elements of a mesh: the convex
 //! element's check at 0x100AA5A70 with the per-axis test at 0x100AAD350 and
@@ -96,9 +98,13 @@
 //!   only when parallel. A skipped axis cannot separate, so the original's
 //!   solid is then larger than the hull: it reports edge and corner
 //!   contacts earlier. STRONG for that consequence (it follows from the
-//!   code; no recording has been compared with it yet). In the user's data
-//!   2,485 of the 13,564 pawn-blocking placements of a mesh with a simple
-//!   body are scaled above 10 and no volume is (NATIVE_PHYSICS.md 10.1).
+//!   code; no recording has been compared with it yet). For a scale that is
+//!   not uniform, a face axis goes when the scales on the other two axes
+//!   multiply to more than 100. In the user's data 2,162 of the 12,846
+//!   pawn-blocking placements of a mesh that is met at its simple body
+//!   lose at least one face axis that way (31,944 of the 89,412 shapes
+//!   placed for them; counted by `scene_simple_real_data`), and no volume
+//!   does.
 //! - The aggregate check takes an element only when its time is strictly
 //!   earlier than the best so far (convex elements first, then spheres,
 //!   boxes, sphyls), and maps the normal to world space as above.
@@ -144,23 +150,96 @@
 //!   its latest-entry axis is that same axis. A per-body switch turns this
 //!   off for convex elements.
 //!
+//! # The test before a convex element is swept
+//!
+//! The aggregate check (0x100AA4840) does not hand every trace to every
+//! convex element. For a trace with an extent it first compares bounds, in
+//! the element's own space (0x100AA4B22 to 0x100AA4E64, CONFIRMED by reading
+//! it): the box `[-extent, extent]` is carried through the inverse matrix and
+//! half the size of its bounds there is the box's half size in that space;
+//! the smaller and the larger of the sweep's start and end on each axis,
+//! widened by that half size plus 0.1 (the float at 0x1016457B8), are the
+//! sweep's bounds; an element whose stored bounds (its vertices' box) lie
+//! entirely beyond them on any axis is skipped, and touching counts. A
+//! zero-extent trace goes to every element without this test.
+//!
+//! With every axis tested this changes nothing (a contact implies that the
+//! bounds meet). With axes left out it is what confines the contact: the
+//! box is stopped by an element's extended face planes only where the
+//! sweep's bounds reach the element's bounds. [`convex_precheck`] is that
+//! test.
+//!
+//! The matrix the check inverts is the placement's own: the component hands
+//! the aggregate check a matrix with its rows divided by the component's
+//! total scale, and that scale as a vector, and the aggregate check
+//! multiplies the two again (`UPrimitiveComponent::GetTransformAndScale` at
+//! 0x100533640, called by the brush component's check at 0x100759CFF;
+//! CONFIRMED for brushes, STRONG for static meshes, whose call is through
+//! the component's table). A component whose scale is below 1e-4 on all
+//! three axes gets the identity instead.
+//!
 //! # Ours
 //!
-//! Triangles and convex hulls: the original's axes in its order with its
-//! tie rule, but in world space with unit vectors, where only an edge axis
-//! below 1e-8 (a parallel pair) is skipped. For triangles that is the
-//! original's test at scale 1. Ours therefore always tests the box's face
-//! axes and tests edge axes the original skips: equal to the original for
-//! a mesh at scale 1 (for a convex body: at scale 1 with edges parallel to
-//! the world axes or more than 0.57° from them), and otherwise never
-//! earlier than the original and sometimes later (see the skip rules above).
-//! The movement code does not sweep the box yet, the scene has no simple
-//! bodies, and none of its volumes is scaled above 10 or turned other than
-//! by quarter turns about Z. Before meshes placed at a scale above 100 and
-//! bodies placed at a scale above 10 are swept by the pawn's box, the
-//! scene has to apply the original's skip rules (it has both transforms at
-//! hand). A recording of a walk against the edge of such a mesh would show
-//! the difference.
+//! [`sweep_triangle`] and [`sweep_hull`] are the exact geometry: the
+//! original's axes in its order with its tie rule, in world space with unit
+//! vectors, where only an edge axis below 1e-8 (a parallel pair) is skipped.
+//! For triangles that is the original's test at scale 1; for a convex body,
+//! at scale 1 with every edge parallel to a world axis or more than 0.57°
+//! from it.
+//!
+//! [`sweep_triangle_skipping`] and [`sweep_hull_skipping`] take an
+//! [`AxisSkip`], the original's rule for leaving axes out, and
+//! [`convex_precheck`] is the test above. The scene applies them to every
+//! instance under `NativeRule` ([`super`]), with the box's edges carried
+//! into the element's space by the instance's own inverse transform (for a
+//! volume, whose hulls are stored in world space, by the inverse of its
+//! component's transform). What is reproduced and what is not:
+//!
+//! - **Convex elements: the rule as read.** Face axes of the box, the
+//!   stored face directions, the stored edge directions crossed with the
+//!   box's edges, each left out by the 1e-4 threshold on the unnormalised
+//!   vector, and the bounds test before. Evaluated in `f64` in world space
+//!   (an axis in the element's space and its image in world space separate
+//!   the same pairs), where the original works in `f32` in the element's
+//!   space: a vector whose squared length is within rounding of 1e-4 can
+//!   fall on the other side. One more test is ours: a solid that loses a
+//!   face axis of the box is swept only when the sweep itself (not only its
+//!   bounds) passes the solid's widened bounds, which is what lets the
+//!   search for candidates stay a search in a hierarchy. The two differ for
+//!   a long sweep that runs past such a solid at an angle in the solid's
+//!   space, far enough for its bounds to reach where the sweep does not: the
+//!   original could then be stopped by the solid's extended face planes away
+//!   from the solid, and ours is not. A pawn's moves are a few units long.
+//! - **Triangles: the edge axes as read, the face axes kept.** An edge axis
+//!   is left out by the 1e-8 threshold on the unnormalised vector (within
+//!   `asin(0.0001 × scale)` of a box edge). The box's own face axes are
+//!   always tested, although the original leaves one out when the mesh's
+//!   scales on the other two axes multiply to more than 10,000: what then
+//!   confines a contact in the original is its collision tree, whose node
+//!   boxes are not in the converted data (MESHES.md, "Collision": the node
+//!   bytes are not decoded). In the user's data 20 pawn-blocking placements
+//!   of a mesh that is met at its triangles are that large (13 in
+//!   AG-ParadiseCave, 7 in AG-BeautifulCity; counted by
+//!   `scene_simple_real_data`). For those ours is the exact contact where
+//!   the original's can come earlier at corners. UNKNOWN by how much.
+//!   Under the rule a triangle is tested when the sweep passes the
+//!   triangle's own bounds in the mesh's space; with the exact test that
+//!   is implied.
+//! - **Box elements:** exact (their own routine's axis order was not read),
+//!   never under the rule.
+//! - **BSP:** exact, through the triangle test.
+//!
+//! The consequence of the rule for a convex solid placed at a scale above
+//! 10 (two scales multiplying to more than 100): the box's own face axes do
+//! not separate, so where an edge or a corner of the solid would have met a
+//! face of the box, the box is stopped earlier, by the planes of the
+//! solid's faces pushed out by the box, as far as the bounds test reaches
+//! (the solid's bounds in its own space widened by the box and by 0.1 of
+//! its own units, that is 0.1 × scale in the world). Above scale 100 no edge
+//! axis is left either. STRONG: it follows from the code; no recording has
+//! been compared with it yet. A walk off the edge of a large platform whose
+//! sides lean inwards would show it: the pawn should still be carried a
+//! short way past the rim.
 //!
 //! For a sweep that starts in contact ours keeps the convention of the rest
 //! of this collision code instead ([`super::cylinder`]): an axis on which
@@ -193,6 +272,138 @@ use super::cylinder::triangle_normal;
 /// Used for hulls as well: the original's convex test compares with 1e-4,
 /// but vectors that are not unit (see the module docs, "Convex hulls").
 const PARALLEL_EPS2: f64 = 1.0e-8;
+
+/// Squared length below which the original's convex test leaves an axis out
+/// (the double at 0x1016393A0 in the user's macOS executable).
+pub const CONVEX_MIN_AXIS_LENGTH2: f64 = 1.0e-4;
+/// The same for the original's triangle test (the double at 0x101645800).
+pub const TRIANGLE_MIN_AXIS_LENGTH2: f64 = 1.0e-8;
+/// What the original's aggregate check adds to the swept box, in the units
+/// of the element's own space, before it compares that box with a convex
+/// element's bounds (the float at 0x1016457B8; see [`convex_precheck`]).
+pub const CONVEX_PRECHECK_PAD: f64 = 0.1;
+
+/// The original's rule for leaving separating axes out (module docs,
+/// "Triangles" and "Convex hulls"): it tests in the space of what is hit,
+/// with the box's edge directions carried into that space and **not**
+/// normalised, and skips an axis whose squared length is under a fixed
+/// threshold. So which axes take part depends on the placement's scale.
+///
+/// [`sweep_triangle`] and [`sweep_hull`] know nothing of this (they test
+/// every axis that is not degenerate, which is the exact geometry);
+/// [`sweep_triangle_skipping`] and [`sweep_hull_skipping`] apply it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxisSkip {
+    /// The box's three edge directions in the space the original tests in:
+    /// the images of the world X, Y and Z axes under the world → element
+    /// transform (the rows of the inverse of the placement's matrix), as
+    /// long as one over the scale.
+    pub box_edges: [DVec3; 3],
+    /// Squared length under which an axis is left out.
+    pub min_length2: f64,
+    /// Whether the box's own three face axes are subject to the rule
+    /// (`false`: they are always tested).
+    pub face_axes: bool,
+}
+
+impl AxisSkip {
+    /// The rule of the original's convex-element check
+    /// ([`CONVEX_MIN_AXIS_LENGTH2`], face axes included).
+    #[must_use]
+    pub fn convex(box_edges: [DVec3; 3]) -> Self {
+        Self {
+            box_edges,
+            min_length2: CONVEX_MIN_AXIS_LENGTH2,
+            face_axes: true,
+        }
+    }
+
+    /// The edge-axis part of the rule of the original's triangle check
+    /// ([`TRIANGLE_MIN_AXIS_LENGTH2`]). The box's face axes stay: the
+    /// original skips them too (for a mesh whose scales on the other two
+    /// axes multiply to more than 10,000), but what then bounds a contact is
+    /// its collision tree's node boxes, which the converted data does not
+    /// have (module docs, "Ours").
+    #[must_use]
+    pub fn triangles(box_edges: [DVec3; 3]) -> Self {
+        Self {
+            box_edges,
+            min_length2: TRIANGLE_MIN_AXIS_LENGTH2,
+            face_axes: false,
+        }
+    }
+
+    /// `true` when the box's face axis `axis` (0 = X, 1 = Y, 2 = Z) is left
+    /// out: the original forms it as the cross product of the other two
+    /// carried edges.
+    #[must_use]
+    pub fn skips_face(&self, axis: usize) -> bool {
+        if !self.face_axes {
+            return false;
+        }
+        let j = (axis + 1) % 3;
+        let k = (axis + 2) % 3;
+        match (self.box_edges.get(j), self.box_edges.get(k)) {
+            (Some(a), Some(b)) => self.too_short(a.cross(*b)),
+            _ => true,
+        }
+    }
+
+    /// `true` when the axis "edge direction × box edge `box_edge`" is left
+    /// out. `edge` is the edge's direction in world space (any length): the
+    /// original crosses the unit direction in the element's space with the
+    /// carried box edge.
+    #[must_use]
+    pub fn skips_edge(&self, edge: DVec3, box_edge: usize) -> bool {
+        let [x, y, z] = self.box_edges;
+        let local = x * edge.x + y * edge.y + z * edge.z;
+        let (Some(unit), Some(b)) = (local.try_normalize(), self.box_edges.get(box_edge)) else {
+            return true;
+        };
+        self.too_short(unit.cross(*b))
+    }
+
+    /// `true` when the axis `v` is left out: its squared length is under the
+    /// threshold (a vector that is not a number counts as left out).
+    fn too_short(&self, v: DVec3) -> bool {
+        let l2 = v.length_squared();
+        l2.is_nan() || l2 < self.min_length2
+    }
+}
+
+/// The original's test before a convex element is swept at all
+/// (`FKAggregateGeom::LineCheck`, 0x100AA4CDC to 0x100AA4E64 in the user's
+/// macOS executable, CONFIRMED by reading it): in the element's own space,
+/// the bounds of the whole sweep (the smaller and the larger of the start and
+/// the end on every axis, widened by the box's half sizes in that space plus
+/// [`CONVEX_PRECHECK_PAD`]) must reach the element's bounds on all three
+/// axes; touching counts. The box's half sizes in that space are half the
+/// bounds of the box `[-extent, extent]` carried through the inverse matrix.
+///
+/// `start` and `end` are the sweep's ends, `half` those half sizes, and
+/// `[elem_min, elem_max]` the element's bounds, all in the element's space.
+/// A value that is not finite anywhere answers `false`.
+#[must_use]
+pub fn convex_precheck(
+    start: DVec3,
+    end: DVec3,
+    half: DVec3,
+    elem_min: DVec3,
+    elem_max: DVec3,
+) -> bool {
+    if !(start.is_finite()
+        && end.is_finite()
+        && half.is_finite()
+        && elem_min.is_finite()
+        && elem_max.is_finite())
+    {
+        return false;
+    }
+    let pad = half + DVec3::splat(CONVEX_PRECHECK_PAD);
+    let lo = start.min(end) - pad;
+    let hi = start.max(end) + pad;
+    elem_min.cmple(hi).all() && lo.cmple(elem_max).all()
+}
 
 /// Running state of one sweep against one convex obstacle.
 struct Sat {
@@ -346,6 +557,31 @@ fn cross_axis(a: DVec3, b: DVec3) -> Option<DVec3> {
     (l2.is_finite() && l2 >= PARALLEL_EPS2).then(|| c / l2.sqrt())
 }
 
+/// The unit axis `a × b` under the original's rule `skip` (`edge` is the
+/// obstacle's edge direction, `box_edge` the index of the box's edge), or
+/// under ours without one: only a parallel pair gives no axis.
+fn edge_axis(
+    edge: DVec3,
+    box_edge: usize,
+    a: DVec3,
+    b: DVec3,
+    skip: Option<&AxisSkip>,
+) -> Option<DVec3> {
+    match skip {
+        None => cross_axis(a, b),
+        Some(rule) => {
+            if rule.skips_edge(edge, box_edge) {
+                return None;
+            }
+            let c = a.cross(b);
+            let l2 = c.length_squared();
+            (l2.is_finite() && l2 > 0.0)
+                .then(|| c / l2.sqrt())
+                .filter(|l| l.is_finite())
+        }
+    }
+}
+
 /// Sweeps the axis-aligned box with half extents `e` and centre `s + t·d`,
 /// `t ∈ [0, limit]` (`limit ≤ 1`), against the triangle `v`. `outward`
 /// makes the triangle one-sided: it is ignored when the box centre starts
@@ -363,6 +599,38 @@ pub fn sweep_triangle(
     tol: f64,
     limit: f64,
 ) -> Option<Contact> {
+    sweep_triangle_impl(s, d, e, v, outward, tol, limit, None)
+}
+
+/// [`sweep_triangle`] with the original's rule for leaving axes out (see
+/// [`AxisSkip`]): an axis the rule skips cannot separate the two, so the
+/// contact is never later than [`sweep_triangle`]'s and can be earlier.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn sweep_triangle_skipping(
+    s: DVec3,
+    d: DVec3,
+    e: DVec3,
+    v: &[DVec3; 3],
+    outward: Option<DVec3>,
+    tol: f64,
+    limit: f64,
+    skip: &AxisSkip,
+) -> Option<Contact> {
+    sweep_triangle_impl(s, d, e, v, outward, tol, limit, Some(skip))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sweep_triangle_impl(
+    s: DVec3,
+    d: DVec3,
+    e: DVec3,
+    v: &[DVec3; 3],
+    outward: Option<DVec3>,
+    tol: f64,
+    limit: f64,
+    skip: Option<&AxisSkip>,
+) -> Option<Contact> {
     if !valid_query(s, d, e, tol, limit) || !v.iter().all(|p| p.is_finite()) {
         return None;
     }
@@ -379,6 +647,9 @@ pub fn sweep_triangle(
     }
     let mut sat = Sat::new(e, d, tol, limit.min(1.0));
     for a in FACE_ORDER {
+        if skip.is_some_and(|rule| rule.skips_face(a)) {
+            continue;
+        }
         let (lo, hi) = range_axis(&w, a);
         if !sat.axis(AXES[a], lo, hi) {
             return None;
@@ -395,9 +666,9 @@ pub fn sweep_triangle(
         (w[2] - w[1]).normalize_or_zero(),
         (w[0] - w[2]).normalize_or_zero(),
     ];
-    for b in AXES {
+    for (bi, b) in AXES.into_iter().enumerate() {
         for edge in edges {
-            if let Some(l) = cross_axis(b, edge) {
+            if let Some(l) = edge_axis(edge, bi, b, edge, skip) {
                 let (lo, hi) = range(&w, l);
                 if !sat.axis(l, lo, hi) {
                     return None;
@@ -426,6 +697,53 @@ pub fn sweep_hull(
     tol: f64,
     limit: f64,
 ) -> Option<Contact> {
+    sweep_hull_impl(s, d, e, vertices, face_dirs, edge_dirs, tol, limit, None)
+}
+
+/// [`sweep_hull`] with the original's rule for leaving axes out (see
+/// [`AxisSkip`]; the caller also applies [`convex_precheck`]). An axis the
+/// rule skips cannot separate the two, so the contact is never later than
+/// [`sweep_hull`]'s and can be earlier: with the box's own face axes left
+/// out, the box is stopped by the hull's face planes pushed out by the box
+/// and by the edge axes that remain, with no bevel where the others were.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn sweep_hull_skipping(
+    s: DVec3,
+    d: DVec3,
+    e: DVec3,
+    vertices: &[DVec3],
+    face_dirs: &[DVec3],
+    edge_dirs: &[DVec3],
+    tol: f64,
+    limit: f64,
+    skip: &AxisSkip,
+) -> Option<Contact> {
+    sweep_hull_impl(
+        s,
+        d,
+        e,
+        vertices,
+        face_dirs,
+        edge_dirs,
+        tol,
+        limit,
+        Some(skip),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sweep_hull_impl(
+    s: DVec3,
+    d: DVec3,
+    e: DVec3,
+    vertices: &[DVec3],
+    face_dirs: &[DVec3],
+    edge_dirs: &[DVec3],
+    tol: f64,
+    limit: f64,
+    skip: Option<&AxisSkip>,
+) -> Option<Contact> {
     if !valid_query(s, d, e, tol, limit)
         || vertices.is_empty()
         || !vertices.iter().all(|p| p.is_finite())
@@ -435,6 +753,9 @@ pub fn sweep_hull(
     let mut sat = Sat::new(e, d, tol, limit.min(1.0));
     // The world axes first: they are also the cheap rejection of far hulls.
     for a in FACE_ORDER {
+        if skip.is_some_and(|rule| rule.skips_face(a)) {
+            continue;
+        }
         let (lo, hi) = range_axis(vertices, a);
         if !sat.axis(AXES[a], lo - s[a], hi - s[a]) {
             return None;
@@ -448,8 +769,8 @@ pub fn sweep_hull(
         }
     }
     for &edge in edge_dirs {
-        for b in AXES {
-            if let Some(l) = cross_axis(edge, b) {
+        for (bi, b) in AXES.into_iter().enumerate() {
+            if let Some(l) = edge_axis(edge, bi, edge, b, skip) {
                 let (lo, hi) = range(vertices, l);
                 let p = s.dot(l);
                 if !sat.axis(l, lo - p, hi - p) {

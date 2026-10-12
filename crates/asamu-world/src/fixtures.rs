@@ -5,6 +5,20 @@
 //! (`levels/<map>.scene.json`, `.bsp.json`/`.bsp.bin`, `meshes/manifest.json`
 //! and glTF files), built entirely from geometry chosen by the test. Used by
 //! the loader and gameplay tests here and in `asamu-game`.
+//!
+//! # Two manifest versions
+//!
+//! [`MeshFixtures::write`] writes a mesh manifest of **version 1**, the
+//! format before the simple collision was converted: the loader then
+//! collides the pawn with every mesh's triangles and says in a warning that
+//! this is approximate. [`MeshFixtures::write_v2`] writes **version 2**, as
+//! the importer does today: every mesh has its switches, and its simple
+//! body when one was given ([`MeshFixtures::add_convex`],
+//! [`MeshFixtures::add_solid_box`], ...). As in the original, a version 2
+//! mesh that was given no body does not stop the pawn at all
+//! (`docs/PARITY_FINDINGS.md` P1), so a test world built for version 2 gives
+//! its floors and walls a body or stores their box switch `false`
+//! ([`MeshFixtures::set_switches`]).
 
 use std::collections::BTreeMap;
 
@@ -19,6 +33,143 @@ pub type MeshData = (Vec<[f32; 3]>, Vec<[u32; 3]>);
 
 /// A converted mesh: package, vertices, triangles, packages with a variant.
 type MeshEntry = (String, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<String>);
+
+/// The simple collision of a fixture mesh (manifest version 2).
+#[derive(Clone, Debug)]
+struct SimpleFixture {
+    use_box: bool,
+    use_line: bool,
+    body: bool,
+    convex: Vec<Value>,
+    boxes: Vec<Value>,
+    spheres: Vec<Value>,
+    sphyls: Vec<Value>,
+}
+
+impl Default for SimpleFixture {
+    /// The original's defaults: both switches on, no body.
+    fn default() -> Self {
+        Self {
+            use_box: true,
+            use_line: true,
+            body: false,
+            convex: Vec::new(),
+            boxes: Vec::new(),
+            spheres: Vec::new(),
+            sphyls: Vec::new(),
+        }
+    }
+}
+
+/// A convex element of a shapes document (`<Name>.collision.json`) for the
+/// closed convex polyhedron `vertices`/`triangles`, with the lists the
+/// original stores per element written the way it writes them: one plane
+/// per face (normal outward), one face-normal direction per direction
+/// (parallel faces share one), one edge direction per direction of an edge
+/// between two faces that are not coplanar, and the vertices' bounds.
+#[must_use]
+pub fn convex_element(vertices: &[[f32; 3]], triangles: &[[u32; 3]]) -> Value {
+    use glam::DVec3;
+    let p = |i: u32| {
+        vertices
+            .get(i as usize)
+            .map_or(DVec3::ZERO, |v| Vec3::from_array(*v).as_dvec3())
+    };
+    let n = vertices.len().max(1) as f64;
+    let centre = vertices
+        .iter()
+        .map(|v| Vec3::from_array(*v).as_dvec3())
+        .sum::<DVec3>()
+        / n;
+    // Outward unit normal of every triangle (None for a collapsed one).
+    let normals: Vec<Option<DVec3>> = triangles
+        .iter()
+        .map(|t| {
+            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+            let n = (b - a).cross(c - a).try_normalize()?;
+            Some(if n.dot(a - centre) < 0.0 { -n } else { n })
+        })
+        .collect();
+    let same = |a: DVec3, b: DVec3| a.cross(b).length_squared() < 1.0e-10;
+    let mut planes: Vec<[f32; 4]> = Vec::new();
+    let mut seen_planes: Vec<(DVec3, f64)> = Vec::new();
+    let mut face_dirs: Vec<DVec3> = Vec::new();
+    for (t, n) in triangles.iter().zip(&normals) {
+        let Some(n) = *n else { continue };
+        let d = n.dot(p(t[0]));
+        if !seen_planes
+            .iter()
+            .any(|(m, e)| same(*m, n) && m.dot(n) > 0.0 && (e - d).abs() < 1.0e-4)
+        {
+            seen_planes.push((n, d));
+            planes.push([n.x as f32, n.y as f32, n.z as f32, d as f32]);
+        }
+        if !face_dirs.iter().any(|m| same(*m, n)) {
+            face_dirs.push(n);
+        }
+    }
+    // Edges by their end points; an edge is one of the solid when the faces
+    // on its two sides are not coplanar (or it has one side only).
+    let mut edges: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    for (ti, t) in triangles.iter().enumerate() {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            if a != b {
+                edges.entry((a.min(b), a.max(b))).or_default().push(ti);
+            }
+        }
+    }
+    let mut edge_dirs: Vec<DVec3> = Vec::new();
+    for ((a, b), faces) in &edges {
+        let coplanar = match faces.as_slice() {
+            [f, g] => match (normals.get(*f), normals.get(*g)) {
+                (Some(Some(m)), Some(Some(n))) => same(*m, *n) && m.dot(*n) > 0.0,
+                _ => false,
+            },
+            _ => false,
+        };
+        if coplanar {
+            continue;
+        }
+        if let Some(d) = (p(*b) - p(*a)).try_normalize()
+            && !edge_dirs.iter().any(|m| same(*m, d))
+        {
+            edge_dirs.push(d);
+        }
+    }
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for v in vertices {
+        lo = lo.min(Vec3::from_array(*v));
+        hi = hi.max(Vec3::from_array(*v));
+    }
+    let dirs = |list: &[DVec3]| -> Vec<[f32; 3]> {
+        list.iter()
+            .map(|d| [d.x as f32, d.y as f32, d.z as f32])
+            .collect()
+    };
+    json!({
+        "vertices": vertices,
+        "planes": planes,
+        "face_triangles": triangles,
+        "edge_directions": dirs(&edge_dirs),
+        "face_normal_directions": dirs(&face_dirs),
+        "bounds_min": lo.to_array(),
+        "bounds_max": hi.to_array(),
+    })
+}
+
+/// A row-vector matrix that only moves to `origin` (for the shapes of a
+/// body).
+#[must_use]
+pub fn shape_origin(origin: Vec3) -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [origin.x, origin.y, origin.z, 1.0],
+    ]
+}
 
 /// A box as 8 vertices and 12 triangles (outward winding irrelevant: the
 /// loader orients hull normals itself).
@@ -365,6 +516,29 @@ impl SceneFixture {
         )
     }
 
+    /// A `DynamicBlockingVolume` box with its `bEnabled` switch (blocks the
+    /// player, not traces, while it collides).
+    pub fn dynamic_blocking_volume(&mut self, min: Vec3, max: Vec3, enabled: bool) -> usize {
+        let n = format!("DynamicBlockingVolume_{}", self.actors.len());
+        let slot = self.brush_actor(
+            &n,
+            "Engine.DynamicBlockingVolume",
+            "blocking_volume",
+            min,
+            max,
+            true,
+            true,
+        );
+        self.set(slot, "params", json!({"bEnabled": enabled}));
+        slot
+    }
+
+    /// Sets a top-level value of the actor in `slot` (for tests that need a
+    /// stored flag the helpers do not offer).
+    pub fn set_actor_value(&mut self, slot: usize, key: &str, value: Value) {
+        self.set(slot, key, value);
+    }
+
     /// A `Trigger` cylinder.
     pub fn trigger(&mut self, location: Vec3, radius: f32, half_height: f32) -> usize {
         let p = Place::at(location);
@@ -528,6 +702,7 @@ impl SceneFixture {
 #[derive(Clone, Debug, Default)]
 pub struct MeshFixtures {
     meshes: BTreeMap<String, MeshEntry>,
+    simple: BTreeMap<String, SimpleFixture>,
 }
 
 impl MeshFixtures {
@@ -559,10 +734,96 @@ impl MeshFixtures {
         }
     }
 
-    /// Writes `meshes/manifest.json` and one glTF + bin per mesh, with the
-    /// collision as a `UCX_` node (`ucx`) or only as render sections with
-    /// `EnableCollision` (the loader's fallback).
+    /// Stores the mesh's two simple-collision switches as the original's
+    /// meshes do when they differ from the default `true`
+    /// (`UseSimpleBoxCollision` for swept traces, `UseSimpleLineCollision`
+    /// for line traces). Version 2 only.
+    pub fn set_switches(&mut self, path: &str, use_box: bool, use_line: bool) {
+        let s = self.simple.entry(path.to_owned()).or_default();
+        s.use_box = use_box;
+        s.use_line = use_line;
+    }
+
+    /// Gives the mesh a body setup without any shape yet (the other
+    /// `add_*` shape methods do this themselves). Version 2 only.
+    pub fn add_body(&mut self, path: &str) {
+        self.simple.entry(path.to_owned()).or_default().body = true;
+    }
+
+    /// Adds the closed convex polyhedron `vertices`/`triangles` (mesh local
+    /// space) to the mesh's simple body as a convex element
+    /// ([`convex_element`]). Version 2 only.
+    pub fn add_convex(&mut self, path: &str, vertices: &[[f32; 3]], triangles: &[[u32; 3]]) {
+        self.add_convex_raw(path, convex_element(vertices, triangles));
+    }
+
+    /// Adds a convex element as written (`vertices`, `planes`,
+    /// `face_triangles`, `edge_directions`, `face_normal_directions`,
+    /// `bounds_min`, `bounds_max`), for elements whose lists the test wants
+    /// to choose. Version 2 only.
+    pub fn add_convex_raw(&mut self, path: &str, element: Value) {
+        let s = self.simple.entry(path.to_owned()).or_default();
+        s.body = true;
+        s.convex.push(element);
+    }
+
+    /// Adds a box element of full edge lengths `size` centred on `origin`
+    /// (mesh local space, unrotated). Version 2 only.
+    pub fn add_box_shape(&mut self, path: &str, origin: Vec3, size: Vec3) {
+        let s = self.simple.entry(path.to_owned()).or_default();
+        s.body = true;
+        s.boxes.push(json!({
+            "transform": shape_origin(origin), "size": size.to_array(),
+            "no_rb_collision": false, "per_poly_shape": false,
+        }));
+    }
+
+    /// Adds a sphere element. Version 2 only.
+    pub fn add_sphere_shape(&mut self, path: &str, origin: Vec3, radius: f32) {
+        let s = self.simple.entry(path.to_owned()).or_default();
+        s.body = true;
+        s.spheres.push(json!({
+            "transform": shape_origin(origin), "radius": radius,
+            "no_rb_collision": false, "per_poly_shape": false,
+        }));
+    }
+
+    /// Adds a capsule element (its segment of `length` along local Z).
+    /// Version 2 only.
+    pub fn add_sphyl_shape(&mut self, path: &str, origin: Vec3, radius: f32, length: f32) {
+        let s = self.simple.entry(path.to_owned()).or_default();
+        s.body = true;
+        s.sphyls.push(json!({
+            "transform": shape_origin(origin), "radius": radius, "length": length,
+            "no_rb_collision": false, "per_poly_shape": false,
+        }));
+    }
+
+    /// Adds the box `[min, max]` as a mesh whose simple body is that same
+    /// box as one convex element: what a plain solid block is in the
+    /// original (triangles for bullet traces, the body for the pawn).
+    pub fn add_solid_box(&mut self, path: &str, package: &str, min: Vec3, max: Vec3) {
+        let (v, t) = box_mesh(min, max);
+        self.add_convex(path, &v, &t);
+        self.add(path, package, v, t);
+    }
+
+    /// Writes `meshes/manifest.json` (version 1: no simple-collision data)
+    /// and one glTF + bin per mesh, with the collision as a `UCX_` node
+    /// (`ucx`) or only as render sections with `EnableCollision` (the
+    /// loader's fallback).
     pub fn write(&self, src: &mut MemorySource, ucx: bool) {
+        self.write_version(src, ucx, 1);
+    }
+
+    /// [`Self::write`] with a version 2 manifest: every mesh has its
+    /// `simple_collision` record, and a mesh with a body its
+    /// `.collision.json` file.
+    pub fn write_v2(&self, src: &mut MemorySource, ucx: bool) {
+        self.write_version(src, ucx, 2);
+    }
+
+    fn write_version(&self, src: &mut MemorySource, ucx: bool, version: u32) {
         let mut entries = serde_json::Map::new();
         for (path, (package, v, t, differs)) in &self.meshes {
             let stem = path.replace(['.', '@'], "_");
@@ -611,9 +872,28 @@ impl MeshFixtures {
             });
             src.insert(format!("meshes/{gltf}"), doc.to_string().into_bytes());
             src.insert(format!("meshes/{bin_name}"), bin);
-            entries.insert(
-                path.clone(),
-                json!({
+            let simple = self.simple.get(path).cloned().unwrap_or_default();
+            let shapes = format!("{package}/{stem}.collision.json");
+            if version >= 2 && simple.body {
+                let shapes_doc = json!({
+                    "format": "asamu-simple-collision",
+                    "version": 1,
+                    "notice": "synthetic test data",
+                    "space": "mesh local space, UE3 axes, Unreal units, unscaled",
+                    "mesh": path,
+                    "body_setup": format!("{path}.RB_BodySetup_0"),
+                    "body_properties": {},
+                    "convex": simple.convex,
+                    "boxes": simple.boxes,
+                    "spheres": simple.spheres,
+                    "sphyls": simple.sphyls,
+                });
+                src.insert(
+                    format!("meshes/{shapes}"),
+                    shapes_doc.to_string().into_bytes(),
+                );
+            }
+            let mut entry = json!({
                     "package": package,
                     "export_index": 1,
                     "also_in": [],
@@ -631,11 +911,35 @@ impl MeshFixtures {
                     "bounds_ue": {"origin": [0.0, 0.0, 0.0], "box_extent": [0.0, 0.0, 0.0], "sphere_radius": 0.0},
                     "scale": 1.0,
                     "content_hash": "0",
-                }),
-            );
+            });
+            if version >= 2
+                && let Some(e) = entry.as_object_mut()
+            {
+                e.insert(
+                    "simple_collision".to_owned(),
+                    json!({
+                        "use_simple_box_collision": simple.use_box,
+                        "use_simple_line_collision": simple.use_line,
+                        "use_simple_rigid_body_collision": true,
+                        "has_body_setup": simple.body,
+                        "shapes": if simple.body { Value::from(shapes) } else { Value::Null },
+                        "convex": simple.convex.len(),
+                        "boxes": simple.boxes.len(),
+                        "spheres": simple.spheres.len(),
+                        "sphyls": simple.sphyls.len(),
+                    }),
+                );
+                if simple.body {
+                    e.insert(
+                        "body_setup".to_owned(),
+                        json!(format!("{path}.RB_BodySetup_0")),
+                    );
+                }
+            }
+            entries.insert(path.clone(), entry);
         }
         let manifest = json!({
-            "version": 1,
+            "version": version,
             "notice": "synthetic test data",
             "coordinates": "glTF",
             "scale": 1.0,

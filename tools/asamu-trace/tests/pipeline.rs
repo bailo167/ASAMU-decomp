@@ -11,6 +11,7 @@ use std::process::Command;
 use asamu_player::Trace;
 use asamu_player::trace::{CompareTolerances, TraceGrappleState, compare};
 use asamu_player::ue3_movement::TARGET_FLOOR_DIST;
+use asamu_player::world::PULL_BACK_MAX;
 use asamu_trace::compare::{
     CompareOptions, CompareSummary, FovPolicy, Verdict, compare_traces, compare_traces_with,
 };
@@ -834,8 +835,13 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
         .capsule_half_height
         .value;
     // The start platform's top is z = 0: a walking pawn's centre rests the
-    // half height and the native hover distance above it.
-    let rest = half_height + TARGET_FLOOR_DIST;
+    // half height, the native hover distance and the pull-back of the floor
+    // check above it. The floor check keeps the pawn where its 28 uu trace
+    // reports the floor 2.15 uu away, and the original reports a hit on BSP,
+    // a brush or a simple body min(0.1 x 28, 1.0) = 1.0 uu short
+    // (PARITY_FINDINGS.md V2 and V18: 72 + 44 + 2.15 + 1.0 = 119.15 in the
+    // Workshop; `asamu_player::world::pull_back`). So 44 + 2.15 + 1.0.
+    let rest = half_height + TARGET_FLOOR_DIST + PULL_BACK_MAX;
 
     // 10 uu inside the platform.
     let inside = recorded(-10.0, None);
@@ -887,7 +893,7 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
     assert!(!r.start_overlaps);
     assert!(!has(&r, "overlaps our collision"));
 
-    // 5 uu above its rest height, walking: our floor check re-seats it.
+    // 5 uu above where the run starts, walking: our floor check re-seats it.
     let high = recorded(5.0, None);
     let r = replay(&high, &ReplayOptions::default()).unwrap();
     assert!(!r.start_overlaps);
@@ -895,11 +901,15 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
     assert!(
         has(
             &r,
+            // The true distance, and the one the floor check reports: the
+            // 28 uu trace against this BSP-kind floor is reported
+            // min(0.1 x 28, 1.0) = 1.0 uu short (`PULL_BACK_MAX`).
             &format!(
-                "start: our floor is {:.3} uu below the pawn at the recorded position (our floor \
-                 check rests a pawn 2.15 uu above its floor and leaves a based one alone between \
-                 1.9 and 2.4)",
-                z0 - half_height
+                "start: our floor is {:.3} uu below the pawn at the recorded position, which \
+                 our floor check reports as {:.3} uu (it holds a pawn at a reported 2.15 uu and \
+                 leaves a based one alone between 1.9 and 2.4)",
+                z0 - half_height,
+                z0 - half_height - PULL_BACK_MAX
             )
         ),
         "{:#?}",
@@ -907,15 +917,20 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
     );
     assert!(has(&r, "the recording names no base actor at this tick"));
     assert_eq!(r.trace.samples[1].position.z, rest, "re-seated by the rule");
+    // Our pawn goes to its rest height; the recording's goes where the run
+    // 5 uu lower went. The two moves differ by more than the hover band is
+    // wide (2.4 - 1.9 = 0.5 uu), which is what the warning is for.
+    let ours_move = f64::from(rest) - f64::from(z0);
+    let original_move = f64::from(high.samples[1].position.z) - f64::from(z0);
+    let apart = ours_move - original_move;
+    assert!(apart.abs() > 0.5, "{apart}");
     assert!(
         has(
             &r,
             &format!(
-                "warning: in the first tick our pawn moves {:+.4} uu vertically and the original \
-                 {:+.4} uu while both walk: -5.0000 uu apart, more than the width of the native \
-                 hover band (0.5 uu)",
-                f64::from(rest) - f64::from(z0),
-                f64::from(high.samples[1].position.z) - f64::from(z0)
+                "warning: in the first tick our pawn moves {ours_move:+.4} uu vertically and the \
+                 original {original_move:+.4} uu while both walk: {apart:+.4} uu apart, more \
+                 than the width of the native hover band (0.5 uu)"
             )
         ),
         "{:#?}",
@@ -933,13 +948,14 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
         r.trace.meta.notes
     );
 
-    // Inside the hover band (2.3 uu above the floor, between 1.9 and 2.4):
-    // a pawn with a recorded base is left where it stands, as the native
-    // floor check leaves a based pawn; without one it is re-seated at 2.15.
-    let in_band = half_height + 2.3;
-    let dz = in_band - fits.samples[0].position.z;
+    // Inside the hover band (the floor check reports the floor 2.3 uu away,
+    // between 1.9 and 2.4: a true 3.3 uu with the pull-back of 1.0): a pawn
+    // with a recorded base is left where it stands, as the native floor
+    // check leaves a based pawn; without one it is re-seated at 2.15.
+    let dz = half_height + 2.3 + PULL_BACK_MAX - fits.samples[0].position.z;
     let based = recorded(dz, Some(common::FLOOR_ACTOR));
-    assert_eq!(based.samples[0].position.z, in_band);
+    let in_band = based.samples[0].position.z;
+    assert!((in_band - (half_height + 2.3 + PULL_BACK_MAX)).abs() < 1e-4);
     let r = replay(&based, &ReplayOptions::default()).unwrap();
     assert!(
         has(&r, "based (recorded base StaticMeshActor_1)"),
@@ -1495,4 +1511,1036 @@ fn check_recorder_command() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(text.contains(" 0 failed"), "{text}");
+}
+
+/// The `state:` note of `trace` carries, tick for tick, what the optional
+/// members of the raw records `records` hold (record `k` is sample `k`).
+fn state_note_has_the_optional_members(trace: &Trace, records: &[asamu_trace::raw::RawRecord]) {
+    let timeline = StateTimeline::from_notes(&trace.meta.notes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(trace.samples.len(), records.len());
+    for (k, r) in records.iter().enumerate() {
+        let p = r.player.as_ref().unwrap();
+        let gun = p.gun.as_ref().unwrap();
+        let s = timeline.at(k as u64).unwrap().unwrap();
+        assert_eq!(s.eye_height, p.eye_height, "tick {k}");
+        assert_eq!(s.base_eye_height, p.base_eye_height, "tick {k}");
+        assert_eq!(s.base_level, p.base_level.clone().flatten(), "tick {k}");
+        assert_eq!(s.floor, p.floor.map(|n| n.to_array()), "tick {k}");
+        assert_eq!(
+            (s.cylinder_radius, s.cylinder_half_height),
+            (
+                p.cylinder.map(|c| c.radius),
+                p.cylinder.map(|c| c.half_height)
+            ),
+            "tick {k}"
+        );
+        assert_eq!(s.weapon_state, gun.state.clone().flatten(), "tick {k}");
+        assert_eq!(
+            s.gun_timers,
+            gun.timers.as_ref().map(|t| t.len() as u32),
+            "tick {k}"
+        );
+        let refire = gun.refire_timer();
+        assert_eq!(s.refire_rate, refire.map(|t| t.rate), "tick {k}");
+        assert_eq!(s.refire_count, refire.map(|t| t.count), "tick {k}");
+    }
+}
+
+/// The recorder's own test records a fake game with recorder 0.2.0, every
+/// optional member in every record (`test_win_glue.py --keep`). The Rust
+/// tool reads that file as it is, converts it with the camera's FOV rule
+/// and the recorded state, and agrees with the Python converter; the
+/// version-1 view of the same recording converts to the same samples but
+/// for the FOV it cannot show.
+#[test]
+fn a_recording_of_recorder_0_2_0_converts_with_the_rust_tool() {
+    let Some(py) = common::python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let kept = d.join("kept");
+    let glue = common::recorder_dir().join("test_win_glue.py");
+    let out = common::run_python(py, &[glue.as_os_str(), "--keep".as_ref(), kept.as_os_str()]);
+    assert!(out.contains("win glue test ok"), "{out}");
+    let raw_path = kept.join("win-glue-optional.raw.jsonl");
+    if !raw_path.is_file() {
+        // The glue test says so when the optional layout is not deployed.
+        assert!(out.contains("optional-field tests skipped"), "{out}");
+        eprintln!("skipped: the recorder's optional layout file is not there");
+        return;
+    }
+
+    // Read as it is: typed, nothing refused.
+    let raw = RawFile::from_str_lines(&std::fs::read_to_string(&raw_path).unwrap()).unwrap();
+    assert_eq!(raw.header.recorder, "asamu_win 0.2.0");
+    assert_eq!(raw.header.version, 1);
+    assert_eq!(
+        raw.header.optional_fields,
+        asamu_trace::raw::OPTIONAL_FIELDS
+    );
+    assert!(
+        raw.header
+            .optional_layout
+            .clone()
+            .flatten()
+            .is_some_and(|id| id.ends_with("-optional"))
+    );
+    assert_eq!(raw.records.len(), 70);
+    let counts = raw.optional_counts();
+    assert_eq!(counts.len(), asamu_trace::raw::OPTIONAL_FIELDS.len());
+    assert!(counts.values().all(|n| *n == 70), "{counts:?}");
+    let v = run_ok(bin().arg("validate").arg(&raw_path));
+    assert!(
+        v.contains("raw v1 (asamu_win 0.2.0), 70 records, 70 usable, 1 convertible segment(s)"),
+        "{v}"
+    );
+    assert!(
+        v.contains("optional members (layout ")
+            && v.contains("-optional), of 70 records with a player: "),
+        "{v}"
+    );
+    assert!(
+        v.contains("player.fov_locked on 70") && v.contains("player.gun.timers on 70"),
+        "{v}"
+    );
+    assert!(
+        !v.contains("not announced") && !v.contains("in no record"),
+        "{v}"
+    );
+
+    // Converted by the Rust tool.
+    let out_dir = d.join("rust");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&raw_path)
+            .arg("--out-dir")
+            .arg(&out_dir),
+    );
+    let trace = asamu_trace::read_trace(&out_dir.join("win-glue-optional.trace.jsonl")).unwrap();
+    assert_eq!(trace.samples.len(), 70);
+    // The camera's rule, record by record: the fake game locks the FOV at
+    // 50 while its grapple button is held (two holds, 12 frames) and leaves
+    // the cached view FOV at 90.
+    let mut locked = 0;
+    for (s, r) in trace.samples.iter().zip(&raw.records) {
+        let p = r.player.as_ref().unwrap();
+        assert_eq!(p.fov_camera, Some(90.0));
+        if p.fov_locked == Some(true) {
+            assert_eq!(p.fov_lock, Some(50.0));
+            assert_eq!(s.fov, 50.0, "frame {}", r.frame);
+            locked += 1;
+        } else {
+            assert_eq!(s.fov, 90.0, "frame {}", r.frame);
+        }
+    }
+    assert_eq!(locked, 12, "the two holds of the fake game's script");
+    let notes = &trace.meta.notes;
+    assert!(
+        notes.iter().any(|n| n
+            == "fov: camera FOV lock read (bLockedFOV, LockedFOV) on 70 of 70 samples: the FOV \
+                is the locked FOV while the lock is set (12 samples), else the cached view FOV"),
+        "{notes:#?}"
+    );
+    assert!(!notes.iter().any(|n| n.starts_with("fov: cached view FOV")));
+    assert!(!notes.iter().any(|n| n.starts_with("check:")), "{notes:#?}");
+    state_note_has_the_optional_members(&trace, &raw.records);
+    // The values vary in that recording (a constant would prove little).
+    let timeline = StateTimeline::from_notes(notes).unwrap().unwrap();
+    let states: Vec<_> = (0..70).map(|k| timeline.at(k).unwrap().unwrap()).collect();
+    let distinct = |f: &dyn Fn(&asamu_trace::state::TickState) -> String| {
+        states
+            .iter()
+            .map(f)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    };
+    assert_eq!(distinct(&|s| format!("{:?}", s.weapon_state)), 2);
+    assert_eq!(distinct(&|s| format!("{:?}", s.base_level)), 2);
+    assert_eq!(distinct(&|s| format!("{:?}", s.floor)), 2);
+    assert!(distinct(&|s| format!("{:?}", s.refire_count)) >= 6);
+    assert_eq!(
+        (states[0].cylinder_radius, states[0].cylinder_half_height),
+        (Some(21.0), Some(44.0))
+    );
+
+    // The Python converter writes the same trace.
+    let python = common::python_convert(py, &raw_path, &d.join("python"), &[], 1);
+    assert_eq!(python[0].samples, trace.samples);
+    common::same_notes(&python[0].meta.notes, &trace.meta.notes);
+
+    // The recorder's version-1 view of the same recording: the same
+    // samples, but its FOV column is the cached view FOV and says so.
+    let view_path = kept.join("v1").join("win-glue-optional.raw.jsonl");
+    let view = RawFile::from_str_lines(&std::fs::read_to_string(&view_path).unwrap()).unwrap();
+    assert!(view.optional_counts().is_empty() && view.header.optional_fields.is_empty());
+    let view_dir = d.join("view");
+    std::fs::create_dir_all(&view_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&view_path)
+            .arg("--out-dir")
+            .arg(&view_dir),
+    );
+    let plain = asamu_trace::read_trace(&view_dir.join("win-glue-optional.trace.jsonl")).unwrap();
+    assert_eq!(plain.samples.len(), 70);
+    for (a, b) in trace.samples.iter().zip(&plain.samples) {
+        assert_eq!(b.fov, 90.0);
+        let mut same = *a;
+        same.fov = b.fov;
+        assert_eq!(&same, b, "tick {}", a.tick);
+    }
+    assert!(plain.meta.notes.iter().any(|n| n
+        == "fov: cached view FOV (the camera's CameraCache.POV.FOV) on 70 of 70 samples: a \
+            locked camera FOV (the zoom) does not show in it"));
+    let state = plain
+        .meta
+        .notes
+        .iter()
+        .find(|n| n.starts_with("state: "))
+        .unwrap();
+    for key in ["floor", "weapon_state", "refire", "cylinder", "base_level"] {
+        assert!(!state.contains(key), "{key} in a version-1 state note");
+    }
+    // In a comparison the zoom now counts: against the view, the 12 locked
+    // samples differ by 40 degrees and the FOV is in the verdict.
+    let s = compare_traces(
+        "0.2.0",
+        &trace,
+        "trace made blind",
+        &{
+            let mut t = plain.clone();
+            t.meta.notes.retain(|n| !n.starts_with("fov:"));
+            t
+        },
+        &CompareTolerances::default(),
+    );
+    assert!(s.fov.as_ref().unwrap().counted);
+    assert_eq!(s.verdict, Verdict::Diverged);
+
+    // With a sidecar next to it (as the recorder leaves one): the markers
+    // are in the listing, at the tick of their record.
+    let marked = d.join("marked");
+    std::fs::create_dir_all(&marked).unwrap();
+    let session = marked.join("session.raw.jsonl");
+    std::fs::copy(&raw_path, &session).unwrap();
+    let frame = |k: usize| raw.records[k].frame;
+    std::fs::write(
+        marked.join("session.stats.json"),
+        format!(
+            r#"{{"recorder":"asamu_win 0.2.0","records":70,"first_frame":{},"last_frame":{},
+                "stats":{{"drops":[],"drops_omitted":0}},
+                "markers":[
+                 {{"name":"zoom hold 1","id":"a","frame":{},"records":36,"state":"recording","utc":"2026-10-12T10:15:01Z"}},
+                 {{"name":"wall 45","id":"b","frame":{},"records":60,"state":"recording","utc":"2026-10-12T10:15:02Z"}}],
+                "markers_omitted":0}}"#,
+            frame(0),
+            frame(69),
+            frame(35),
+            frame(59)
+        ),
+    )
+    .unwrap();
+    run_ok(bin().arg("convert").arg(&session));
+    let listing = run_ok(
+        bin()
+            .arg("starts")
+            .arg(marked.join("session.trace.jsonl"))
+            .arg("--events"),
+    );
+    assert!(listing.contains(", 2 marker(s)\n"), "{listing}");
+    assert!(
+        listing.contains("\n        35 marker \"zoom hold 1\"\n"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("\n        59 marker \"wall 45\"\n"),
+        "{listing}"
+    );
+    let python = common::python_convert(py, &session, &d.join("python-marked"), &[], 1);
+    let rust = asamu_trace::read_trace(&marked.join("session.trace.jsonl")).unwrap();
+    assert_eq!(python[0].samples, rust.samples);
+    common::same_notes(&python[0].meta.notes, &rust.meta.notes);
+}
+
+/// A recording **and its sidecar as the recorder itself writes them**
+/// (`tests/common/fake_recording.py` runs the recorder's own recording loop
+/// on its fake game: markers set through its request files, a torn frame, a
+/// record written without its input). The sidecars of the other tests are
+/// written by hand; this one fails if the recorder and the strict reader of
+/// `asamu_trace::sidecar` stop agreeing on a member.
+///
+/// Every expectation is computed here from the two files with the rules of
+/// docs/TRACE_CAPTURE.md 3.3 and 3.6, not taken from a converter:
+/// a run is a stretch of consecutive frames and ends after a record the log
+/// lists as `no-input`; a marker is at tick `frame − first frame of its
+/// run`; the notes of the runs on both sides of a gap name every log entry
+/// that covers a missing frame.
+#[test]
+fn a_recorders_own_sidecar_gives_markers_and_dropped_frames() {
+    use asamu_trace::segments::{MarkerPlace, markers_of};
+    use asamu_trace::sidecar::RecorderLog;
+
+    let Some(py) = common::python() else {
+        eprintln!("skipped: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let kept = d.join("kept");
+    let driver = common::repo_root().join("tools/asamu-trace/tests/common/fake_recording.py");
+    let out = common::run_python(
+        py,
+        &[
+            driver.as_os_str(),
+            common::recorder_dir().as_os_str(),
+            kept.as_os_str(),
+        ],
+    );
+    let raw_path = kept.join("session.raw.jsonl");
+    let stats_path = kept.join("session.stats.json");
+    if !raw_path.is_file() {
+        assert!(out.contains("skipped: "), "{out}");
+        eprintln!("skipped: the recorder's optional layout file is not there");
+        return;
+    }
+    assert!(
+        out.contains("recorded 70 records with asamu_win 0.2.0"),
+        "{out}"
+    );
+
+    // The strict reader takes the recorder's file as it is.
+    let raw = RawFile::from_str_lines(&std::fs::read_to_string(&raw_path).unwrap()).unwrap();
+    let log = RecorderLog::read(&stats_path).unwrap();
+    log.check_belongs_to(&raw).unwrap();
+    assert_eq!(log.recorder.as_deref(), Some("asamu_win 0.2.0"));
+    let drops = log.drops.clone().expect("recorder 0.2.0 keeps a log");
+    let stats: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&stats_path).unwrap()).unwrap();
+    assert_eq!(
+        log.markers.len(),
+        stats["markers"].as_array().unwrap().len(),
+        "every marker of the file is read"
+    );
+    assert_eq!(
+        drops.len(),
+        stats["stats"]["drops"].as_array().unwrap().len()
+    );
+    // What the session did (fake_recording.py): four markers, the first
+    // before any record; a torn frame; a record without its input.
+    let names: Vec<&str> = log.markers.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["before anything", "scenario A", "zoom hold 1", "wall 45"]
+    );
+    assert_eq!(log.markers[0].frame, None);
+    assert!(log.markers[1..].iter().all(|m| m.frame.is_some()));
+    let torn: Vec<_> = drops.iter().filter(|e| e.reason == "torn").collect();
+    let no_input: Vec<_> = drops.iter().filter(|e| e.is_no_input()).collect();
+    assert_eq!((torn.len(), no_input.len()), (1, 1), "{drops:#?}");
+    assert_eq!(no_input[0].frame, no_input[0].last);
+
+    // The runs, from the frame numbers and the log alone.
+    let frames: Vec<u64> = raw.records.iter().map(|r| r.frame).collect();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for i in 1..=frames.len() {
+        let cut = i == frames.len()
+            || frames[i] != frames[i - 1] + 1
+            || frames[i - 1] == no_input[0].frame;
+        if cut {
+            if i - start >= 2 {
+                runs.push((start, i - 1));
+            }
+            start = i;
+        }
+    }
+    assert_eq!(runs.len(), 3, "{frames:?}");
+    // The torn frame lies between the first two runs, and the second run
+    // ends with the record that has no input.
+    assert!(frames[runs[0].1] < torn[0].frame && torn[0].frame < frames[runs[1].0]);
+    assert_eq!(frames[runs[1].1], no_input[0].frame);
+
+    // validate and convert find the sidecar next to the raw file.
+    let v = run_ok(bin().arg("validate").arg(&raw_path));
+    assert!(
+        v.contains("70 records, 70 usable, 3 convertible segment(s)"),
+        "{v}"
+    );
+    assert!(
+        v.contains(&format!(
+            "session.stats.json: 4 marker(s), dropped-frame log with {} entries for {} frame(s)",
+            drops.len(),
+            drops.iter().map(|e| e.count).sum::<u64>()
+        )),
+        "{v}"
+    );
+    let rust_dir = d.join("rust");
+    std::fs::create_dir_all(&rust_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&raw_path)
+            .arg("--out-dir")
+            .arg(&rust_dir),
+    );
+    let traces: Vec<Trace> = (0..3)
+        .map(|i| {
+            asamu_trace::read_trace(&rust_dir.join(format!("session.seg{i}.trace.jsonl"))).unwrap()
+        })
+        .collect();
+    assert!(!rust_dir.join("session.seg3.trace.jsonl").exists());
+
+    let mut placed = 0;
+    for (i, ((a, b), t)) in runs.iter().zip(&traces).enumerate() {
+        let (first, last) = (frames[*a], frames[*b]);
+        let notes = &t.meta.notes;
+        assert_eq!(t.samples.len(), b - a + 1, "run {i}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n == &format!("frames {first}..={last} (segment {} of 3)", i + 1)),
+            "{notes:#?}"
+        );
+        // Sample k is the state of record k of the run.
+        for (s, r) in t.samples.iter().zip(&raw.records[*a..=*b]) {
+            assert_eq!(s.position, r.player.as_ref().unwrap().location);
+        }
+
+        // Markers: at the tick of the record whose frame they carry; the
+        // one without a frame at the first tick of the first run.
+        let got: Vec<(u64, String, Option<u64>, MarkerPlace)> = markers_of(notes)
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.tick, m.name, m.frame, m.place))
+            .collect();
+        let mut want: Vec<(u64, String, Option<u64>, MarkerPlace)> = Vec::new();
+        for m in &log.markers {
+            match m.frame {
+                None if i == 0 => want.push((0, m.name.clone(), None, MarkerPlace::Before)),
+                Some(f) if first <= f && f <= last => {
+                    want.push((f - first, m.name.clone(), Some(f), MarkerPlace::At));
+                }
+                _ => {}
+            }
+        }
+        want.sort_by_key(|m| m.0);
+        assert_eq!(got, want, "run {i}");
+        for (tick, _, frame, place) in &got {
+            if *place == MarkerPlace::At {
+                assert_eq!(Some(raw.records[a + *tick as usize].frame), *frame);
+            }
+        }
+        placed += got.len();
+
+        // Dropped frames: the gap before and the gap after the run, each
+        // with every log entry (but the no-input ones) that covers one of
+        // its frames, in the recorder's words; and the record without its
+        // input, where the run ends with it.
+        let dropped: Vec<&String> = notes
+            .iter()
+            .filter(|n| n.starts_with("dropped: "))
+            .collect();
+        let gap = |side: &str, lo: u64, hi: u64| -> String {
+            let entries: Vec<String> = drops
+                .iter()
+                .filter(|e| !e.is_no_input() && e.frame <= hi && e.last >= lo)
+                .map(|e| {
+                    assert_eq!(e.frame, e.last, "one frame per entry in this session");
+                    format!(
+                        "{} {}: {}",
+                        e.frame,
+                        e.reason,
+                        e.detail.as_deref().expect("the recorder says why")
+                    )
+                })
+                .collect();
+            assert_eq!(
+                entries.len() as u64,
+                hi - lo + 1,
+                "every missing frame has its entry: {drops:#?}"
+            );
+            format!(
+                "dropped: {} frame(s) without a record {side} this run (frames {lo}..={hi}): {}",
+                hi - lo + 1,
+                entries.join("; ")
+            )
+        };
+        let mut expected: Vec<String> = Vec::new();
+        if *a > 0 && frames[a - 1] + 1 < first {
+            expected.push(gap("before", frames[a - 1] + 1, first - 1));
+        }
+        if last == no_input[0].frame {
+            expected.push(format!(
+                "dropped: the run ends with frame {last}, whose record was written without its \
+                 frame's input ({}): its keys are not used",
+                no_input[0]
+                    .detail
+                    .as_deref()
+                    .expect("the recorder says why")
+            ));
+        }
+        if b + 1 < frames.len() && last + 1 < frames[b + 1] {
+            expected.push(gap("after", last + 1, frames[b + 1] - 1));
+        }
+        assert_eq!(dropped, expected.iter().collect::<Vec<_>>(), "run {i}");
+        assert!(!expected.is_empty(), "run {i} has a gap next to it");
+    }
+    assert_eq!(placed, 4, "every marker is in exactly one run");
+    // The first marker says that it was set before there was a record.
+    assert!(
+        traces[0].meta.notes.iter().any(|n| n.starts_with(
+            "event: 2 marker(s) (set with the recorder's mark command; the tick is that of the \
+             last record written when the marker was taken): 0 \"before anything\" (set before \
+             the first record), "
+        )),
+        "{:#?}",
+        traces[0].meta.notes
+    );
+    let listing = run_ok(
+        bin()
+            .arg("starts")
+            .arg(rust_dir.join("session.seg0.trace.jsonl"))
+            .arg("--events"),
+    );
+    assert!(listing.contains(", 2 marker(s)\n"), "{listing}");
+    assert!(
+        listing.contains("\n        0 marker \"before anything\" (set before the first record)\n"),
+        "{listing}"
+    );
+    assert!(listing.contains(" marker \"scenario A\"\n"), "{listing}");
+
+    // The zoom is in the samples of every run, by the camera's rule.
+    let mut zoomed = 0;
+    for ((a, b), t) in runs.iter().zip(&traces) {
+        for (s, r) in t.samples.iter().zip(&raw.records[*a..=*b]) {
+            let p = r.player.as_ref().unwrap();
+            let want = if p.fov_locked == Some(true) {
+                zoomed += 1;
+                p.fov_lock.unwrap()
+            } else {
+                p.fov_camera.unwrap()
+            };
+            assert_eq!(s.fov, want, "frame {}", r.frame);
+        }
+    }
+    assert!(zoomed >= 8, "only {zoomed} zoomed samples");
+
+    // The Python converter finds the same sidecar and writes the same traces.
+    let python = common::python_convert(py, &raw_path, &d.join("python"), &[], 3);
+    for (p, r) in python.iter().zip(&traces) {
+        assert_eq!(p.samples, r.samples);
+        common::same_notes(&p.meta.notes, &r.meta.notes);
+    }
+
+    // Without the sidecar the frame gaps still end the runs (the record
+    // without its input is followed by a missing frame in this session), so
+    // the samples are the same; no marker and no reason is known.
+    let bare_dir = d.join("bare");
+    std::fs::create_dir_all(&bare_dir).unwrap();
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&raw_path)
+            .arg("--no-stats")
+            .arg("--out-dir")
+            .arg(&bare_dir),
+    );
+    for (i, t) in traces.iter().enumerate() {
+        let bare =
+            asamu_trace::read_trace(&bare_dir.join(format!("session.seg{i}.trace.jsonl"))).unwrap();
+        assert_eq!(bare.samples, t.samples, "run {i}");
+        assert!(
+            !bare.meta.notes.iter().any(|n| n.starts_with("dropped: ")
+                || n.starts_with("markers: ")
+                || n.contains("marker(s)")),
+            "{:#?}",
+            bare.meta.notes
+        );
+    }
+}
+
+/// The command line with a recording of recorder 0.2.0 and its sidecar: the
+/// zoom in the samples, the markers in the listing, the reason of a gap in
+/// the notes; and what is refused.
+#[test]
+fn command_line_zoom_markers_and_dropped_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let (mut raw, _) = common::scripted_recording(90, 1_000);
+    // Two frames are missing after record 60: frames 1000..=1060, 1063..=1092.
+    for r in raw.records.iter_mut().skip(61) {
+        r.frame += 2;
+    }
+    // The camera's FOV lock in every record, set on records 20..=29 with a
+    // locked FOV of 50 degrees.
+    let cached: Vec<f32> = raw
+        .records
+        .iter()
+        .map(|r| r.player.as_ref().unwrap().fov_camera.unwrap())
+        .collect();
+    for (i, r) in raw.records.iter_mut().enumerate() {
+        let p = r.player.as_mut().unwrap();
+        let locked = (20..30).contains(&i);
+        p.fov_default = Some(90.0);
+        p.fov_locked = Some(locked);
+        p.fov_lock = Some(if locked { 50.0 } else { 0.0 });
+    }
+    raw.header.recorder = "asamu_win 0.2.0".into();
+    raw.header.optional_fields = ["player.fov_default", "player.fov_lock", "player.fov_locked"]
+        .map(str::to_owned)
+        .to_vec();
+    raw.header.optional_layout = Some(Some("test-optional".into()));
+    let raw_path = d.join("walk.raw.jsonl");
+    write_raw(&raw, &raw_path);
+    let stats = r#"{"recorder":"asamu_win 0.2.0","records":91,"first_frame":1000,"last_frame":1092,
+        "stats":{"missed":2,"drops":[
+          {"frame":1061,"last":1062,"count":2,"reason":"missed","detail":"the counter advanced by 3 between two polls"}],
+          "drops_omitted":0},
+        "markers":[
+          {"name":"zoom hold 1","id":"a","frame":1020,"records":21,"state":"recording","utc":"2026-10-12T10:15:01Z"},
+          {"name":"second act","id":"b","frame":1062,"records":61,"state":"recording","utc":"2026-10-12T10:15:02Z"},
+          {"name":"wall","id":"c","frame":1070,"records":69,"state":"recording","utc":"2026-10-12T10:15:03Z"}],
+        "markers_omitted":0}"#;
+    std::fs::write(d.join("walk.stats.json"), stats).unwrap();
+
+    let listed = run_ok(bin().args(["convert", "--list"]).arg(&raw_path));
+    for want in [
+        "segment 0: frames 1000..=1060 (61 samples",
+        "segment 1: frames 1063..=1092 (30 samples",
+        "    fov: camera FOV lock read (bLockedFOV, LockedFOV) on 61 of 61 samples: the FOV is \
+         the locked FOV while the lock is set (10 samples), else the cached view FOV",
+        "    fov: camera FOV lock read (bLockedFOV, LockedFOV) on 30 of 30 samples: the FOV is \
+         the locked FOV while the lock is set (0 samples), else the cached view FOV",
+        // Frame 1020 is record 20 of the first run.
+        "    event: 1 marker(s) (set with the recorder's mark command; the tick is that of the \
+         last record written when the marker was taken): 20 \"zoom hold 1\"",
+        // Frame 1062 has no record: the next run's first tick. Frame 1070
+        // is record 1070 − 1063 = 7 of the second run.
+        "    event: 2 marker(s) (set with the recorder's mark command; the tick is that of the \
+         last record written when the marker was taken): 0 \"second act\" (set before this \
+         run, at frame 1062), 7 \"wall\"",
+        "    dropped: 2 frame(s) without a record after this run (frames 1061..=1062): \
+         1061..=1062 missed: the counter advanced by 3 between two polls",
+        "    dropped: 2 frame(s) without a record before this run (frames 1061..=1062): \
+         1061..=1062 missed: the counter advanced by 3 between two polls",
+    ] {
+        assert!(listed.contains(want), "{want}\n{listed}");
+    }
+    assert!(
+        !listed.contains("cached view FOV (the camera's"),
+        "{listed}"
+    );
+
+    run_ok(bin().arg("convert").arg(&raw_path));
+    let seg0 = asamu_trace::read_trace(&d.join("walk.seg0.trace.jsonl")).unwrap();
+    for (k, s) in seg0.samples.iter().enumerate() {
+        let want = if (20..30).contains(&k) {
+            50.0
+        } else {
+            cached[k]
+        };
+        assert_eq!(s.fov, want, "tick {k}");
+    }
+    let starts = |name: &str| run_ok(bin().arg("starts").arg(d.join(name)).arg("--events"));
+    let l0 = starts("walk.seg0.trace.jsonl");
+    assert!(l0.contains(", 1 marker(s)\n"), "{l0}");
+    assert!(l0.contains("\n        20 marker \"zoom hold 1\"\n"), "{l0}");
+    let l1 = starts("walk.seg1.trace.jsonl");
+    assert!(
+        l1.contains("\n        0 marker \"second act\" (set before this run, at frame 1062)\n"),
+        "{l1}"
+    );
+    assert!(l1.contains("\n        7 marker \"wall\"\n"), "{l1}");
+
+    // Without the sidecar: the same samples, no marker, no reason.
+    let bare = d.join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    run_ok(
+        bin()
+            .args(["convert", "--no-stats", "--out-dir"])
+            .arg(&bare)
+            .arg(&raw_path),
+    );
+    let b0 = asamu_trace::read_trace(&bare.join("walk.seg0.trace.jsonl")).unwrap();
+    assert_eq!(b0.samples, seg0.samples);
+    assert!(!b0.meta.notes.iter().any(|n| n.starts_with("markers: ")
+        || n.starts_with("dropped: ")
+        || n.contains("marker(s)")));
+    let expected: Vec<&String> = seg0
+        .meta
+        .notes
+        .iter()
+        .filter(|n| {
+            !(n.starts_with("markers: ") || n.starts_with("dropped: ") || n.contains("marker(s)"))
+        })
+        .collect();
+    assert_eq!(b0.meta.notes.iter().collect::<Vec<_>>(), expected);
+    assert!(!starts("bare/walk.seg0.trace.jsonl").contains("marker"));
+
+    // A sidecar named on the command line; one of another recording is
+    // refused, and the message says how to go on without it.
+    let named = d.join("named");
+    std::fs::create_dir_all(&named).unwrap();
+    let elsewhere = d.join("elsewhere.json");
+    std::fs::write(&elsewhere, stats).unwrap();
+    let copy = named.join("copy.raw.jsonl");
+    write_raw(&raw, &copy);
+    run_ok(
+        bin()
+            .arg("convert")
+            .arg(&copy)
+            .arg("--stats")
+            .arg(&elsewhere),
+    );
+    assert_eq!(
+        asamu_trace::read_trace(&named.join("copy.seg0.trace.jsonl")).unwrap(),
+        seg0
+    );
+    let wrong = d.join("wrong.json");
+    std::fs::write(&wrong, stats.replace("\"records\":91", "\"records\":90")).unwrap();
+    let refused = bin()
+        .arg("convert")
+        .arg(&copy)
+        .arg("--stats")
+        .arg(&wrong)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("not this recording's: they count 90 records, the raw file has 91")
+            && err.contains("--no-stats"),
+        "{err}"
+    );
+    let both = bin()
+        .arg("convert")
+        .arg(&copy)
+        .arg("--no-stats")
+        .arg("--stats")
+        .arg(&wrong)
+        .output()
+        .unwrap();
+    assert_eq!(both.status.code(), Some(2));
+    std::fs::write(&wrong, "{\"markers\":[{\"name\":\"x\"}]}").unwrap();
+    let broken = bin()
+        .arg("convert")
+        .arg(&copy)
+        .arg("--stats")
+        .arg(&wrong)
+        .output()
+        .unwrap();
+    assert_eq!(broken.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&broken.stderr).contains("invalid recorder stats"),
+        "{}",
+        String::from_utf8_lossy(&broken.stderr)
+    );
+
+    // validate: what the recording has, and what its sidecar holds.
+    let v = run_ok(bin().arg("validate").arg(&raw_path));
+    assert!(
+        v.contains("raw v1 (asamu_win 0.2.0), 91 records, 91 usable, 2 convertible segment(s)"),
+        "{v}"
+    );
+    assert!(
+        v.contains(
+            "    optional members (layout test-optional), of 91 records with a player: \
+             player.fov_default on 91, player.fov_lock on 91, player.fov_locked on 91\n"
+        ),
+        "{v}"
+    );
+    assert!(
+        v.contains(
+            "walk.stats.json: 3 marker(s), dropped-frame log with 1 entries for 2 frame(s)\n"
+        ),
+        "{v}"
+    );
+    // A member the header does not announce is read and named; one nobody
+    // writes is refused, as is a header that announces one.
+    let mut extra = raw.clone();
+    extra.records[5].player.as_mut().unwrap().base_eye_height = Some(38.0);
+    extra.header.optional_fields.push("player.walk_bob".into());
+    extra.header.optional_fields.sort();
+    let extra_path = d.join("extra.raw.jsonl");
+    write_raw(&extra, &extra_path);
+    let v = run_ok(bin().arg("validate").arg(&extra_path));
+    assert!(
+        v.contains("player.base_eye_height on 1 (not announced in the header)")
+            && v.contains("; announced but in no record: player.walk_bob\n"),
+        "{v}"
+    );
+    let text = raw.to_jsonl_string().unwrap();
+    for (bad, why) in [
+        (
+            text.replacen(
+                "\"fov_locked\":false",
+                "\"fov_locked\":false,\"fov_zoom\":50.0",
+                1,
+            ),
+            "unknown field `fov_zoom`",
+        ),
+        (
+            text.replacen("\"player.fov_default\"", "\"player.fov_zoom\"", 1),
+            "does not know: \"player.fov_zoom\"",
+        ),
+        (
+            text.replacen("\"fov_locked\":false", "\"fov_locked\":null", 1),
+            "invalid raw record",
+        ),
+    ] {
+        assert_ne!(bad, text);
+        let path = d.join("bad.raw.jsonl");
+        std::fs::write(&path, bad).unwrap();
+        let out = bin().arg("validate").arg(&path).output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("INVALID raw recording") && said.contains(why),
+            "{said}"
+        );
+    }
+}
+
+/// The header notes of a real recording made with recorder 0.2.0, as the
+/// recorder's session command writes them (`tools/trace-recorder/
+/// win_remote.sh session NAME TEXT`: `--note "session: TEXT"` and `--note
+/// "markers: see the stats file (set with win_remote.sh mark)"`; the first
+/// such recording, 2026-10-12, has both in each of its 7 runs). The second
+/// begins with the word the converter's own JSON line begins with, and the
+/// header notes follow that line in a trace's notes. `starts` must list the
+/// markers of the sidecar all the same, and list a run without markers
+/// instead of failing on the person's note (it failed with "invalid
+/// markers: note" on every run of that recording).
+#[test]
+fn the_session_note_of_a_real_recording_is_not_the_markers_line() {
+    use asamu_trace::segments::markers_of;
+
+    const SESSION_NOTES: [&str; 2] = [
+        "session: keyboard and mouse, section 6 scenarios",
+        "markers: see the stats file (set with win_remote.sh mark)",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let (mut raw, _) = common::scripted_recording(90, 1_000);
+    // Two frames are missing after record 60: frames 1000..=1060, 1063..=1092.
+    for r in raw.records.iter_mut().skip(61) {
+        r.frame += 2;
+    }
+    raw.header.recorder = "asamu_win 0.2.0".into();
+    raw.header.notes.extend(SESSION_NOTES.map(str::to_owned));
+    let raw_path = d.join("km.raw.jsonl");
+    write_raw(&raw, &raw_path);
+    // One marker, in the first run: frame 1020 is its record 20.
+    let stats = r#"{"recorder":"asamu_win 0.2.0","records":91,"first_frame":1000,"last_frame":1092,
+        "stats":{"drops":[
+          {"frame":1061,"last":1062,"count":2,"reason":"unconfirmed","detail":"the tick start of the frame was not seen"}],
+          "drops_omitted":0},
+        "markers":[
+          {"name":"wall 45","id":"a","frame":1020,"records":21,"state":"recording","utc":"2026-10-12T06:30:00Z"}],
+        "markers_omitted":0}"#;
+    std::fs::write(d.join("km.stats.json"), stats).unwrap();
+    run_ok(bin().arg("convert").arg(&raw_path));
+
+    let seg0 = asamu_trace::read_trace(&d.join("km.seg0.trace.jsonl")).unwrap();
+    let seg1 = asamu_trace::read_trace(&d.join("km.seg1.trace.jsonl")).unwrap();
+    for t in [&seg0, &seg1] {
+        // The person's notes are in the trace as they were written, after
+        // the converter's own lines about the run.
+        for note in SESSION_NOTES {
+            assert_eq!(
+                t.meta.notes.iter().filter(|n| *n == note).count(),
+                1,
+                "{note}"
+            );
+        }
+    }
+    let at = |t: &Trace, start: &str| t.meta.notes.iter().position(|n| n.starts_with(start));
+    assert!(
+        at(&seg0, "markers: {").unwrap() < at(&seg0, "markers: see").unwrap(),
+        "the case the reader must get right: {:?}",
+        seg0.meta.notes
+    );
+    // The first run has the sidecar's marker at tick 1020 - 1000 = 20; the
+    // second has none, and no converter's line.
+    let m0 = markers_of(&seg0.meta.notes).unwrap();
+    assert_eq!(
+        m0.iter()
+            .map(|m| (m.tick, m.name.as_str(), m.frame))
+            .collect::<Vec<_>>(),
+        [(20, "wall 45", Some(1020))]
+    );
+    assert_eq!(at(&seg1, "markers: {"), None);
+    assert!(markers_of(&seg1.meta.notes).unwrap().is_empty());
+
+    let starts = |name: &str| run_ok(bin().arg("starts").arg(d.join(name)).arg("--events"));
+    let l0 = starts("km.seg0.trace.jsonl");
+    assert!(l0.contains(", 1 marker(s)\n"), "{l0}");
+    assert!(l0.contains("\n        20 marker \"wall 45\"\n"), "{l0}");
+    let l1 = starts("km.seg1.trace.jsonl");
+    assert!(!l1.contains("marker"), "{l1}");
+    // The same listing as without the person's notes, apart from the marker.
+    let plain_dir = d.join("plain");
+    std::fs::create_dir_all(&plain_dir).unwrap();
+    let mut plain = raw.clone();
+    plain
+        .header
+        .notes
+        .retain(|n| !SESSION_NOTES.contains(&n.as_str()));
+    let plain_path = plain_dir.join("km.raw.jsonl");
+    write_raw(&plain, &plain_path);
+    run_ok(bin().args(["convert", "--no-stats"]).arg(&plain_path));
+    let p1 = run_ok(
+        bin()
+            .arg("starts")
+            .arg(plain_dir.join("km.seg1.trace.jsonl"))
+            .arg("--events"),
+    );
+    let body = |text: &str| text.split_once('\n').map(|(_, rest)| rest.to_owned());
+    assert_eq!(body(&l1), body(&p1), "the listing below the file's line");
+
+    // A replay of such a run starts as it would without the notes.
+    let out = d.join("ours.jsonl");
+    let replayed = run_ok(
+        bin()
+            .arg("replay")
+            .arg(d.join("km.seg0.trace.jsonl"))
+            .arg("--out")
+            .arg(&out)
+            .args(["--compare", "--tol-angle", "1e-6"]),
+    );
+    assert!(
+        replayed.contains("61 samples") && out.is_file(),
+        "{replayed}"
+    );
+
+    // The Python converter writes the same notes (it copies the header's
+    // too), and the comparison of the two takes the person's line as text.
+    let Some(py) = common::python() else {
+        eprintln!("skipped (the Python part): no python3");
+        return;
+    };
+    let python = common::python_convert(py, &raw_path, &d.join("py"), &[], 2);
+    let rust = asamu_trace::convert::convert(
+        &raw,
+        &asamu_trace::convert::ConvertOptions {
+            log: Some(asamu_trace::sidecar::RecorderLog::from_json_str(stats).unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(rust[0].trace, seg0);
+    common::same_traces(&python, &rust);
+}
+
+/// The weapon's firing state and refire timer of a recording of recorder
+/// 0.2.0 are compared with ours after every tick: a fake original of our
+/// own run agrees on every tick, and one altered at a single record shows
+/// that record's tick and the amount.
+#[test]
+fn weapon_state_and_refire_timer_are_compared_with_the_recording() {
+    let steps = common::script(110);
+    let (mut raw, ours) = common::scripted_steps(&steps, 100, false);
+    let states = common::our_states(&steps);
+    let interval = asamu_player::PlayerParams::asamu_original()
+        .gun
+        .as_ref()
+        .unwrap()
+        .fire_interval
+        .value;
+    common::with_our_weapon(&mut raw, &states, interval);
+    // The run fires (the grapple button is held for thirty ticks). Ticks
+    // 1..=110 are compared; `running` of them have a refire check on our
+    // side, which the recording then has too.
+    let firing: Vec<usize> = (1..=110)
+        .filter(|k| states[*k].script.gun.weapon == asamu_player::grapple_gun::WeaponState::Firing)
+        .collect();
+    let running = (1..=110)
+        .filter(|k| states[*k].script.gun.refire_timer.is_some())
+        .count();
+    assert!(firing.len() >= 20 && running >= 20, "{firing:?}");
+    let fake = common::fake_original(&raw, &ours);
+    let r = replay(&fake, &ReplayOptions::default()).unwrap();
+    let agreeing = r
+        .trace
+        .meta
+        .notes
+        .iter()
+        .find(|n| n.starts_with("state check: after each of 110 tick(s) our "))
+        .unwrap_or_else(|| panic!("{:#?}", r.trace.meta.notes));
+    assert!(
+        agreeing.contains("the weapon's firing state (1 WeaponFiring, 0 Active)"),
+        "{agreeing}"
+    );
+    assert!(
+        has(
+            &r,
+            &format!(
+                "state check: our refire timer equals the recorded RefireCheckTimer count after \
+                 each of {running} tick(s) on which both run"
+            )
+        ),
+        "{:#?}",
+        r.trace.meta.notes
+    );
+
+    // One record says otherwise: at a firing tick the recorded timer is
+    // 0.01 s further, and at another the recorded weapon is Active.
+    let (k_timer, k_state) = (firing[3], firing[7]);
+    let mut altered = raw.clone();
+    let gun_at = |raw: &mut RawFile, k: usize, change: &dyn Fn(&mut asamu_trace::raw::RawGun)| {
+        change(
+            raw.records[k]
+                .player
+                .as_mut()
+                .and_then(|p| p.gun.as_mut())
+                .unwrap(),
+        );
+    };
+    gun_at(&mut altered, k_timer, &|g| {
+        g.timers.as_mut().unwrap()[0].count += 0.01;
+    });
+    gun_at(&mut altered, k_state, &|g| {
+        g.state = Some(Some("Active".into()));
+    });
+    let fake = common::fake_original(&altered, &ours);
+    let r = replay(&fake, &ReplayOptions::default()).unwrap();
+    assert!(
+        has(
+            &r,
+            &format!(
+                "state check: our refire timer differs from the recorded RefireCheckTimer count \
+                 after 1 of {running} tick(s) on which both run; largest difference 0.010000 s at \
+                 tick {k_timer} "
+            )
+        ),
+        "{:#?}",
+        r.trace.meta.notes
+    );
+    assert!(
+        has(
+            &r,
+            &format!(
+                "state check: the weapon's firing state (1 WeaponFiring, 0 Active) differs from \
+                 the recording's after 1 of 110 tick(s) (first at tick {k_state}: ours 1, \
+                 recorded 0)"
+            )
+        ),
+        "{:#?}",
+        r.trace.meta.notes
+    );
+    // A version-1 recording has neither note.
+    let (plain, ours) = common::scripted_steps(&steps, 100, false);
+    let r = replay(
+        &common::fake_original(&plain, &ours),
+        &ReplayOptions::default(),
+    )
+    .unwrap();
+    assert!(!has(&r, "refire timer") && !has(&r, "firing state"));
 }

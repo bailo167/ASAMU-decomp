@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+asamu-assets.workspace = true
 asamu-core.workspace = true
 glam.workspace = true
 serde.workspace = true

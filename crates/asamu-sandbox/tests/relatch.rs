@@ -505,7 +505,15 @@ fn a_changed_cylinder_keeps_a_standing_pawn_on_its_feet() {
     assert_eq!(game.player().position.z, before.position.z + lift);
     assert!(game.player().pawn.force_floor_check);
     assert_eq!(game.player().velocity, before.velocity);
-    // It keeps standing where it stood: no fall, no landing.
+    // It keeps standing: no fall, no landing. The floor check the retune
+    // forces does what the pawn's next step would have done: a fresh pawn
+    // stands 2.20 uu above the floor (the start's 0.05 uu plus the first
+    // floor check's 2.15), which the 28 uu check reports as 1.20 (the
+    // original's pull-back, 1.0 uu on this BSP-kind floor: NATIVE_PHYSICS.md
+    // 10.2); that is under 1.9, so the pawn is moved up by 2.15 − 1.20 =
+    // 0.95 uu, to the hover, and stays. (Before the port applied the
+    // pull-back a fresh pawn stood at the hover and the check moved nothing.)
+    let reseated = 0.95;
     for i in 0..60 {
         let r = game.tick(&idle()).unwrap();
         assert!(game.player().grounded, "tick {i}");
@@ -514,11 +522,14 @@ fn a_changed_cylinder_keeps_a_standing_pawn_on_its_feet() {
             "tick {i}: {r:?}"
         );
         let feet = game.player().position.z - taller.movement.capsule_half_height.value;
-        assert!((feet - feet_before).abs() < 0.5, "tick {i}: feet at {feet}");
+        assert!(
+            (feet - feet_before - reseated).abs() < 1e-3,
+            "tick {i}: feet at {feet}"
+        );
     }
-    // And shrinking back puts the centre back.
+    // And shrinking back puts the centre back, on the same feet.
     retune(&mut game, PlayerParams::asamu_original()).unwrap();
-    assert!((game.player().position.z - before.position.z).abs() < 0.5);
+    assert!((game.player().position.z - before.position.z - reseated).abs() < 1e-3);
     ticks(&mut game, &idle(), 30);
     assert!(game.player().grounded);
 

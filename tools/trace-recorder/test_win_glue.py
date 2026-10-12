@@ -1382,7 +1382,22 @@ def test_optional_fields(keep=None):
         for a in r1:
             ok(set(a) == set(core.V1_RECORD) and set(a["player"]) == set(core.V1_PLAYER) and set(a["player"]["gun"]) == set(core.V1_GUN))
         full, plain = core.convert_raw(header, records), core.convert_raw(h1, r1)
-        ok(len(full) == len(plain) == 1 and full[0][1] == plain[0][1], "the optional fields change no sample")
+        # (WP-T3, 2026-10-12: this was `full[0][1] == plain[0][1]`, "the
+        # optional fields change no sample". The converter now applies the
+        # camera's FOV rule, PARITY_FINDINGS.md V19: the sample's FOV is
+        # LockedFOV while bLockedFOV is set, else the cached view FOV. The
+        # fake game locks the FOV at 50 while the grapple button is held and
+        # leaves the cached view FOV at 90, so the two conversions differ in
+        # exactly that column on exactly those samples, and in nothing else.)
+        ok(len(full) == len(plain) == 1 and len(full[0][1]) == len(plain[0][1]) == 70)
+        locked = [k for k, r in enumerate(records) if r["player"]["fov_locked"]]
+        ok(len(locked) >= 10 and all(records[k]["player"]["fov_lock"] == 50.0 for k in locked), locked)
+        for k, (a, b) in enumerate(zip(full[0][1], plain[0][1])):
+            ok(b["fov"] == 90.0 and a["fov"] == (50.0 if k in locked else 90.0), "sample %d: FOV %r" % (k, a["fov"]))
+            ok(dict(a, fov=b["fov"]) == b, "sample %d: the optional fields change nothing but the FOV" % k)
+        ok(not any(n.startswith("fov: cached view FOV") for n in full[0][0]["notes"])
+           and any(n.startswith("fov: cached view FOV") and "on 70 of 70 samples" in n for n in plain[0][0]["notes"]),
+           "only the version-1 view says that its FOV column cannot show the zoom")
         try:
             core.write_v1_view(rec.path, v1_path)
             ok(False, "the view was written over a file")

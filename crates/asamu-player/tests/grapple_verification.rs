@@ -15,7 +15,7 @@ use asamu_player::pawn::{self, PawnStateName, PowerJumpEvent};
 use asamu_player::rocket_boots::{self, BootsEvent, BootsStateName};
 use asamu_player::sim::MAX_STEP_DT;
 use asamu_player::ue3_movement::MIN_TICK_TIME;
-use asamu_player::world::{ActorClass, ActorTag, Surface};
+use asamu_player::world::{ActorClass, ActorTag, PULL_BACK_BSP_LINE, Surface};
 use asamu_player::{
     BoxWorld, InputFrame, PlayerParams, PlayerState, StepEvents, Ue3PawnMovement, step_with,
 };
@@ -80,17 +80,34 @@ fn level_pitch(distance: f32) -> f32 {
     (-38.0_f32).atan2(distance)
 }
 
-/// Where the fire trace of [`level_pitch`] meets a wall at `distance` from a
+/// Where the ray of [`level_pitch`] meets a wall at `distance` from a
 /// pawn centred at z = 1000: the original aims along the pitch's rotator
 /// unit floored to a multiple of 4 (ABILITIES.md A-CM-8), so the hit is
 /// `distance · tan` of that angle below the eye (38 above the centre), up to
 /// `distance · tan(3.5 units)` away from the centre's height.
-fn level_anchor(distance: f32) -> Vec3 {
+fn level_hit(distance: f32) -> Vec3 {
     let turn = std::f64::consts::TAU;
     let units = (f64::from(level_pitch(distance)) * 65_536.0 / turn).round();
     let floored = (units / 4.0).floor() * 4.0;
     let drop = f64::from(distance) * (floored * turn / 65_536.0).tan();
     Vec3::new(distance, 0.0, (1038.0 + drop) as f32)
+}
+
+/// The hit location the original's fire trace reports for a ray from `eye`
+/// that meets a surface of these test worlds at `hit`. A zero-extent trace
+/// reports its hit short of the surface (GRAPPLE.md G-AT-4): the worlds here
+/// answer as level BSP does, whose routine moves the hit back along the
+/// trace by a flat 0.5 uu whatever the trace's length (NATIVE_PHYSICS.md
+/// 10.2; the constant −0.5 read in the user's executable).
+fn reported(eye: Vec3, hit: Vec3) -> Vec3 {
+    hit - (hit - eye).normalize() * PULL_BACK_BSP_LINE
+}
+
+/// The anchor of the fire trace of [`level_pitch`] against a wall at
+/// `distance` from a pawn centred at z = 1000: [`level_hit`] as the trace
+/// reports it ([`reported`]; the eye is 38 above the centre).
+fn level_anchor(distance: f32) -> Vec3 {
+    reported(Vec3::new(0.0, 0.0, 1038.0), level_hit(distance))
 }
 
 /// A grapple-able wall whose face is at `x` (facing −X).
@@ -141,15 +158,31 @@ fn g_ph_2_pull_is_ten_million_over_d_at_the_spec_reference_distances() {
         let e = tick(&mut s, &fire(), &params, &world);
         assert!(e.gun.attached.is_some(), "{d}");
         assert!(e.gun.released.is_none(), "{d}: outside 200, no release");
+        // The distance is measured to the anchor, which the fire trace
+        // reports 0.5 uu before the wall along the ray ([`level_anchor`]);
+        // at 201 uu that is 200.51, still outside the release distance.
+        let to_anchor = (level_anchor(d) - Vec3::new(0.0, 0.0, 1000.0)).length();
         let measured = s.script.gun.distance;
-        assert!((measured - d).abs() < 0.01, "{d}: {measured}");
+        assert!((measured - to_anchor).abs() < 0.01, "{d}: {measured}");
+        // 0.5 uu along a ray inclined by atan(38 / d) shortens the level
+        // distance by 0.5 × cos of that: between 0.491 (at 201 uu) and 0.5.
+        assert!(
+            to_anchor > 200.0 && to_anchor > d - 0.501 && to_anchor < d - 0.49,
+            "{d}: {to_anchor}"
+        );
         let expected = pull(DT, measured);
         assert!(
             (s.velocity.x - expected).abs() <= expected * 1e-5,
             "{d}: {} vs {expected}",
             s.velocity.x
         );
-        assert!((s.velocity.x / DT - accel).abs() <= accel * 1e-4, "{d}");
+        // `accel` is the spec's value at the wall's distance; at the anchor,
+        // which is `to_anchor` away, the 1/d law gives `accel × d / to_anchor`.
+        let at_anchor = accel * d / to_anchor;
+        assert!(
+            (s.velocity.x / DT - at_anchor).abs() <= at_anchor * 1e-4,
+            "{d}"
+        );
         // The pull points at the anchor, which the floored aim puts a
         // little off the centre's height (`level_anchor`): 0.34 uu below at
         // 4999, 0.02 above at 1000, 0.06 below at 201.
@@ -258,8 +291,14 @@ fn g_ac_5_the_range_check_is_strict_at_exactly_5000_and_the_trace_ends_at_16384(
     assert_eq!(s0.view_direction(), Vec3::X, "level view along +X");
     let eye = s0.view_location(&params);
     assert_eq!(eye, Vec3::new(0.0, 0.0, 1038.0));
+    // The range is measured to the hit as the trace reports it, 0.5 uu
+    // before the face on this level ray ([`reported`]), so the walls stand
+    // 0.5 uu behind the distances under test. The arithmetic is exact in
+    // `f32`: the trace is 16 384 = 2¹⁴ uu long, so a face at 5000.5 is hit
+    // at the time 10 001 / 2¹⁵, the 0.5 uu are 1 / 2¹⁵ of the trace, and
+    // the reported time 10 000 / 2¹⁵ of 16 384 uu is 5000.
     // Exactly 5000 from the eye: `distance < fMaxDistance` fails.
-    let world = wall_at(5000.0);
+    let world = wall_at(5000.0 + PULL_BACK_BSP_LINE);
     let aim = grapple_gun::aim(&s0, &params, &world).unwrap();
     assert_eq!(aim.distance, 5000.0);
     assert!(!aim.acceptable);
@@ -271,7 +310,11 @@ fn g_ac_5_the_range_check_is_strict_at_exactly_5000_and_the_trace_ends_at_16384(
     assert!(s.script.gun.has_grappled, "a range failure marks the press");
     // The next float below 5000 attaches.
     let just_inside = f32::from_bits(5000.0_f32.to_bits() - 1);
-    let world = wall_at(just_inside);
+    let world = wall_at(just_inside + PULL_BACK_BSP_LINE);
+    assert_eq!(
+        grapple_gun::aim(&s0, &params, &world).unwrap().distance,
+        just_inside
+    );
     let mut s = s0;
     assert_eq!(
         tick(&mut s, &fire(), &params, &world).gun.fire,
@@ -346,10 +389,15 @@ fn g_rl_2_attaching_inside_the_release_distance_releases_in_the_same_tick() {
     let a = e.gun.attached.expect("attached");
     let r = e.gun.released.expect("released in the attach tick");
     assert_eq!(r.reason, ReleaseReason::Proximity);
-    assert!((a.anchor - Vec3::new(d, 0.0, 1000.0)).length() < 0.01);
+    // The anchor: the wall's hit as the trace reports it, 0.5 uu before the
+    // wall along the ray ([`level_anchor`]).
+    let anchor = level_anchor(d);
+    assert!((a.anchor - anchor).length() < 0.01, "{}", a.anchor);
     // Velocity: (0 + one pull) / 2.
     let measured = s.script.gun.distance;
-    assert!((measured - d).abs() < 0.01);
+    let to_anchor = (anchor - Vec3::new(0.0, 0.0, 1000.0)).length();
+    assert!((measured - to_anchor).abs() < 0.01);
+    assert!((to_anchor - (d - 0.5)).abs() < 0.03, "{to_anchor}");
     let expected = pull(DT, measured) * 0.5;
     assert!(
         (r.velocity.x - expected).abs() <= expected * 1e-5,
@@ -1048,11 +1096,16 @@ fn g_tm_2_the_fire_uses_the_input_world_and_the_actors_use_the_updated_world() {
         .gun
         .attached
         .expect("attached in the input event");
-    assert!((a.anchor.x - 1000.0).abs() < 0.01, "{}", a.anchor);
+    // The old hit point as the trace reports it: 0.5 uu before the face at
+    // 1000 along the ray ([`level_anchor`]).
+    let anchor = level_anchor(1000.0);
+    assert!((a.anchor - anchor).length() < 0.01, "{}", a.anchor);
     assert!(s.pawn.flying, "physics switched synchronously (G-IN-5)");
     let e = asamu_player::finish_step(&Ue3PawnMovement, &mut s, pending, &params, &new);
     assert_eq!(e.gun.attached, Some(a), "the input events' events are kept");
-    assert!((s.script.gun.distance - 1000.0).abs() < 0.01);
+    let to_anchor = (anchor - Vec3::new(0.0, 0.0, 1000.0)).length();
+    assert!((s.script.gun.distance - to_anchor).abs() < 0.01);
+    assert!((to_anchor - 999.5).abs() < 0.01, "{to_anchor}");
     // One world for both halves is `step_with`.
     let mut x = s0;
     let mut y = s0;
@@ -1183,8 +1236,10 @@ fn g_tg_1_aims_during_the_actor_ticks_use_the_camera_cache_of_the_previous_tick(
     }
     let (start_yaw, anchor) = served.expect("the refire check served the press");
     assert_eq!(start_yaw, 0.0);
+    // The cube's near face is at 1920; the level ray's hit is reported
+    // 0.5 uu before it ([`reported`]).
     assert!(
-        (anchor.y).abs() < 1.0 && (anchor.x - 1920.0).abs() < 0.5,
+        (anchor.y).abs() < 1.0 && (anchor.x - (1920.0 - PULL_BACK_BSP_LINE)).abs() < 0.01,
         "hit the cube straight ahead: {anchor}"
     );
 }

@@ -691,10 +691,16 @@ fn fast_landing_resets_the_eye_baseline() {
 #[test]
 fn ceiling_probe_keeps_the_view_below_a_low_ceiling() {
     let params = original();
-    // Floor at 0; the walking pawn hovers 2.15 uu, so its centre is at
-    // 46.15. A ceiling 44.5 above the centre: the 12-uu probe stops at
-    // 44.5 − 12 = 32.5.
-    let ceiling = 46.15 + 44.5;
+    // Floor at 0. `place_on_floor` (ours) puts the pawn's bottom 0.05 uu
+    // above it; the first walking floor check then moves it up. That check
+    // reports this BSP-kind floor 1.0 uu nearer than it is (the original's
+    // pull-back of a 28 uu trace: min(0.1 × 28, 1.0), NATIVE_PHYSICS.md
+    // 10.2), clamped to a distance of 0, so the pawn rises by the whole
+    // 2.15 and its centre is at 44 + 0.05 + 2.15 = 46.20, where it stays
+    // while it stands still (46.15 before the port applied the pull-back:
+    // 0.05 was then reported as 0.05 and the rise was 2.10). A ceiling 44.5
+    // above the centre: the 12-uu probe stops at 44.5 − 12 = 32.5.
+    let ceiling = 46.2 + 44.5;
     let world = flat_world().with_box(
         Vec3::new(-500.0, -500.0, ceiling),
         Vec3::new(500.0, 500.0, ceiling + 50.0),
@@ -711,7 +717,7 @@ fn ceiling_probe_keeps_the_view_below_a_low_ceiling() {
     for _ in 0..10 {
         tick(&mut s, &input(), &params, &world);
     }
-    assert!(s.grounded && (s.position.z - 46.15).abs() < 1e-3);
+    assert!(s.grounded && (s.position.z - 46.2).abs() < 1e-3);
     let room = ceiling - s.position.z - 12.0;
     assert!(
         (s.script.eye_height - room).abs() < 1e-3,

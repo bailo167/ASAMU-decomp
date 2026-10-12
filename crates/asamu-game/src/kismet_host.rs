@@ -46,7 +46,9 @@
 //! instead.
 //!
 //! **Basing (TENTATIVE).** A grounded player standing on a mover (the actor
-//! a short downward sweep hits) is moved by the mover's change of transform
+//! a short downward sweep of the pawn's box hits: the shape its floor check
+//! stands it with, so a mover whose top leans along both X and Y is found
+//! under the box's corner) is moved by the mover's change of transform
 //! that frame (position through the full transform, yaw by the yaw change).
 //! UE3 bases pawns on movers and moves them in the mover's encroachment
 //! pass; that path (and pushing, crushing) is not modelled.
@@ -79,6 +81,56 @@
 //! **NPC pawn collision.** The NPC pawns' collision cylinders (the worm's
 //! 200 × 500 cylinder in AG-Darkcave) are added as dynamic instances that
 //! block the player (not traces) and follow the pawns before each tick.
+//!
+//! **Blocking volumes (P5).** A `SeqAct_Toggle` whose target is a blocking
+//! volume switches that volume's collision: its "Turn On" input makes the
+//! volume collide, "Turn Off" stops it and "Toggle" flips it, each keeping
+//! the volume's block flag (CONFIRMED (src): the toggle handler of
+//! `Engine.Volume`, which the blocking volumes inherit; read locally from
+//! the user's `Engine.u`). Every blocking volume the shipped level scripts
+//! refer to is an `Engine.DynamicBlockingVolume` (24 of them in five
+//! levels; 22 are targets of toggle actions and of nothing else, and
+//! AG-StarHaven's `_2` and `_3` are the target of no action); such a
+//! volume starts colliding or not by its `bEnabled`
+//! (`asamu_world::scene::switchable_volume`). The blocking volumes in the
+//! script's actor table get dynamic collision instances before play, and
+//! the host's toggle sets their switch
+//! ([`Game::set_actor_collision`]). The switch is also what
+//! `SeqAct_ChangeCollision`, `SeqAct_Destroy` and the follow-collision
+//! actors turn on a mover body: the instances keep what each blocks (a
+//! mesh's triangles the bullet traces, its simple body the pawn).
+//!
+//! **Every target of an action.** An action acts on every object linked to
+//! its `Target` variable link: `SequenceAction.Targets` is an array of
+//! objects (CONFIRMED: the class model of the user's `Engine.u`), which the
+//! engine fills with one element per linked variable before the action
+//! runs. The converted graphs store no value for that property (it is empty
+//! in the editor: 318 fed links in the shipped graphs, 65 of them with two
+//! or more variables, none with a stored value), and the Kismet runtime
+//! takes a property without a stored value for a single object, the first
+//! linked one. So the host gives the property its declared type when it
+//! binds a script (`declare_target_arrays`); without that only the first
+//! target of each action is reached. Measured for one case: AG-BeautifulCity's
+//! cutscene toggle has five blocking volumes linked, and the recorded pawn
+//! walks inside the third of them (`DynamicBlockingVolume_5`, which starts
+//! colliding) after that cutscene's end (KISMET_RUNTIME.md §8).
+//!
+//! **Console commands (P6).** `SeqAct_ConsoleCommand` hands each command
+//! line to the player's controller. After the Kismet update the host gives
+//! every such line to the pawn script layer ([`Game::console_command`]),
+//! which runs the one it models: `SetSpeed F` (the stock cheat-manager
+//! command, spelled `setspeed` and `SetSpeed` in the maps: `GroundSpeed` =
+//! the class default 440 × `F`; AG-Workshop's `setspeed 0.3` gives the
+//! recorded 132 uu/s). Lines are applied in emission order, but after the
+//! update's host calls rather than between them; in the three shipped
+//! graphs with a speed command the story-mode toggle that also writes
+//! `GroundSpeed` comes before the command, so the result is the same.
+//! `changesize F` (AG-Epilogue, 1.4) is the stock command too: the pawn's
+//! collision cylinder becomes the class default × `F` and the pawn is
+//! re-placed where it stands by the engine's placement search
+//! ([`Game::change_size`]; not measured, AG-Epilogue is in no recording).
+//! [`LevelScript::console_commands`] lists what was issued and what was
+//! done with it; the app receives every line as an output as before.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -91,7 +143,7 @@ use asamu_kismet::{
 };
 use asamu_player::pawn::{LandingHandler, PowerJumpEvent, PowerJumpStateName};
 use asamu_player::rocket_boots::BootsEvent;
-use asamu_player::world::{CollisionShape, CollisionWorld};
+use asamu_player::world::CollisionWorld;
 use asamu_player::{InputFrame, PlayerParams, PlayerState, SimEvent, pawn};
 use asamu_world::collision::{Affine, CollisionClass, InstanceInfo};
 use asamu_world::scene::{self, LoadedMap, SceneError};
@@ -102,8 +154,42 @@ use thiserror::Error;
 use crate::npc::{NpcEvent, NpcOptions, NpcSystem};
 use crate::{Game, GameError, TickReport};
 
-/// Distance of the downward sweep that finds the base mover, UU.
+/// Distance of the downward sweep that finds the base mover, UU. Ours (the
+/// original keeps the base its floor check found): longer than the greatest
+/// height a pawn stands above its floor, 2.4 uu reported, which is at most
+/// 2.4 + 2.8 = 5.2 uu above mesh triangles (NATIVE_PHYSICS.md 3.3, 10.2).
 const BASE_PROBE: f32 = 8.0;
+
+/// Scene kind of a blocking volume in the level script's actor table (the
+/// importer's name for `Engine.BlockingVolume` and its subclasses).
+const BLOCKING_VOLUME_KIND: &str = "blocking_volume";
+
+/// Most console commands [`LevelScript::console_commands`] keeps.
+const MAX_CONSOLE_LOG: usize = 256;
+
+/// The property a sequence action receives its targets in, as the graph
+/// keeps property names (lower case): `SequenceAction.Targets`.
+const TARGETS_PROPERTY: &str = "targets";
+
+/// Gives the `Targets` property of every node that is fed targets through a
+/// variable link its declared type, an array, where the converted graph
+/// stores no value for it (module docs, "Every target of an action").
+/// Stored values are left alone.
+fn declare_target_arrays(graph: &mut asamu_kismet::Graph) {
+    for node in &mut graph.nodes {
+        let fed = node
+            .variables
+            .iter()
+            .any(|l| l.property.as_deref() == Some(TARGETS_PROPERTY));
+        if !fed {
+            continue;
+        }
+        let value = node.params.entry(TARGETS_PROPERTY.to_owned()).or_default();
+        if matches!(value, asamu_kismet::KValue::None) {
+            *value = asamu_kismet::KValue::Array(Vec::new());
+        }
+    }
+}
 
 /// Errors loading a converted level with its Kismet.
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -196,6 +282,9 @@ pub struct LevelScript {
     group_actors: BTreeMap<(usize, String), String>,
     /// The player camera's animations.
     camera: CameraAnims,
+    /// Console commands the level script issued, with what the simulation
+    /// did with each (capped).
+    console: Vec<(String, crate::ConsoleCommand)>,
 }
 
 fn world_id(map: &LoadedMap, a: &ActorInfo) -> Option<u32> {
@@ -322,16 +411,29 @@ fn prepare_movers(
         let relative = actor
             .inverse()
             .map_or(Affine::IDENTITY, |inv| inst.to_world.then(&inv));
-        let Some(dynamic) = map
-            .collision
-            .dynamic_instance(inst.mesh, inst.to_world, inst.info)
-        else {
-            continue;
-        };
+        // The instance as it was placed: its kind, switch, flags and sweep
+        // rule stay (a rebuilt one would be an enabled instance of the
+        // default kind, whatever the level loader had decided).
         body.parts.push((map.dynamic.len(), relative));
-        map.dynamic.push(dynamic);
+        map.dynamic.push(inst);
     }
     bodies
+}
+
+/// The blocking volumes the level script knows (its actor table lists the
+/// actors its nodes refer to): the targets of its toggle actions, whose
+/// collision must be switchable during play (P5; module docs, "Blocking
+/// volumes"). Volumes already taken as movers have no static collision left
+/// and are switched through their body's instances.
+fn prepare_switchable_volumes(map: &mut LoadedMap, scripts: &asamu_kismet::LevelScripts) {
+    let ids: BTreeSet<u32> = scripts
+        .graph
+        .actors
+        .iter()
+        .filter(|a| a.kind == BLOCKING_VOLUME_KIND)
+        .filter_map(|a| world_id(map, a))
+        .collect();
+    crate::converted::make_switchable(map, &ids);
 }
 
 /// Loads a converted map (as [`Game::load_level`]) together with its
@@ -375,6 +477,9 @@ pub fn load_level_with_kismet_options(
         .as_ref()
         .map(|s| prepare_movers(&mut loaded, s))
         .unwrap_or_default();
+    if let Some(s) = &scripts {
+        prepare_switchable_volumes(&mut loaded, s);
+    }
     let levels = loaded.levels.clone();
     let level_names: Vec<String> = levels.iter().map(|l| l.name.clone()).collect();
     let npcs = options.npcs.then(|| {
@@ -446,9 +551,10 @@ impl LevelScript {
 
     fn attach(
         game: &mut Game,
-        scripts: asamu_kismet::LevelScripts,
+        mut scripts: asamu_kismet::LevelScripts,
         movers: BTreeMap<u32, MoverBody>,
     ) -> LevelScript {
+        declare_target_arrays(&mut scripts.graph);
         // Undo the level-start ability table: the pawn's script state as a
         // fresh start, so the map's Kismet decides; the table is dropped so a
         // save snapshot applied later (`Game::apply_snapshot`) does not put it
@@ -501,6 +607,7 @@ impl LevelScript {
             host_errors: Vec::new(),
             group_actors,
             camera: CameraAnims::default(),
+            console: Vec::new(),
         }
     }
 
@@ -772,6 +879,16 @@ impl LevelScript {
     fn apply_game_outputs(&mut self, game: &mut Game, outputs: &[Output]) {
         for o in outputs {
             match o {
+                Output::ConsoleCommand { command } => {
+                    // The action hands the line to the player's controller;
+                    // two commands change the simulation (`SetSpeed`, P6,
+                    // and `ChangeSize`). The rest is presentation or not
+                    // modelled (module docs, "Console commands").
+                    let done = game.console_command(command);
+                    if self.console.len() < MAX_CONSOLE_LOG {
+                        self.console.push((command.clone(), done));
+                    }
+                }
                 Output::Worm { action, worm } => {
                     let Some(id) = worm.as_deref().and_then(|p| self.actor_id_of(game, p)) else {
                         continue;
@@ -848,19 +965,28 @@ impl LevelScript {
         &self.host_errors
     }
 
+    /// The console commands the level script issued so far, in order, each
+    /// with what the simulation did with it
+    /// ([`crate::ConsoleCommand::NotHandled`]: nothing; the app still gets
+    /// every command as an output). At most 256 are kept.
+    #[must_use]
+    pub fn console_commands(&self) -> &[(String, crate::ConsoleCommand)] {
+        &self.console
+    }
+
     fn base_mover(&self, game: &Game) -> Option<u32> {
         if self.movers.is_empty() || !game.player.grounded {
             return None;
         }
-        let shape = CollisionShape {
-            radius: game.params.movement.capsule_radius.value,
-            half_height: game.params.movement.capsule_half_height.value,
-        };
+        // The pawn's box, as its floor check sweeps it (P4): the original's
+        // base is the actor that check hits. An upright cylinder touches a
+        // floor that leans along both X and Y up to 21 × (|a| + |b| −
+        // √(a² + b²)) uu lower than the box's corner does, further than this
+        // probe reaches on a mover that leans enough.
+        let extent = crate::converted::extent_of(game.pawn_cylinder());
         let p = game.player.position;
-        let hit = game
-            .world
-            .sweep_capsule(p, p - Vec3::Z * BASE_PROBE, shape)?;
-        let id = hit.surface.actor?;
+        let hit = game.world.sweep_box(p, p - Vec3::Z * BASE_PROBE, extent)?;
+        let id = hit.hit.surface.actor?;
         self.movers.contains_key(&id).then_some(id)
     }
 
@@ -942,7 +1068,8 @@ impl LevelScript {
     }
 }
 
-/// Turns a mover body's collision on (blocking) or off.
+/// Turns a mover body's collision on (blocking) or off: the switch of each
+/// of its instances ([`asamu_world::collision::Instance::enabled`]).
 fn set_body_collision(
     game: &mut Game,
     movers: &mut BTreeMap<u32, MoverBody>,
@@ -955,9 +1082,11 @@ fn set_body_collision(
     body.hidden_collision = !blocks;
     if let Some(sc) = &mut game.world.scene {
         for (i, _) in &body.parts {
+            // The switch, not the flags: what each part blocks when the
+            // actor collides (its triangles the bullet traces, its simple
+            // body the pawn, ...) is the level loader's and stays.
             if let Some(inst) = sc.dynamic.get_mut(*i) {
-                inst.info.blocks_pawn = blocks;
-                inst.info.blocks_traces = blocks;
+                inst.enabled = blocks;
             }
         }
     }
@@ -1013,6 +1142,21 @@ impl GameHost<'_> {
 
     fn set_body_collision(&mut self, id: u32, blocks: bool) {
         set_body_collision(self.game, self.movers, id, blocks);
+    }
+
+    /// A toggle action on a blocking volume (module docs, "Blocking
+    /// volumes"): "turn on" makes it collide, "turn off" stops it, "toggle"
+    /// flips it. `false` when the actor has no collision to switch.
+    fn toggle_blocking_volume(&mut self, id: u32, mode: ToggleMode) -> bool {
+        let Some(current) = self.game.actor_collision(id) else {
+            return false;
+        };
+        let enabled = match mode {
+            ToggleMode::On => true,
+            ToggleMode::Off => false,
+            ToggleMode::Toggle => !current,
+        };
+        self.game.set_actor_collision(id, enabled)
     }
 }
 
@@ -1088,7 +1232,9 @@ impl Host for GameHost<'_> {
 
     fn toggle_actor(&mut self, actor: &ActorInfo, mode: ToggleMode) {
         let Some(id) = self.id(actor) else { return };
-        if !self.set_trigger_enabled(id, mode) {
+        if actor.kind == BLOCKING_VOLUME_KIND {
+            self.toggle_blocking_volume(id, mode);
+        } else if !self.set_trigger_enabled(id, mode) {
             self.set_volume_mode(id, mode);
         }
     }
@@ -1178,11 +1324,21 @@ impl Host for GameHost<'_> {
         if !p.is_finite() {
             return false;
         }
-        self.game.player.position = p;
+        // The action sets the pawn's location (CONFIRMED (src): the stock
+        // teleport handler), which runs the engine's placement search: the
+        // destination itself when the pawn's box is free there, else a
+        // place over the floor below, else the teleport fails and nothing
+        // changes (NATIVE_PHYSICS.md 10.3). A teleport also drops the base.
+        let extent = crate::converted::extent_of(self.game.pawn_cylinder());
+        let Some(spot) = crate::converted::find_spot(&self.game.world, p, extent) else {
+            return false;
+        };
+        self.game.player.position = spot;
         if let Some(r) = rot {
             self.game.player.yaw = rotation::units_to_radians(r[1]);
             self.game.player.pitch = rotation::units_to_radians(rotation::normalize_axis(r[0]));
         }
+        self.game.player.pawn.based = false;
         self.game.player.pawn.force_floor_check = true;
         true
     }
@@ -1284,6 +1440,7 @@ impl Host for GameHost<'_> {
 mod tests {
     use super::*;
     use asamu_kismet::{Graph, MatineeSet};
+    use asamu_player::world::CollisionShape;
     use asamu_world::SurfaceTag;
     use asamu_world::collision::{
         CollisionClass, CollisionSceneBuilder, InstanceInfo, QueryFilter,
@@ -1400,6 +1557,16 @@ mod tests {
     /// the player starts on; Kismet plays a Matinee that lifts the platform
     /// by 200 UU in 1 s, and its `Completed` output sets the grapple limit.
     fn lift_map() -> (LoadedMap, asamu_kismet::LevelScripts) {
+        lift_map_tilted(0.0)
+    }
+
+    /// [`lift_map`] with the platform sheared so that its top rises by
+    /// `gradient` uu per uu along X and along Y: the top is the plane
+    /// z = 50 + 400 × gradient + gradient × (x + y). The player starts over
+    /// the origin, its box 2.15 uu above where it touches that plane (the
+    /// box touches with its corner at (21, 21): 21 × 2 × gradient above the
+    /// plane's height under its centre).
+    fn lift_map_tilted(gradient: f64) -> (LoadedMap, asamu_kismet::LevelScripts) {
         let mut b = CollisionSceneBuilder::new();
         let v: Vec<Vec3> = (0..8)
             .map(|i| Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32))
@@ -1435,11 +1602,18 @@ mod tests {
         b.add_static(cube, floor, info(None, CollisionClass::WorldGeometry))
             .unwrap();
         let platform = Affine {
-            rows: [DVec3::X * 400.0, DVec3::Y * 400.0, DVec3::Z * 50.0],
+            rows: [
+                DVec3::X * 400.0 + DVec3::Z * (400.0 * gradient),
+                DVec3::Y * 400.0 + DVec3::Z * (400.0 * gradient),
+                DVec3::Z * 50.0,
+            ],
             translation: DVec3::new(-200.0, -200.0, 0.0),
         };
         b.add_static(cube, platform, info(Some(5), CollisionClass::InterpActor))
             .unwrap();
+        // 50 + 44 + 2.15 over a level top (the sum as it always was here),
+        // plus the top's rise to the origin and to the box's corner.
+        let start_z = 50.0_f32 + 46.15 + (442.0 * gradient) as f32;
         // A 50 UU crate attached to the lift (a passenger: not bound to the
         // Matinee itself, carried through its `Base`).
         let crate_box = Affine {
@@ -1471,7 +1645,7 @@ mod tests {
                 player_starts: vec![PlayerStartDef {
                     id: 1,
                     name: "PlayerStart_0".into(),
-                    location: Vec3::new(0.0, 0.0, 50.0 + 46.15),
+                    location: Vec3::new(0.0, 0.0, start_z),
                     rotation: [0; 3],
                     enabled: true,
                     primary: true,
@@ -1624,6 +1798,58 @@ mod tests {
             "{:?}",
             script.runtime().errors()
         );
+    }
+
+    /// The base under a standing pawn is what its **box** stands on (the
+    /// original's base is the actor its floor check hits, and that check
+    /// sweeps the box, P4). On a mover whose top leans along both X and Y the
+    /// box rests on its corner, well above where an upright cylinder of the
+    /// same radius would touch, so a cylinder probe of a few uu misses the
+    /// mover.
+    #[test]
+    fn a_mover_whose_top_leans_both_ways_carries_the_player() {
+        // Gradient 0.4 along X and along Y: the floor's normal is
+        // (−0.4, −0.4, 1)/√1.32, z = 0.870, walkable (the limit is 0.7).
+        let (mut map, s) = lift_map_tilted(0.4);
+        let movers = prepare_movers(&mut map, &s);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        // The top under the origin is at 50 + 160 = 210; the box touches it
+        // with its corner at (21, 21), where the top is 0.4 × 42 = 16.8
+        // higher: the centre at 210 + 16.8 + 44 = 270.8 at contact, and the
+        // start is 2.15 uu above that.
+        let contact = 270.8_f32;
+        let start_z = game.player().position.z;
+        assert!((start_z - (contact + 2.15)).abs() < 1e-4, "{start_z}");
+        // An upright cylinder of radius 21 would touch 21 × √0.32 = 11.879
+        // above the top under its centre: its centre at 265.879, 4.921 uu
+        // lower than the box's. From where the pawn stands, at least 2.15 uu
+        // above the box's contact, a cylinder is more than 7 uu from the
+        // mover; after the first floor check (which reports the triangles
+        // 2.8 uu nearer than they are, at distance 0, and raises the pawn by
+        // 2.15) more than 9.
+        for _ in 0..90 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        let lift = script.mover_location(5).unwrap();
+        assert!((lift.z - 200.0).abs() < 1e-3, "lift at {lift:?}");
+        let p = game.player().position;
+        assert!(game.player().grounded, "still standing on the lift");
+        assert_eq!((p.x, p.y), (0.0, 0.0), "a standing pawn does not slide");
+        // Carried by the lift's 200 uu. Above the lifted contact it stands
+        // where the floor checks leave it: 4.30 uu after the first one (the
+        // start's 2.15 plus the check's 2.15), and at most the standing
+        // height on mesh triangles, 2.15 + 2.8 = 4.95 uu, if a later check
+        // (a moved base forces one) raises it once more.
+        let above = p.z - (contact + 200.0);
+        assert!(
+            (4.30 - 1e-3..=4.95 + 1e-3).contains(&above),
+            "{above} uu above the lifted mover (carried by {})",
+            p.z - start_z
+        );
+        let extent = crate::converted::extent_of(game.pawn_cylinder());
+        assert!(!game.world().overlaps_box(p, extent), "inside the mover");
     }
 
     #[test]
@@ -3232,5 +3458,510 @@ mod tests {
             }
             assert!(game.player().script.boots.enabled, "rocket boots enabled");
         }
+    }
+
+    /// P6, the Workshop's graph shape: the level-loaded event links the
+    /// story-mode toggle and a console command `setspeed 0.3`, which links a
+    /// second console command (AG-Epilogue's `changesize 1.4`, spelled
+    /// differently here: commands are matched without regard to case).
+    #[test]
+    fn console_commands_of_the_level_script_set_the_speed_and_the_size() {
+        let mut game = Game::graybox().unwrap();
+        game.start();
+        let command = |id: usize, commands: &str, next: &str| {
+            format!(
+                r#"{{"id": {id}, "class": "Engine.SeqAct_ConsoleCommand", "kind": "action", "parent": 0,
+                    "inputs": [{{"desc": "In"}}], "outputs": [{{"desc": "Out", "links": [{next}]}}],
+                    "variables": [{{"desc": "Target", "property": "Targets", "vars": [5]}}],
+                    "params": {{"Commands": {commands}, "Targets": []}},
+                    "auto_activate_outputs": true}}"#
+            )
+        };
+        let nodes = format!(
+            r#"[
+                {{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3, 4, 5]}},
+                {{"id": 1, "class": "Engine.SeqEvent_LevelLoaded", "kind": "event", "parent": 0,
+                  "outputs": [{{"desc": "Loaded and Visible",
+                               "links": [{{"op": 2, "input": 0}}, {{"op": 3, "input": 0}}]}}],
+                  "event": {{"max_trigger_count": 1}}}},
+                {}, {}, {},
+                {{"id": 5, "class": "Engine.SeqVar_Player", "kind": "variable", "parent": 0}}
+            ]"#,
+            action(
+                2,
+                "asamu.SeqAct_ToggleStoryMode",
+                &["Enable", "Disable", "Toggle"],
+                None,
+                "{}"
+            ),
+            command(3, r#"["setspeed 0.3"]"#, r#"{"op": 4, "input": 0}"#),
+            command(4, r#"["ChangeSize 1.4", "NormalMode"]"#, ""),
+        );
+        let g = graph(&nodes, "[]");
+        let mut script = LevelScript::new(&mut game, scripts(g, MatineeSet::default()));
+        let floor_z = game.player().position.z - 44.0 - asamu_player::world::CONTACT_SKIN;
+        let t = script.tick(&mut game, &InputFrame::default()).unwrap();
+        assert!(
+            script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+            "{:?} {:?}",
+            script.runtime().errors(),
+            script.host_errors()
+        );
+        // Story mode (which writes `MoveSpeed × 0.6` = 264), then the
+        // command: the pawn class's default `GroundSpeed` 440 × 0.3 = 132,
+        // the speed of all 3,001 recorded Workshop frames.
+        assert!(game.in_story_mode());
+        assert_eq!(game.player().script.ground_speed, 132.0);
+        // The size: the class default cylinder 21 × 44 times 1.4. It is
+        // state of the game; the parameter set is untouched.
+        let m = game.pawn_cylinder();
+        assert!((m.radius - 29.4).abs() < 1e-4);
+        assert!((m.half_height - 61.6).abs() < 1e-4);
+        assert_eq!(*game.params(), PlayerParams::asamu_original());
+        assert_eq!(
+            script.console_commands(),
+            &[
+                (
+                    "setspeed 0.3".to_owned(),
+                    crate::ConsoleCommand::SetSpeed {
+                        factor: 0.3,
+                        ground_speed: 132.0
+                    }
+                ),
+                (
+                    "ChangeSize 1.4".to_owned(),
+                    crate::ConsoleCommand::ChangeSize {
+                        factor: 1.4,
+                        radius: m.radius,
+                        half_height: m.half_height,
+                        placed: true
+                    }
+                ),
+                ("NormalMode".to_owned(), crate::ConsoleCommand::NotHandled),
+            ]
+        );
+        // The app still receives every line.
+        for line in ["setspeed 0.3", "ChangeSize 1.4", "NormalMode"] {
+            assert!(t.outputs.contains(&Output::ConsoleCommand {
+                command: line.into()
+            }));
+        }
+        // The grown pawn was re-placed by the placement search (bottom 3.0 uu
+        // above the floor, see `change_size_replaces_the_pawn`), its base
+        // dropped; the tick's walking floor check then found the floor as a
+        // new base, reported 2.0 uu away, and set the 2.15: a true 3.15.
+        let z = game.player().position.z;
+        assert!((z - (floor_z + 61.6 + 3.15)).abs() < 1e-3, "{z}");
+        assert!(game.player().grounded);
+        // Walking forward reaches 132 uu/s and stays there.
+        let forward = InputFrame {
+            move_forward: 1.0,
+            ..InputFrame::default()
+        };
+        for _ in 0..30 {
+            script.tick(&mut game, &forward).unwrap();
+        }
+        let speed = game.player().horizontal_speed();
+        assert!((speed - 132.0).abs() < 0.01, "{speed}");
+        // The other writers still write (A-WK-3): leaving story mode gives
+        // `MoveSpeed` 440.
+        game.exit_story_mode();
+        assert_eq!(game.player().script.ground_speed, 440.0);
+    }
+
+    /// `ChangeSize F` (the stock command; AG-Epilogue runs 1.4): the
+    /// cylinder becomes the class default × F and the pawn is re-placed
+    /// where it stands by the placement search.
+    #[test]
+    fn change_size_replaces_the_pawn() {
+        let mut game = Game::graybox().unwrap();
+        game.start();
+        let start = game.player().position;
+        let floor_z = start.z - 44.0 - asamu_player::world::CONTACT_SKIN;
+        // The grown box (half height 61.6) reaches 17.55 uu into the floor.
+        // The search traces a 1 uu slice down 2 × 61.6 = 123.2 uu from the
+        // centre: its bottom is 43.05 uu above the floor, reported 1.0 uu
+        // short (a tenth of the trace, at most 1.0 on a BSP-kind floor):
+        // 42.05. New centre: z − (2 × 42.05/123.2 − 1) × 61.6 + 1 =
+        // z + 20.55: the bottom 3.0 uu above the floor.
+        let done = game.console_command("changesize 1.4");
+        assert!(matches!(
+            done,
+            crate::ConsoleCommand::ChangeSize { placed: true, .. }
+        ));
+        let p = game.player().position;
+        assert_eq!((p.x, p.y), (start.x, start.y));
+        assert!((p.z - (floor_z + 61.6 + 3.0)).abs() < 1e-3, "{}", p.z);
+        assert!(!game.player().pawn.based && game.player().pawn.force_floor_check);
+        // Back to the class default: nothing encroaches, the pawn is left
+        // where it is (now 20.6 uu above the floor).
+        let done = game.console_command("ChangeSize 1");
+        assert_eq!(
+            done,
+            crate::ConsoleCommand::ChangeSize {
+                factor: 1.0,
+                radius: 21.0,
+                half_height: 44.0,
+                placed: true
+            }
+        );
+        assert_eq!(game.player().position, p);
+        // Guards of ours, and commands that are not modelled.
+        for line in [
+            "changesize",
+            "changesize 0",
+            "changesize -1",
+            "changesize nan",
+            "changesize 1 2",
+        ] {
+            assert_eq!(
+                game.console_command(line),
+                crate::ConsoleCommand::NotHandled,
+                "{line}"
+            );
+        }
+        assert_eq!(game.pawn_cylinder().half_height, 44.0);
+        assert_eq!(*game.params(), PlayerParams::asamu_original());
+        // Without the pawn script layer the commands do nothing.
+        let mut placeholder = Game::graybox_placeholder().unwrap();
+        assert_eq!(
+            placeholder.console_command("changesize 1.4"),
+            crate::ConsoleCommand::NotHandled
+        );
+        assert_eq!(
+            placeholder.console_command("setspeed 0.3"),
+            crate::ConsoleCommand::NotHandled
+        );
+    }
+
+    /// A floor and a 100 × 400 × 400 blocking volume (actor 7, its face at
+    /// x = 250) that starts switched off, as a `DynamicBlockingVolume` with
+    /// `bEnabled` false does; the level script toggles it.
+    fn volume_map() -> (LoadedMap, asamu_kismet::LevelScripts) {
+        volumes_map(1)
+    }
+
+    /// [`volume_map`] with `count` volumes, all the targets of the one
+    /// toggle action: actors 7, 8, ... (`DynamicBlockingVolume_0`, `_1`,
+    /// ...), each 1000 uu further along Y than the one before. Only the
+    /// first starts switched off. The action has no stored `Targets`
+    /// value, as in the converted graphs.
+    fn volumes_map(count: u32) -> (LoadedMap, asamu_kismet::LevelScripts) {
+        use asamu_world::collision::{InstanceOptions, PrimitiveKind};
+        let mut b = CollisionSceneBuilder::new();
+        let v: Vec<Vec3> = (0..8)
+            .map(|i| Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32))
+            .collect();
+        let t = vec![
+            [0, 1, 3],
+            [0, 3, 2],
+            [4, 6, 7],
+            [4, 7, 5],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 3, 7],
+            [2, 7, 6],
+            [0, 2, 6],
+            [0, 6, 4],
+            [1, 5, 7],
+            [1, 7, 3],
+        ];
+        let cube = b.add_mesh(v, t).unwrap();
+        let floor = Affine {
+            rows: [DVec3::X * 4000.0, DVec3::Y * 4000.0, DVec3::Z * 100.0],
+            translation: DVec3::new(-2000.0, -2000.0, -100.0),
+        };
+        b.add_static(
+            cube,
+            floor,
+            InstanceInfo {
+                actor: None,
+                class: CollisionClass::WorldGeometry,
+                tag: SurfaceTag::None,
+                grapple_able: true,
+                blocks_pawn: true,
+                blocks_traces: true,
+                sublevel: 0,
+            },
+        )
+        .unwrap();
+        let hull = b.add_box_mesh(Vec3::new(50.0, 200.0, 200.0)).unwrap();
+        for n in 0..count {
+            b.add_static_with(
+                hull,
+                Affine::from_translation(DVec3::new(300.0, 1000.0 * f64::from(n), 200.0)),
+                InstanceInfo {
+                    actor: Some(7 + n),
+                    class: CollisionClass::BlockingVolume,
+                    tag: SurfaceTag::None,
+                    grapple_able: true,
+                    blocks_pawn: true,
+                    blocks_traces: false,
+                    sublevel: 0,
+                },
+                InstanceOptions {
+                    kind: Some(PrimitiveKind::BrushHull),
+                    enabled: n > 0,
+                },
+            )
+            .unwrap();
+        }
+        let map = LoadedMap {
+            map: "T".into(),
+            levels: vec![SubLevel {
+                name: "T".into(),
+                streaming_class: None,
+                initially_loaded: true,
+                offset: Vec3::ZERO,
+                actors: 0,
+            }],
+            world: WorldSettings {
+                title: None,
+                kill_z: -100_000.0,
+                soft_kill_z: false,
+                default_gravity_z: -520.0,
+                global_gravity_z: 0.0,
+            },
+            collision: b.build(),
+            dynamic: Vec::new(),
+            bodies: Vec::new(),
+            actors: SceneActors {
+                player_starts: vec![PlayerStartDef {
+                    id: 1,
+                    name: "PlayerStart_0".into(),
+                    location: Vec3::new(0.0, 0.0, 100.0),
+                    rotation: [0; 3],
+                    enabled: true,
+                    primary: true,
+                    half_height: 44.0,
+                }],
+                ..SceneActors::default()
+            },
+            stats: LoadStats::default(),
+            warnings: Vec::new(),
+        };
+        // A toggle whose targets are the volumes, one object variable each
+        // on its `Target` link; nothing fires it by itself.
+        let members: Vec<String> = (1..=count + 1).map(|i| i.to_string()).collect();
+        let vars: Vec<String> = (0..count).map(|n| (n + 2).to_string()).collect();
+        let mut nodes = vec![
+            format!(
+                r#"{{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [{}]}}"#,
+                members.join(", ")
+            ),
+            format!(
+                r#"{{"id": 1, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+                    "inputs": [{{"desc": "Turn On"}}, {{"desc": "Turn Off"}}, {{"desc": "Toggle"}}],
+                    "outputs": [{{"desc": "Out"}}],
+                    "variables": [{{"desc": "Target", "property": "Targets", "vars": [{}]}}],
+                    "auto_activate_outputs": true}}"#,
+                vars.join(", ")
+            ),
+        ];
+        let mut actors = Vec::new();
+        for n in 0..count {
+            nodes.push(format!(
+                r#"{{"id": {}, "class": "Engine.SeqVar_Object", "kind": "variable", "parent": 0,
+                    "var": {{"value": {{"$obj": "T.TheWorld.PersistentLevel.DynamicBlockingVolume_{n}"}}}}}}"#,
+                n + 2
+            ));
+            actors.push(format!(
+                r#"{{"path": "T.TheWorld.PersistentLevel.DynamicBlockingVolume_{n}",
+                    "name": "DynamicBlockingVolume_{n}", "class": "Engine.DynamicBlockingVolume",
+                    "kind": "blocking_volume", "package": "T", "slot": {}}}"#,
+                7 + n
+            ));
+        }
+        let g = graph(
+            &format!("[{}]", nodes.join(", ")),
+            &format!("[{}]", actors.join(", ")),
+        );
+        (map, scripts(g, MatineeSet::default()))
+    }
+
+    /// P5: a toggle action on a blocking volume switches its collision.
+    /// Input 0 turns it on, input 1 off, input 2 flips it (the volume
+    /// classes' toggle handler).
+    #[test]
+    fn toggle_actions_switch_a_blocking_volume() {
+        let (mut map, s) = volume_map();
+        let movers = prepare_movers(&mut map, &s);
+        assert!(movers.is_empty(), "the volume is not moved by anything");
+        let placed = map.collision.statics()[1].clone();
+        prepare_switchable_volumes(&mut map, &s);
+        // The volume's hull left the static set unchanged: still a brush,
+        // still switched off.
+        assert_eq!(map.collision.statics().len(), 1);
+        assert_eq!(map.dynamic, vec![placed]);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        game.start();
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        let half = Vec3::new(21.0, 21.0, 44.0);
+        let (from, to) = (Vec3::new(100.0, 0.0, 100.0), Vec3::new(400.0, 0.0, 100.0));
+        let blocked = |game: &Game| game.world().sweep_box(from, to, half);
+        assert_eq!(game.actor_collision(7), Some(false));
+        assert!(blocked(&game).is_none());
+        // "Turn On".
+        script.runtime_mut().force_input(1, 0);
+        script.tick(&mut game, &InputFrame::default()).unwrap();
+        assert_eq!(game.actor_collision(7), Some(true));
+        // The box stops at the face x = 250 with its centre at 229: 129 uu
+        // into the 300 uu trace.
+        let hit = blocked(&game).expect("blocked");
+        assert_eq!(hit.kind, asamu_player::world::PrimitiveKind::BrushHull);
+        assert!((hit.hit.time * 300.0 - 129.0).abs() < 1e-3, "{hit:?}");
+        // "Turn On" again changes nothing; "Turn Off"; "Toggle" twice.
+        for (input, expected) in [(0, true), (1, false), (1, false), (2, true), (2, false)] {
+            script.runtime_mut().force_input(1, input);
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+            assert_eq!(game.actor_collision(7), Some(expected), "input {input}");
+            assert_eq!(blocked(&game).is_some(), expected, "input {input}");
+        }
+        assert!(
+            script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+            "{:?} {:?}",
+            script.runtime().errors(),
+            script.host_errors()
+        );
+    }
+
+    /// P5 on a toggle with several targets, as the shipped graphs have them
+    /// (AG-BeautifulCity's cutscene toggle has five volumes on its `Target`
+    /// link and no stored `Targets` value): the action acts on every linked
+    /// volume, not on the first alone. `SequenceAction.Targets` is an array
+    /// of objects with one element per linked variable.
+    #[test]
+    fn a_toggle_switches_every_blocking_volume_linked_to_it() {
+        let (mut map, s) = volumes_map(3);
+        // The converted form: no value stored for the action's targets.
+        assert!(!s.graph.nodes[1].params.contains_key("targets"));
+        let movers = prepare_movers(&mut map, &s);
+        prepare_switchable_volumes(&mut map, &s);
+        assert_eq!(map.collision.statics().len(), 1, "the floor");
+        assert_eq!(map.dynamic.len(), 3);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        game.start();
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        let half = Vec3::new(21.0, 21.0, 44.0);
+        // A sweep through each volume (they are 1000 uu apart along Y).
+        let blocked = |game: &Game, n: u32| {
+            let y = 1000.0 * n as f32;
+            game.world()
+                .sweep_box(Vec3::new(100.0, y, 100.0), Vec3::new(400.0, y, 100.0), half)
+                .is_some()
+        };
+        let state = |game: &Game| [7, 8, 9].map(|id| game.actor_collision(id));
+        // As placed: the first off, the others on (`bEnabled`).
+        assert_eq!(state(&game), [Some(false), Some(true), Some(true)]);
+        // Input 0 turns on, 1 off, 2 flips: every volume, each time.
+        for (input, expected) in [
+            (0, [true, true, true]),
+            (1, [false, false, false]),
+            (1, [false, false, false]),
+            (2, [true, true, true]),
+            (2, [false, false, false]),
+            (0, [true, true, true]),
+        ] {
+            script.runtime_mut().force_input(1, input);
+            let tick = script.tick(&mut game, &InputFrame::default()).unwrap();
+            assert_eq!(state(&game), expected.map(Some), "input {input}");
+            for n in 0..3 {
+                assert_eq!(
+                    blocked(&game, n),
+                    expected[n as usize],
+                    "input {input}, volume {n}"
+                );
+            }
+            // One toggle output per target, in the link's order.
+            let toggled: Vec<&str> = tick
+                .outputs
+                .iter()
+                .filter_map(|o| match o {
+                    Output::ActorToggled { actor, .. } => Some(actor.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                toggled,
+                [
+                    "T.TheWorld.PersistentLevel.DynamicBlockingVolume_0",
+                    "T.TheWorld.PersistentLevel.DynamicBlockingVolume_1",
+                    "T.TheWorld.PersistentLevel.DynamicBlockingVolume_2",
+                ],
+                "input {input}"
+            );
+        }
+        // A "Toggle" flips each volume from its own state: with the first
+        // switched off by hand, the three end up on, off, off.
+        assert!(game.set_actor_collision(7, false));
+        script.runtime_mut().force_input(1, 2);
+        script.tick(&mut game, &InputFrame::default()).unwrap();
+        assert_eq!(state(&game), [Some(true), Some(false), Some(false)]);
+        assert!(
+            script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+            "{:?} {:?}",
+            script.runtime().errors(),
+            script.host_errors()
+        );
+    }
+
+    /// A stored `Targets` value is left as it is, and a node without a
+    /// `Targets` link gets none.
+    #[test]
+    fn target_arrays_are_declared_only_where_they_are_missing() {
+        let nodes = r#"[
+            {"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3, 4]},
+            {"id": 1, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+             "variables": [{"desc": "Target", "property": "Targets", "vars": [4]}]},
+            {"id": 2, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+             "variables": [{"desc": "Target", "property": "Targets", "vars": [4]}],
+             "params": {"Targets": [{"$obj": null}]}},
+            {"id": 3, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+             "variables": [{"desc": "Bool", "vars": []}]},
+            {"id": 4, "class": "Engine.SeqVar_Object", "kind": "variable", "parent": 0}
+        ]"#;
+        let mut g = graph(nodes, "[]");
+        let stored = g.nodes[2].params.clone();
+        declare_target_arrays(&mut g);
+        assert_eq!(
+            g.nodes[1].params.get("targets"),
+            Some(&asamu_kismet::KValue::Array(Vec::new()))
+        );
+        assert_eq!(g.nodes[2].params, stored);
+        assert!(g.nodes[3].params.is_empty() && g.nodes[4].params.is_empty());
+    }
+
+    /// Instances taken out of the static set for a moving actor stay as the
+    /// level loader placed them (kind, switch, flags, sweep rule), and
+    /// turning a mover body's collision off and on again changes only the
+    /// switch.
+    #[test]
+    fn mover_bodies_keep_their_instances_as_placed() {
+        let (mut map, s) = lift_map();
+        // The lift's platform as a level loader may place it: switched off.
+        assert_eq!(map.collision.set_actor_enabled(5, false), 1);
+        let placed: Vec<_> = map
+            .collision
+            .statics()
+            .iter()
+            .filter(|i| i.info.actor.is_some())
+            .cloned()
+            .collect();
+        assert_eq!(placed.len(), 2);
+        let mut movers = prepare_movers(&mut map, &s);
+        assert_eq!(map.dynamic, placed);
+        assert!(!map.dynamic[0].enabled && map.dynamic[1].enabled);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let flags = |game: &Game, i: usize| {
+            let inst = &game.world.scene.as_ref().unwrap().dynamic[i];
+            (inst.info, inst.kind, inst.blocks_lines, inst.enabled)
+        };
+        let (info, kind, lines, _) = flags(&game, 1);
+        set_body_collision(&mut game, &mut movers, 6, false);
+        assert_eq!(flags(&game, 1), (info, kind, lines, false));
+        set_body_collision(&mut game, &mut movers, 6, true);
+        assert_eq!(flags(&game, 1), (info, kind, lines, true));
+        // The other body was not touched.
+        assert!(!flags(&game, 0).3);
     }
 }

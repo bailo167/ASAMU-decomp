@@ -3,6 +3,7 @@
 //! ```text
 //! asamu-trace convert RAW.raw.jsonl [--out FILE | --out-dir DIR] [--segment N] [--level NAME] [--list]
 //!                    [--move-input auto|keys|acceleration] [--move-frame original|yaw]
+//!                    [--stats FILE.stats.json | --no-stats]
 //! asamu-trace starts TRACE [--events]
 //! asamu-trace replay TRACE --out OURS [--converted DIR [--map NAME] [--kismet]]
 //!                    [--tick-rate HZ | --variable-dt]
@@ -27,7 +28,10 @@
 //! tick from the recording's previous sample, so that a comparison measures
 //! one tick of our rules instead of accumulated drift. `compare` leaves the
 //! FOV out of the verdict of a recording whose FOV column is the camera's
-//! cached view FOV (`--fov-verdict`).
+//! cached view FOV (`--fov-verdict`). `convert` and `validate` read the
+//! recorder's `<recording>.stats.json` next to a raw file when it is there:
+//! its markers become events (`starts --events` lists them) and its
+//! dropped-frame log says why a run ended (`asamu_trace::sidecar`).
 
 use std::fs::File;
 use std::io::BufReader;
@@ -45,6 +49,7 @@ use asamu_trace::convert::{ConvertOptions, MoveInput, convert, output_names, raw
 use asamu_trace::move_input::MoveFrame;
 use asamu_trace::raw::{RawFile, looks_raw};
 use asamu_trace::replay::{EventPolicy, ReplayLevel, ReplayOptions, StartPolicy, Stepping, replay};
+use asamu_trace::sidecar::{RecorderLog, sidecar_path};
 use asamu_trace::timestep::StepStats;
 use asamu_trace::{layout, read_trace, report, segments, write_trace};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -209,6 +214,14 @@ enum Cmd {
         /// The axes an acceleration is read in.
         #[arg(long, value_enum, default_value = "original")]
         move_frame: MoveFrameArg,
+        /// The recorder's stats file with the recording's markers and
+        /// dropped-frame log (default: `<name>.stats.json` next to
+        /// `<name>.raw.jsonl`, when it exists).
+        #[arg(long, conflicts_with = "no_stats")]
+        stats: Option<PathBuf>,
+        /// Convert without the recorder's stats file.
+        #[arg(long)]
+        no_stats: bool,
     },
     /// List where a replay of a trace may start (standing still, nothing held) and what
     /// happens in between.
@@ -347,6 +360,27 @@ fn read_raw(path: &Path) -> Result<RawFile> {
     RawFile::read(BufReader::new(f)).with_context(|| format!("reading {}", path.display()))
 }
 
+/// The recorder's sidecar for the raw file at `raw`: the file named with
+/// `--stats`, else the one next to the raw file if it exists; none with
+/// `--no-stats`. Returns the log and where it was read.
+fn read_log(
+    raw: &Path,
+    stats: Option<&Path>,
+    no_stats: bool,
+) -> Result<Option<(RecorderLog, PathBuf)>> {
+    if no_stats {
+        return Ok(None);
+    }
+    let path = match stats {
+        Some(p) => p.to_path_buf(),
+        None => match sidecar_path(raw).filter(|p| p.is_file()) {
+            Some(p) => p,
+            None => return Ok(None),
+        },
+    };
+    Ok(Some((RecorderLog::read(&path)?, path)))
+}
+
 fn write_summary(s: &CompareSummary, path: &Path) -> Result<()> {
     let text = serde_json::to_string_pretty(s)?;
     std::fs::write(path, text + "\n").with_context(|| format!("writing {}", path.display()))
@@ -361,7 +395,12 @@ fn cmd_convert(
     list: bool,
 ) -> Result<()> {
     let file = read_raw(raw)?;
-    let segs = convert(&file, opts)?;
+    let segs = convert(&file, opts).with_context(|| {
+        format!(
+            "converting {} (--no-stats converts without the recorder's stats file)",
+            raw.display()
+        )
+    })?;
     if list {
         for (i, s) in segs.iter().enumerate() {
             println!(
@@ -374,9 +413,16 @@ fn cmd_convert(
                 StepStats::of_samples(&s.trace.samples).describe()
             );
             for n in s.trace.meta.notes.iter().filter(|n| {
-                ["move input:", "check:", "input:", "event:", "fov:"]
-                    .iter()
-                    .any(|p| n.starts_with(p))
+                [
+                    "move input:",
+                    "check:",
+                    "input:",
+                    "event:",
+                    "fov:",
+                    "dropped:",
+                ]
+                .iter()
+                .any(|p| n.starts_with(p))
             }) {
                 println!("    {n}");
             }
@@ -425,10 +471,15 @@ fn cmd_validate(files: &[PathBuf]) -> Result<bool> {
         let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
         if looks_raw(first) {
             match RawFile::from_str_lines(&text).and_then(|f| {
-                let segs = convert(&f, &ConvertOptions::default())?;
-                Ok((f, segs))
+                let log = read_log(p, None, false)?;
+                let opts = ConvertOptions {
+                    log: log.as_ref().map(|(l, _)| l.clone()),
+                    ..ConvertOptions::default()
+                };
+                let segs = convert(&f, &opts)?;
+                Ok((f, segs, log))
             }) {
-                Ok((f, segs)) => {
+                Ok((f, segs, log)) => {
                     let t = raw_timing(&f);
                     let arg_check = if t.arg_checked > 0 {
                         format!(
@@ -451,6 +502,75 @@ fn cmd_validate(files: &[PathBuf]) -> Result<bool> {
                         f.header.benchmarking,
                         t.lengths.describe()
                     );
+                    let counts = f.optional_counts();
+                    if !counts.is_empty() || !f.header.optional_fields.is_empty() {
+                        let listed: Vec<String> = counts
+                            .iter()
+                            .map(|(name, n)| {
+                                let announced = f.header.optional_fields.iter().any(|a| a == name);
+                                format!(
+                                    "{name} on {n}{}",
+                                    if announced {
+                                        ""
+                                    } else {
+                                        " (not announced in the header)"
+                                    }
+                                )
+                            })
+                            .collect();
+                        let absent: Vec<&str> = f
+                            .header
+                            .optional_fields
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|a| !counts.contains_key(a))
+                            .collect();
+                        println!(
+                            "    optional members (layout {}), of {} records with a player: {}{}",
+                            f.header
+                                .optional_layout
+                                .clone()
+                                .flatten()
+                                .as_deref()
+                                .unwrap_or("none"),
+                            f.records.iter().filter(|r| r.player.is_some()).count(),
+                            if listed.is_empty() {
+                                "none".to_owned()
+                            } else {
+                                listed.join(", ")
+                            },
+                            if absent.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; announced but in no record: {}", absent.join(", "))
+                            }
+                        );
+                    }
+                    if let Some((l, path)) = &log {
+                        println!(
+                            "    {}: {} marker(s){}, dropped-frame log {}",
+                            path.display(),
+                            l.markers.len(),
+                            if l.markers_omitted > 0 {
+                                format!(" ({} more not kept)", l.markers_omitted)
+                            } else {
+                                String::new()
+                            },
+                            match &l.drops {
+                                None => "not kept by this recorder".to_owned(),
+                                Some(d) => format!(
+                                    "with {} entries for {} frame(s){}",
+                                    d.len(),
+                                    d.iter().map(|e| e.count).fold(0_u64, u64::saturating_add),
+                                    if l.drops_omitted > 0 {
+                                        format!(" ({} more frames not logged)", l.drops_omitted)
+                                    } else {
+                                        String::new()
+                                    }
+                                ),
+                            }
+                        );
+                    }
                 }
                 Err(e) => {
                     all_ok = false;
@@ -533,8 +653,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             list,
             move_input,
             move_frame,
+            stats,
+            no_stats,
         } => {
+            let log = read_log(&raw, stats.as_deref(), no_stats)?;
             let opts = ConvertOptions {
+                log: log.map(|(l, _)| l),
                 level,
                 move_input: match move_input {
                     MoveInputArg::Auto => MoveInput::Auto,

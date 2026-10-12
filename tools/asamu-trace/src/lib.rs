@@ -11,7 +11,10 @@
 //! ```
 //!
 //! - [`raw`]: the recorder's lossless per-frame format (engine units: rotator
-//!   units, raw key names, physics mode numbers).
+//!   units, raw key names, physics mode numbers), with the optional members
+//!   of recorder 0.2.0.
+//! - [`sidecar`]: the markers and the dropped-frame log the recorder writes
+//!   next to a recording.
 //! - [`bindings`]: key names → logical actions through the game's own key
 //!   bindings (recorded from the running game).
 //! - [`convert`]: raw → canonical trace (unit normalisation, frame alignment,
@@ -20,13 +23,14 @@
 //! - [`move_input`]: the move axes of a gamepad recording, from the pawn's
 //!   recorded acceleration (with the evidence for the mapping).
 //! - [`state`]: the script state the recorder read on every frame (with
-//!   the eye height), kept in the trace's notes so that a replay can start
-//!   from any tick.
+//!   the eye height and, from recorder 0.2.0, the floor normal, the weapon's
+//!   state and refire timer and the cylinder's size), kept in the trace's
+//!   notes so that a replay can start from any tick.
 //! - [`segments`]: where a replay of a recording may start (standing still,
 //!   nothing held), what the player did in between, and the events a replay
 //!   of the inputs cannot follow (respawn teleports, level-script state
 //!   changes) or a sample cannot show (an attach released inside its
-//!   frame).
+//!   frame), and the recording's markers.
 //! - [`replay`]: drives [`asamu_game::Game`] (graybox or a converted level,
 //!   optionally with Kismet) with a trace's initial state and inputs: with
 //!   fixed ticks for a fixed-rate trace, with each sample's own frame length
@@ -58,6 +62,7 @@ pub mod raw;
 pub mod replay;
 pub mod report;
 pub mod segments;
+pub mod sidecar;
 pub mod state;
 pub mod stepper;
 pub mod timestep;

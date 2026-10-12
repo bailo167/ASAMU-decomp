@@ -44,6 +44,7 @@ evidence for each so a later agent can confirm them against the script property 
 | 8 | Air control: if a pawn flag (Pawn+0x298 bit 51, hypothesis `bLimitFallAccel`) is set, air acceleration is clamped to `AccelRate·AirControl` (+ a low-speed boost below 10 uu/s, and a horizontal speed bound when already above GroundSpeed). If the flag is clear, the script acceleration is used unclamped. **The flag's default must be read from script.** | CONFIRMED logic; UNKNOWN default |
 | 9 | Landing happens on any hit whose normal Z ≥ `WalkableFloorZ` (Pawn+0x258). On a direct landing the unused sub-step time is carried into walking; a landing detected only after a wall/ceiling slide carries **zero** time. | CONFIRMED (disassembly of both call sites) |
 | 10 | Jumping is **not native** (no `DoJump` symbol); the jump impulse comes from script. Native code only provides `SuggestJumpVelocity` (AI) and landing bookkeeping. `SetMaxLandingVelocity` is an empty stub. | CONFIRMED |
+| 11 | Every hit the movement code sees is **reported short of the contact** (10.2): 0.1 uu for a trace under 1 uu, else a tenth of its length, at most 1.0 uu (BSP, brushes, simple bodies) or 4.0 uu (mesh triangles). The pawn therefore stands a true 3.15 or 4.95 uu above a floor, rests 0.1 uu from a wall and lands a tenth of its last fall step above the floor. It is swept as a box (10.1). | CONFIRMED (code; recordings) |
 
 ## 0. Evidence and reproduction
 
@@ -412,6 +413,38 @@ after loop:
 - Otherwise (no actor, the base, or step-up-able): `stepUp(down=(0,0,−1), DesiredDir=SafeNormal(Delta),
   Delta·(1 − Hit.Time), Hit)` (3.2.1). If that leaves the pawn falling → falling transition.
 
+**Wall contact, with the pull-back (10.2)** [CONFIRMED rule; measured at one wall]. Every `Hit.Time`
+above is a reported time, short of the contact. Walking square into a wall therefore takes this
+course, all moves being shorter than 10 uu:
+
+- The move `Delta` meets the wall and stops `pull(|Delta|)` short of it, `pull(L)` = 0.1 uu for
+  `L < 1`, else `0.1·L`.
+- `stepUp` then tries the rest, `R = Delta·(1 − Hit.Time)`, from `MaxStepHeight + 2` higher. Against the
+  same wall that shorter trace is pulled back less: the pawn advances `pull(|Delta|) − pull(|R|)` more
+  and is `pull(|R|)` from the wall. Its slide is zero for a head-on hit; the step-down brings it back
+  to the height it had (the floor check is longer than the step and finds nothing nearer).
+- Once the attempted moves are shorter than 1 uu the pawn is 0.1 uu from the wall and stays there: a
+  contact nearer than the pull-back is reported at time 0.
+- At an angle the pull-back is along the move, so the distance along the wall's normal is the
+  pull-back times the cosine of the angle of approach.
+
+Measured (`docs/PARITY_FINDINGS.md` V11, the Workshop door, WS1 ticks 1562 to 1565): from 0.4189 uu
+with attempted moves of 2.266, 0.788 and 0.662 uu the rule gives 0.2266 after the first sweep and
+0.2074 after the step-up's retry (an advance of 0.2115), then 0.1 (an advance of 0.1074), then no
+move; recorded advances 0.2114 and 0.1074, rest 0.0999 uu from the contact plane. That plane is where
+the pawn's centre is 21.025 uu from the door's face: the move's box is 1.001 × 21 = 21.021 wide (9.2).
+`crates/asamu-player/tests/parity_pull_back.rs` holds the derivation as a test.
+
+Re-measured by the package's verifier (2026-10-12, own script over the raw records, the attempted move
+of each tick recomputed with 2.1 from the previous record's velocity and this record's acceleration):
+the gap before tick 1563 is 0.41877 and the contact plane x = 302.98485. Ticks 1564 to 1569 attempt
+moves under 1 uu that turn sideways (0.032 to 0.074 uu of 0.56 to 0.79), and the gap follows the cosine
+rule above tick by tick: derived 0.09992, 0.09980, 0.09958, 0.09945, 0.09938, 0.09913, recorded
+0.09993, 0.09980, 0.09959, 0.09947, 0.09941, 0.09913 (positions there are multiples of 0.00003). The
+"0.0999" is therefore 0.1 times the cosine, not a rounding of 0.1. Sideways the pawn makes the whole
+attempted move on each of the seven ticks (to 0.00002 uu): what the blocked tries leave is slid along
+the door. `crates/asamu-player/tests/parity_pull_back_recorded.rs` runs the port over these seven moves.
+
 #### 3.2.1 APawn::stepUp @ 0x100ADCFA0 [CONFIRMED]
 
 `StepDown = down · (MaxStepHeight[+0x250] + 2.0)`.
@@ -474,6 +507,37 @@ also hit while the floor is unwalkable (this blocks the falling path below and r
 
 Constants: 2.0 (trace fudge), 2.4 @ 0x10173D2B0, 1.9 @ 0x10173D2B4, 2.15 @ 0x10173D2B8,
 0.1 @ 0x1016457B8.
+
+**`FloorDist` is a reported distance (10.2), so the pawn stands higher than 2.15**
+[CONFIRMED: native rule and recordings]. The floor trace is `P = MaxStepHeight + 2` long, 28 uu for
+the player, and its hit comes back `min(0.1·P, K)` short of the floor: 1.0 uu on BSP, on a brush and
+on a mesh's simple-collision body (K = 1.0), 2.8 uu on a mesh's triangles (K = 4.0). With `g` the true
+height of the pawn's bottom above the floor:
+
+```
+FloorDist = max(0, g − 1.0)        BSP, brushes, simple bodies
+FloorDist = max(0, g − 2.8)        mesh triangles
+```
+
+- The target 2.15 is a true 3.15 uu (4.95 on triangles) and the band 1.9 to 2.4 a true 2.9 to 3.4
+  (4.7 to 5.2). Measured: the centre at 72 + 44 + 2.15 + 1.0 = 119.150 on 1,817 of 1,817 Workshop
+  records over the BSP floor at 72 (V18; recounted: 1,563 hold the `f32` nearest to 119.15 and 254 the
+  one below it, 0.0000076 lower, so the height is not one bit pattern); 3.151 uu above flat hull tops at 7 places (P2); 4.954 uu
+  (sd 0.113, n 23) under the box's footprint on triangle floors, standing gaps 4.72 to 5.17 (P4, V7).
+- A floor nearer than the pull-back is reported at distance 0 and not as penetrating, so the pawn is
+  moved up by the whole 2.15, wherever it is below 1.0 (2.8). From close to a floor it therefore
+  reaches the band **in stages**: on triangles from 0.466 to 2.616 and, at the next check, to 4.766,
+  where the floor is reported at 1.966 and the pawn stays (not at 4.95). On BSP the second check sees
+  1.616 and moves it to 3.15.
+- A pawn that stands still is not checked (the skip rule above), so it keeps whatever height its last
+  check or its landing left it, in or out of the band, until it moves. The pops of
+  `docs/PARITY_FINDINGS.md` P11 start as such a rise; why those pawns then fall is not explained by it.
+- The trace is the pawn's box (10.1), so on a slope `g` is the height of the box's lowest corner above
+  the floor under that corner: on a plane rising `a` per uu along X and `b` along Y the centre is
+  `44 + 21·(|a| + |b|) + 3.15` above the plane under it (a cylinder: `21·sqrt(a² + b²)`).
+- Not covered by the above [CONFIRMED rule, not measured]: with BSP within reach below a mesh or a
+  volume, their hit is pulled back on a shorter trace (10.2, "BSP first"), so a pawn standing on
+  triangles that lie a few uu above a BSP floor stands lower than 4.95 above them.
 
 ### 3.4 Fall / ledge decision
 
@@ -625,6 +689,24 @@ If `Hit.Normal.Z ≥ WalkableFloorZ` [+0x258]:
 
 (If the hit actor is a pawn, the move was upward, `Hit.Time = 0` and the normal is straight up, script
 `StuckOnPawn` is raised first.) Constants: 0.003 @ 0x10173D2D4, 0.1 @ 0x1016457B8.
+
+**Where a landing leaves the pawn** [CONFIRMED rule; measured, `docs/PARITY_FINDINGS.md` P3]. `Hit.Time`
+is the reported time (10.2): the pawn stops short of the floor by the pull-back of the falling move,
+along that move. For a move `L` uu long that is `0.1·L` (0.1 uu under 1 uu), at most 1.0 uu on BSP,
+brushes and simple bodies and 4.0 uu on a mesh's triangles; a fall of 600 uu/s at 60 Hz lands 1.0 uu
+above a BSP floor. Both conditions of the velocity rule above use the reported time. A floor nearer
+than the pull-back is reported at time 0: the pawn lands where it is, and the velocity is not
+re-derived (`Hit.Time ≤ 0.1`). The walking that follows in the same frame (carried time, forced floor
+check, 5.2) then moves the pawn up as described in 3.3: a landing with a 4.66 uu move on triangles
+rests at 0.466 + 2.15 = 2.616 uu (the after-landing rest of 2.62 at the Darkcave start, V7), and at
+4.766 after the next moving frame. Re-measured on the five landings of the recordings after which the
+pawn stood still (2026-10-12, verifier's own script; `L` from the record before the landing): on
+triangles `L` = 4.658 rests at 2.616 (2.615 under the box's footprint on the converted triangles) and
+rises 2.150 with the first step, and `L` = 1.051 rests at 2.255 (2.255) and rises 2.148; on
+simple-collision floors `L` = 1.325, 1.283 and 1.288 rise to 3.15 with the first step, by
+`1.0 − 0.1·L` = 0.867, 0.872, 0.871 (recorded 0.867, 0.879, 0.875; heights there are multiples of
+0.0039). Two more such landings are on uneven floors and were not used. A landing found only after a slide (4.5) carries no time: the pawn
+stays the slide's pull-back above the floor until the next frame.
 
 ### 4.5 Walls and ceilings (non-walkable hits)
 
@@ -1010,9 +1092,12 @@ DefaultGravityZ (−520.0 config).
 1. **Swept box move** (`MoveActor`): sweep the axis-aligned box of the collision cylinder's extent
    (radius ×1.001 on X and Y, half-height on Z; a box, not a cylinder: 10.1) by Delta; stop at the
    first blocking hit; return Time ∈ [0,1], Normal, hit actor,
-   material/physical-material friction, "started penetrating". The original's collision primitives
-   keep a small skin; the walking code relies on hovering 1.9–2.4 uu above floors, so our sweep must be
-   conservative in the same way [exact skin UNKNOWN].
+   material/physical-material friction, "started penetrating". `MoveActor` adds no skin of its own:
+   the pawn goes to `Location + Delta·Hit.Time` (0x1008E9DBF to 0x1008E9E39), and `Hit.Time` is the
+   time the primitive reported, already pulled back (10.2). The 1.001 widens X and Y only: the extent
+   from `AActor::GetCylinderExtent` is multiplied at 0x1008E9BF1 by the vector at 0x10171DA60, whose
+   first two floats are 1.001 [CONFIRMED]. Ours: `CollisionWorld::sweep_box` returns the exact
+   contact with the primitive's kind and the port applies `pull_back`.
 2. **Extent line check** (`SingleLineCheck` with extent; the same box, 10.1): floor probe (length MaxStepHeight + 2),
    air-control wall probe (world only), landing sanity probe (0.9× extent), base search (8 uu).
 3. **Point/small-extent probes** for ledge checks (only needed for crouch/slow walk).
@@ -1052,8 +1137,8 @@ tick(dt):
 4. What physics mode and forces the **grapple** uses (script); `physCustom` is empty natively.
 5. Exact return value of `CheckForLedges` (crouch/slow-walk ledge behaviour).
 6. Mesh root-motion mode of the player pawn (must be "ignore" for the UDK velocity path).
-7. Collision skin/pullback inside the original line checks (BSP/static mesh) — affects hover distances
-   and wall contact.
+7. ~~Collision skin/pullback inside the original line checks (BSP/static mesh) — affects hover
+   distances and wall contact.~~ Answered: 10.2.
 8. Per-map WorldGravityZ/GlobalGravityZ, GravityVolumes, PhysicsVolume GroundFriction/TerminalVelocity
    values in ASAMU maps.
 9. Default of UDKPawn+0x78C (slope boosting) and of the lean-roll limit (visual only).
@@ -1157,19 +1242,87 @@ A skipped axis cannot separate the two bodies, so the solid the original sweeps 
 than the element and contacts with its edges and corners come earlier: above scale 100 the box is stopped
 by the element's face planes pushed out by the box and by nothing else, with no bevel at an edge.
 [STRONG: it follows from the code; no recording has been compared with it yet.] A body whose faces are
-parallel to the world axes loses nothing: its own face directions are those axes.
+parallel to the world axes loses nothing: its own face directions are those axes. When the scale is not
+uniform, the box's face axis along one world axis is the cross product of the rows for the other two: it
+is skipped when those two scales multiply to more than 100 (more than 10,000 for triangles).
 
-How much of the user's data this touches (counted from a local conversion on 2026-10-11: the scene files'
-component transforms and the mesh list's simple-body references): of 22,782 mesh components that block
-the pawn, 13,564 use a mesh with a simple-collision body; 2,485 of those are placed at a scale above 10 on
-at least one axis (2,157 on all three, 330 above 100), 39 different meshes. Of the 9,218 whose mesh has no
-simple body (triangles for the pawn too), 127 are placed at a scale above 100 on at least one axis (108 on
-all three; 4 above 1,000). Of the 906 blocking-volume actors none is scaled above 10 and none is turned
-other than by quarter turns about Z, so blocking volumes are not affected beyond the 0.57° rule.
+**What confines such a contact: the bounds test of the aggregate check** (third pass, 2026-10-12, read
+statically from 0x100AA4B22 to 0x100AA4E64) [CONFIRMED]. For a trace with an extent the aggregate check
+does not hand every convex element to the routine above. In the element's space it builds the box
+`[−extent, extent]`, carries it through the inverse matrix (`FBox::TransformBy`, called at 0x100AA4B75)
+and takes half the size of the result as the box's half size there; it takes the smaller and the larger
+of the start and the end on each axis, widens them by that half size plus 0.1 (f32 at 0x1016457B8, added
+at 0x100AA4DA2), and skips every element whose stored bounds (`ElemBox`, at +0x60 and +0x6C of the
+element: the box of its vertices) lie entirely beyond that range on any of the three axes (six
+comparisons from 0x100AA4E14; a touching element is tested). The routine's second loop over the convex
+elements (from 0x100AA5020, taken by its last argument) makes the same six comparisons. A trace without extent
+(all three components zero, tested at 0x100AA4BF7) goes to every element without this test.
+
+With every axis tested the bounds test changes no result. With axes skipped it is what limits the
+enlarged solid: the box is stopped by an element's extended face planes only where the bounds of the
+whole sweep reach the element's bounds widened by the box and by 0.1 of the element's own units (0.1 ×
+scale in the world). Note that it is the bounds of the sweep that are compared, not the sweep.
+
+**Which matrix** [CONFIRMED for brushes and, by the verification pass of 2026-10-12, for static meshes].
+The brush component gets the matrix and the scale it hands to the aggregate check from
+`UPrimitiveComponent::GetTransformAndScale @ 0x100533640` (called at 0x100759CFF). It returns the
+component's total scale (its own scale and 3-D scale times the owner's `DrawScale` and `DrawScale3D`,
+unless a flag of the component is set: the absolute-scale flag, by this use) and the component's
+`LocalToWorld` with each of its three rows divided by that scale; the aggregate check multiplies the rows
+by the scale again. One exception: when all three components of the scale are below 1e-4 in size (f32 at
+0x10163FED8) the routine logs a warning and returns the identity matrix.
+
+The static-mesh component does not call that routine. `UStaticMeshComponent::LineCheck` takes a matrix
+from its own table (slot 0x420, with an index: one matrix per instance, the component's `LocalToWorld`
+for an ordinary component) and separates it itself, at 0x100C58AD4 to 0x100C58C95: the scale on an axis
+is the length of that row of the matrix, the row is divided by it, and a row whose squared length is not
+above 1e-8 (f32 at 0x10163FED4) is left as it is with a scale of zero. The scale is therefore never
+negative; a mirrored placement keeps its mirror in the rows. Then:
+
+- when the absolute product of the three scales is not above 1e-4 (the double at 0x1016393A0, compared at
+  0x100C58C8D), the aggregate check is **not called**: such a placement has no simple collision, for a
+  trace with or without an extent (uniformly: a scale of 0.0464 or less). 7 pawn-blocking placements of a
+  mesh with a body in the user's levels are that small (MESHES.md, "In the runtime"); ours leaves their
+  bodies out (`asamu_world::scene::simple_body_checked`);
+- otherwise the aggregate check is called (0x100C58CE4) with the rows of length one and the scale, and
+  multiplies them again.
+
+So for both components the element's space is the component's local space and the matrix that is
+inverted is the component's `LocalToWorld`, whatever the rotation.
+
+How much of the user's data this touches. Counted on 2026-10-11, before the per-mesh switches were
+applied (the scene files' component transforms and the mesh list's simple-body references): of 22,782
+mesh components that block the pawn by their flags, 13,564 use a mesh with a simple-collision body; 2,485
+of those are placed at a scale above 10 on at least one axis (2,157 on all three, 330 above 100), 39
+different meshes. Of the 906 blocking-volume actors none is scaled above 10 and none is turned other
+than by quarter turns about Z, so blocking volumes are not affected beyond the 0.57° rule. Counted again
+on 2026-10-12 by the scene loader with the rule itself (`crates/asamu-world/tests/scene_simple_real_data.rs`
+on the Windows conversion, the seven story maps with their sub-levels): of 12,846 placements that the
+pawn meets at a simple body, 2,162 lose at least one face axis of the box (two scales multiplying to
+more than 100), which is 31,944 of the 89,412 convex elements placed for them (7 placements fewer, with
+one element each, than first counted: those too small to have a simple body, above): AG-ParadiseCave 486
+placements, AG-Darkcave 418, AG-IceCave 941, AG-BeautifulCity 188, AG-StarHaven 123, AG-Workshop 3,
+AG-Epilogue 3. They are the large rocks and platforms the levels are built from (`Rocks.Mesh.Rock_Huge_1`
+and `_2`, `Platforms.Meshes.Platform_Medium_1`, the icicles of AG-IceCave). No volume hull loses one.
+13 pawn-blocking placements sit on the threshold itself: they are scaled by exactly 10 on two axes
+(`Rocks.Mesh.Rock_Huge_2` and `Platforms.Meshes.Platform_Medium_1`: 9 in AG-Darkcave, 3 in
+AG-ParadiseCave, 1 in AG-BeautifulCity), so the squared length of a face axis of the box is 1e-4 to
+within 2 parts in 10 million, which is the rounding of single precision. Which side the original's `f32`
+arithmetic in the element's space puts each of them on is UNKNOWN (it would take that arithmetic
+operation by operation); ours decides in `f64` from the stored matrix, and a recount in `f64` made
+without this repository's code already differs from the loader on one of them (2,163 placements against
+2,162; counted 2026-10-12 by the third verification). Of
+the 637 placements the pawn meets at triangles (meshes that store the box switch `false`), 20 are placed
+so that two scales multiply to more than 10,000 (13 in AG-ParadiseCave, 7 in AG-BeautifulCity:
+`Platforms.Meshes.Platform_Medium_2` and `Village.rock2`). The earlier figure of 127 counted meshes
+without a simple body, which do not stop the pawn at all (`docs/PARITY_FINDINGS.md` P1).
 
 **Spheres and sphyls** (`FKSphereElem::LineCheck @ 0x100AA6710`, `FKSphylElem::LineCheck
 @ 0x100AA7510`) return "no hit" at once when any component of the extent is non-zero: they never
-block a pawn move, only zero-extent traces.
+block a pawn move, only zero-extent traces. [CONFIRMED, read again on 2026-10-12: each routine loads
+its "no hit" value, compares the three floats of its extent argument with zero one after the other
+(0x100AA6714 to 0x100AA6757; 0x100AA7518 to 0x100AA755B) and jumps to its return (0x100AA695C;
+0x100AA7DBA) on the first that differs, before it touches the result.]
 
 **Box elements** (`FKBoxElem::LineCheck @ 0x100AA69A0` with
 `FBoxSweptBoxSeparatingAxisCheck::FindSeparatingAxis @ 0x100AAC780`): fifteen calls of one per-axis
@@ -1228,13 +1381,35 @@ gave the same hit or miss every time and the same normal on all 9,797 hits (larg
 8.2e-7, the original's single precision); the script of that comparison was not kept either.
 Differences: BSP goes through the triangle test (its leaf hulls are not in the converted data); a
 start in contact follows this code base's tolerance rule instead of the two rules above (documented in
-the module); box elements use the convex rule; and ours works with unit vectors in world space and
-skips an edge axis only below 1e-8 (a parallel pair), for triangles and for convex solids, so it does
-**not** reproduce the scale-dependent skipping above: ours always tests the box's face axes and every
-edge axis that is not degenerate, which makes its contact never earlier than the original's and
-sometimes later. Nothing depends on it yet (the movement code still sweeps the cylinder, simple-collision
-bodies are not in the scene, and the volumes are not affected), but the scene must reproduce the
-skipping before the 127 and 2,485 large placements above are collided with the box.
+the module); box elements use the convex rule. That kernel works with unit vectors in world space and
+skips an edge axis only below 1e-8 (a parallel pair): the exact geometry.
+
+The scale-dependent skipping and the bounds test are applied on top of it, per placed instance
+(`collision::NativeRule`, `box_sweep::AxisSkip`, `box_sweep::convex_precheck`; since 2026-10-12). It
+has to be per instance and per axis, not a property of a mesh or a single number of a placement: which
+axes go depends on the placement's inverse matrix and on each stored edge direction. The scene loader
+puts every simple body, every volume hull (in its component's space) and every mesh met at its
+triangles under it; the kernel decides each axis from the box's edges carried into the element's space,
+as the original does, and evaluates the axes that remain in world space in `f64`. What is not the
+original's:
+
+- A convex solid that loses a face axis is swept only when the sweep itself passes the solid's bounds
+  widened as the bounds test widens them, where the original asks only whether the sweep's bounds reach.
+  The two differ for a long sweep that passes such a solid diagonally in the solid's space; a pawn's
+  moves are a few units long. Without this the search for candidates could not use a hierarchy.
+- For triangles only the edge axes follow the rule (within `asin(1e-4 · scale)` of a box edge). The box's
+  face axes are always tested: what confines a contact once they are skipped is the original's collision
+  tree, and its node boxes are not decoded (MESHES.md, "Collision"). 20 placements are concerned (above).
+  [UNKNOWN how much earlier the original's corner contacts are there.]
+- The thresholds are compared in `f64` on vectors computed in `f64`; the original's are `f32` in the
+  element's space, so a vector within rounding of the threshold can fall on the other side.
+- Box elements and BSP are swept as exact geometry.
+
+`crates/asamu-world/tests/simple_native_rule.rs` holds the rule's consequences as worked examples (an
+octahedron of radius `a` under the player's box: stopped at `a + 44` at scale 5 and at scale 20, where
+its horizontal edges give the vertical axis back, and at `a + 86` at scale 128, where only its four
+face directions are left; the bounds test at 128 + 21 + 12.8 uu), and checks that the hierarchy and the
+reference without one give bit-identical results for 4,000 sweeps against 180 instances under the rule.
 
 What is checked without the original (`crates/asamu-world/tests/collision_box_verify.rs`, run on
 2026-10-11): 16,000 random sweeps in seven families (every triangle shape, corners and edges passing at
@@ -1246,6 +1421,226 @@ travel; all 166 exact ties between the box's face axes report the first in the o
 the tie comparison or that order in the kernel fails these tests and no other.
 [TENTATIVE that nothing observable follows; a recording of a walk into the outer corner of a BSP
 wall at an angle, and one of a pawn pushed into geometry by a mover, would settle it.]
+
+### 10.2 The pull-back: every reported hit is short of the contact
+
+Each collision routine ends by moving the hit it found back along the trace, and the movement code
+only ever sees that reported hit. This is the "skin" of the original: there is no other
+(`UWorld::MoveActor`, 9.2). Read in the Mac executable on 2026-10-10 and again, independently, on
+2026-10-12 (`objdump -d --x86-asm-syntax=intel` over the ranges named below; constants from the file's
+bytes). [CONFIRMED]
+
+**Rule K.** With `L` the length of the trace (start to end, in `f32`: the square root of the sum of the
+three squared differences) and `t` the time of the contact:
+
+```
+t' = t − ( 0.1 < 0.1/L  ?  0.1/L  :  min(0.1, K/L) )
+t' = t' < 0 ? 0 : min(t', 1)
+Hit.Location = Start + (End − Start)·t'
+```
+
+In words: the hit is 0.1 uu short of the contact for a trace shorter than 1 uu, else a tenth of the
+trace's length short, but never more than K uu; and never before the start of the trace (a contact
+nearer than that is reported at time 0, which is not the "started penetrating" flag).
+
+| Routine | Where | Extent trace | Zero-extent trace |
+|---|---|---|---|
+| BSP: `UModel::LineCheck @ 0x10092BD20` | box path 0x10092BED7 to 0x10092BF7C; zero-extent path 0x10092C060 to 0x10092C11B | rule K, K = 1.0 | **0.5 uu at any length**: the time is recomputed from the hit location and `−0.5/L` is added, then the same clamp |
+| Brush: `UBrushComponent::LineCheck @ 0x100759CB0` | 0x100759D65 to 0x100759DFD | rule K, K = 1.0 | the same code |
+| Static mesh, simple body: `UStaticMeshComponent::LineCheck @ 0x100C58790` | 0x100C58909 to 0x100C589B0 | rule K, K = 1.0 | the same code |
+| Static mesh, triangles: the same routine | 0x100C5960D to 0x100C596C1, where its zero-extent and its box check of the triangles both end | rule K, K = 4.0 | the same code |
+| Pawn cylinder: `UCylinderComponent::LineCheck @ 0x100537920` | 0x100537D60 to 0x100537D8B | `t' = t − 0.001`, same clamp | the same code |
+
+Constants (`f32`): 0.1 @ 0x1016457B8, 1.0 @ 0x101633D88, 4.0 @ 0x1016457CC, −0.5 @ 0x10163926C,
+−0.001 @ 0x1016BC044, 0.0 @ 0x1016526A4. Each of the five skips its reduction (not the clamp) for a
+trace carrying flag 0x80000; none of the pawn's moves or checks carries it (`MoveActor`'s flags are
+0x2086 plus, depending on the actor's own flags, 0x20000 and 0x100000: 0x1008E98A1 to 0x1008E98CC; the
+floor check passes 0x20DF, 3.3). Which path a static mesh takes: 10.1 and
+`docs/PARITY_FINDINGS.md` V3.
+
+**BSP first** (`UWorld::MultiLineCheck @ 0x1008EB640`, which `MoveActor` at 0x1008E9C38 and
+`UWorld::SingleLineCheck @ 0x1008E8F10` both go through). The level's BSP is asked first, with the whole
+trace. If it reports a hit at time `T`, the trace given to everything else (the octree's primitives)
+is shortened to end 5 uu beyond that hit:
+
+```
+Dist     = |Hit.Location − Start|
+Dilation = min(1, (5.0 + Dist)·T / (Dist + 0.0001))
+End'     = Start + (End − Start)·Dilation
+```
+
+and the times those primitives report are multiplied by `Dilation` afterwards (0x1008EBC3D to
+0x1008EBDA9; 5.0 @ 0x101639278, 0.0001 @ 0x10163FED8). They are skipped altogether when `Dilation` is
+not above 1e-8. Their own pull-back therefore uses the shortened length `L·Dilation`. On the 28 uu
+floor check over a mesh's triangles with BSP `h` uu below them, and the pawn `g` above the triangles,
+the trace the mesh sees is `g + h − 1 + 5` long, and while that is under 28 the triangles are reported
+`0.1·(g + h + 4)` short instead of 2.8: the pawn then stands `(2.15 + 0.1·(h + 4)) / 0.9` above them,
+2.83 uu for `h` = 0 rising to 4.95 at `h` = 19.05. [CONFIRMED code; not compared with a recording. Of the
+four low standing gaps of V7 (1.18, 2.26, 2.38, 2.62), 2.26 and 2.62 are landing rests (4.4:
+`0.1·L + 2.15` for `L` = 1.051 and 4.658); 1.18 and 2.38 are unexplained and remain candidates.]
+
+Which hit comes first is decided on the reported times, so it need not be the first surface touched:
+on the 28 uu check a mesh's triangles up to 1.8 uu below the top of a blocking volume are reported
+before it (2.8 uu back against 1.0).
+
+**Measured** (`docs/PARITY_FINDINGS.md` P3): BSP floor, simple-body floors and triangle floors (3.3
+here), one wall (3.2), landings (4.4), 47 grapple anchors 3.9967 uu short of the triangles (V16: a
+16,384 uu bullet trace, K = 4.0). Not measured: the zero-extent rows of BSP, brushes and simple bodies,
+the pawn cylinder, and "BSP first".
+
+**Second reading** (2026-10-12, the package's verifier, by another route). Rule K stands in two
+routines the readings above did not use, both with K = 4.0 and the same flag test, length, comparison
+and clamp: `UFracturedStaticMeshComponent::LineCheck @ 0x10086C320` (0x10086CA5A to 0x10086CB07) and
+`UTerrainComponent::LineCheck @ 0x1001C0540` (0x1001C0783 to 0x1001C07D2). The seven constants and the
+vector at 0x10171DA60 were read again from the file's bytes; `MoveActor`'s extent and location update,
+the floor check's flags (0x20DF at 0x100ADB153, extent from `GetCylinderExtent` unscaled) and the
+shortening after a BSP hit were re-read at the addresses given and agree. A NaN time leaves the
+original's clamp as 1 (no hit), as the note on `pull_back` says. Standing gaps on per-triangle floors,
+recomputed from the raw records and the converted triangles under the 42 × 42 footprint: 20 of 23
+standing places (11 or more identical records) are between 4.779 and 5.167, inside the 4.7 to 5.2 the
+rule gives; the other three are 2.255 and 2.615 (the landing rests above) and 2.379.
+
+**Ours.** `asamu_player::world::pull_back` is the rule, operation for operation in `f32`, for the five
+kinds and both sorts of trace; `bsp_checked_fraction` and `reported_time` are "BSP first".
+`CollisionWorld::sweep_box` and `trace_line` return the exact contact and the kind
+(`TraceHit`), and the caller applies the rule: the movement port does for every hit it consumes
+(`crates/asamu-player/src/ue3_movement.rs`: moves, the floor check, the air-control probe, and through
+them step-up, step-down, slides, landings and flying). The port's former 0.05 uu skin is gone. Open on
+our side: a world that mixes kinds has to return the hit that is first by reported time and the
+shortened fraction after a BSP hit; the test worlds here have one kind each. The game's world does both
+(`asamu_game::world::reported_first`): it takes the first contact of all, asks the level's BSP alone when
+that is not BSP, and asks a group of kinds that share one rule (brushes and simple bodies; mesh triangles;
+pawn cylinders) separately, on the shortened trace, only when a contact of that group at the same time
+would be reported before the best so far. On equal reported times BSP is kept, then the contact touched
+first (ours: the original's order among equal times was not read).
+
+### 10.3 Placement: where a spawn or a teleport puts a pawn
+
+Read in the user's macOS executable (2026-10-12; CONFIRMED for the code, constants read from the file's
+bytes; measured on five recorded respawns, below). In our own words.
+
+**Who runs it.** `UWorld::SpawnActor @ 0x1008E5650` (call at 0x1008E5AE6) and `UWorld::FarMoveActor @
+0x1008E90D0` (call at 0x1008E9205; the teleport behind a script's `SetLocation`) both call
+`UWorld::FindSpot @ 0x1008E6570` with the actor's **unscaled** cylinder extent
+(`AActor::GetCylinderExtent`: radius, radius, half height; the player's (21, 21, 44)) when the actor's
+flag word at +0xE8 has bit 0x3C set, or bit 0x3A and the game is not a network client; `SpawnActor` not
+when its "no collision fail" argument is set, `FarMoveActor` not when its "no check" argument is. Bit 0x3D
+of the same word is passed on as the "complex collision" flag. When the search finds no place, the spawn
+or teleport fails and nothing moves.
+
+**"Encroaches"** (`UWorld::EncroachingWorldGeometry @ 0x1008E8D30`): a point check of the box at the
+location (`UWorld::MultiPointCheck`, trace flags 0x22C6, or 0x222C6 with the complex flag) that returns
+anything the test actor is blocked by. The primitives' point-check routines were not read.
+
+**`FindSpot(extent, location)`:**
+
+1. If the box does not encroach at the location: found, location unchanged.
+2. If the extent is zero: not found.
+3. The slice step (below). If it finds a place: found. If it reports that the slice fits but no place was
+   found from it: not found.
+4. Otherwise (the slice does not fit at the location) four slices of **half** the box's X and Y half sizes
+   (vector (0.5, 0.5) at 0x101662F80) and 1 uu half height are tested at the wanted location ± 0.55 half
+   sizes in X and Y (0x10171DA70), X negative first, each with Y negative first, until two fit. Each one
+   that fits moves the location by 1.1 of its offset (0x1016844A8; −1.1 at 0x10171DA74 for the mirrored
+   Y). None: not found. Exactly one: the move is doubled. Then a zero-extent line check (flags 0x2086)
+   from the wanted location to the new one must hit nothing; the box must not encroach there, or the
+   slice step run from there must find a place; and at last the box is traced (flags 0x2086) from there to
+   the point 0.2 of the move beyond the wanted location (0x1016825B8) and, on a hit, stops at the
+   reported hit location. Found.
+
+**The slice step** (`UWorld::CheckSlice @ 0x1008E8A00`):
+
+1. A slice with the box's X and Y half sizes and 1 uu half height (immediate at 0x1008E8A8E) is tested at
+   the location. If it encroaches, the step ends and tells the caller to keep trying.
+2. The slice is traced straight down by 2 × the half height (−2.0 at 0x1016457D0; an extent trace with
+   flags 0x2086, so its hit is reported pulled back, 10.2). With a hit at the reported time `t` the
+   location's height becomes `z − (2t − 1) × half height + 1` (the 1.0 at 0x101633D88; the two branches
+   for `t` above and below 0.5 compute the same value): the box's bottom 2 uu above the slice's bottom at
+   the reported hit. Without a hit the location goes down by one half height.
+3. If the box does not encroach there: found (when `t` was above 0.5, or there was no hit, the box is
+   first traced up by one half height and stops at the reported hit location of what it meets). If it
+   encroaches, the location is pushed sideways by the floor hit's normal's X and Y times the box's X half
+   size and tested once more: found if it fits, else not found.
+
+**What the teleport does besides** (`FarMoveActor`): on success it sets the actor's "just teleported" bit
+(byte +0xF1, 0x10), drops its base (virtual +0x3C0 with a floor normal of (0, 0, 1)) unless the move is
+that of an attached actor, moves the attached actors along, writes the location and updates the touching
+actors. It does not write the physics mode: a pawn keeps the mode it had (all five recorded respawns
+were falling before and after).
+
+**Consequence for a spawn point whose box is `p` uu inside a floor** (the slice at the centre is free):
+the 88 uu slice trace is reported a tenth of its length short, at most 1.0 uu on BSP, brushes and simple
+bodies and 4.0 uu on mesh triangles, so the pawn is put with its bottom **3.0 uu** (or 6.0 uu) above the
+floor, `p + 3.0` above the spawn point, in whatever physics mode it had.
+
+**Measured** (five recorded respawns; all falling, so the first record after the teleport is one frame
+of free fall below the place, `v²/2g` with the recorded `v` and `g` = 1040):
+
+| Record | Checkpoint spawn height | Place (first record + one frame of fall) | Above the spawn point | Rest after the landing | Rest below the place |
+|---|---|---|---|---|---|
+| DC1 997 (AG-ParadiseCave) | 96932.5 | 96932.499 | 0.00 | (floor lower) | |
+| PLAY2 25183 (AG-BeautifulCity) | 37430.484 | 37430.486 | 0.00 | (floor lower) | |
+| DC1 5746 (AG-ParadiseCave) | 110847.625 | 110853.712 | 6.09 | 110853.000 | 0.712 |
+| PLAY2 9084 (AG-BeautifulCity) | 47441.03 | 47449.829 | 8.80 | 47449.105 | 0.724 |
+| PLAY2 20797 (AG-BeautifulCity) | 37217.293 | 37224.900 | 7.61 | 37224.176 | 0.724 |
+
+The three lifted ones come to rest 0.71 to 0.72 uu below where they were put, four frames after the first
+record. That is the rule: from 3.0 uu above a simple-collision floor the fall meets the floor in its fifth
+frame, a move of about 1.3 uu reported a tenth of itself short (4.4), and the landing frame's floor check
+adds 2.15 (3.3): 0.13 + 2.15 = 2.28 uu above the floor, 0.72 below the place. On mesh triangles (6.0 uu)
+the difference would be about 3.4 uu. With the converted levels' simple bodies our placement gives
+110853.72, 47449.832 and 37224.90 for the three places (differences +0.007, +0.003 and −0.002 uu, the
+recording's resolution there being 0.008 and 0.004) and the two free spots unchanged
+(`crates/asamu-game/tests/parity_converted.rs`).
+
+**Ours** (`find_spot` and `check_slice` in `crates/asamu-game/src/converted.rs`): the steps above, with
+the traces answered by the game's world check and their hits pulled back by the one pull-back function.
+Not the original's: "encroaches" is the exact overlap test of the pawn's collision
+(`GameWorld::overlaps_box`), where the original runs its point checks (not read); and ours counts NPC
+pawn cylinders, which the original's flags leave out.
+
+### 10.4 The time of a tick is clamped, and a level's first tick is 0.4 s
+
+Read in the user's macOS executable (2026-10-12; CONFIRMED for the code, constants read from the file's
+bytes). In our own words.
+
+`UWorld::Tick @ 0x1009107A0` takes the frame's time and, in this order:
+
+1. adds it, unscaled, to the world info's real-time clock (+0x540) unless the world is paused
+   (0x100910B8F to 0x100910B9B);
+2. multiplies it by the time dilation (+0x530), and by a second factor (+0x534) while a certain object of
+   the world exists (0x100910BA7 to 0x100910BD6; which object was not read);
+3. **clamps it**: 0.0005 s when it is below 0.0005 s (`f32` at 0x101718EB4), else the smaller of it and
+   **0.4 s** (`f32` at 0x1016E9200) (0x100910BE1 to 0x100910C02);
+4. stores that as the world's delta seconds (+0x544) and adds it to the game-time clock (+0x538) unless
+   paused (0x100910C07 to 0x100910C29). Every actor's tick of that frame gets the clamped time.
+
+**A level's first tick** [CONFIRMED (measured), four level starts in three recordings]. The first frame
+after a level load is long (the load itself), so the first tick is the clamped 0.4 s and the game clock
+reads 0.400 s when the second tick starts:
+
+- AG-Workshop (KM1 record 1179): game time 0.41343 s with a previous delta of 0.01343 s, so the tick before
+  it began at 0.40000 s; the real-time clock reads 0.638 s there, 0.225 s more.
+- AG-BeautifulCity (DC1 7795, KM1 52199) and AG-Darkcave (PLAY2 25512): the recorded free fall of the pawn,
+  extrapolated back by its velocity over 1040 uu/s², begins at game time 0.4001, 0.4000 and 0.4000 s, at
+  the height of the `PlayerStart` (to 0.015, 0.004 and 0.0005 uu).
+
+The pawn exists and is possessed before that tick: the stock game info restarts the player in its
+post-login unless the game has a delayed start, and ASAMU's game info (a `FrameworkGame`) has none
+(CONFIRMED (src)). It is walking and
+has no base (ABILITIES.md A-CP-5), so the 0.4 s tick is one walking step without a move, which is the
+floor check of 3.3 and nothing else: a floor in reach takes the pawn to its standing height, and with no
+floor in reach the pawn is set falling without having moved and without time carried over (3.1 and 1.4:
+a step without a move ends the walking loop, and the time given back to the fall is 0 for it). That is
+why the recorded
+falls begin exactly when the first tick ends, and why a pawn that started falling at login is excluded:
+it would have fallen for 0.4 s in the first tick and landed in it (33.7 and 36.4 uu take 0.25 and 0.26 s).
+
+**Ours:** the game's first tick has the length of every other tick. The pawn's side is the same whatever
+that length is (a walking step without a move). Not reproduced: level script that runs in the original's
+first tick sees 0.4 s pass in it, so its delays and Matinees are up to 0.4 s further on, relative to the
+pawn, than ours. What a script does within that tick was not read: TENTATIVE, and a candidate for the
+timing leftovers of PARITY_FINDINGS P13.
 
 ## 11. Verification log
 
@@ -1311,3 +1706,19 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   elements, brushes and BSP: shape, axis order, contact normal, rules for a start in contact), from the
   disassembly and from running the triangle and convex routines in a local interpreter; 3 and 9.2
   now say "box" where they said "cylinder".
+- 2026-10-12: section 10.2 (the pull-back of every reported hit: the rule re-read at the five
+  routines, `MoveActor`'s use of the reported time and the extent it widens, and the shortening of a
+  trace after a BSP hit in `UWorld::MultiLineCheck`, which no earlier pass had read); what follows from
+  it in 3.2 (wall contact), 3.3 (the floor check's distances are reported ones; rising in stages) and
+  4.4 (where a landing leaves the pawn); 9.2 item 1 and 9.5 item 7 now point to it.
+- 2026-10-12: verification pass of 10.2 and of what 3.2, 3.3 and 4.4 say about it: rule K read at two
+  further routines, the constants and `MoveActor` re-read, and the wall contact (seven ticks, with the
+  cosine of the approach), the Workshop height, five landings and the standing gaps on triangle floors
+  recomputed from the raw recordings. Corrected: two of the four low standing gaps are landing rests,
+  not candidates for "BSP first".
+- 2026-10-12 (game layer, second wave): section 10.3 (the placement search of spawns and teleports,
+  `UWorld::FindSpot` and `UWorld::CheckSlice`, with what `UWorld::FarMoveActor` does besides; measured on
+  the five recorded respawns), and the last paragraph of 10.2 (how the game's world picks the hit that is
+  reported first).
+- 2026-10-12 (game layer, second wave, second pass): section 10.4 (the clamp of a tick's time in
+  `UWorld::Tick` and the 0.4 s first tick of a level, measured on four recorded level starts).

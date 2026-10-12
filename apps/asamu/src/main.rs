@@ -12,7 +12,7 @@
 //!   [`converted`]): renders a level from the user-local output of
 //!   `asamu-import` (scene JSON, glTF meshes, DDS textures, materials when
 //!   converted). The level's game with its Kismet and NPCs
-//!   (`asamu_game::load_level_with_kismet_options`: triangle collision, the
+//!   (`asamu_game::load_level_with_kismet_options`: the level's collision, the
 //!   gameplay actors, the level script, Matinee movers, NPCs) loads on a
 //!   background task; once it is ready the simulation drives the
 //!   first-person camera exactly as in the graybox, and every fixed tick runs
@@ -147,7 +147,7 @@ fn banner(game: &Game) -> String {
             })
             .unwrap_or_else(|| "no grapple gun".to_owned());
         let abilities = if game.scene_map().is_some() {
-            "converted level: abilities, story mode and movers from the map's Kismet, NPCs, triangle collision"
+            "converted level: abilities, story mode and movers from the map's Kismet, NPCs, the level's collision (simple bodies, triangles, BSP, volumes)"
         } else {
             "graybox abilities: everything on, 3 grapples (test configuration)"
         };
@@ -858,7 +858,7 @@ fn run_converted(cli: &Cli, dir: ConvertedDir) -> AppExit {
         fog: cli.fog,
         normal_maps: cli.normal_maps,
     };
-    // Gameplay: the level's game (triangle collision, gameplay actors) loads
+    // Gameplay: the level's game (its collision, gameplay actors) loads
     // on the async pool; until it is ready (or with --fly) the camera flies.
     let game_load = GameLoad {
         request: (!cli.fly && !menu).then(|| (dir.root().to_path_buf(), level.clone())),
@@ -1891,9 +1891,9 @@ mod tests {
     /// - the simulation spawns there (its spot search only moves upwards),
     ///   and its render-space eye is the fly camera's start up to that lift;
     /// - after settling (no input, 2 s), when a level BSP triangle lies under
-    ///   the grounded pawn, its feet hover over that rendered triangle by the
-    ///   native walking physics' 1.9-2.4 uu (the floor the player sees is the
-    ///   floor the simulation collides with).
+    ///   the grounded pawn, its feet rest over that rendered triangle where
+    ///   the start's landing leaves them, 2.25 to 3.15 uu (the floor the
+    ///   player sees is the floor the simulation collides with).
     #[test]
     fn converted_levels_spawn_where_the_render_plan_starts() {
         let Some(root) = std::env::var_os("ASAMU_CONVERTED_DIR").map(PathBuf::from) else {
@@ -1984,8 +1984,22 @@ mod tests {
                 game.player().position,
                 floor.map(|h| (f.y - h) * 50.0),
             );
-            // A walking pawn hovers 1.9-2.4 uu above its floor
-            // (NATIVE_PHYSICS.md, CONFIRMED); 0.01 uu of slack for the
+            // The pawn starts walking at the `PlayerStart` without a base
+            // (ABILITIES.md A-CP-5). A floor within its first floor check's
+            // 28 uu takes it to the standing height, 3.15 uu above BSP, at
+            // once. Otherwise (AG-Epilogue: 36 uu) it falls, lands and then
+            // stands still, and where it rests follows from how the
+            // original reports its traces (NATIVE_PHYSICS.md 10.2,
+            // CONFIRMED): the landing
+            // move stops a tenth of its own length, at least 0.1 and at most
+            // 1.0 uu, above the floor; the landing's floor check sees that
+            // gap 1.0 uu smaller (so 0, below its 1.9-2.4 uu band) and
+            // raises the pawn by its target of 2.15 uu; and no further floor
+            // check runs while the pawn does not move. So the feet rest
+            // between 0.1 + 2.15 = 2.25 and 1.0 + 2.15 = 3.15 uu above the
+            // floor (AG-Epilogue: a 4.478 uu landing move, 2.598 uu). Before
+            // the traces were reported short this was the band itself,
+            // 1.9-2.4 uu. 0.01 uu of slack for the
             // render-space rounding. A BSP triangle far below means the pawn
             // stands on a static mesh (not checked here).
             if let Some(h) = floor
@@ -1994,7 +2008,7 @@ mod tests {
             {
                 let hover = (f.y - h) * 50.0;
                 assert!(
-                    (1.89..=2.41).contains(&hover),
+                    (2.24..=3.16).contains(&hover),
                     "{level}: feet {hover} uu above the BSP floor"
                 );
                 bsp_floors += 1;

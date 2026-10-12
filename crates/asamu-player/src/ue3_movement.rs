@@ -64,16 +64,26 @@
 //!   `CheckForLedges` output is UNKNOWN), the `processLanded` sanity trace /
 //!   `FindSpot` / random kick (5.2 step 1), the UDK stuck-falling nudge
 //!   (4.9), rotation (6), swimming and the other modes of section 10.
-//! - **Collision skin.** UE3's exact pull-back inside line checks is UNKNOWN
-//!   (spec 9.5 q7). `MoveActor` here pulls the reported hit time back by
-//!   [`CONTACT_SKIN`] along the move (a numerical tolerance of this port, not
-//!   a gameplay constant) and inflates the horizontal radius by
-//!   [`MOVE_RADIUS_INFLATION`] (STRONG, `UWorld::MoveActor`).
+//! - **Shape.** The pawn is swept as the axis-aligned box of its collision
+//!   cylinder's radius and half height ([`CollisionWorld::sweep_box`];
+//!   spec 10.1, `docs/PARITY_FINDINGS.md` P4), for moves and for the floor
+//!   check and the air-control probe alike. A move widens the box by
+//!   [`MOVE_RADIUS_INFLATION`] on X and Y, as `UWorld::MoveActor` does.
+//! - **Pull-back.** Every hit the port consumes is the one the original
+//!   would report: the world's exact contact moved back along the trace by
+//!   the rule of the routine that answered ([`crate::world::pull_back`];
+//!   spec 10.2, P3), from the [`crate::world::PrimitiveKind`] the world
+//!   reports. That holds for moves (walking, the floor adjustments, step-up
+//!   and step-down, slides, falling and flying), for the floor check and for
+//!   the air-control probe. `MoveActor` adds nothing of its own: the pawn
+//!   goes to `Location + Delta · Hit.Time` (CONFIRMED,
+//!   `UWorld::MoveActor @ 0x1008E94A0`, 0x1008E9DBF to 0x1008E9E39). The
+//!   port has no contact tolerance of its own any more.
 //! - **Contract-violating collision results** (NaN or out-of-range hit
 //!   times, non-finite or clearly non-unit normals) are repaired, and
 //!   non-finite moves are refused, so a broken [`CollisionWorld`] cannot
 //!   make the state non-finite. Robustness only; results from a conforming
-//!   world pass through bit for bit.
+//!   world pass through bit for bit, to the pull-back.
 //! - **Flying.** Entered and left only by script (grapple attach/release,
 //!   [`PawnPhysicsState::flying`]); the native code never lands a flying
 //!   pawn. `processHitWall` is a no-op here too.
@@ -114,7 +124,7 @@ use serde::{Deserialize, Serialize};
 use crate::movement::{ClassDefaults, Landing, LocomotionIntent, MovementModel, PawnHooks};
 use crate::params::MovementParams;
 use crate::sim::{PlayerState, StepEvents};
-use crate::world::{ActorTag, CONTACT_SKIN, CollisionShape, CollisionWorld, Hit};
+use crate::world::{ActorTag, CollisionWorld, Hit, TraceExtent, TraceHit, reported_time};
 
 // ---------------------------------------------------------------------------
 // Algorithm constants of the native code (provenance: NativeCode). Addresses
@@ -197,8 +207,15 @@ pub const LANDING_MIN_CONTACT_TIME: f32 = 0.003;
 /// Same-wall tolerance in `TwoWallAdjust` (evaluated in `f64`).
 /// NativeCode `AActor::TwoWallAdjust @ 0x100970D20` (data 0x1016393A0).
 pub const TWO_WALL_SAME_TOLERANCE: f64 = 1.0e-4;
-/// Horizontal extent inflation of the `MoveActor` sweep (STRONG).
-/// NativeCode `UWorld::MoveActor @ 0x1008E94A0` (data 0x10171DA60).
+/// Horizontal extent inflation of the `MoveActor` sweep: the X and Y half
+/// sizes of the pawn's box are multiplied by this, the Z half size is not
+/// (CONFIRMED). NativeCode `UWorld::MoveActor @ 0x1008E94A0`: the extent
+/// returned by `AActor::GetCylinderExtent` is multiplied at 0x1008E9BF1 by
+/// the vector at 0x10171DA60, whose first two floats are 1.001 and which
+/// touches neither the third component nor any other trace. Measured
+/// (`docs/PARITY_FINDINGS.md` V11): the pawn's centre is stopped by a face
+/// at x = 281.96 on the plane x = 302.985, 21.025 from it (21 × 1.001 =
+/// 21.021).
 pub const MOVE_RADIUS_INFLATION: f32 = 1.001;
 /// Flying friction = this × `PhysicsVolume.FluidFriction` (GRAPPLE.md
 /// G-PH-3). NativeCode `APawn::physFlying @ 0x100AE1710` (data 0x101636054).
@@ -641,6 +658,21 @@ impl MoveHit {
         self.time < 1.0
     }
 
+    /// The hit the original reports for the world's exact contact on a
+    /// trace `length` uu long: [`Self::from_world`], with the time moved
+    /// back by the rule of the routine that answered ([`reported_time`]).
+    fn reported(hit: &TraceHit, length: f32) -> Self {
+        let mut reported = Self::from_world(&hit.hit);
+        reported.time = reported_time(
+            hit.kind,
+            TraceExtent::Box,
+            length,
+            reported.time,
+            hit.checked_fraction,
+        );
+        reported
+    }
+
     /// Converts a world hit, repairing results that break the
     /// [`CollisionWorld`] contract (robustness only, not original
     /// behaviour): a NaN time blocks at once, times are clamped to `[0, 1]`,
@@ -682,8 +714,10 @@ struct Pawn<'w, 'h, W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> {
     world: &'w W,
     hooks: &'h mut H,
     t: PawnTuning,
-    move_shape: CollisionShape,
-    trace_shape: CollisionShape,
+    /// Half sizes of the box a move sweeps (X and Y widened).
+    move_extent: Vec3,
+    /// Half sizes of the box an extent trace sweeps.
+    trace_extent: Vec3,
     location: Vec3,
     velocity: Vec3,
     acceleration: Vec3,
@@ -697,8 +731,11 @@ struct Pawn<'w, 'h, W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> {
 }
 
 impl<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> Pawn<'_, '_, W, H> {
-    /// `UWorld::MoveActor`: sweep by `delta`, stop at the first blocking hit
-    /// (pulled back by [`CONTACT_SKIN`] along the move).
+    /// `UWorld::MoveActor`: sweep the pawn's box by `delta` and stop at the
+    /// first blocking hit as the original reports it, that is with its time
+    /// already moved back (module docs, "Pull-back"). The length the rule
+    /// sees is that of the trace from the location to the location plus
+    /// `delta`, as the original's routines compute it.
     fn move_actor(&mut self, delta: Vec3) -> MoveHit {
         // A non-finite move (only reachable through a contract-violating
         // world or absurd magnitudes) is refused rather than propagated.
@@ -706,33 +743,25 @@ impl<W: CollisionWorld + ?Sized, H: PawnHooks + ?Sized> Pawn<'_, '_, W, H> {
             return MoveHit::NONE;
         }
         let end = self.location + delta;
-        match self
-            .world
-            .sweep_capsule(self.location, end, self.move_shape)
-        {
+        match self.world.sweep_box(self.location, end, self.move_extent) {
             None => {
                 self.location = end;
                 MoveHit::NONE
             }
             Some(hit) => {
-                let mut hit = MoveHit::from_world(&hit);
-                let len = delta.length();
-                hit.time = if len > 0.0 {
-                    (hit.time - CONTACT_SKIN / len).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+                let hit = MoveHit::reported(&hit, (end - self.location).length());
                 self.location += delta * hit.time;
                 hit
             }
         }
     }
 
-    /// `SingleLineCheck` with the collision cylinder (no pull-back).
+    /// `SingleLineCheck` with the pawn's box as the extent: the hit as the
+    /// original reports it (time moved back), nothing moved.
     fn line_check(&self, start: Vec3, end: Vec3) -> MoveHit {
-        match self.world.sweep_capsule(start, end, self.trace_shape) {
+        match self.world.sweep_box(start, end, self.trace_extent) {
             None => MoveHit::NONE,
-            Some(hit) => MoveHit::from_world(&hit),
+            Some(hit) => MoveHit::reported(&hit, (end - start).length()),
         }
     }
 
@@ -1314,14 +1343,16 @@ impl Ue3PawnMovement {
         t.ground_speed = hooks.ground_speed();
         t.air_control = hooks.air_control();
         t.air_speed = hooks.air_speed();
-        let trace_shape = CollisionShape {
-            radius: t.collision_radius,
-            half_height: t.collision_half_height,
-        };
-        let move_shape = CollisionShape {
-            radius: t.collision_radius * MOVE_RADIUS_INFLATION,
-            half_height: t.collision_half_height,
-        };
+        let trace_extent = Vec3::new(
+            t.collision_radius,
+            t.collision_radius,
+            t.collision_half_height,
+        );
+        let move_extent = Vec3::new(
+            t.collision_radius * MOVE_RADIUS_INFLATION,
+            t.collision_radius * MOVE_RADIUS_INFLATION,
+            t.collision_half_height,
+        );
         let flying = state.pawn.flying;
         let was_walking = state.grounded && !flying;
         let external = if external_accel.is_finite() {
@@ -1333,8 +1364,8 @@ impl Ue3PawnMovement {
             world,
             hooks,
             t,
-            move_shape,
-            trace_shape,
+            move_extent,
+            trace_extent,
             location: state.position,
             velocity: state.velocity,
             // [script] PlayerMove: Acceleration = AccelRate · Normal(input)

@@ -62,10 +62,31 @@
 //! [`EventKind::GrappleAttachedWithinFrame`], so that the attaches of a
 //! recording are counted from the counter: 134 in the recordings of
 //! 2026-10-10, 15 of them inside one frame.
+//!
+//! # Markers
+//!
+//! A marker is a name the person recording gave a moment of the session
+//! (the recorder's `mark` command), so that a scenario's boundaries can be
+//! found afterwards. No sample shows one: the converter writes the markers
+//! of a run into a `markers:` notes line ([`markers_note`], JSON), each with
+//! the tick of the last record written when it was taken, and
+//! [`markers_of`] reads them back. [`describe`] lists them among the events.
+//!
+//! A trace's notes also hold the recording's own header notes, which are
+//! what a person typed, and one of them may begin with the same word: the
+//! recorder's session command (`tools/trace-recorder/win_remote.sh
+//! session`) gives every recording the note `markers: see the stats file
+//! (set with win_remote.sh mark)`, and the first recording made with
+//! recorder 0.2.0 (2026-10-12, 52,266 records, 7 runs) has it in every run.
+//! The converter's line is therefore the one that goes on with a JSON
+//! object ([`MARKERS_NOTE_OBJECT`]); a `markers:` line that goes on with
+//! anything else is a person's note and is not read.
 
 use std::fmt::Write as _;
 
-use anyhow::Result;
+use std::collections::BTreeMap;
+
+use anyhow::{Context, Result, bail};
 use asamu_core::glam::Vec3;
 use asamu_player::trace::{TraceGrappleState, TraceSample};
 use asamu_player::{PawnParams, PlayerParams, Trace};
@@ -608,10 +629,206 @@ pub fn event_notes(all: &[Event]) -> Vec<String> {
     notes
 }
 
+/// Prefix of the converter's notes line with a run's markers, as JSON:
+/// `markers: {"markers":[{"frame":F,"name":"…","tick":T,"where":"at"}],"v":1}`.
+pub const MARKERS_NOTE_PREFIX: &str = "markers: ";
+/// What the converter's line goes on with after the prefix: the start of
+/// its JSON object. A notes line with the prefix and anything else after it
+/// is not the converter's (see the module docs, "Markers").
+pub const MARKERS_NOTE_OBJECT: char = '{';
+/// Version of that line's encoding.
+pub const MARKERS_NOTE_VERSION: u64 = 1;
+/// Most markers a line may hold (the recorder keeps at most 500).
+pub const MAX_MARKERS: usize = 4096;
+
+/// How a marker's tick was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerPlace {
+    /// The marker's frame is a record of the run: the tick is that record's.
+    At,
+    /// It was set before the run began (before the first record, in a pause
+    /// or a gap): the tick is the run's first.
+    Before,
+    /// It was set after the last run ended: the tick is the run's last.
+    After,
+}
+
+impl MarkerPlace {
+    fn word(self) -> &'static str {
+        match self {
+            Self::At => "at",
+            Self::Before => "before",
+            Self::After => "after",
+        }
+    }
+}
+
+/// A marker of the recording in a trace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceMarker {
+    /// The tick it belongs to.
+    pub tick: u64,
+    /// Its name.
+    pub name: String,
+    /// `GFrameCounter` of the last record written when it was taken (`None`
+    /// before the first record).
+    pub frame: Option<u64>,
+    /// How the tick was found.
+    pub place: MarkerPlace,
+}
+
+impl TraceMarker {
+    /// What sets the marker apart from one found at its own record.
+    fn aside(&self) -> String {
+        match (self.place, self.frame) {
+            (MarkerPlace::At, _) => String::new(),
+            (MarkerPlace::Before, None) => " (set before the first record)".to_owned(),
+            (place, Some(f)) => format!(" (set {} this run, at frame {f})", place.word()),
+            (MarkerPlace::After, None) => " (set after this run)".to_owned(),
+        }
+    }
+
+    /// `tick "name"`, with where it was set when that is not its own record
+    /// (the text of the converter's `event:` line).
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("{} \"{}\"{}", self.tick, self.name, self.aside())
+    }
+}
+
+/// The `markers:` notes line of a run (keys sorted; the Python converter
+/// writes the same values).
+///
+/// # Errors
+/// Serialization errors.
+pub fn markers_note(markers: &[TraceMarker]) -> Result<String> {
+    let list: Vec<BTreeMap<&'static str, serde_json::Value>> = markers
+        .iter()
+        .map(|m| {
+            BTreeMap::from([
+                ("frame", serde_json::Value::from(m.frame)),
+                ("name", serde_json::Value::from(m.name.as_str())),
+                ("tick", serde_json::Value::from(m.tick)),
+                ("where", serde_json::Value::from(m.place.word())),
+            ])
+        })
+        .collect();
+    let mut top: BTreeMap<&'static str, serde_json::Value> = BTreeMap::new();
+    top.insert("markers", serde_json::to_value(&list)?);
+    top.insert("v", serde_json::Value::from(MARKERS_NOTE_VERSION));
+    Ok(format!(
+        "{MARKERS_NOTE_PREFIX}{}",
+        serde_json::to_string(&top)?
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncodedMarker {
+    frame: Option<u64>,
+    name: String,
+    tick: u64,
+    r#where: String,
+}
+
+#[derive(serde::Deserialize)]
+struct EncodedMarkers {
+    v: u64,
+    markers: Vec<EncodedMarker>,
+}
+
+/// The markers in a trace's notes, in tick order: those of the last
+/// `markers:` line that holds a JSON object ([`MARKERS_NOTE_OBJECT`]: the
+/// converter's line; a recording's own header note that begins with the
+/// same word is a person's text and is passed over). Empty without one.
+///
+/// # Errors
+/// A converter's `markers:` line that is not valid, has another version,
+/// too many entries, an unknown placement or ticks out of order.
+pub fn markers_of(notes: &[String]) -> Result<Vec<TraceMarker>> {
+    let Some(json) = notes.iter().rev().find_map(|n| {
+        n.strip_prefix(MARKERS_NOTE_PREFIX)
+            .filter(|rest| rest.starts_with(MARKERS_NOTE_OBJECT))
+    }) else {
+        return Ok(Vec::new());
+    };
+    let e: EncodedMarkers = serde_json::from_str(json).context("invalid markers: note")?;
+    if e.v != MARKERS_NOTE_VERSION {
+        bail!(
+            "markers: note version {} (supported: {MARKERS_NOTE_VERSION})",
+            e.v
+        );
+    }
+    if e.markers.len() > MAX_MARKERS {
+        bail!("markers: note with more than {MAX_MARKERS} markers");
+    }
+    if e.markers.windows(2).any(|w| w[0].tick > w[1].tick) {
+        bail!("markers: note with ticks out of order");
+    }
+    e.markers
+        .into_iter()
+        .map(|m| {
+            let place = match m.r#where.as_str() {
+                "at" => MarkerPlace::At,
+                "before" => MarkerPlace::Before,
+                "after" => MarkerPlace::After,
+                other => bail!("markers: note with an unknown placement {other:?}"),
+            };
+            Ok(TraceMarker {
+                tick: m.tick,
+                name: m.name,
+                frame: m.frame,
+                place,
+            })
+        })
+        .collect()
+}
+
+/// One line of a listing: an event or a marker.
+struct Listed {
+    /// Index of its sample.
+    index: usize,
+    tick: u64,
+    label: String,
+}
+
+/// The events and the markers of a trace in sample order; at one sample the
+/// markers come first (a marker names what follows).
+fn listed(samples: &[TraceSample], all: &[Event], markers: &[TraceMarker]) -> Vec<Listed> {
+    let mut out: Vec<(usize, u8, Listed)> = Vec::with_capacity(all.len() + markers.len());
+    for m in markers {
+        if let Ok(index) = samples.binary_search_by_key(&m.tick, |s| s.tick) {
+            let label = format!("marker \"{}\"{}", m.name, m.aside());
+            out.push((
+                index,
+                0,
+                Listed {
+                    index,
+                    tick: m.tick,
+                    label,
+                },
+            ));
+        }
+    }
+    for e in all {
+        out.push((
+            e.index,
+            1,
+            Listed {
+                index: e.index,
+                tick: e.tick,
+                label: e.kind.name().to_owned(),
+            },
+        ));
+    }
+    out.sort_by_key(|(index, rank, _)| (*index, *rank));
+    out.into_iter().map(|(_, _, l)| l).collect()
+}
+
 /// The events of `samples[from..until]`: with `every_event` one per line,
 /// else one line with, per kind, how often and where first.
-fn activity(out: &mut String, all: &[Event], from: usize, until: usize, every_event: bool) {
-    let inside: Vec<&Event> = all
+fn activity(out: &mut String, all: &[Listed], from: usize, until: usize, every_event: bool) {
+    let inside: Vec<&Listed> = all
         .iter()
         .filter(|e| e.index >= from && e.index < until)
         .collect();
@@ -622,24 +839,24 @@ fn activity(out: &mut String, all: &[Event], from: usize, until: usize, every_ev
     if every_event {
         let _ = writeln!(out);
         for e in inside {
-            let _ = writeln!(out, "        {} {}", e.tick, e.kind.name());
+            let _ = writeln!(out, "        {} {}", e.tick, e.label);
         }
         return;
     }
-    let mut kinds: Vec<(EventKind, usize, u64)> = Vec::new();
+    let mut kinds: Vec<(&str, usize, u64)> = Vec::new();
     for e in inside {
-        match kinds.iter_mut().find(|k| k.0 == e.kind) {
+        match kinds.iter_mut().find(|k| k.0 == e.label) {
             Some(k) => k.1 += 1,
-            None => kinds.push((e.kind, 1, e.tick)),
+            None => kinds.push((e.label.as_str(), 1, e.tick)),
         }
     }
     let text: Vec<String> = kinds
         .iter()
-        .map(|(kind, n, tick)| {
+        .map(|(label, n, tick)| {
             if *n == 1 {
-                format!("{} at {tick}", kind.name())
+                format!("{label} at {tick}")
             } else {
-                format!("{} x{n} (first at {tick})", kind.name())
+                format!("{label} x{n} (first at {tick})")
             }
         })
         .collect();
@@ -650,7 +867,7 @@ fn activity(out: &mut String, all: &[Event], from: usize, until: usize, every_ev
 fn between(
     out: &mut String,
     samples: &[TraceSample],
-    all: &[Event],
+    all: &[Listed],
     from: usize,
     until: usize,
     every_event: bool,
@@ -672,18 +889,21 @@ fn between(
 /// the recorded script state at its first tick and the events inside it (a
 /// sprint button, `use`), and what happens between the stretches (per kind
 /// of event: how often and where first; with `every_event` each event on
-/// its own line).
+/// its own line). The recording's markers ([`markers_of`]) are listed with
+/// the events, each under its name.
 ///
 /// # Errors
-/// An invalid `state:` note.
+/// An invalid `state:` or `markers:` note.
 pub fn describe(trace: &Trace, every_event: bool) -> Result<String> {
     let samples = trace.samples.as_slice();
     let runs = clean_runs(samples);
     let timeline = StateTimeline::from_notes(&trace.meta.notes)?;
-    let all = recorded_events(samples, timeline.as_ref())?;
+    let events = recorded_events(samples, timeline.as_ref())?;
+    let markers = markers_of(&trace.meta.notes)?;
+    let all = listed(samples, &events, &markers);
     let params = PlayerParams::asamu_original();
     let mut out = String::new();
-    let _ = writeln!(
+    let _ = write!(
         out,
         "{} samples, ticks {}..={}; {} standing-still stretch(es) (a replay starts at a tick \
          inside one), {} event(s) of input or state",
@@ -691,8 +911,12 @@ pub fn describe(trace: &Trace, every_event: bool) -> Result<String> {
         samples.first().map_or(0, |s| s.tick),
         samples.last().map_or(0, |s| s.tick),
         runs.len(),
-        all.len()
+        events.len()
     );
+    if !markers.is_empty() {
+        let _ = write!(out, ", {} marker(s)", markers.len());
+    }
+    let _ = writeln!(out);
     let mut cursor = 0;
     for (a, b) in &runs {
         between(&mut out, samples, &all, cursor, *a, every_event);
@@ -731,9 +955,11 @@ pub fn describe(trace: &Trace, every_event: bool) -> Result<String> {
             }
         }
         let _ = writeln!(out);
-        if all.iter().any(|e| e.index > *a && e.index <= *b) {
+        // (From the stretch's first sample on: a marker, or a level-script
+        // change, can be at the very tick a stretch begins with.)
+        if all.iter().any(|e| e.index >= *a && e.index <= *b) {
             let _ = write!(out, "    while standing:");
-            activity(&mut out, &all, a + 1, b + 1, every_event);
+            activity(&mut out, &all, *a, b + 1, every_event);
         }
         cursor = b + 1;
     }
@@ -1087,5 +1313,179 @@ mod tests {
             "{\"changes\":[[0,{\"ground_speed\":1.0}],[1,{\"ground_speed\":\"x\"}]],\"v\":1}",
         );
         assert!(recorded_events(&s, Some(&bad)).is_err());
+    }
+
+    #[test]
+    fn markers_in_notes_and_listings() {
+        let markers = vec![
+            TraceMarker {
+                tick: 0,
+                name: "early".into(),
+                frame: None,
+                place: MarkerPlace::Before,
+            },
+            TraceMarker {
+                tick: 3,
+                name: "zoom \"hold\" 1".into(),
+                frame: Some(1003),
+                place: MarkerPlace::At,
+            },
+            TraceMarker {
+                tick: 3,
+                name: "Zürich".into(),
+                frame: Some(900),
+                place: MarkerPlace::Before,
+            },
+            TraceMarker {
+                tick: 11,
+                name: "late".into(),
+                frame: Some(2000),
+                place: MarkerPlace::After,
+            },
+        ];
+        let note = markers_note(&markers).unwrap();
+        assert_eq!(
+            note,
+            "markers: {\"markers\":[{\"frame\":null,\"name\":\"early\",\"tick\":0,\"where\":\"before\"},\
+             {\"frame\":1003,\"name\":\"zoom \\\"hold\\\" 1\",\"tick\":3,\"where\":\"at\"},\
+             {\"frame\":900,\"name\":\"Zürich\",\"tick\":3,\"where\":\"before\"},\
+             {\"frame\":2000,\"name\":\"late\",\"tick\":11,\"where\":\"after\"}],\"v\":1}"
+        );
+        assert_eq!(markers_of(&["x".into(), note.clone()]).unwrap(), markers);
+        assert_eq!(
+            markers[0].describe(),
+            "0 \"early\" (set before the first record)"
+        );
+        assert_eq!(markers[1].describe(), "3 \"zoom \"hold\" 1\"");
+        assert_eq!(
+            markers[2].describe(),
+            "3 \"Zürich\" (set before this run, at frame 900)"
+        );
+        assert_eq!(
+            markers[3].describe(),
+            "11 \"late\" (set after this run, at frame 2000)"
+        );
+        assert!(markers_of(&[]).unwrap().is_empty());
+        assert!(markers_of(&["state: {}".into()]).unwrap().is_empty());
+        // A recording's own header note that begins with the same word is
+        // not the converter's line. This is the note the recorder's session
+        // command gives every recording (tools/trace-recorder/win_remote.sh,
+        // cmd_session), as the first recording of recorder 0.2.0 has it in
+        // the notes of each of its 7 runs: alone it means "no markers", and
+        // it hides the converter's line neither before nor after it.
+        let session = "markers: see the stats file (set with win_remote.sh mark)".to_owned();
+        assert!(
+            markers_of(std::slice::from_ref(&session))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            markers_of(&[note.clone(), session.clone()]).unwrap(),
+            markers,
+            "the header notes follow the converter's line in a trace"
+        );
+        assert_eq!(
+            markers_of(&[session.clone(), note.clone()]).unwrap(),
+            markers
+        );
+        // Neither is any other text after the prefix that is no JSON object
+        // (the converter writes an object, sorted and compact, so its line
+        // always goes on with a brace).
+        for person in ["markers: ", "markers: []", "markers: none", "markers:  {}"] {
+            assert!(markers_of(&[person.into()]).unwrap().is_empty(), "{person}");
+            assert_eq!(
+                markers_of(&[note.clone(), person.into()]).unwrap(),
+                markers,
+                "{person}"
+            );
+        }
+        // A line that does hold an object is the converter's, and a broken
+        // one is an error: also when a valid one comes before it.
+        for bad in [
+            "markers: {",
+            "markers: {}",
+            "markers: {see the stats file}",
+            "markers: {\"v\":2,\"markers\":[]}",
+            "markers: {\"v\":1,\"markers\":[{\"frame\":1,\"name\":\"a\",\"tick\":0,\"where\":\"near\"}]}",
+            "markers: {\"v\":1,\"markers\":[{\"frame\":1,\"name\":\"a\",\"tick\":0}]}",
+            "markers: {\"v\":1,\"markers\":[{\"frame\":1,\"name\":\"a\",\"tick\":0,\"where\":\"at\",\"x\":1}]}",
+            "markers: {\"v\":1,\"markers\":[{\"frame\":1,\"name\":\"a\",\"tick\":5,\"where\":\"at\"},\
+             {\"frame\":1,\"name\":\"b\",\"tick\":4,\"where\":\"at\"}]}",
+        ] {
+            assert!(markers_of(&[bad.into()]).is_err(), "{bad}");
+            assert!(markers_of(&[note.clone(), bad.into()]).is_err(), "{bad}");
+        }
+
+        // In a listing: twelve standing samples with a walk on ticks 5..=7.
+        let mut s: Vec<TraceSample> = (0..12).map(standing).collect();
+        for x in &mut s[5..8] {
+            x.input.move_forward = 1.0;
+        }
+        let mut t = Trace::new(asamu_player::TraceMeta::runtime(None, Some(60.0)));
+        t.samples = s;
+        let plain = describe(&t, false).unwrap();
+        assert!(!plain.contains("marker"), "{plain}");
+        t.meta.notes.push(
+            markers_note(&[
+                markers[0].clone(),
+                markers[1].clone(),
+                TraceMarker {
+                    tick: 5,
+                    name: "walk".into(),
+                    frame: Some(1005),
+                    place: MarkerPlace::At,
+                },
+                markers[3].clone(),
+                // A tick the trace does not have is not listed.
+                TraceMarker {
+                    tick: 40,
+                    name: "cut off".into(),
+                    frame: Some(1040),
+                    place: MarkerPlace::At,
+                },
+            ])
+            .unwrap(),
+        );
+        let text = describe(&t, false).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 6, "{text}");
+        assert!(
+            lines[0].ends_with("2 event(s) of input or state, 5 marker(s)"),
+            "{text}"
+        );
+        // Stretches 0..=4 and 9..=11 (the tick after the walk is not a
+        // start); a marker comes before the event of its tick.
+        assert_eq!(lines[1], "standing still 0..=4 (5 ticks)");
+        assert_eq!(
+            lines[2],
+            "    while standing: marker \"early\" (set before the first record) at 0, marker \
+             \"zoom \"hold\" 1\" at 3"
+        );
+        assert_eq!(
+            lines[3],
+            "    5..=8: marker \"walk\" at 5, move at 5, move ends at 8"
+        );
+        assert_eq!(lines[4], "standing still 9..=11 (3 ticks)");
+        assert_eq!(
+            lines[5],
+            "    while standing: marker \"late\" (set after this run, at frame 2000) at 11"
+        );
+        let every = describe(&t, true).unwrap();
+        assert!(
+            every.contains("\n        5 marker \"walk\"\n        5 move\n"),
+            "{every}"
+        );
+        // The session note of a real recording changes nothing in a
+        // listing (`asamu-trace starts` failed on every run of the first
+        // recording of recorder 0.2.0 before the reader told the two apart).
+        t.meta.notes.push(session.clone());
+        assert_eq!(describe(&t, false).unwrap(), text);
+        let mut bare = t.clone();
+        bare.meta.notes.retain(|n| !n.starts_with("markers: {"));
+        assert!(bare.meta.notes.contains(&session));
+        assert_eq!(describe(&bare, false).unwrap(), plain);
+        // A broken markers line is an error, not an empty listing.
+        t.meta.notes.push("markers: {}".into());
+        assert!(describe(&t, false).is_err());
     }
 }

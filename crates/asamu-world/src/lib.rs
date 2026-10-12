@@ -40,6 +40,7 @@ pub mod npc;
 pub mod objects;
 pub mod rotation;
 pub mod scene;
+pub mod simple_body;
 
 pub use abilities::{
     KismetAbilityActions, LevelAbilities, ORIGINAL_ABILITY_ACTIONS, level_start_abilities,

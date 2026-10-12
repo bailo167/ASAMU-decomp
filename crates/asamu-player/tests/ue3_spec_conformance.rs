@@ -5,10 +5,11 @@
 //!
 //! Expected values are derived in the test from the spec's formulas (in `f64`
 //! where rounding matters), never by calling the code under test. Where a
-//! value depends on the port's documented contact tolerances
-//! (`CONTACT_SKIN` pull-back along the move, `MOVE_RADIUS_INFLATION`), those
-//! public constants are used explicitly. Parameter values set here are test
-//! inputs, not game values.
+//! value depends on how far the original reports a hit short of the contact
+//! (the pull-back, spec 10.2), the rule is written out here ([`pull`]); the
+//! widening of a move's box is the public `MOVE_RADIUS_INFLATION`. The test
+//! worlds answer as BSP and the pawn is swept as a box (spec 10.1).
+//! Parameter values set here are test inputs, not game values.
 
 mod common;
 
@@ -16,7 +17,6 @@ use asamu_player::movement::{ClassDefaults, Landing, LocomotionIntent, PawnHooks
 use asamu_player::ue3_movement::{
     MOVE_RADIUS_INFLATION, PawnPhysicsState, PhysicsMode, TickStats, Ue3PawnMovement,
 };
-use asamu_player::world::CONTACT_SKIN;
 use asamu_player::{
     BoxWorld, CollisionShape, CollisionWorld, HalfSpace, Hit, MovementModelKind, PlayerParams,
     PlayerState, SlopeWorld, StepEvents, step_with,
@@ -25,8 +25,31 @@ use common::SplitMix64;
 use glam::{DVec3, Vec3};
 
 const DT: f32 = 1.0 / 60.0;
-const HOVER: f32 = 2.15;
-const SKIN: f64 = CONTACT_SKIN as f64;
+/// What the walking floor check aims at: the *reported* distance to the
+/// floor (spec 3.3).
+const REPORTED_HOVER: f64 = 2.15;
+/// The true height of a walking pawn's bottom above a floor in these worlds:
+/// the floor check is `MaxStepHeight + 2` long (20 uu for the default
+/// parameters, 28 for the original's), so a BSP floor is reported
+/// `pull(20) = pull(28) = 1.0` uu nearer than it is, and the pawn is held at
+/// a reported 2.15: 2.15 + 1.0.
+const HOVER: f32 = 3.15;
+
+/// The distance (uu) by which the original reports a hit short of the
+/// contact on a box trace `len` uu long against BSP, which is what
+/// `BoxWorld` and `SlopeWorld` answer as: 0.1 uu for a trace shorter than
+/// 1 uu, else a tenth of the trace, at most 1.0 uu (spec 10.2, rule K with
+/// K = 1.0; `docs/PARITY_FINDINGS.md` V2). Written out here, not taken from
+/// the code under test.
+fn pull(len: f64) -> f64 {
+    if len < 1.0 { 0.1 } else { (0.1 * len).min(1.0) }
+}
+
+/// The fraction of a move `delta` the pawn makes before a surface whose
+/// exact contact is at the fraction `raw` of it: the reported hit time.
+fn reported(raw: f64, delta: DVec3) -> f64 {
+    (raw - pull(delta.length()) / delta.length()).clamp(0.0, 1.0)
+}
 
 fn no_input() -> LocomotionIntent {
     LocomotionIntent::default()
@@ -68,7 +91,7 @@ fn radius(params: &PlayerParams) -> f32 {
     params.movement.capsule_radius.value
 }
 
-/// Radius of the `MoveActor` sweep (spec 9.2: ×1.001 horizontally).
+/// Half width of the box a `MoveActor` sweeps (spec 9.2: ×1.001 on X and Y).
 fn move_radius(params: &PlayerParams) -> f32 {
     radius(params) * MOVE_RADIUS_INFLATION
 }
@@ -80,6 +103,16 @@ fn gravity(params: &PlayerParams) -> f64 {
 
 fn d(v: Vec3) -> DVec3 {
     v.as_dvec3()
+}
+
+/// Half sizes of the box of an extent trace (the floor check).
+fn trace_extent(params: &PlayerParams) -> Vec3 {
+    Vec3::new(radius(params), radius(params), hh(params))
+}
+
+/// Half sizes of the box of a move.
+fn move_extent(params: &PlayerParams) -> Vec3 {
+    Vec3::new(move_radius(params), move_radius(params), hh(params))
 }
 
 fn walking_at(position: Vec3, floor: Vec3, based: bool, force: bool) -> PlayerState {
@@ -199,7 +232,7 @@ fn ceiling_contact_reflects_the_vertical_velocity() {
     let h = f64::from(DT);
     let v1 = v0 + DVec3::new(0.0, 0.0, g * h); // semi-implicit
     let adj = v1 * h;
-    let t = gap / adj.z - SKIN / adj.length(); // pulled back along the move
+    let t = reported(gap / adj.z, adj); // pulled back along the move
     // Slide along the ceiling = horizontal rest of the move (no height clamp
     // applies, slide.z = 0): total displacement (adj.x, 0, adj.z·t).
     let disp = DVec3::new(adj.x, 0.0, adj.z * t);
@@ -236,7 +269,7 @@ fn falling_along_a_wall_keeps_doubled_gravity_without_horizontal_extrapolation()
     let h = f64::from(DT);
     let v1 = v0 + DVec3::new(0.0, 0.0, g * h);
     let adj = v1 * h;
-    let t = f64::from(gap) / adj.x - SKIN / adj.length();
+    let t = reported(f64::from(gap) / adj.x, adj);
     // Wall normal −X: slide = (0, 0, adj.z)·(1 − t); nothing is clamped
     // (the slide goes down).
     let disp = DVec3::new(adj.x * t, 0.0, adj.z);
@@ -284,10 +317,10 @@ fn falling_into_a_vertical_corner_slides_down_the_crease() {
     let v1 = v0 + DVec3::new(0.0, 0.0, g * h);
     let adj = v1 * h;
     // First hit: the +Y wall (gap 2 < 5 along equal x/y speeds).
-    let t1 = f64::from(gy) / adj.y - SKIN / adj.length();
+    let t1 = reported(f64::from(gy) / adj.y, adj);
     let slide1 = DVec3::new(adj.x, 0.0, adj.z) * (1.0 - t1);
     // Second hit: the +X wall, part-way along the slide.
-    let t2 = (f64::from(gx) - adj.x * t1) / slide1.x - SKIN / slide1.length();
+    let t2 = reported((f64::from(gx) - adj.x * t1) / slide1.x, slide1);
     // TwoWallAdjust (normals −Y then −X, dot 0): crease = ±Z, flipped to the
     // desired (downward) direction: (0, 0, slide1.z·(1 − t2)).
     let disp = DVec3::new(
@@ -335,7 +368,8 @@ fn terminal_velocity_clamps_after_the_move_not_before() {
 /// 4.5: a landing found only after a slide (wall, then floor) carries
 /// **zero** time into walking: the rest of the tick is dropped, the
 /// velocity is not re-derived and no walking sub-step runs (so the pawn rests
-/// at the contact distance, not at the 2.15 hover, until the next tick).
+/// where the slide's reported hit left it, not at the hover, until the next
+/// tick).
 #[test]
 fn landing_found_by_a_slide_carries_no_time() {
     let params = PlayerParams::default();
@@ -356,8 +390,8 @@ fn landing_found_by_a_slide_carries_no_time() {
     let v1 = v0 + DVec3::new(0.0, 0.0, g * step);
     let adj = v1 * step;
     // Wall first (x gap 1 → t ≈ 0.03) before the floor (z gap 3 → t ≈ 0.18).
-    let t1 = 1.0 / adj.x - SKIN / adj.length();
-    assert!(t1 < 3.0 / -adj.z);
+    let t1 = reported(1.0 / adj.x, adj);
+    assert!(t1 > 0.0 && 1.0 / adj.x < 3.0 / -adj.z);
     assert!(s.grounded && s.pawn.based && s.pawn.floor == Vec3::Z);
     assert_modes(&stats, &[(PhysicsMode::Falling, 0.05)]);
     assert_eq!(stats.returned_time, 0.0);
@@ -372,13 +406,29 @@ fn landing_found_by_a_slide_carries_no_time() {
         "impact",
     );
     close(f64::from(s.velocity.x), v1.x, 1e-3, "vx");
-    // Resting at the contact distance (pull-back along the vertical slide).
-    close(f64::from(s.position.z - hh(&params)), SKIN, 1e-4, "gap");
+    // The slide along the wall is the rest of the fall, straight down
+    // (4.7: (0, 0, adj.z)·(1 − t1)); it meets the floor, and its reported
+    // hit is short of it by the pull-back of a trace of the slide's length.
+    let slide = -adj.z * (1.0 - t1);
+    let fallen = -adj.z * t1;
+    assert!(3.0 - fallen < slide, "the slide reaches the floor");
+    let rest = pull(slide);
+    assert!(3.0 - fallen > rest, "and stops short of it");
+    close(f64::from(s.position.z - hh(&params)), rest, 1e-4, "gap");
     close(f64::from(s.position.x - x0), adj.x * t1, 1e-4, "x");
-    // Next tick: walking with force-floor-check re-establishes the hover.
+    // Next tick: the forced floor check (3.3) reports the floor at
+    // rest − pull(probe), not below 0; that is under 1.9, so the pawn is
+    // moved up by 2.15 minus the reported distance.
+    let probe = f64::from(params.movement.step_height.value) + 2.0;
+    let seen = (rest - pull(probe)).max(0.0);
     tick(&mut s, no_input(), &params, &world, DT);
     assert!(s.grounded);
-    close(f64::from(s.position.z - hh(&params)), 2.15, 1e-4, "hover");
+    close(
+        f64::from(s.position.z - hh(&params)),
+        rest + REPORTED_HOVER - seen,
+        1e-4,
+        "hover",
+    );
 }
 
 /// 1.4 (`StartFalling`): when the walking sub-step is cut short by a wall
@@ -401,7 +451,7 @@ fn walking_into_a_wall_over_a_pit_returns_the_untravelled_time() {
             Vec3::new(wall_x + 200.0, 500.0, 2000.0),
             false,
         );
-    // Still supported by the rim of the cylinder (centre within r of x=100).
+    // Still supported by the edge of the box (centre within r of x = 100).
     let x0 = 100.0 + r - 1.0;
     let mut s = walking_at(
         Vec3::new(x0, 0.0, hh(&params) + HOVER),
@@ -414,7 +464,15 @@ fn walking_into_a_wall_over_a_pit_returns_the_untravelled_time() {
 
     let h = f64::from(DT);
     let delta = f64::from(speed) * h;
-    let travel = f64::from(wall_x - move_radius(&params) - x0) - SKIN;
+    // The move stops pull(Delta) short of the wall. The step-up that follows
+    // (3.2.1) tries the rest of the move again from 20 uu higher, where the
+    // wall is the same: that shorter trace is pulled back less, so the pawn
+    // ends pull(rest) from the wall.
+    let gap = f64::from(wall_x - move_radius(&params) - x0);
+    let first = gap - pull(delta);
+    let rest = delta - first;
+    assert!(first > 0.0 && rest >= 1.0);
+    let travel = gap - pull(rest);
     let carry = h * (1.0 - travel / delta);
     assert!(carry > 0.003, "a real fraction of the sub-step: {carry}");
     close(f64::from(stats.returned_time), carry, 1e-6, "returned");
@@ -592,8 +650,9 @@ fn movement_speed_modifier_scales_the_cap_not_the_acceleration() {
 }
 
 /// 3.3: a floor trace that starts penetrating is never pushed up
-/// ("only if FloorDist < 1.9 **and not penetrating**"), while a touching
-/// (non-penetrating) pawn is pushed up to the 2.15 hover.
+/// ("only if FloorDist < 1.9 **and not penetrating**"), while a pawn just
+/// above the floor (not penetrating) is pushed up by 2.15 less the reported
+/// distance.
 #[test]
 fn penetrating_floor_trace_is_not_pushed_up() {
     let params = PlayerParams::default();
@@ -603,10 +662,20 @@ fn penetrating_floor_trace_is_not_pushed_up() {
     tick(&mut s, no_input(), &params, &world, DT);
     assert_eq!(s.position, inside);
     assert!(s.grounded);
-    let touching = Vec3::new(0.0, 0.0, hh(&params) + 0.05);
-    let mut s = walking_at(touching, Vec3::Z, true, true);
+    // 0.05 uu above the floor: the check reports it pull(probe) = 1.0 uu
+    // nearer, which is clamped to a distance of 0, so the pawn is moved up
+    // by the whole 2.15 and ends 2.20 above the floor.
+    let near = Vec3::new(0.0, 0.0, hh(&params) + 0.05);
+    let mut s = walking_at(near, Vec3::Z, true, true);
     tick(&mut s, no_input(), &params, &world, DT);
-    assert!((s.position.z - (hh(&params) + HOVER)).abs() < 1e-4);
+    let probe = f64::from(params.movement.step_height.value) + 2.0;
+    assert!(0.05 - pull(probe) < 0.0);
+    close(
+        f64::from(s.position.z - hh(&params)),
+        0.05 + REPORTED_HOVER,
+        1e-4,
+        "pushed up",
+    );
 }
 
 /// 3.3 steep branch: walking into an unwalkable slope that is under the
@@ -622,17 +691,14 @@ fn steep_floor_pushed_into_slides_down_the_slope_and_falls() {
     let ramp = HalfSpace::ramp_x(nz, Vec3::ZERO, false).expect("valid ramp");
     let n = ramp.normal;
     let world = SlopeWorld::new(BoxWorld::new()).with_half_space(ramp);
-    let shape = CollisionShape {
-        radius: radius(&params),
-        half_height: hh(&params),
-    };
     let contact = world
-        .sweep_capsule(
+        .sweep_box(
             Vec3::new(0.0, 0.0, 500.0),
             Vec3::new(0.0, 0.0, -500.0),
-            shape,
+            trace_extent(&params),
         )
         .expect("ramp below")
+        .hit
         .position;
     let p0 = contact + Vec3::Z * HOVER;
     let mut s = walking_at(p0, n, true, true);
@@ -642,15 +708,13 @@ fn steep_floor_pushed_into_slides_down_the_slope_and_falls() {
     // moves horizontally (head-on slide is zero), then the planned step
     // down (MaxStepHeight + 2) with the MoveActor sweep stops at the slope.
     let step_down = f64::from(params.movement.step_height.value) + 2.0;
-    let move_shape = CollisionShape {
-        radius: move_radius(&params),
-        half_height: hh(&params),
-    };
     let t_down = world
-        .sweep_capsule(p0, p0 - Vec3::Z * step_down as f32, move_shape)
+        .sweep_box(p0, p0 - Vec3::Z * step_down as f32, move_extent(&params))
         .expect("slope below")
+        .hit
         .time;
-    let z_after_step = f64::from(p0.z) - step_down * (f64::from(t_down) - SKIN / step_down);
+    let z_after_step =
+        f64::from(p0.z) - step_down * reported(f64::from(t_down), DVec3::new(0.0, 0.0, -step_down));
     // Steep slide.
     let nd = d(n);
     let drop = DVec3::new(0.0, 0.0, -f64::from(params.movement.step_height.value));
@@ -685,17 +749,14 @@ fn slope_slide_uses_the_whole_call_dt_on_every_substep() {
     let ramp = HalfSpace::ramp_x(nz, Vec3::ZERO, false).expect("valid ramp");
     let n = d(ramp.normal);
     let world = SlopeWorld::new(BoxWorld::new()).with_half_space(ramp);
-    let shape = CollisionShape {
-        radius: radius(&params),
-        half_height: hh(&params),
-    };
     let contact = world
-        .sweep_capsule(
+        .sweep_box(
             Vec3::new(0.0, 0.0, 500.0),
             Vec3::new(0.0, 0.0, -500.0),
-            shape,
+            trace_extent(&params),
         )
         .expect("ramp below")
+        .hit
         .position;
     let p0 = contact + Vec3::Z * HOVER;
     let mut s = walking_at(p0, ramp.normal, true, false);
@@ -953,7 +1014,8 @@ fn calc_velocity_runs_once_per_walking_call_with_the_whole_dt() {
 }
 
 /// 3.2 → 3.2.1 step 5: walking diagonally into a wall too tall to step on:
-/// step up, the move across is blocked at once, the rest slides along the
+/// step up, the move across is blocked again (a little nearer the wall: a
+/// shorter trace is pulled back less), the rest slides along the
 /// horizontalised wall normal, then the step down. The wall-parallel part
 /// of the move is kept in full; the walking velocity is the displacement.
 /// Into an inner corner the slide hits the second wall, `TwoWallAdjust`
@@ -980,14 +1042,18 @@ fn walking_into_a_tall_wall_slides_along_it_and_stops_in_a_corner() {
     tick(&mut s, towards(dir), &params, &world, DT);
     let h = f64::from(DT);
     let delta = d(dir) * speed * h;
-    let t = gap / delta.x - SKIN / delta.length();
-    // Up, across (parallel to the first move, blocked at once: t2 = 0),
-    // slide (0, Delta.y·(1 − t), 0), down.
-    close(f64::from(s.position.x - x0), delta.x * t, 1e-3, "x");
+    let t = reported(gap / delta.x, delta);
+    // Up; across with the rest of the move, blocked by the same wall at
+    // t2; slide (0, rest.y·(1 − t2), 0); down.
+    let rest_of_move = delta * (1.0 - t);
+    let t2 = reported((gap - delta.x * t) / rest_of_move.x, rest_of_move);
+    assert!(t > 0.0 && t2 > 0.0);
+    let x = delta.x * t + rest_of_move.x * t2;
+    close(f64::from(s.position.x - x0), x, 1e-3, "x");
     close(f64::from(s.position.y), delta.y, 1e-3, "y kept in full");
     close(f64::from(s.position.z), f64::from(z0), 1e-4, "z");
     close(f64::from(s.velocity.y), delta.y / h, 0.05, "vy");
-    close(f64::from(s.velocity.x), delta.x * t / h, 0.05, "vx");
+    close(f64::from(s.velocity.x), x / h, 0.05, "vx");
     assert!(s.grounded);
 
     // Inner corner: second wall at y = 100.
@@ -1003,14 +1069,33 @@ fn walking_into_a_tall_wall_slides_along_it_and_stops_in_a_corner() {
         tick(&mut s, towards(dir), &params, &corner, DT);
         assert!(s.grounded);
     }
+    // Where it can stop. Standing still, each tick's attempted move is
+    // AccelRate·dt² = 0.83 uu along the diagonal: shorter than 1 uu, so a
+    // hit is reported 0.1 uu short along the trace. The pawn stays put only
+    // if neither the move nor the slide gets anywhere: the nearer wall is no
+    // more than 0.1·cos 45° away along its normal (the diagonal move is
+    // reported at time 0), and the other no more than 0.1 (so is the slide,
+    // which runs square into it). Which wall ends up the nearer, and where
+    // inside that range the other one is, depends on the approach. It never
+    // touches either.
+    assert!(f64::from(params.movement.ground_acceleration.value) * h * h < 1.0);
     let rest = 100.0 - rm;
+    let gaps = [
+        rest - f64::from(s.position.x),
+        rest - f64::from(s.position.y),
+    ];
+    let (near, far) = (gaps[0].min(gaps[1]), gaps[0].max(gaps[1]));
+    assert!(near > 0.0, "never touches: {gaps:?}");
     assert!(
-        (f64::from(s.position.x) - rest).abs() < 0.1
-            && (f64::from(s.position.y) - rest).abs() < 0.1,
-        "stopped in the corner: {}",
-        s.position
+        near <= 0.1 * std::f64::consts::FRAC_1_SQRT_2 + 1e-4,
+        "the diagonal move is held: {gaps:?}"
     );
+    assert!(far <= 0.1 + 1e-4, "the slide is held: {gaps:?}");
     assert!(s.velocity.length() < 1.0, "{}", s.velocity);
+    let before = s.position;
+    tick(&mut s, towards(dir), &params, &corner, DT);
+    assert_eq!(s.position, before, "at rest");
+    assert_eq!(s.velocity, Vec3::ZERO);
 }
 
 /// 4.7: with `SlopeBoostFriction = 0` a falling slide up an unwalkable slope
@@ -1026,18 +1111,16 @@ fn slope_boost_friction_zero_lets_a_falling_slide_gain_height() {
     let run = |sbf: f32| {
         let mut params = PlayerParams::default();
         params.movement.slope_boost_friction.value = sbf;
-        let move_shape = CollisionShape {
-            radius: move_radius(&params),
-            half_height: hh(&params),
-        };
+        let extent = move_extent(&params);
         // Start 3 uu (horizontally) before touching the slope.
         let probe = world
-            .sweep_capsule(
+            .sweep_box(
                 Vec3::new(-500.0, 0.0, 100.0),
                 Vec3::new(500.0, 0.0, 100.0),
-                move_shape,
+                extent,
             )
             .expect("slope ahead")
+            .hit
             .position;
         let p0 = probe - Vec3::X * 3.0;
         let mut s = airborne(p0, Vec3::new(600.0, 0.0, 0.0));
@@ -1045,10 +1128,11 @@ fn slope_boost_friction_zero_lets_a_falling_slide_gain_height() {
         let h = f64::from(DT);
         let adj = DVec3::new(600.0, 0.0, gravity(&params) * h) * h;
         let t_hit = world
-            .sweep_capsule(p0, p0 + adj.as_vec3(), move_shape)
+            .sweep_box(p0, p0 + adj.as_vec3(), extent)
             .expect("hits the slope")
+            .hit
             .time;
-        let t = f64::from(t_hit) - SKIN / adj.length();
+        let t = reported(f64::from(t_hit), adj);
         (s, p0, adj, t)
     };
     let (free, p0, adj, t) = run(0.0);
@@ -1128,24 +1212,63 @@ fn walking_into_an_obtuse_corner_follows_the_second_wall() {
         .with_half_space(
             HalfSpace::through_point(n_b, Vec3::new(100.0, 60.0, 0.0), false).unwrap(),
         );
-    // Centre constraints with the MoveActor radius: x ≤ 100 − rm and
-    // 0.8·x + 0.6·y ≤ 116 − rm.
+    // Where the centre of the move's box (half width rm) may be: a box rests
+    // against a plane with its nearest corner, rm·(|n.x| + |n.y|) from it
+    // (spec 10.1). Wall A: x ≤ 100 − rm. Wall B: 0.8·x + 0.6·y ≤ 116 − 1.4·rm.
+    let rm = f64::from(rm);
     let a_limit = 100.0 - rm;
-    let b_limit = 116.0 - rm;
+    let b_limit = 116.0 - 1.4 * rm;
     let dir = Vec3::new(0.6, 0.8, 0.0);
-    let p0 = Vec3::new(77.0, 48.5, hh(&params) + HOVER);
+    // Start 1 uu from wall A and 2.5 uu (along its normal) from wall B.
+    let x0 = a_limit - 1.0;
+    let y0 = (b_limit - 2.5 - 0.8 * x0) / 0.6;
+    let p0 = Vec3::new(x0 as f32, y0 as f32, hh(&params) + HOVER);
     let mut s = walking_at(p0, Vec3::Z, true, false);
     s.velocity = dir * speed;
     tick(&mut s, towards(dir), &params, &world, DT);
     let p = s.position;
-    // Hit wall A first (stepped up, blocked, slid +Y), then wall B: the
-    // projected rest moves along B, i.e. back from A (−X) and further +Y.
-    assert!(p.x < a_limit - 0.3, "moved away from wall A along B: {p}");
+
+    // The same tick from the rules (3.2, 3.2.1, 4.8), in f64. `to_b` is the
+    // distance left to wall B along its normal.
+    let nb = d(n_b);
+    let delta = d(dir) * f64::from(speed) * f64::from(DT);
+    let mut at = DVec3::new(x0, y0, 0.0);
+    let to_b = |at: DVec3| b_limit - (0.8 * at.x + 0.6 * at.y);
+    // 1. The move: wall A first.
+    let t1 = reported((a_limit - at.x) / delta.x, delta);
+    assert!((a_limit - at.x) / delta.x < to_b(at) / -delta.dot(nb));
+    at += delta * t1;
+    // 2. Step up and across with the rest: wall A again.
+    let rest = delta * (1.0 - t1);
+    let t2 = reported((a_limit - at.x) / rest.x, rest);
+    assert!((a_limit - at.x) / rest.x < to_b(at) / -rest.dot(nb));
+    at += rest * t2;
+    // 3. Slide along A (its normal is already horizontal): this meets B.
+    let slide = DVec3::new(0.0, rest.y, 0.0) * (1.0 - t2);
+    let raw3 = to_b(at) / -slide.dot(nb);
+    assert!(raw3 < 1.0, "the slide reaches wall B");
+    let t3 = reported(raw3, slide);
+    at += slide * t3;
+    // 4. TwoWallAdjust, walls at an obtuse angle: the rest of the slide
+    // projected onto B. It runs along B, away from A, and meets nothing.
+    let along_b = (slide - nb * slide.dot(nb)) * (1.0 - t3);
+    assert!(along_b.x < 0.0 && along_b.y > 0.0 && along_b.dot(d(dir)) > 0.0);
+    at += along_b;
+
+    close(f64::from(p.x), at.x, 2e-3, "x");
+    close(f64::from(p.y), at.y, 2e-3, "y");
     assert!(
-        (0.8 * p.x + 0.6 * p.y - b_limit).abs() < 0.2,
-        "in contact with wall B: {p}"
+        f64::from(p.x) < a_limit - 0.3,
+        "moved away from wall A along B: {p}"
     );
-    assert!(p.y > p0.y + 5.0, "{p}");
+    // Held off wall B by the pull-back of the slide, which met it at an
+    // angle: pull(|slide|) along the slide is 0.6 of that along B's normal.
+    close(
+        b_limit - f64::from(0.8 * p.x + 0.6 * p.y),
+        pull(slide.length()) * 0.6,
+        2e-3,
+        "distance to wall B",
+    );
     assert!(s.grounded && (p.z - p0.z).abs() < 1e-3);
 }
 
@@ -1605,19 +1728,42 @@ fn flying_never_lands_and_slides_along_floors_and_walls() {
     let params = PlayerParams::asamu_original();
     let world = BoxWorld::new().with_ground(0.0, false);
     let z = hh(&params) + 1.0;
-    let mut s = flying(Vec3::new(0.0, 0.0, z), Vec3::new(300.0, 0.0, -300.0));
+    let v0 = DVec3::new(300.0, 0.0, -300.0);
+    let mut s = flying(Vec3::new(0.0, 0.0, z), v0.as_vec3());
     for _ in 0..10 {
         let (e, _) = tick(&mut s, no_input(), &params, &world, DT);
         assert!(e.landed.is_none());
         assert!(s.pawn.flying && !s.grounded);
     }
-    assert!(s.position.z >= hh(&params) - 1e-3);
-    assert!(
-        s.velocity.z.abs() < 1e-2,
-        "velocity into the floor lost: {}",
-        s.velocity
-    );
-    assert!(s.velocity.x > 250.0, "slides along: {}", s.velocity);
+    // The same ten ticks from the rules, in f64: drag (1 − F·dt)² with
+    // F = 0.5 × FluidFriction (the speed stays under the AirSpeed cap), one
+    // move, and where the floor is met the move stops at the reported hit
+    // and the rest slides level, so the velocity re-derived from the
+    // displacement keeps only that fraction of the speed into the floor.
+    // The pawn never touches the floor: each contact leaves it the
+    // pull-back short, and what speed is left closes the rest ever slower.
+    let h = f64::from(DT);
+    let f = 0.5 * f64::from(params.movement.fluid_friction.value);
+    assert!(v0.length() < f64::from(params.movement.air_speed.value));
+    let (mut gap, mut v, mut contacts) = (1.0_f64, v0, 0);
+    for _ in 0..10 {
+        v *= (1.0 - f * h).powi(2);
+        let delta = v * h;
+        if -delta.z >= gap {
+            let t = reported(gap / -delta.z, delta);
+            gap += delta.z * t;
+            v.z = delta.z * t / h;
+            contacts += 1;
+        } else {
+            gap += delta.z;
+        }
+    }
+    assert_eq!(contacts, 3);
+    assert!(gap > 0.0 && gap < 0.05, "{gap}");
+    assert!(v.z < 0.0 && v.z > -1.0, "{}", v.z);
+    close(f64::from(s.position.z - hh(&params)), gap, 1e-4, "gap");
+    close(f64::from(s.velocity.z), v.z, 2e-3, "vz");
+    close(f64::from(s.velocity.x), v.x, 1e-2, "slides along");
 }
 
 #[test]

@@ -35,22 +35,35 @@
 //!   by triangle, one-sided. A ray that starts inside a hull leaves it
 //!   without a hit; the original's zero-extent check of a convex element
 //!   instead reports a hit at time 0 with the reversed direction as the
-//!   normal (0x100AA5A70 in the user's macOS executable, CONFIRMED). No
-//!   trace of ours goes to a simple body yet (bullet traces go to the
-//!   triangles, P1), so nothing depends on it.
+//!   normal (0x100AA5A70 in the user's macOS executable, CONFIRMED). The
+//!   only traces that go to a simple body are [`QueryKind::Line`] ones
+//!   (bullet traces go to the triangles, P1), and the game issues none yet,
+//!   so nothing depends on it.
 //! - **Pawn cylinders** ([`CollisionScene::add_cylinder_mesh`]).
 //!
 //! The simple-collision bodies of the original's meshes are made of convex
 //! elements, boxes, spheres and sphyls (capsules). Convex elements and boxes
-//! are the hulls above. Spheres and sphyls are not represented, and for the
-//! pawn they need nothing: the original's sphere and sphyl checks (in the
-//! user's macOS executable at 0x100AA6710 and 0x100AA7510) report "no hit"
-//! at once for any non-zero extent, so they never block a box sweep
-//! (CONFIRMED, read locally). They do answer zero-extent line checks, so a
-//! mesh whose line traces go to its simple body would need a ray against a
-//! sphere and a ray against a capsule here. The user's data has 2,439 convex
-//! elements in 315 meshes, one sphere (the engine's own sphere mesh), no box
+//! are the hulls above ([`crate::simple_body`] builds them from the
+//! converted shapes and [`crate::scene`] places them). Spheres and sphyls
+//! are not represented, and for the pawn they need nothing: the original's
+//! sphere and sphyl checks (in the user's macOS executable at 0x100AA6710
+//! and 0x100AA7510) report "no hit" at once for any non-zero extent, so they
+//! never block a box sweep (CONFIRMED, read locally, twice). They do answer
+//! zero-extent line checks, so a mesh whose line traces go to its simple
+//! body would need a ray against a sphere and a ray against a capsule here.
+//! The user's data has 2,439 convex elements in 315 meshes, one sphere (the
+//! engine's own sphere mesh, whose line traces go to its triangles), no box
 //! and no sphyl (counted from the 882 meshes of a local conversion).
+//!
+//! # The original's own rule for a swept box
+//!
+//! [`CollisionScene::sweep_box`] against an instance is the exact geometric
+//! test unless the instance is under [`NativeRule`]: then the box is swept
+//! the way the original's routine does it, in the space of what is hit, with
+//! separating axes left out by a threshold that depends on the placement's
+//! scale ([`box_sweep`]). The scene loader puts every mesh, simple body and
+//! volume it places under it; instances built by hand (tests, the pawn
+//! cylinders) are exact unless asked otherwise.
 //!
 //! # Primitive kinds
 //!
@@ -82,11 +95,15 @@
 //! # Collision flags and the enabled switch
 //!
 //! Every instance carries [`InstanceInfo::blocks_pawn`] (non-zero-extent
-//! checks: the player's moves) and [`InstanceInfo::blocks_traces`]
-//! (zero-extent checks: grapple and aim traces); [`QueryFilter`] selects one,
-//! plus a mask of loaded sub-levels. A mesh that the original collides with
-//! differently for the two (its simple body for the pawn, its triangles for
-//! bullet traces: P1, P2) is two instances of the same actor, one per flag.
+//! checks: the player's moves), [`InstanceInfo::blocks_traces`] (the
+//! original's bullet traces: the grapple's fire trace) and
+//! [`Instance::blocks_lines`] (zero-extent traces that are not bullet
+//! traces; the same as `blocks_traces` unless set otherwise).
+//! [`QueryFilter`] selects one ([`QueryKind`]), plus a mask of loaded
+//! sub-levels. A mesh that the original collides with differently for them
+//! (its simple body for the pawn and for line traces, its triangles for
+//! bullet traces: P1, P2) is several instances of the same actor: its
+//! triangles, and one per shape of its body.
 //!
 //! [`Instance::enabled`] switches an instance off for every query without
 //! removing it (blocking volumes that level script toggles, P5):
@@ -169,8 +186,14 @@ pub struct InstanceInfo {
 pub enum QueryKind {
     /// Pawn moves (instances with `blocks_pawn`).
     Pawn,
-    /// Zero-extent traces (instances with `blocks_traces`).
+    /// Zero-extent traces (instances with `blocks_traces`): the original's
+    /// bullet traces, which always go to a mesh's triangles (the grapple's
+    /// fire trace is one).
     Trace,
+    /// Zero-extent traces that are not bullet traces (instances with
+    /// [`Instance::blocks_lines`]): the original sends these to a mesh's
+    /// simple body or to its triangles by the mesh's line switch.
+    Line,
 }
 
 /// Which instances a query considers.
@@ -193,15 +216,41 @@ impl QueryFilter {
         kind: QueryKind::Trace,
         sublevels: u64::MAX,
     };
+    /// Zero-extent traces that are not bullet traces, against every
+    /// sub-level.
+    pub const LINE: Self = Self {
+        kind: QueryKind::Line,
+        sublevels: u64::MAX,
+    };
 
-    /// `true` when the filter accepts the instance.
+    /// `true` when the instance's sub-level is loaded.
+    #[must_use]
+    pub fn loaded(&self, info: &InstanceInfo) -> bool {
+        info.sublevel < 64 && self.sublevels & (1u64 << info.sublevel) != 0
+    }
+
+    /// `true` when the filter accepts an instance with this information.
+    /// For [`QueryKind::Line`] the information alone cannot say (the flag is
+    /// [`Instance::blocks_lines`]); this answers with `blocks_traces`, the
+    /// value an instance has unless it was given another. Queries use
+    /// [`Self::accepts_instance`].
     #[must_use]
     pub fn accepts(&self, info: &InstanceInfo) -> bool {
-        let loaded = info.sublevel < 64 && self.sublevels & (1u64 << info.sublevel) != 0;
-        loaded
+        self.loaded(info)
             && match self.kind {
                 QueryKind::Pawn => info.blocks_pawn,
-                QueryKind::Trace => info.blocks_traces,
+                QueryKind::Trace | QueryKind::Line => info.blocks_traces,
+            }
+    }
+
+    /// `true` when the filter accepts the instance (its switch aside).
+    #[must_use]
+    pub fn accepts_instance(&self, inst: &Instance) -> bool {
+        self.loaded(&inst.info)
+            && match self.kind {
+                QueryKind::Pawn => inst.info.blocks_pawn,
+                QueryKind::Trace => inst.info.blocks_traces,
+                QueryKind::Line => inst.blocks_lines,
             }
     }
 }
@@ -240,6 +289,66 @@ impl PrimitiveKind {
         } else {
             Self::TriangleMesh
         }
+    }
+}
+
+/// A set of [`PrimitiveKind`]s, for the queries that look only at instances
+/// of some kinds ([`CollisionScene::sweep_box_kinds`],
+/// [`CollisionScene::raycast_kinds`]).
+///
+/// The original's world check does not ask everything at once: it asks the
+/// level's BSP first and then the other primitives on a trace shortened to
+/// end just beyond the BSP hit, and each routine moves its own hit back by
+/// its own amount (`asamu_player::world::bsp_checked_fraction`,
+/// NATIVE_PHYSICS.md 10.2). A caller that reproduces this needs the first
+/// contact of each kind, not only the first contact of all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KindSet(u8);
+
+impl KindSet {
+    /// No kind.
+    pub const NONE: Self = Self(0);
+    /// Every kind.
+    pub const ALL: Self = Self(0b1_1111);
+
+    const fn bit(kind: PrimitiveKind) -> u8 {
+        match kind {
+            PrimitiveKind::Bsp => 1,
+            PrimitiveKind::BrushHull => 1 << 1,
+            PrimitiveKind::SimpleHull => 1 << 2,
+            PrimitiveKind::TriangleMesh => 1 << 3,
+            PrimitiveKind::PawnCylinder => 1 << 4,
+        }
+    }
+
+    /// The set of exactly `kind`.
+    #[must_use]
+    pub const fn only(kind: PrimitiveKind) -> Self {
+        Self(Self::bit(kind))
+    }
+
+    /// This set and `kind`.
+    #[must_use]
+    pub const fn with(self, kind: PrimitiveKind) -> Self {
+        Self(self.0 | Self::bit(kind))
+    }
+
+    /// This set without `kind`.
+    #[must_use]
+    pub const fn without(self, kind: PrimitiveKind) -> Self {
+        Self(self.0 & !Self::bit(kind))
+    }
+
+    /// `true` when `kind` is in the set.
+    #[must_use]
+    pub const fn contains(self, kind: PrimitiveKind) -> bool {
+        self.0 & Self::bit(kind) != 0
+    }
+
+    /// `true` for the empty set.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
     }
 }
 
@@ -355,6 +464,61 @@ pub struct Instance {
     /// Switched on. A disabled instance is skipped by every query (sweeps,
     /// rays, overlaps) whatever its flags, and blocks again once enabled.
     pub enabled: bool,
+    /// Blocks zero-extent traces that are not bullet traces
+    /// ([`QueryKind::Line`]). The same as `info.blocks_traces` unless set
+    /// otherwise (a mesh whose line traces go to its simple body has this on
+    /// the body's instances and off on its triangles).
+    pub blocks_lines: bool,
+    /// Swept by the box with the original's own rule for leaving separating
+    /// axes out, which depends on the placement's scale, instead of the
+    /// exact geometry (`None`). See [`NativeRule`].
+    pub native: Option<NativeRule>,
+}
+
+/// How far a box's half extents may go (per axis, UU) for the widened bounds
+/// of an instance under [`NativeRule`] to hold every contact the rule can
+/// report when the instance is turned other than by quarter turns. The
+/// player's box is `(21, 21, 44)`.
+pub const NATIVE_RULE_MAX_EXTENT: f64 = 128.0;
+
+/// The original's own rule for a swept box against an instance
+/// ([`box_sweep`], "Triangles" and "Convex hulls"; NATIVE_PHYSICS.md 10.1).
+///
+/// The original tests in the space of what is hit, with the box's edges
+/// carried there unnormalised, and leaves out every axis shorter than a
+/// threshold. For a convex solid that removes the box's own face axes when
+/// two of the placement's scales multiply to more than 100 and edge axes
+/// within `asin(0.01 × scale)` of the box's edges; before that, the solid is
+/// only tested when the sweep's bounds reach its bounds in that space
+/// ([`box_sweep::convex_precheck`]). For triangles the edge axes within
+/// `asin(0.0001 × scale)` go (the face axes stay, see
+/// [`box_sweep::AxisSkip::triangles`]).
+///
+/// Set with [`CollisionSceneBuilder::set_static_native`] or
+/// [`CollisionScene::set_native`]; the scene loader does for every simple
+/// body, volume and mesh it places. Only the box sweep looks at it: rays,
+/// the cylinder and the overlap tests see the exact geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeRule {
+    /// The mesh's space → the space the original tests in (the component's
+    /// local space). The identity for a mesh placed by its component's
+    /// transform; a volume whose hulls are stored in world space carries the
+    /// inverse of its component's transform here.
+    pub mesh_to_element: Affine,
+    /// A convex solid's bounds in that space.
+    element_bounds: Option<(DVec3, DVec3)>,
+    /// At least one of the box's face axes is left out: the bounds are
+    /// widened and a contact can come before the sweep enters them.
+    wide: bool,
+}
+
+impl NativeRule {
+    /// `true` when the placement's scale makes the original leave out at
+    /// least one of the box's own face axes for this (convex) instance.
+    #[must_use]
+    pub fn skips_face_axes(&self) -> bool {
+        self.wide
+    }
 }
 
 /// Which instance a hit belongs to (statics order before dynamics).
@@ -661,6 +825,8 @@ impl CollisionSceneBuilder {
                     info,
                     kind,
                     enabled: options.enabled,
+                    blocks_lines: info.blocks_traces,
+                    native: None,
                 })
             }
             None => {
@@ -685,6 +851,8 @@ impl CollisionSceneBuilder {
                     info,
                     kind,
                     enabled: options.enabled,
+                    blocks_lines: info.blocks_traces,
+                    native: None,
                 })
             }
         }
@@ -708,6 +876,26 @@ impl CollisionSceneBuilder {
         let index = u32::try_from(self.statics.len()).ok()?;
         self.statics.push(inst);
         Some(index)
+    }
+
+    /// The static instance `index`, to change what was not given when it
+    /// was added ([`Instance::blocks_lines`], [`Instance::enabled`]). The
+    /// transform and the bounds must stay as they are.
+    pub fn static_mut(&mut self, index: u32) -> Option<&mut Instance> {
+        self.statics.get_mut(index as usize)
+    }
+
+    /// Puts the static instance `index` under the original's own rule for a
+    /// swept box ([`NativeRule`]). `element_to_world` is the transform of
+    /// the component the geometry belongs to when the mesh is not stored in
+    /// that component's space (a volume's hulls in world space); `None` when
+    /// the instance's own transform is it. `false` (and nothing changed) for
+    /// an unknown index, a pawn cylinder or a transform without an inverse.
+    pub fn set_static_native(&mut self, index: u32, element_to_world: Option<Affine>) -> bool {
+        match self.statics.get_mut(index as usize) {
+            Some(inst) => apply_native(&self.meshes, inst, element_to_world),
+            None => false,
+        }
     }
 
     /// Finishes the scene.
@@ -821,7 +1009,134 @@ enum Whole {
 }
 
 fn visible(filter: &QueryFilter, inst: &Instance) -> bool {
-    inst.enabled && filter.accepts(&inst.info)
+    inst.enabled && filter.accepts_instance(inst)
+}
+
+/// [`visible`], and of one of `kinds`.
+fn visible_of(filter: &QueryFilter, kinds: KindSet, inst: &Instance) -> bool {
+    kinds.contains(inst.kind) && visible(filter, inst)
+}
+
+/// World → the space the original tests the instance in.
+fn element_space(inst: &Instance, rule: &NativeRule) -> Affine {
+    inst.to_local.then(&rule.mesh_to_element)
+}
+
+/// Recomputes what [`NativeRule`] derives from the instance's transform:
+/// whether a face axis of the box is left out, and then the bounds.
+///
+/// With all three face axes tested, every contact lies within the solid's
+/// world bounds widened by the box, as for the exact test. A face axis that
+/// is left out no longer confines the contact on its world axis; what does
+/// is the original's test of the sweep's bounds against the solid's bounds
+/// in the solid's own space ([`box_sweep::convex_precheck`]). The world
+/// bounds on that axis become the bounds of that region for a box of up to
+/// [`NATIVE_RULE_MAX_EXTENT`], less the box's own half size, which every
+/// query adds again.
+fn refresh_native(meshes: &[CollisionMesh], inst: &mut Instance) {
+    let Some(mut rule) = inst.native else {
+        return;
+    };
+    rule.wide = false;
+    let Some(mesh) = meshes.get(inst.mesh as usize) else {
+        inst.native = Some(rule);
+        return;
+    };
+    // The regular bounds first (the instance may have been widened before).
+    if let Some(local) = mesh.bvh.bounds() {
+        let (lo, hi) = inst
+            .to_world
+            .transform_aabb(local.min.as_dvec3(), local.max.as_dvec3());
+        let (min, max) = affine::round_out(lo, hi);
+        inst.bounds = Aabb3 { min, max };
+    }
+    if let Some((elem_min, elem_max)) = rule.element_bounds {
+        let to_element = element_space(inst, &rule);
+        let skip = box_sweep::AxisSkip::convex(to_element.rows);
+        let skipped = [skip.skips_face(0), skip.skips_face(1), skip.skips_face(2)];
+        if let (true, Some(to_world)) = (skipped.contains(&true), to_element.inverse()) {
+            rule.wide = true;
+            let centre = to_world.point((elem_min + elem_max) * 0.5);
+            let half = (elem_max - elem_min) * 0.5 + DVec3::splat(box_sweep::CONVEX_PRECHECK_PAD);
+            let mut lo = inst.bounds.min.as_dvec3();
+            let mut hi = inst.bounds.max.as_dvec3();
+            for j in 0..3 {
+                if !skipped[j] {
+                    continue;
+                }
+                // The region's half size on world axis `j` for a box with
+                // half extents `e` is
+                //   Σk |B[j][k]| · (half[k] + Σi |A[k][i]| · e[i]),
+                // with A = world → element and B its inverse. The query adds
+                // e[j] itself; the rest is bounded with the largest extent.
+                let mut reach = 0.0;
+                for k in 0..3 {
+                    reach += to_world.rows[k][j].abs() * half[k];
+                }
+                for i in 0..3 {
+                    let mut c = 0.0;
+                    for k in 0..3 {
+                        c += to_world.rows[k][j].abs() * to_element.rows[i][k].abs();
+                    }
+                    if i == j {
+                        c -= 1.0;
+                    }
+                    reach += c.max(0.0) * NATIVE_RULE_MAX_EXTENT;
+                }
+                lo[j] = lo[j].min(centre[j] - reach);
+                hi[j] = hi[j].max(centre[j] + reach);
+            }
+            if lo.is_finite() && hi.is_finite() {
+                let (min, max) = affine::round_out(lo, hi);
+                inst.bounds = Aabb3 { min, max };
+            } else {
+                rule.wide = false;
+            }
+        }
+    }
+    inst.native = Some(rule);
+}
+
+/// Puts `inst` under the original's rule (see
+/// [`CollisionSceneBuilder::set_static_native`]).
+fn apply_native(
+    meshes: &[CollisionMesh],
+    inst: &mut Instance,
+    element_to_world: Option<Affine>,
+) -> bool {
+    let Some(mesh) = meshes.get(inst.mesh as usize) else {
+        return false;
+    };
+    if mesh.cylinder.is_some() {
+        return false;
+    }
+    let mesh_to_element = match element_to_world {
+        None => Affine::IDENTITY,
+        Some(to_world) => match to_world.inverse() {
+            Some(to_element) => inst.to_world.then(&to_element),
+            None => return false,
+        },
+    };
+    if !mesh_to_element.is_finite() {
+        return false;
+    }
+    let element_bounds = mesh.hull().and_then(|hull| {
+        let mut lo = DVec3::splat(f64::INFINITY);
+        let mut hi = DVec3::splat(f64::NEG_INFINITY);
+        for v in hull.vertices() {
+            let p = mesh_to_element.point(*v);
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+    });
+    inst.native = Some(NativeRule {
+        mesh_to_element,
+        element_bounds,
+        wide: false,
+    });
+    refresh_native(meshes, inst);
+    true
 }
 
 impl CollisionScene {
@@ -973,6 +1288,8 @@ impl CollisionScene {
                 .kind
                 .unwrap_or_else(|| PrimitiveKind::default_for(info.class, m)),
             enabled: options.enabled,
+            blocks_lines: info.blocks_traces,
+            native: None,
         })
     }
 
@@ -985,12 +1302,22 @@ impl CollisionScene {
             enabled: inst.enabled,
         };
         match self.dynamic_instance_with(inst.mesh, to_world, inst.info, options) {
-            Some(n) => {
+            Some(mut n) => {
+                n.blocks_lines = inst.blocks_lines;
+                n.native = inst.native;
+                refresh_native(&self.meshes, &mut n);
                 *inst = n;
                 true
             }
             None => false,
         }
+    }
+
+    /// Puts a dynamic instance under the original's own rule for a swept box
+    /// (see [`CollisionSceneBuilder::set_static_native`]); the rule then
+    /// follows the instance through [`Self::place_dynamic`].
+    pub fn set_native(&self, inst: &mut Instance, element_to_world: Option<Affine>) -> bool {
+        apply_native(&self.meshes, inst, element_to_world)
     }
 
     /// Adds an upright collision cylinder (`radius`, `half_height`, centred
@@ -1061,19 +1388,47 @@ impl CollisionScene {
         })
     }
 
-    /// One triangle against the query's shape.
+    /// One triangle against the query's shape; `skip` is the original's
+    /// axis rule for a box against an instance under [`NativeRule`].
     fn sweep_triangle(
         q: &SweepQuery,
         w: &[DVec3; 3],
         outward: Option<DVec3>,
         limit: f64,
+        skip: Option<&box_sweep::AxisSkip>,
     ) -> Option<cylinder::Contact> {
-        match q.shape {
-            Shape::Cylinder { r, h } => {
+        match (q.shape, skip) {
+            (Shape::Cylinder { r, h }, _) => {
                 cylinder::sweep_within(q.s, q.d, r, h, w, outward, q.tol, limit)
             }
-            Shape::Box { e } => box_sweep::sweep_triangle(q.s, q.d, e, w, outward, q.tol, limit),
+            (Shape::Box { e }, None) => {
+                box_sweep::sweep_triangle(q.s, q.d, e, w, outward, q.tol, limit)
+            }
+            (Shape::Box { e }, Some(rule)) => {
+                box_sweep::sweep_triangle_skipping(q.s, q.d, e, w, outward, q.tol, limit, rule)
+            }
         }
+    }
+
+    /// Under [`NativeRule`] a triangle is swept only when the sweep passes
+    /// the triangle's bounds in the mesh's space, widened by the box (and the
+    /// query's margin) in that space. With the exact test that is implied;
+    /// with axes left out it is what keeps every path to a triangle (the
+    /// hierarchy, the reference) on the same triangles.
+    fn triangle_gate(s_l: DVec3, inv_l: DVec3, l: &[Vec3; 3], pad_l: DVec3) -> bool {
+        let b = Aabb3 {
+            min: l[0].min(l[1]).min(l[2]),
+            max: l[0].max(l[1]).max(l[2]),
+        };
+        bvh::segment_box_entry(s_l, inv_l, &b, pad_l, 1.0).is_some()
+    }
+
+    /// The original's axis rule for the triangles of `inst`, if it is under
+    /// [`NativeRule`].
+    fn triangle_rule(inst: &Instance) -> Option<box_sweep::AxisSkip> {
+        inst.native
+            .as_ref()
+            .map(|rule| box_sweep::AxisSkip::triangles(element_space(inst, rule).rows))
     }
 
     /// The instance as a whole (a pawn cylinder, or a convex solid for a
@@ -1099,8 +1454,43 @@ impl CollisionScene {
             ));
         }
         if let (Shape::Box { e }, Some(hull)) = (q.shape, mesh.hull()) {
+            let Some(rule) = &inst.native else {
+                scratch.load(hull, inst);
+                return Whole::Tested(box_sweep::sweep_hull(
+                    q.s,
+                    q.d,
+                    e,
+                    &scratch.vertices,
+                    &scratch.faces,
+                    &scratch.edges,
+                    q.tol,
+                    limit,
+                ));
+            };
+            // The original's rule. With a face axis of the box left out the
+            // contact is confined by the widened bounds instead (the same
+            // test the search for candidates makes, repeated here so that
+            // every path to this instance agrees).
+            if rule.wide
+                && bvh::segment_box_entry(q.s, bvh::reciprocal(q.d), &inst.bounds, q.pad, 1.0)
+                    .is_none()
+            {
+                return Whole::Tested(None);
+            }
+            let to_element = element_space(inst, rule);
+            if let Some((lo, hi)) = rule.element_bounds
+                && !box_sweep::convex_precheck(
+                    to_element.point(q.s),
+                    to_element.point(q.s + q.d),
+                    to_element.transform_extent(e),
+                    lo,
+                    hi,
+                )
+            {
+                return Whole::Tested(None);
+            }
             scratch.load(hull, inst);
-            return Whole::Tested(box_sweep::sweep_hull(
+            return Whole::Tested(box_sweep::sweep_hull_skipping(
                 q.s,
                 q.d,
                 e,
@@ -1109,6 +1499,7 @@ impl CollisionScene {
                 &scratch.edges,
                 q.tol,
                 limit,
+                &box_sweep::AxisSkip::convex(to_element.rows),
             ));
         }
         Whole::Triangles
@@ -1143,6 +1534,7 @@ impl CollisionScene {
             }
             return;
         }
+        let skip = Self::triangle_rule(inst);
         let s_l = inst.to_local.point(q.s);
         let d_l = inst.to_local.vector(q.d);
         let pad_l = inst.to_local.transform_extent(q.pad);
@@ -1154,7 +1546,15 @@ impl CollisionScene {
         let cell = Cell::new(*best);
         mesh.bvh.query_ordered(
             |b| bvh::segment_box_entry(s_l, inv, b, pad_l, 1.0),
-            || cell.get().map_or(1.0, |b| b.t),
+            // Under the original's rule a contact can come before the sweep
+            // reaches the triangle's own bounds, so nothing is cut by time.
+            || {
+                if skip.is_some() {
+                    1.0
+                } else {
+                    cell.get().map_or(1.0, |b| b.t)
+                }
+            },
             |tri| {
                 let Some(l) = mesh.triangle_local(tri) else {
                     return;
@@ -1164,6 +1564,9 @@ impl CollisionScene {
                 if tmax.cmplt(lo).any() || tmin.cmpgt(hi).any() {
                     return;
                 }
+                if skip.is_some() && !Self::triangle_gate(s_l, inv, &l, pad_l) {
+                    return;
+                }
                 let w = l.map(|p| inst.to_world.point_f32(p));
                 let outward = if mesh.convex.is_some() {
                     self.outward(inst, &w)
@@ -1171,7 +1574,7 @@ impl CollisionScene {
                     None
                 };
                 let limit = cell.get().map_or(1.0, |b| b.t);
-                if let Some(c) = Self::sweep_triangle(q, &w, outward, limit) {
+                if let Some(c) = Self::sweep_triangle(q, &w, outward, limit, skip.as_ref()) {
                     let hit = make(c, tri);
                     if cell.get().is_none_or(|b| hit.better_than(&b)) {
                         cell.set(Some(hit));
@@ -1209,6 +1612,7 @@ impl CollisionScene {
         dynamic: &[Instance],
         q: &SweepQuery,
         filter: QueryFilter,
+        kinds: KindSet,
     ) -> Option<SceneHit> {
         let inv = bvh::reciprocal(q.d);
         let mut best: Option<SceneHit> = None;
@@ -1225,10 +1629,14 @@ impl CollisionScene {
             .into_iter()
             .filter_map(|i| {
                 let inst = self.statics.get(i as usize)?;
-                if !visible(&filter, inst) {
+                if !visible_of(&filter, kinds, inst) {
                     return None;
                 }
-                bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0).map(|t| (t, i))
+                // Under the original's rule with a face axis left out, a
+                // contact can come before the sweep enters the bounds.
+                let early = inst.native.is_some_and(|rule| rule.wide);
+                bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0)
+                    .map(|t| (if early { 0.0 } else { t }, i))
             })
             .collect();
         ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -1242,7 +1650,7 @@ impl CollisionScene {
         }
         for (i, inst) in dynamic.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else { break };
-            if !visible(&filter, inst) {
+            if !visible_of(&filter, kinds, inst) {
                 continue;
             }
             if bvh::segment_box_entry(q.s, inv, &inst.bounds, q.pad, 1.0).is_some() {
@@ -1295,7 +1703,18 @@ impl CollisionScene {
                 }
                 continue;
             }
+            let skip = Self::triangle_rule(inst);
+            let s_l = inst.to_local.point(q.s);
+            let inv_l = bvh::reciprocal(inst.to_local.vector(q.d));
+            let pad_l = inst.to_local.transform_extent(q.pad);
             for tri in 0..mesh.triangles.len() as u32 {
+                if skip.is_some()
+                    && !mesh
+                        .triangle_local(tri)
+                        .is_some_and(|l| Self::triangle_gate(s_l, inv_l, &l, pad_l))
+                {
+                    continue;
+                }
                 let Some(w) = self.world_triangle(inst, tri) else {
                     continue;
                 };
@@ -1304,7 +1723,7 @@ impl CollisionScene {
                 } else {
                     None
                 };
-                if let Some(c) = Self::sweep_triangle(q, &w, outward, 1.0) {
+                if let Some(c) = Self::sweep_triangle(q, &w, outward, 1.0, skip.as_ref()) {
                     let hit = make(c, tri);
                     if best.is_none_or(|b| hit.better_than(&b)) {
                         best = Some(hit);
@@ -1333,7 +1752,7 @@ impl CollisionScene {
             h: f64::from(half_height),
         };
         let q = Self::sweep_query(start, end, shape)?;
-        self.sweep_shape(dynamic, &q, filter)
+        self.sweep_shape(dynamic, &q, filter, KindSet::ALL)
     }
 
     /// Reference implementation of [`Self::sweep_cylinder`] without any
@@ -1376,7 +1795,24 @@ impl CollisionScene {
         filter: QueryFilter,
     ) -> Option<SceneHit> {
         let q = Self::box_query(start, end, half_extents)?;
-        self.sweep_shape(dynamic, &q, filter)
+        self.sweep_shape(dynamic, &q, filter, KindSet::ALL)
+    }
+
+    /// [`Self::sweep_box`] against the instances of `kinds` only: the first
+    /// contact among them, as if nothing else were there (see [`KindSet`]).
+    /// With [`KindSet::ALL`] this is [`Self::sweep_box`].
+    #[must_use]
+    pub fn sweep_box_kinds(
+        &self,
+        dynamic: &[Instance],
+        start: Vec3,
+        end: Vec3,
+        half_extents: Vec3,
+        filter: QueryFilter,
+        kinds: KindSet,
+    ) -> Option<SceneHit> {
+        let q = Self::box_query(start, end, half_extents)?;
+        self.sweep_shape(dynamic, &q, filter, kinds)
     }
 
     /// Reference implementation of [`Self::sweep_box`] without any
@@ -1471,6 +1907,20 @@ impl CollisionScene {
         end: Vec3,
         filter: QueryFilter,
     ) -> Option<SceneHit> {
+        self.raycast_kinds(dynamic, origin, end, filter, KindSet::ALL)
+    }
+
+    /// [`Self::raycast`] against the instances of `kinds` only (see
+    /// [`KindSet`]). With [`KindSet::ALL`] this is [`Self::raycast`].
+    #[must_use]
+    pub fn raycast_kinds(
+        &self,
+        dynamic: &[Instance],
+        origin: Vec3,
+        end: Vec3,
+        filter: QueryFilter,
+        kinds: KindSet,
+    ) -> Option<SceneHit> {
         let o = origin.as_dvec3();
         let dv = end.as_dvec3() - o;
         if !(o.is_finite() && dv.is_finite()) || dv == DVec3::ZERO {
@@ -1489,7 +1939,7 @@ impl CollisionScene {
             .into_iter()
             .filter_map(|i| {
                 let inst = self.statics.get(i as usize)?;
-                if !visible(&filter, inst) {
+                if !visible_of(&filter, kinds, inst) {
                     return None;
                 }
                 bvh::segment_box_entry(o, inv, &inst.bounds, pad, 1.0).map(|t| (t, i))
@@ -1506,7 +1956,7 @@ impl CollisionScene {
         }
         for (i, inst) in dynamic.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else { break };
-            if visible(&filter, inst)
+            if visible_of(&filter, kinds, inst)
                 && bvh::segment_box_entry(o, inv, &inst.bounds, pad, 1.0).is_some()
             {
                 self.ray_instance(inst, InstanceRef::Dynamic(i), o, dv, &mut best);
@@ -2402,5 +2852,73 @@ mod tests {
         assert!((contact_tolerance(Vec3::ZERO) - 1.0e-3).abs() < 1e-12);
         let far = contact_tolerance(Vec3::new(250_000.0, 0.0, 0.0));
         assert!(far > 0.03 && far < 0.04, "{far}");
+    }
+
+    /// Two floors under one probe, the upper one mesh triangles (top at
+    /// z = 10) and the lower one BSP (top at z = 0): a query by kind sees
+    /// the first contact among the instances of its kinds and nothing else,
+    /// for boxes and for rays, and every kind together is the plain query.
+    #[test]
+    fn queries_by_kind_see_only_their_kinds() {
+        let mut b = CollisionSceneBuilder::new();
+        let (v, t) = cube();
+        let m = b.add_mesh(v, t).unwrap();
+        let slab = |top: f64| Affine {
+            rows: [DVec3::X * 200.0, DVec3::Y * 200.0, DVec3::Z * 50.0],
+            translation: DVec3::new(-100.0, -100.0, top - 50.0),
+        };
+        let bsp = b
+            .add_static_with(
+                m,
+                slab(0.0),
+                info(),
+                InstanceOptions::of_kind(PrimitiveKind::Bsp),
+            )
+            .unwrap();
+        let mesh = b
+            .add_static_with(
+                m,
+                slab(10.0),
+                info(),
+                InstanceOptions::of_kind(PrimitiveKind::TriangleMesh),
+            )
+            .unwrap();
+        let s = b.build();
+        let (start, end) = (Vec3::new(0.0, 0.0, 100.0), Vec3::new(0.0, 0.0, -100.0));
+        let half = Vec3::new(21.0, 21.0, 44.0);
+        let sweep = |kinds| s.sweep_box_kinds(&[], start, end, half, QueryFilter::PAWN, kinds);
+        // The box's bottom starts at 56: 46 above the mesh, 56 above the BSP.
+        let all = sweep(KindSet::ALL).unwrap();
+        assert_eq!(all.instance, InstanceRef::Static(mesh));
+        assert!((all.t - 46.0 / 200.0).abs() < 1e-9, "{all:?}");
+        assert_eq!(
+            Some(all),
+            s.sweep_box(&[], start, end, half, QueryFilter::PAWN)
+        );
+        let only_bsp = sweep(KindSet::only(PrimitiveKind::Bsp)).unwrap();
+        assert_eq!(only_bsp.instance, InstanceRef::Static(bsp));
+        assert_eq!(only_bsp.kind, PrimitiveKind::Bsp);
+        assert!((only_bsp.t - 56.0 / 200.0).abs() < 1e-9, "{only_bsp:?}");
+        assert_eq!(
+            sweep(KindSet::ALL.without(PrimitiveKind::Bsp)),
+            Some(all),
+            "the rest without BSP is the mesh"
+        );
+        assert_eq!(sweep(KindSet::only(PrimitiveKind::SimpleHull)), None);
+        assert_eq!(sweep(KindSet::NONE), None);
+        let ray = |kinds| s.raycast_kinds(&[], start, end, QueryFilter::TRACE, kinds);
+        let first = ray(KindSet::ALL).unwrap();
+        assert_eq!(first.instance, InstanceRef::Static(mesh));
+        assert!((first.t - 90.0 / 200.0).abs() < 1e-9, "{first:?}");
+        assert_eq!(Some(first), s.raycast(&[], start, end, QueryFilter::TRACE));
+        let below = ray(KindSet::only(PrimitiveKind::Bsp)).unwrap();
+        assert_eq!(below.instance, InstanceRef::Static(bsp));
+        assert!((below.t - 100.0 / 200.0).abs() < 1e-9, "{below:?}");
+        assert_eq!(ray(KindSet::only(PrimitiveKind::PawnCylinder)), None);
+        // Set arithmetic.
+        let set = KindSet::NONE.with(PrimitiveKind::BrushHull);
+        assert!(set.contains(PrimitiveKind::BrushHull) && !set.contains(PrimitiveKind::Bsp));
+        assert!(set.without(PrimitiveKind::BrushHull).is_empty());
+        assert!(KindSet::NONE.is_empty() && !KindSet::ALL.is_empty());
     }
 }

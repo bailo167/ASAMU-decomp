@@ -126,7 +126,9 @@ pitch (the simulation has no pawn roll or pitch yet).
 `SetSpeed F` is the stock cheat manager's command [CONFIRMED (src, `Engine.CheatManager`)]: it writes the
 two speeds and nothing else (no sprint flag, no pawn state), from the class defaults (`UTPawn` `GroundSpeed`
 440, not `MoveSpeed`). In `f32`, 440 × 0.3 = 132.0 and 440 × 0.15 = 66.0 exactly. Measured: the original's
-`GroundSpeed` is 132.0 on 3,001 of 3,001 recorded AG-Workshop frames (docs/PARITY_FINDINGS.md P6).
+`GroundSpeed` is 132.0 on 3,001 of 3,001 recorded AG-Workshop frames (docs/PARITY_FINDINGS.md P6), and on
+14,017 of 14,017 of the recording KM1, from the level's first recorded frame (two ticks after the load) and
+through 1,950 frames with the sprint key held.
 
 Every other writer keeps writing its own 440-based value afterwards, whatever the command left
 [CONFIRMED (src)]:
@@ -137,7 +139,9 @@ Every other writer keeps writing its own 440-based value afterwards, whatever th
   sprinting 440, a landing with the sprint armed 880.
 No recording contains a sprint press after the command, so this is the script's rule, not a measurement.
 → Rust: `pawn::set_speed(state, params, factor)` and `pawn::console_command(state, params, line)` (the
-command word matched without regard to case). The Kismet host does not call them yet.
+command word matched without regard to case). The Kismet host hands every console command of a level
+script to them (`Game::console_command`, KISMET_RUNTIME.md §8): AG-Workshop with its Kismet walks at
+132.0 uu/s (`crates/asamu-game/tests/parity_converted.rs`).
 
 **A-WK-4 Sprint state machine** [CONFIRMED (src, config)] (`StartSprinting`/`StopSprinting`, left shift /
 gamepad left shoulder):
@@ -559,6 +563,16 @@ same routine. **Falling speed never kills** (§5).
 Not reset: physics mode (a pawn that died falling falls again from the spawn point), grapple budget
 (refilled at the next landing), power-jump state, move-input lock, sprint flags, `AirControl`, eye height.
 
+**Where the teleport puts the pawn** [CONFIRMED (native, NATIVE_PHYSICS.md 10.3); measured on five
+recorded respawns]: at the spawn position when the pawn's box is free there (2 of 5, to 0.002 uu); else
+the engine's placement search stands it over the floor below, its bottom 3.0 uu above a floor of BSP or
+simple collision (6.0 uu above mesh triangles), in the air, in the physics mode it had (3 of 5: the spawn
+points are 3.1 to 5.8 uu inside the floor, the pawn appears 6.09 to 8.80 uu above them, falls and rests
+0.72 uu lower four frames later). The teleport also drops the pawn's base. A search that finds no place
+(a spawn position whose centre lies in a floor) fails the teleport and the pawn stays where it was.
+→ Rust: `find_spot` in `crates/asamu-game/src/converted.rs`; with the converted levels' simple bodies it
+puts the pawn within 0.007 uu of the three recorded places.
+
 **A-DT-3 KillZ** [CONFIRMED (map decode); reachability TENTATIVE]: `WorldInfo.KillZ` is 1.0 in Workshop and
 Epilogue and far below the geometry elsewhere. Below it the engine raises `FellOutOfWorld` with the world's
 KillZ damage type (`Engine.KillZDamageType`, the `ZoneInfo` default, never overridden), so the stock path
@@ -591,8 +605,49 @@ actor are all present, else by the checkpoint's rotation, and not rotated when `
 Spawn rotation = spawn-point actor rotation if `bRotatePlayerToSpawnPointRot` (warning and checkpoint
 rotation if it is missing), else the checkpoint's rotation. Defaults: both flags true [CONFIRMED (cdo)].
 
-**A-CP-5 Level start** [CONFIRMED (src); corrected]: the pawn spawns at the `PlayerStart` with only its yaw,
-walking; the grapple gun is created; then (outside play-in-editor) the save file is loaded. On success:
+**A-CP-5 Level start** [CONFIRMED (src); corrected three times]: the pawn spawns at the `PlayerStart`'s
+location with only its yaw, and possessing it puts it in **walking** physics: the stock player controller's
+restart enters the pawn's land movement state, whose begin sets the pawn's walking physics unless the pawn
+is falling (or a rigid body), and a new pawn is neither; this build's stock pawn does nothing of its own at a
+restart, and its "set movement physics" routine, which would choose Falling, is called only from damage
+taken with no physics and from one stock state (CONFIRMED (src), re-read 2026-10-12). The pawn has no base,
+so its **first tick is the walking floor check** (NATIVE_PHYSICS.md 3.3): a floor within the check's 28 uu
+is taken as a new base and the pawn is put at its standing height at once, from above or below, **without
+a landing**; with no floor in reach the pawn **starts to fall in that tick**, where it is and with zero
+velocity (a pawn that did not move carries no time into the fall), and lands like any other fall.
+
+In a story level the save is loaded right after the spawn (below) and its reset puts the pawn at the
+level's latest checkpoint, the first one when the save names none, before the first tick. Every recorded
+start had a save (a new game writes one), so the recorded pawns start at their level's **first
+checkpoint**. Measured on six level starts in four recordings [CONFIRMED]:
+
+| Level (recording, first record) | First checkpoint's spawn point | First recorded state | What it shows |
+|---|---|---|---|
+| AG-Workshop (KM1 1179, a new game; world time 0.41343 s) | the checkpoint's own location (409.6443, −347.4434, 73.321), 68 uu from the `PlayerStart`, inside the floor | walking at (409.6443, −347.4434, **119.15**), zero velocity, based on the world, `GroundSpeed` 132, `AirControl` 0.30 | the placement search (NATIVE_PHYSICS.md 10.3) puts the centre at 118.321; a walking floor check from there gives 72 + 44 + 2.15 + 1.0 = 119.15; a pawn falling from there needs 0.067 s and rests lower |
+| AG-Workshop (WS1 6869, world time 13.95 s) | the same | the same place | |
+| AG-ParadiseCave (KM1 15199, 0.535 s) | its own point (210583.44, −97921.16, 110846.35), 40 uu from the `PlayerStart`, free | walking at (210583.4375, −97921.1562, **110826.6328**), zero velocity, floor normal (−0.0445, −0.0987, 0.9941), `AirControl` **0.30** | 19.7 uu below the spawn point 0.135 s after the first tick: a fall takes 0.195 s and its landing would have set `AirControl` 0.35; the floor check put it there |
+| AG-BeautifulCity (DC1 7795, 0.559 s; KM1 52199, 0.485 s) | the `PlayerStart` (the checkpoint names it as its spawn point actor), 33.7 uu above the floor | falling, vz −165.43 and −88.37 | free fall from the start's height (to 0.015 and 0.004 uu) that began at world time 0.4001 and 0.4000 s |
+| AG-Darkcave (PLAY2 25512, 0.451 s) | the `PlayerStart`, 36.4 uu above the floor | falling, vz −52.62 | free fall from the start's height (to 0.0005 uu) that began at 0.4000 s; its landing switched `AirControl` to 0.35 (A-AC-2) |
+
+The 0.400 s is the original's first tick: the first frame after a level load is long and the engine clamps
+a tick's time to 0.4 s (NATIVE_PHYSICS.md 10.4, CONFIRMED (native)); in that tick the pawn's floor check
+runs, and a fall begins when it ends. With our converted levels the same rule gives (409.6443, −347.4434,
+119.15) and (210583.44, −97921.16, 110826.63) after the first tick, and falls from the two `PlayerStart`s
+from the second tick on (`crates/asamu-game/tests/parity_converted.rs`). The landing of such a fall is a
+landing like any other: at the AG-Darkcave start it switches `AirControl` to 0.35 (A-AC-2), and in a level
+that starts in story mode (AG-BeautifulCity) it does not. A `PlayerStart` at which the pawn's box does not
+fit goes through the engine's placement search first (NATIVE_PHYSICS.md 10.3); no recorded start needs it.
+
+History: the first version said the pawn spawns walking (right, without the consequences); the second
+(earlier on 2026-10-12, from PARITY_FINDINGS P10 and two recorded starts) said it spawns falling, which the
+AG-Workshop and AG-ParadiseCave starts of the next recording refute. Not established: what the original
+does when its save does not load (it fires the "save loaded" event with −1 and does not reset the player,
+so by the script the pawn stays at the `PlayerStart`; never recorded).
+→ Rust: `Game::from_loaded_map` starts the pawn at the `PlayerStart`, walking, without a base, its floor
+check forced; `Game::apply_snapshot` is the save's reset. Its clock starts at 0 and its first tick has the
+length of every other (the original's 0.4 s is not reproduced: level scripts there are 0.4 s further on
+when the pawn's second tick starts, TENTATIVE for what a script does within that tick).
+The grapple gun is created; then (outside play-in-editor) the save file is loaded. On success:
 restore the checkpoint table, grapple capacity, boots enabled and the grapple latch (G-IN-4) and the saved
 state of savable world actors (e.g. crystal charge), reset the player to the latest checkpoint of this
 level, fire the Kismet "save loaded" event with that index. On failure: fire it with −1 and register
@@ -646,6 +701,16 @@ collision cylinder to the class-default radius/half-height × F (21·F, 44·F), 
 re-places the pawn; `BaseEyeHeight` is **not** scaled. The Epilogue's Kismet runs `changesize 1.4`
 (29.4 × 61.6). `SeqAct_SetPawnSize` issues 1.5 (input 0) or 1 (input 1).
 
+The re-placement is the pawn's location set to itself: the teleport of A-DT-2 at the present location,
+with the new size [CONFIRMED (src) for the call, CONFIRMED (native) for the search, NATIVE_PHYSICS.md
+10.3]. A pawn that stood on a floor now reaches into it, so the search stands it with its bottom 3.0 uu
+above the floor (BSP or simple collision) and drops its base; the next walking floor check takes the
+floor as a new base (3.3) and sets the reported 2.15: a true 3.15. Shrinking leaves the pawn where it
+is, above the floor. Not measured: AG-Epilogue is in no recording, and no shipped map places
+`SeqAct_SetPawnSize` on a path that was recorded.
+→ Rust: `Game::change_size` (`crates/asamu-game/src/lib.rs`), run by the Kismet host for a console
+command `changesize F` (KISMET_RUNTIME.md §8); the draw scale is presentation and not modelled.
+
 ## 15. Timing model
 
 Same primitives as G-TM-1…5: per-actor order script tick → latent code → timers → physics → eye height;
@@ -676,9 +741,13 @@ after it (integrated next frame).
 ## 17. Open questions
 
 1. Input dispatch placement relative to the actor ticks (assumed before them; G-TM-2).
-2. Whether the Workshop/Epilogue slow-walk (`SetSpeed`) can be overridden by sprinting in practice. By the
-   script: not in story mode (the sprint keys do nothing there), yes outside it (A-WK-3). No recording has a
-   sprint press after the command.
+2. ~~Whether the Workshop/Epilogue slow-walk (`SetSpeed`) can be overridden by sprinting in practice.~~
+   **Settled for AG-Workshop** (recording KM1, 2026-10-12): on 1,950 frames with the sprint key and forward
+   held, `GroundSpeed` is 132.0 and the pawn's sprint flag clear on every one; `GroundSpeed` is 132.0 on all
+   14,017 Workshop records of that recording. That is the script's rule: story mode ignores the sprint keys
+   (A-WK-3). → Rust: the same (`crates/asamu-game/tests/parity_converted.rs`,
+   `the_workshop_with_its_kismet_walks_at_132`). Outside story mode after a `SetSpeed`: not recorded
+   (AG-Epilogue is in no recording).
 3. Is KillZ ever reached (A-DT-3)?
 4. Which rocket-boot and grapple-capacity Kismet actions fire at which moment per level.
 5. Exact landing velocity seen by `Landed` for slides/step landings (native, NATIVE_PHYSICS.md §4.4).
@@ -775,3 +844,14 @@ Method as in GRAPPLE.md §0/§19. Outcome per item:
   lean, which reaches 11.2°; A-CM-9 said the recorded pitch is always masked, which one record of a respawn
   is not; A-CM-9's count of free-running replays (12 of 14 runs over 45,237 ticks) holds for replays stopped
   at the first level event (20,220 ticks), carried through them it is 10 of 14.
+- 2026-10-12 (game layer, second wave, second pass; the recording KM1 of that day): A-CP-5 **corrected
+  again**: the pawn spawns **walking**, without a base, and its first tick's floor check stands it on a
+  floor in reach or starts its fall; the recorded starts are at each level's first checkpoint (the save's
+  reset), which is the `PlayerStart` only in AG-BeautifulCity and AG-Darkcave. Six recorded starts in a
+  table; the stock scripts re-read; the 0.400 s explained by the engine's clamp of a tick's time.
+- 2026-10-12 (game layer, second wave; docs/PARITY_FINDINGS.md P6, P10): A-CP-5 corrected (superseded by
+  the entry above): the pawn
+  starts in the air at the `PlayerStart` and falls (script rule and the two recorded level starts), it does
+  not spawn walking. A-DT-2 gained where the reset's teleport puts the pawn (the engine's placement
+  search, read natively, NATIVE_PHYSICS.md 10.3, and measured on five recorded respawns). §14: the
+  re-placement of `changesize` is that same search. A-WK-3: the Kismet host now runs `SetSpeed`.
