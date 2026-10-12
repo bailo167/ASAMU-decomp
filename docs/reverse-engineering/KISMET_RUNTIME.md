@@ -354,31 +354,63 @@ location (`_25` and `_101`, `_21` and `_22`, `_149` and `_23`, `_151` and `_24`)
 `_51` turned 116 units (9102 × 0.01282 = 116.7) in 2,249 of its 2,251 single frames. The rocks in the
 interpolating physics follow their tracks: every loop of a track that ends at 359.9° shows as a jump of
 17.7 to 19.4 units (0.1° is 18.2). Since no fraction is kept, the original's turning speed depends on its
-frame time; ours is the rule at the game's tick (9102 units/s: 151 units a tick at 60 Hz, 9060 units/s,
-against the recorded 9048 at 78 frames a second).
+frame time (9102 units/s: 9048 at the recorded 78 frames a second, 9060 at 60). Ours does not follow it
+there: the game turns these actors at the level's rate ("Ours: the designed rate", below).
 
 One place shows that dependence: **the merry-go-round's two arms** [CONFIRMED (level data, native rules);
 the recording cannot tell the two rules apart there]. `InterpActor_16` and `InterpActor_136` are the same
 platform mesh at one location, half a turn apart, each with four attached actors, and one Matinee group
 names both (one turn of yaw less 0.1° in 30 s, looping). `_136` is in the interpolating physics and follows
 the track, 2183.9 units/s with a hop of 0.1° at each loop; `_16` is in the rotating physics and turns by
-its rate of 2184 units/s, a turn in 30 s only when the tick's step loses nothing. At the recorded frame
-time the step is 2184 × 0.0128206 = 28.0002, so 28 units and 2184.0 units/s: the arms stay half a turn
-apart (the pawn at rest on `_16` turned 28 units in each of 79 frames, KM1 from frame 23,656; the track
-would give the same there, and no loop of the track fell into the 4.1 s on the arm). At 60 Hz the step is
-36 of 36.4 units, 2160 units/s: the arm that turns by its rate falls behind the other by 0.131° a second,
-7.9° a minute (ours; the original does the same at 60 frames a second, and 0.076° a second at the 62 of its
-shipped frame-rate smoothing). Whether the engine's own turns should be taken at the game's tick or at a
-reference frame time is open (`crates/asamu-game/tests/turning_rocks.rs` pins the rule and the size).
+its rate of 2184 units/s, which is 65,520 units in the track's 30 s where the track with its hop makes
+the whole turn of 65,536: even a step that loses nothing leaves that arm 16 units (0.088°) behind the
+other in every loop, 0.18° a minute (corrected 2026-10-12: this section said "a turn in 30 s"). At the
+recorded frame time the step is 2184 × 0.0128206 = 28.0002, so 28 units and 2184.0 units/s: the arms stay
+half a turn apart to those 16 units a loop (the pawn at rest on `_16` turned 28 units in each of 79
+frames, KM1 from frame 23,656; the track would give the same there, and no loop of the track fell into
+the 4.1 s on the arm). At 60 frames a second the step is 36 of 36.4 units, 2160 units/s: the arm that
+turns by its rate falls behind the other by 0.131° a second, 7.9° a minute (the original's rule at that
+frame rate, and ours until 2026-10-12; 0.076° a second at the 62 of the original's shipped frame-rate
+smoothing).
+
+**Ours: the designed rate** (a deliberate difference from the original's rule; the owner's decision of
+2026-10-12, which answers what this section had left open). The game must not show the arms parting, so
+it does not take the engine's turns at its tick by the original's rule: every actor in the rotating
+physics turns at the rate its level gives it. A tick's step is the rate times the tick plus the fraction
+of a unit left over from the ticks before, in whole units, the rest kept for the next tick per actor and
+per member (`kismet_host::carried_rotation_step`; rule, precision and the speeds against the original's:
+NATIVE_PHYSICS.md 10.5). At 60 Hz 9102 units/s turn 151.7 units a tick on the average (151 or 152), 4551
+turn 75.85 and 2184 turn 36.4, where the original at 60 frames a second turns 151, 75 and 36. The
+original's rule stays as `kismet_host::rotation_step` and a script turns by it only when it is told to
+(`LevelScript::set_turn_rule(TurnRule::Native)`), for a replay of a recording at the recording's own frame
+times; the app and the loaders never select it.
+
+What that makes of the merry-go-round (ours, `crates/asamu-game/tests/turning_rocks.rs`, 10,000 ticks at
+60 Hz; the bounds derived there from the track's data): the arm in the rotating physics is at the
+truncation of 2184 × time to the unit (364,000 units), the arm on the track within 3 units below and 1
+above its track's value (whole units, then the sine table's 4), and the two move from their places
+opposite each other by the level's own 16 units a loop and nothing else: 76 units (0.42°) after five
+loops, where the original's rule at this tick takes 4000 units (22°). A second test selects the original's
+rule and pins its 0.131° a second.
+
+One more thing the level's data does there, unchanged by any of this [CONFIRMED (level data); the size in
+the original not measured]: the Matinee's Play input has an activation delay of 1 s
+(`SeqAct_Interp_30`, fed by the level-loaded event), and nothing delays the arm in the rotating physics.
+So that arm has turned for a second before the other starts: in ours it is 2220 units (12.2°) ahead of
+its place opposite the other arm from the 62nd tick on. The original has the same delay in its data;
+how far its arm gets in that second depends on its first frames (a level's first tick is 0.4 s,
+NATIVE_PHYSICS.md 10.4) and no recording shows both arms. NEEDS EVIDENCE: a recording that looks at the
+merry-go-round from outside, or one with the pawn on each arm in turn.
 
 **Movers** (ours). At load, every actor bound to a Matinee group, every passenger, the actor
 `SetRotationToPlayerRotation` turns, every target of a destroy or change-collision action, and every
 turning actor of the level's own data with everything attached to it (the level's script need not know
 those: AG-ParadiseCave's `InterpActor_51` and its passengers are in no Kismet actor table) becomes a
 mover body (falling rocks excepted: they move through their rock state). A turning actor is taken out of
-the Matinee groups that name it, and the host turns it after the Kismet update and carries its passengers
-by the original's rules (`kismet_host`, "Turning actors", "Attached actors"). A static mesh actor is taken
-out of a group that has movement tracks and nothing else, for the same reason: it is not in the
+the Matinee groups that name it, and the host turns it after the Kismet update, at its designed rate, and
+carries its passengers by the original's rules (`kismet_host`, "Turning actors", "Attached actors"). A
+static mesh actor is taken out of a group that has movement tracks and nothing else, for the same reason:
+it is not in the
 interpolating physics (three in AG-ParadiseCave: `StaticMeshActor_4`, `_173` and `_347`, which ours moved
 by a wiggle, 50 uu and 256 uu until 2026-10-12; the recorded pawn at rest on `_173` was not moved,
 NATIVE_PHYSICS.md 10.5). It keeps its body, which stays at its placement. Its static collision instances are
