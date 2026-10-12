@@ -249,6 +249,111 @@ fn a_disabled_blocking_volume_of_beautiful_city_lets_the_pawn_through() {
     );
 }
 
+#[test]
+fn the_beautiful_city_cutscene_switches_all_its_blocking_volumes() {
+    let dir = converted_dir_or_skip!();
+    let (mut g, script) = load_level_with_kismet(&dir, "AG-BeautifulCity").expect("loads");
+    let mut script = script.expect("AG-BeautifulCity has Kismet");
+    g.start();
+    let ids: Vec<u32> = (0..7)
+        .map(|n| {
+            script
+                .actor_id_by_path(&format!(
+                    "AG-BeautifulCity.TheWorld.PersistentLevel.DynamicBlockingVolume_{n}"
+                ))
+                .expect("the volume is in the level script's actor table")
+        })
+        .collect();
+    let state =
+        |g: &Game| -> Vec<Option<bool>> { ids.iter().map(|i| g.actor_collision(*i)).collect() };
+    let on = Some(true);
+    let off = Some(false);
+    // As placed (`bEnabled`, V14): `_3` and `_6` start switched off.
+    assert_eq!(state(&g), [on, on, on, off, on, on, off]);
+    // The level script (read from the user's converted graph): the touch
+    // event of `Trigger_14` starts a cutscene, turns story mode on and
+    // pulses "Turn On" of one toggle action whose `Target` link holds five
+    // volumes, in this order: `_6`, `_0`, `_5`, `_4`, `_1`. The cutscene's
+    // "Finished" output turns story mode off and pulses that action's
+    // "Turn Off". The action acts on every linked volume
+    // (`SequenceAction.Targets` is an array of objects).
+    //
+    // The recording (PLAY2, segment 4): story mode goes off at tick 2470;
+    // at tick 2597 the pawn walks at (9827.794, 788.718, 38198.684), which
+    // is inside `DynamicBlockingVolume_5` (the third linked volume, which
+    // starts colliding), and at tick 3145 it flies through
+    // (4353, −595, 37937), inside `DynamicBlockingVolume_6` (V13).
+    let in_5 = Vec3::new(9_827.794, 788.718, 38_198.684);
+    let in_6 = Vec3::new(4_353.0, -595.0, 37_937.0);
+    assert!(
+        g.world().overlaps_box(in_5, BOX),
+        "inside the volume as placed"
+    );
+    assert!(g.set_actor_collision(ids[5], false));
+    assert!(!g.world().overlaps_box(in_5, BOX), "nothing else is there");
+    assert!(g.set_actor_collision(ids[5], true));
+    assert!(
+        !g.world().overlaps_box(in_6, BOX),
+        "`_6` starts switched off"
+    );
+    // Let the level start (the pawn lands, story mode of the level start).
+    for _ in 0..120 {
+        script.tick(&mut g, &idle()).unwrap();
+    }
+    assert_eq!(state(&g), [on, on, on, off, on, on, off]);
+    // Into the trigger. A touch takes effect in the next frame
+    // (KISMET_RUNTIME.md 1).
+    let (trigger, _) = script
+        .actor_transform_by_path("AG-BeautifulCity.TheWorld.PersistentLevel.Trigger_14")
+        .expect("the trigger is in the level script's actor table");
+    {
+        let p = g.player_mut();
+        p.position = trigger;
+        p.velocity = Vec3::ZERO;
+    }
+    script.tick(&mut g, &idle()).unwrap();
+    script.tick(&mut g, &idle()).unwrap();
+    assert!(g.in_story_mode(), "the cutscene's story mode");
+    assert_eq!(state(&g), [on, on, on, off, on, on, on], "all five on");
+    assert!(g.world().overlaps_box(in_6, BOX));
+    // To the cutscene's end: the five stay on while it runs and go off
+    // with the story mode, in the same frame.
+    let mut ended = None;
+    for tick in 3..=9_000 {
+        script.tick(&mut g, &idle()).unwrap();
+        if !g.in_story_mode() {
+            ended = Some(tick);
+            break;
+        }
+        assert_eq!(
+            state(&g),
+            [on, on, on, off, on, on, on],
+            "tick {tick} of the cutscene"
+        );
+    }
+    let ended = ended.expect("the cutscene ends");
+    eprintln!(
+        "AG-BeautifulCity: the Trigger_14 cutscene ends {ended} ticks after the touch; volumes \
+         then: {:?}",
+        state(&g)
+    );
+    assert_eq!(
+        state(&g),
+        [off, off, on, off, off, off, off],
+        "the five linked volumes are off, `_2` and `_3` as they were"
+    );
+    // Where the recorded pawn walked and flew afterwards is free.
+    assert!(!g.world().overlaps_box(in_5, BOX));
+    assert!(!g.world().overlaps_box(in_6, BOX));
+    assert_eq!(g.respawn_count(), 0, "the pawn did not die on the way");
+    assert!(
+        script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+        "{:?} {:?}",
+        script.runtime().errors(),
+        script.host_errors()
+    );
+}
+
 /// A recorded respawn: where the checkpoint's spawn point is, and the
 /// pawn's first record after the teleport.
 struct Respawn {
@@ -425,6 +530,94 @@ fn respawns_appear_where_the_recorded_ones_did() {
     }
 }
 
+/// The placement search at every checkpoint of the story maps, not only at
+/// the five recorded ones: a respawn there finds a place, the pawn comes to
+/// rest on a floor and does not die again. (A teleport that finds no place
+/// leaves the dead pawn where it died; the original is played through every
+/// one of these checkpoints.) How many spawn points are free, lifted or
+/// moved sideways is printed, not asserted.
+#[test]
+fn a_respawn_finds_a_place_at_every_checkpoint() {
+    let dir = converted_dir_or_skip!();
+    let maps = [
+        "AG-Workshop",
+        "AG-ParadiseCave",
+        "AG-BeautifulCity",
+        "AG-Darkcave",
+        "AG-StarHaven",
+        "AG-IceCave",
+        "AG-Epilogue",
+    ];
+    for map in maps {
+        let Ok(mut g) = Game::load_level(&dir, map) else {
+            eprintln!("SKIP: {map} is not converted");
+            continue;
+        };
+        g.start();
+        // In index order: a triggered checkpoint becomes the respawn point
+        // when its index is above the present one's (A-CP-2).
+        let mut checkpoints: Vec<(i32, u32, Vec3, String)> = g
+            .scene_map()
+            .expect("a converted map")
+            .actors
+            .checkpoints
+            .iter()
+            .map(|c| (c.index, c.id, c.spawn_location, c.name.clone()))
+            .collect();
+        checkpoints.sort_by_key(|c| c.0);
+        let (mut free, mut lifted, mut sideways, mut skipped) = (0, 0, 0, 0);
+        for (index, id, spawn, name) in &checkpoints {
+            assert!(g.trigger_checkpoint(*id), "{map} {name}");
+            g.tick(&idle()).unwrap();
+            if g.scene_respawn_point().map(|p| p.0) != Some(*spawn) {
+                // An index that is not above the present one's.
+                skipped += 1;
+                continue;
+            }
+            let before = g.player().position;
+            let respawns = g.respawn_count();
+            g.respawn();
+            let placed = g.player().position;
+            assert_ne!(
+                placed, before,
+                "{map} {name} (index {index}): no place at {spawn}"
+            );
+            assert!(
+                !g.world().overlaps_box(placed, BOX),
+                "{map} {name}: placed inside collision at {placed}"
+            );
+            if placed == *spawn {
+                free += 1;
+            } else if placed.truncate() == spawn.truncate() {
+                lifted += 1;
+            } else {
+                sideways += 1;
+            }
+            // Ten seconds are enough to fall onto the floor below.
+            let mut rests = false;
+            for _ in 0..600 {
+                let r = g.tick(&idle()).unwrap();
+                assert!(
+                    r.died.is_none(),
+                    "{map} {name} (index {index}): dies again after a respawn at {placed}"
+                );
+                if g.player().grounded && g.player().velocity == Vec3::ZERO {
+                    rests = true;
+                    break;
+                }
+            }
+            assert!(rests, "{map} {name}: no rest after a respawn at {placed}");
+            assert_eq!(g.respawn_count(), respawns + 1, "{map} {name}");
+        }
+        eprintln!(
+            "{map}: {} checkpoints: spawn point free at {free}, pawn lifted at {lifted}, moved \
+             sideways at {sideways}; {skipped} not reached by index order",
+            checkpoints.len()
+        );
+        assert!(free + lifted + sideways > 0, "{map}");
+    }
+}
+
 #[test]
 fn the_darkcave_start_falls_from_the_player_start_and_lands() {
     let dir = converted_dir_or_skip!();
@@ -506,9 +699,8 @@ fn the_beautiful_city_start_falls_from_the_player_start() {
     let rest = g.player().position.z;
     eprintln!(
         "AG-BeautifulCity start: first contact at {contact} (reported {} on a 100 uu trace); \
-         landed in tick {landed:?} at {rest} (recorded rest 54996.598: difference {:+.4})",
+         at 60 Hz it lands in tick {landed:?} at {rest}",
         start.z - 100.0 * hit.reported_time(TraceExtent::Box, 100.0),
-        f64::from(rest) - 54_996.597_656_25
     );
     // The recorded pawn was still falling 35.84 uu below the start and its
     // next falling move was 4.82 uu. At 60 Hz the fall is 32.5 uu after 15
@@ -516,14 +708,46 @@ fn the_beautiful_city_start_falls_from_the_player_start() {
     assert!(matches!(landed, Some(16 | 17)), "{landed:?}");
     assert!(g.in_story_mode());
     assert!((g.player().script.air_control - 0.30).abs() < 1e-6);
-    // The recording bounds the contact there: below 54994.449 (still
-    // falling) and, by the landing rule (rest = contact + a tenth of the
-    // 4.82 uu landing move + 2.15), at 54993.97. The rest height is printed,
-    // not asserted: ours is the simple body's contact plus 0.45 + 2.15.
+    // What the recording says about the contact there. Record 7801 (the
+    // last falling one) is at z = 54994.44921875 with vz = −273.066, and
+    // record 7802 walks at 54996.59765625: 2.1484 uu **higher**, which is
+    // the floor check's 2.15 at the heights' spacing there (1/256 uu). So
+    // the landing move did not advance: the box was already nearer to the
+    // floor than that move's pull-back (a tenth of 4.82 uu), its hit was
+    // reported at time 0, and the floor check found the floor at a
+    // reported distance of 0 and added 2.15. The contact is therefore
+    // between 54994.449 − 0.482 = 54993.967 and 54994.449 (it is not fixed
+    // more closely than that).
     assert!(
         (54_993.96..=54_994.45).contains(&contact),
         "contact {contact}"
     );
+    // The same landing from the recorded state: one 60 Hz frame from record
+    // 7801 moves 273.066/60 + 1040/3600 = 4.840 uu, reported 0.484 uu short;
+    // the contact is nearer than that, so the pawn lands where it is and
+    // rests 2.15 uu higher, at the recorded 54996.59765625 (to the spacing
+    // of the heights, 0.0039 uu).
+    {
+        let p = g.player_mut();
+        // 54994.45 is the `f32` 54994.44921875 of record 7801.
+        p.position = Vec3::new(start.x, start.y, 54_994.45);
+        p.velocity = Vec3::new(0.0, 0.0, -273.066);
+        p.grounded = false;
+        p.pawn = PawnPhysicsState::default();
+    }
+    script.tick(&mut g, &idle()).unwrap();
+    let rest = g.player().position.z;
+    assert!(g.player().grounded, "lands in that frame");
+    assert!(
+        (f64::from(rest) - 54_996.597_656_25).abs() <= 0.004,
+        "rest {rest} against the recorded 54996.59765625"
+    );
+    // And it stays there while it stands (records 7802 to 7900 are all at
+    // that height).
+    for _ in 0..30 {
+        script.tick(&mut g, &idle()).unwrap();
+    }
+    assert_eq!(g.player().position.z, rest);
 }
 
 #[test]

@@ -97,6 +97,21 @@
 //! actors turn on a mover body: the instances keep what each blocks (a
 //! mesh's triangles the bullet traces, its simple body the pawn).
 //!
+//! **Every target of an action.** An action acts on every object linked to
+//! its `Target` variable link: `SequenceAction.Targets` is an array of
+//! objects (CONFIRMED: the class model of the user's `Engine.u`), which the
+//! engine fills with one element per linked variable before the action
+//! runs. The converted graphs store no value for that property (it is empty
+//! in the editor: 318 fed links in the shipped graphs, 65 of them with two
+//! or more variables, none with a stored value), and the Kismet runtime
+//! takes a property without a stored value for a single object, the first
+//! linked one. So the host gives the property its declared type when it
+//! binds a script (`declare_target_arrays`); without that only the first
+//! target of each action is reached. Measured for one case: AG-BeautifulCity's
+//! cutscene toggle has five blocking volumes linked, and the recorded pawn
+//! walks inside the third of them (`DynamicBlockingVolume_5`, which starts
+//! colliding) after that cutscene's end (KISMET_RUNTIME.md §8).
+//!
 //! **Console commands (P6).** `SeqAct_ConsoleCommand` hands each command
 //! line to the player's controller. After the Kismet update the host gives
 //! every such line to the pawn script layer ([`Game::console_command`]),
@@ -145,6 +160,30 @@ const BLOCKING_VOLUME_KIND: &str = "blocking_volume";
 
 /// Most console commands [`LevelScript::console_commands`] keeps.
 const MAX_CONSOLE_LOG: usize = 256;
+
+/// The property a sequence action receives its targets in, as the graph
+/// keeps property names (lower case): `SequenceAction.Targets`.
+const TARGETS_PROPERTY: &str = "targets";
+
+/// Gives the `Targets` property of every node that is fed targets through a
+/// variable link its declared type, an array, where the converted graph
+/// stores no value for it (module docs, "Every target of an action").
+/// Stored values are left alone.
+fn declare_target_arrays(graph: &mut asamu_kismet::Graph) {
+    for node in &mut graph.nodes {
+        let fed = node
+            .variables
+            .iter()
+            .any(|l| l.property.as_deref() == Some(TARGETS_PROPERTY));
+        if !fed {
+            continue;
+        }
+        let value = node.params.entry(TARGETS_PROPERTY.to_owned()).or_default();
+        if matches!(value, asamu_kismet::KValue::None) {
+            *value = asamu_kismet::KValue::Array(Vec::new());
+        }
+    }
+}
 
 /// Errors loading a converted level with its Kismet.
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -506,9 +545,10 @@ impl LevelScript {
 
     fn attach(
         game: &mut Game,
-        scripts: asamu_kismet::LevelScripts,
+        mut scripts: asamu_kismet::LevelScripts,
         movers: BTreeMap<u32, MoverBody>,
     ) -> LevelScript {
+        declare_target_arrays(&mut scripts.graph);
         // Undo the level-start ability table: the pawn's script state as a
         // fresh start, so the map's Kismet decides; the table is dropped so a
         // save snapshot applied later (`Game::apply_snapshot`) does not put it
@@ -3520,6 +3560,15 @@ mod tests {
     /// x = 250) that starts switched off, as a `DynamicBlockingVolume` with
     /// `bEnabled` false does; the level script toggles it.
     fn volume_map() -> (LoadedMap, asamu_kismet::LevelScripts) {
+        volumes_map(1)
+    }
+
+    /// [`volume_map`] with `count` volumes, all the targets of the one
+    /// toggle action: actors 7, 8, ... (`DynamicBlockingVolume_0`, `_1`,
+    /// ...), each 1000 uu further along Y than the one before. Only the
+    /// first starts switched off. The action has no stored `Targets`
+    /// value, as in the converted graphs.
+    fn volumes_map(count: u32) -> (LoadedMap, asamu_kismet::LevelScripts) {
         use asamu_world::collision::{InstanceOptions, PrimitiveKind};
         let mut b = CollisionSceneBuilder::new();
         let v: Vec<Vec3> = (0..8)
@@ -3559,24 +3608,26 @@ mod tests {
         )
         .unwrap();
         let hull = b.add_box_mesh(Vec3::new(50.0, 200.0, 200.0)).unwrap();
-        b.add_static_with(
-            hull,
-            Affine::from_translation(DVec3::new(300.0, 0.0, 200.0)),
-            InstanceInfo {
-                actor: Some(7),
-                class: CollisionClass::BlockingVolume,
-                tag: SurfaceTag::None,
-                grapple_able: true,
-                blocks_pawn: true,
-                blocks_traces: false,
-                sublevel: 0,
-            },
-            InstanceOptions {
-                kind: Some(PrimitiveKind::BrushHull),
-                enabled: false,
-            },
-        )
-        .unwrap();
+        for n in 0..count {
+            b.add_static_with(
+                hull,
+                Affine::from_translation(DVec3::new(300.0, 1000.0 * f64::from(n), 200.0)),
+                InstanceInfo {
+                    actor: Some(7 + n),
+                    class: CollisionClass::BlockingVolume,
+                    tag: SurfaceTag::None,
+                    grapple_able: true,
+                    blocks_pawn: true,
+                    blocks_traces: false,
+                    sublevel: 0,
+                },
+                InstanceOptions {
+                    kind: Some(PrimitiveKind::BrushHull),
+                    enabled: n > 0,
+                },
+            )
+            .unwrap();
+        }
         let map = LoadedMap {
             map: "T".into(),
             levels: vec![SubLevel {
@@ -3611,22 +3662,41 @@ mod tests {
             stats: LoadStats::default(),
             warnings: Vec::new(),
         };
-        // A toggle whose target is the volume; nothing fires it by itself.
-        let nodes = r#"[
-            {"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2]},
-            {"id": 1, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
-             "inputs": [{"desc": "Turn On"}, {"desc": "Turn Off"}, {"desc": "Toggle"}],
-             "outputs": [{"desc": "Out"}],
-             "variables": [{"desc": "Target", "property": "Targets", "vars": [2]}],
-             "auto_activate_outputs": true},
-            {"id": 2, "class": "Engine.SeqVar_Object", "kind": "variable", "parent": 0,
-             "var": {"value": {"$obj": "T.TheWorld.PersistentLevel.DynamicBlockingVolume_0"}}}
-        ]"#;
+        // A toggle whose targets are the volumes, one object variable each
+        // on its `Target` link; nothing fires it by itself.
+        let members: Vec<String> = (1..=count + 1).map(|i| i.to_string()).collect();
+        let vars: Vec<String> = (0..count).map(|n| (n + 2).to_string()).collect();
+        let mut nodes = vec![
+            format!(
+                r#"{{"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [{}]}}"#,
+                members.join(", ")
+            ),
+            format!(
+                r#"{{"id": 1, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+                    "inputs": [{{"desc": "Turn On"}}, {{"desc": "Turn Off"}}, {{"desc": "Toggle"}}],
+                    "outputs": [{{"desc": "Out"}}],
+                    "variables": [{{"desc": "Target", "property": "Targets", "vars": [{}]}}],
+                    "auto_activate_outputs": true}}"#,
+                vars.join(", ")
+            ),
+        ];
+        let mut actors = Vec::new();
+        for n in 0..count {
+            nodes.push(format!(
+                r#"{{"id": {}, "class": "Engine.SeqVar_Object", "kind": "variable", "parent": 0,
+                    "var": {{"value": {{"$obj": "T.TheWorld.PersistentLevel.DynamicBlockingVolume_{n}"}}}}}}"#,
+                n + 2
+            ));
+            actors.push(format!(
+                r#"{{"path": "T.TheWorld.PersistentLevel.DynamicBlockingVolume_{n}",
+                    "name": "DynamicBlockingVolume_{n}", "class": "Engine.DynamicBlockingVolume",
+                    "kind": "blocking_volume", "package": "T", "slot": {}}}"#,
+                7 + n
+            ));
+        }
         let g = graph(
-            nodes,
-            r#"[{"path": "T.TheWorld.PersistentLevel.DynamicBlockingVolume_0",
-                 "name": "DynamicBlockingVolume_0", "class": "Engine.DynamicBlockingVolume",
-                 "kind": "blocking_volume", "package": "T", "slot": 7}]"#,
+            &format!("[{}]", nodes.join(", ")),
+            &format!("[{}]", actors.join(", ")),
         );
         (map, scripts(g, MatineeSet::default()))
     }
@@ -3675,6 +3745,112 @@ mod tests {
             script.runtime().errors(),
             script.host_errors()
         );
+    }
+
+    /// P5 on a toggle with several targets, as the shipped graphs have them
+    /// (AG-BeautifulCity's cutscene toggle has five volumes on its `Target`
+    /// link and no stored `Targets` value): the action acts on every linked
+    /// volume, not on the first alone. `SequenceAction.Targets` is an array
+    /// of objects with one element per linked variable.
+    #[test]
+    fn a_toggle_switches_every_blocking_volume_linked_to_it() {
+        let (mut map, s) = volumes_map(3);
+        // The converted form: no value stored for the action's targets.
+        assert!(!s.graph.nodes[1].params.contains_key("targets"));
+        let movers = prepare_movers(&mut map, &s);
+        prepare_switchable_volumes(&mut map, &s);
+        assert_eq!(map.collision.statics().len(), 1, "the floor");
+        assert_eq!(map.dynamic.len(), 3);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        game.start();
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        let half = Vec3::new(21.0, 21.0, 44.0);
+        // A sweep through each volume (they are 1000 uu apart along Y).
+        let blocked = |game: &Game, n: u32| {
+            let y = 1000.0 * n as f32;
+            game.world()
+                .sweep_box(Vec3::new(100.0, y, 100.0), Vec3::new(400.0, y, 100.0), half)
+                .is_some()
+        };
+        let state = |game: &Game| [7, 8, 9].map(|id| game.actor_collision(id));
+        // As placed: the first off, the others on (`bEnabled`).
+        assert_eq!(state(&game), [Some(false), Some(true), Some(true)]);
+        // Input 0 turns on, 1 off, 2 flips: every volume, each time.
+        for (input, expected) in [
+            (0, [true, true, true]),
+            (1, [false, false, false]),
+            (1, [false, false, false]),
+            (2, [true, true, true]),
+            (2, [false, false, false]),
+            (0, [true, true, true]),
+        ] {
+            script.runtime_mut().force_input(1, input);
+            let tick = script.tick(&mut game, &InputFrame::default()).unwrap();
+            assert_eq!(state(&game), expected.map(Some), "input {input}");
+            for n in 0..3 {
+                assert_eq!(
+                    blocked(&game, n),
+                    expected[n as usize],
+                    "input {input}, volume {n}"
+                );
+            }
+            // One toggle output per target, in the link's order.
+            let toggled: Vec<&str> = tick
+                .outputs
+                .iter()
+                .filter_map(|o| match o {
+                    Output::ActorToggled { actor, .. } => Some(actor.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                toggled,
+                [
+                    "T.TheWorld.PersistentLevel.DynamicBlockingVolume_0",
+                    "T.TheWorld.PersistentLevel.DynamicBlockingVolume_1",
+                    "T.TheWorld.PersistentLevel.DynamicBlockingVolume_2",
+                ],
+                "input {input}"
+            );
+        }
+        // A "Toggle" flips each volume from its own state: with the first
+        // switched off by hand, the three end up on, off, off.
+        assert!(game.set_actor_collision(7, false));
+        script.runtime_mut().force_input(1, 2);
+        script.tick(&mut game, &InputFrame::default()).unwrap();
+        assert_eq!(state(&game), [Some(true), Some(false), Some(false)]);
+        assert!(
+            script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+            "{:?} {:?}",
+            script.runtime().errors(),
+            script.host_errors()
+        );
+    }
+
+    /// A stored `Targets` value is left as it is, and a node without a
+    /// `Targets` link gets none.
+    #[test]
+    fn target_arrays_are_declared_only_where_they_are_missing() {
+        let nodes = r#"[
+            {"id": 0, "class": "Engine.Sequence", "kind": "sequence", "members": [1, 2, 3, 4]},
+            {"id": 1, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+             "variables": [{"desc": "Target", "property": "Targets", "vars": [4]}]},
+            {"id": 2, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+             "variables": [{"desc": "Target", "property": "Targets", "vars": [4]}],
+             "params": {"Targets": [{"$obj": null}]}},
+            {"id": 3, "class": "Engine.SeqAct_Toggle", "kind": "action", "parent": 0,
+             "variables": [{"desc": "Bool", "vars": []}]},
+            {"id": 4, "class": "Engine.SeqVar_Object", "kind": "variable", "parent": 0}
+        ]"#;
+        let mut g = graph(nodes, "[]");
+        let stored = g.nodes[2].params.clone();
+        declare_target_arrays(&mut g);
+        assert_eq!(
+            g.nodes[1].params.get("targets"),
+            Some(&asamu_kismet::KValue::Array(Vec::new()))
+        );
+        assert_eq!(g.nodes[2].params, stored);
+        assert!(g.nodes[3].params.is_empty() && g.nodes[4].params.is_empty());
     }
 
     /// Instances taken out of the static set for a moving actor stay as the
