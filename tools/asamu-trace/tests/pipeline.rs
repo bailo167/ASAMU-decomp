@@ -11,6 +11,7 @@ use std::process::Command;
 use asamu_player::Trace;
 use asamu_player::trace::{CompareTolerances, TraceGrappleState, compare};
 use asamu_player::ue3_movement::TARGET_FLOOR_DIST;
+use asamu_player::world::PULL_BACK_MAX;
 use asamu_trace::compare::{
     CompareOptions, CompareSummary, FovPolicy, Verdict, compare_traces, compare_traces_with,
 };
@@ -834,8 +835,13 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
         .capsule_half_height
         .value;
     // The start platform's top is z = 0: a walking pawn's centre rests the
-    // half height and the native hover distance above it.
-    let rest = half_height + TARGET_FLOOR_DIST;
+    // half height, the native hover distance and the pull-back of the floor
+    // check above it. The floor check keeps the pawn where its 28 uu trace
+    // reports the floor 2.15 uu away, and the original reports a hit on BSP,
+    // a brush or a simple body min(0.1 x 28, 1.0) = 1.0 uu short
+    // (PARITY_FINDINGS.md V2 and V18: 72 + 44 + 2.15 + 1.0 = 119.15 in the
+    // Workshop; `asamu_player::world::pull_back`). So 44 + 2.15 + 1.0.
+    let rest = half_height + TARGET_FLOOR_DIST + PULL_BACK_MAX;
 
     // 10 uu inside the platform.
     let inside = recorded(-10.0, None);
@@ -887,7 +893,7 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
     assert!(!r.start_overlaps);
     assert!(!has(&r, "overlaps our collision"));
 
-    // 5 uu above its rest height, walking: our floor check re-seats it.
+    // 5 uu above where the run starts, walking: our floor check re-seats it.
     let high = recorded(5.0, None);
     let r = replay(&high, &ReplayOptions::default()).unwrap();
     assert!(!r.start_overlaps);
@@ -907,15 +913,20 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
     );
     assert!(has(&r, "the recording names no base actor at this tick"));
     assert_eq!(r.trace.samples[1].position.z, rest, "re-seated by the rule");
+    // Our pawn goes to its rest height; the recording's goes where the run
+    // 5 uu lower went. The two moves differ by more than the hover band is
+    // wide (2.4 - 1.9 = 0.5 uu), which is what the warning is for.
+    let ours_move = f64::from(rest) - f64::from(z0);
+    let original_move = f64::from(high.samples[1].position.z) - f64::from(z0);
+    let apart = ours_move - original_move;
+    assert!(apart.abs() > 0.5, "{apart}");
     assert!(
         has(
             &r,
             &format!(
-                "warning: in the first tick our pawn moves {:+.4} uu vertically and the original \
-                 {:+.4} uu while both walk: -5.0000 uu apart, more than the width of the native \
-                 hover band (0.5 uu)",
-                f64::from(rest) - f64::from(z0),
-                f64::from(high.samples[1].position.z) - f64::from(z0)
+                "warning: in the first tick our pawn moves {ours_move:+.4} uu vertically and the \
+                 original {original_move:+.4} uu while both walk: {apart:+.4} uu apart, more \
+                 than the width of the native hover band (0.5 uu)"
             )
         ),
         "{:#?}",
@@ -933,13 +944,14 @@ fn a_start_that_does_not_fit_our_collision_is_reported() {
         r.trace.meta.notes
     );
 
-    // Inside the hover band (2.3 uu above the floor, between 1.9 and 2.4):
-    // a pawn with a recorded base is left where it stands, as the native
-    // floor check leaves a based pawn; without one it is re-seated at 2.15.
-    let in_band = half_height + 2.3;
-    let dz = in_band - fits.samples[0].position.z;
+    // Inside the hover band (the floor check reports the floor 2.3 uu away,
+    // between 1.9 and 2.4: a true 3.3 uu with the pull-back of 1.0): a pawn
+    // with a recorded base is left where it stands, as the native floor
+    // check leaves a based pawn; without one it is re-seated at 2.15.
+    let dz = half_height + 2.3 + PULL_BACK_MAX - fits.samples[0].position.z;
     let based = recorded(dz, Some(common::FLOOR_ACTOR));
-    assert_eq!(based.samples[0].position.z, in_band);
+    let in_band = based.samples[0].position.z;
+    assert!((in_band - (half_height + 2.3 + PULL_BACK_MAX)).abs() < 1e-4);
     let r = replay(&based, &ReplayOptions::default()).unwrap();
     assert!(
         has(&r, "based (recorded base StaticMeshActor_1)"),
@@ -1993,4 +2005,110 @@ fn command_line_zoom_markers_and_dropped_frames() {
             "{said}"
         );
     }
+}
+
+/// The weapon's firing state and refire timer of a recording of recorder
+/// 0.2.0 are compared with ours after every tick: a fake original of our
+/// own run agrees on every tick, and one altered at a single record shows
+/// that record's tick and the amount.
+#[test]
+fn weapon_state_and_refire_timer_are_compared_with_the_recording() {
+    let steps = common::script(110);
+    let (mut raw, ours) = common::scripted_steps(&steps, 100, false);
+    let states = common::our_states(&steps);
+    let interval = asamu_player::PlayerParams::asamu_original()
+        .gun
+        .as_ref()
+        .unwrap()
+        .fire_interval
+        .value;
+    common::with_our_weapon(&mut raw, &states, interval);
+    // The run fires (the grapple button is held for thirty ticks). Ticks
+    // 1..=110 are compared; `running` of them have a refire check on our
+    // side, which the recording then has too.
+    let firing: Vec<usize> = (1..=110)
+        .filter(|k| states[*k].script.gun.weapon == asamu_player::grapple_gun::WeaponState::Firing)
+        .collect();
+    let running = (1..=110)
+        .filter(|k| states[*k].script.gun.refire_timer.is_some())
+        .count();
+    assert!(firing.len() >= 20 && running >= 20, "{firing:?}");
+    let fake = common::fake_original(&raw, &ours);
+    let r = replay(&fake, &ReplayOptions::default()).unwrap();
+    let agreeing = r
+        .trace
+        .meta
+        .notes
+        .iter()
+        .find(|n| n.starts_with("state check: after each of 110 tick(s) our "))
+        .unwrap_or_else(|| panic!("{:#?}", r.trace.meta.notes));
+    assert!(
+        agreeing.contains("the weapon's firing state (1 WeaponFiring, 0 Active)"),
+        "{agreeing}"
+    );
+    assert!(
+        has(
+            &r,
+            &format!(
+                "state check: our refire timer equals the recorded RefireCheckTimer count after \
+                 each of {running} tick(s) on which both run"
+            )
+        ),
+        "{:#?}",
+        r.trace.meta.notes
+    );
+
+    // One record says otherwise: at a firing tick the recorded timer is
+    // 0.01 s further, and at another the recorded weapon is Active.
+    let (k_timer, k_state) = (firing[3], firing[7]);
+    let mut altered = raw.clone();
+    let gun_at = |raw: &mut RawFile, k: usize, change: &dyn Fn(&mut asamu_trace::raw::RawGun)| {
+        change(
+            raw.records[k]
+                .player
+                .as_mut()
+                .and_then(|p| p.gun.as_mut())
+                .unwrap(),
+        );
+    };
+    gun_at(&mut altered, k_timer, &|g| {
+        g.timers.as_mut().unwrap()[0].count += 0.01;
+    });
+    gun_at(&mut altered, k_state, &|g| {
+        g.state = Some(Some("Active".into()));
+    });
+    let fake = common::fake_original(&altered, &ours);
+    let r = replay(&fake, &ReplayOptions::default()).unwrap();
+    assert!(
+        has(
+            &r,
+            &format!(
+                "state check: our refire timer differs from the recorded RefireCheckTimer count \
+                 after 1 of {running} tick(s) on which both run; largest difference 0.010000 s at \
+                 tick {k_timer} "
+            )
+        ),
+        "{:#?}",
+        r.trace.meta.notes
+    );
+    assert!(
+        has(
+            &r,
+            &format!(
+                "state check: the weapon's firing state (1 WeaponFiring, 0 Active) differs from \
+                 the recording's after 1 of 110 tick(s) (first at tick {k_state}: ours 1, \
+                 recorded 0)"
+            )
+        ),
+        "{:#?}",
+        r.trace.meta.notes
+    );
+    // A version-1 recording has neither note.
+    let (plain, ours) = common::scripted_steps(&steps, 100, false);
+    let r = replay(
+        &common::fake_original(&plain, &ours),
+        &ReplayOptions::default(),
+    )
+    .unwrap();
+    assert!(!has(&r, "refire timer") && !has(&r, "firing state"));
 }

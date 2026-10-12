@@ -989,6 +989,58 @@ pub fn recorder_stats(raw: &RawFile, seed: u64) -> String {
     .to_string()
 }
 
+/// Our simulation's state at every record of the fake original that
+/// [`scripted_steps`] makes of `steps` (the same deterministic run again).
+pub fn our_states(steps: &[Step]) -> Vec<PlayerState> {
+    let mut g = Game::graybox().expect("graybox");
+    let mut states = vec![*g.player()];
+    g.start();
+    for (i, s) in steps.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| &steps[j]);
+        g.tick(&input(s, prev)).expect("tick");
+        states.push(*g.player());
+    }
+    states
+}
+
+/// Gives the records of a fake original of our own run what recorder 0.2.0
+/// reads of the weapon: its script state (`Active` or `WeaponFiring`) and
+/// its timer list, with the refire check while ours runs (`states[i]` is
+/// our state at record `i`; `fire_interval` is the timer's period).
+pub fn with_our_weapon(raw: &mut RawFile, states: &[PlayerState], fire_interval: f32) {
+    assert_eq!(raw.records.len(), states.len());
+    for (rec, st) in raw.records.iter_mut().zip(states) {
+        let gun = &st.script.gun;
+        let g = rec
+            .player
+            .as_mut()
+            .and_then(|p| p.gun.as_mut())
+            .expect("gun data");
+        let name = match gun.weapon {
+            asamu_player::grapple_gun::WeaponState::Active => "Active",
+            asamu_player::grapple_gun::WeaponState::Firing => "WeaponFiring",
+        };
+        g.state = Some(Some(name.to_owned()));
+        g.timers = Some(
+            gun.refire_timer
+                .map(|count| RawTimer {
+                    name: "RefireCheckTimer".to_owned(),
+                    rate: fire_interval,
+                    count,
+                    looping: true,
+                    paused: false,
+                })
+                .into_iter()
+                .collect(),
+        );
+    }
+    raw.header.recorder = "asamu_win 0.2.0".to_owned();
+    raw.header.optional_fields = vec![
+        "player.gun.state".to_owned(),
+        "player.gun.timers".to_owned(),
+    ];
+}
+
 // ---- the Python recorder (tools/trace-recorder)
 
 /// A Python 3.8+ interpreter on the PATH, if any.

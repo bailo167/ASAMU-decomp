@@ -155,7 +155,14 @@
 //!   released inside its frame shows in the counter only).
 //! - `state check:` our `GroundSpeed`, `AirControl`, sprint flag, used
 //!   grapples, capacity and eye height after every tick against the
-//!   recording's (canonical samples do not carry them).
+//!   recording's (canonical samples do not carry them). For a recording of
+//!   recorder 0.2.0 also the weapon's firing state (recorded `Active` or
+//!   `WeaponFiring` against ours; a tick whose recorded state has another
+//!   name is not compared) and, on the ticks on which both sides have a
+//!   refire check running, its elapsed time. They are compared only: a
+//!   replay does not start from the recorded weapon state or timer yet (the
+//!   start rule of [`crate::segments`] still puts a start where both are at
+//!   rest).
 //!
 //! # Time step ([`Stepping`])
 //!
@@ -794,6 +801,26 @@ struct StateCheck {
     times_grappled: CheckedValue,
     max_grapples: CheckedValue,
     eye_height: CheckedValue,
+    /// 1 while the weapon is in its firing state, 0 while it is active.
+    weapon_firing: CheckedValue,
+    /// The refire check's elapsed time, on ticks on which both sides have
+    /// one running.
+    refire_count: CheckedValue,
+}
+
+/// What a recorded weapon state name says about the firing state: the stock
+/// weapon is `Active` between shots and `WeaponFiring` from a shot to the
+/// refire check that finds the button released (GRAPPLE.md, "Firing
+/// state"). Names compare without ASCII case, as the engine's do; any other
+/// state (equipping, putting down) is not one of the two.
+fn recorded_firing(state: &str) -> Option<bool> {
+    if state.eq_ignore_ascii_case("WeaponFiring") {
+        Some(true)
+    } else if state.eq_ignore_ascii_case("Active") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 impl StateCheck {
@@ -829,6 +856,16 @@ impl StateCheck {
             self.eye_height
                 .add(tick, f64::from(s.eye_height), f64::from(v));
         }
+        if s.gun.spawned
+            && let Some(firing) = recorded.weapon_state.as_deref().and_then(recorded_firing)
+        {
+            let ours = s.gun.weapon == grapple_gun::WeaponState::Firing;
+            self.weapon_firing
+                .add(tick, f64::from(u8::from(ours)), f64::from(u8::from(firing)));
+        }
+        if let (Some(ours), Some(v)) = (s.gun.refire_timer, recorded.refire_count) {
+            self.refire_count.add(tick, f64::from(ours), f64::from(v));
+        }
     }
 
     fn notes(&self, notes: &mut Vec<String>) {
@@ -838,6 +875,10 @@ impl StateCheck {
             ("the sprint flag", &self.sprinting),
             ("the used-grapple count", &self.times_grappled),
             ("the grapple capacity", &self.max_grapples),
+            (
+                "the weapon's firing state (1 WeaponFiring, 0 Active)",
+                &self.weapon_firing,
+            ),
         ];
         let agreeing: Vec<&str> = exact
             .iter()
@@ -873,6 +914,22 @@ impl StateCheck {
                     "state check: our eye height differs from the recorded EyeHeight after {} \
                      of {} tick(s); largest difference {:.4} uu at tick {} (ours {}, recorded {})",
                     e.differing, e.compared, e.largest, d.tick, d.ours, d.recorded
+                )),
+            }
+        }
+        let r = &self.refire_count;
+        if r.compared > 0 {
+            match r.largest_at {
+                None => notes.push(format!(
+                    "state check: our refire timer equals the recorded RefireCheckTimer count \
+                     after each of {} tick(s) on which both run",
+                    r.compared
+                )),
+                Some(d) => notes.push(format!(
+                    "state check: our refire timer differs from the recorded RefireCheckTimer \
+                     count after {} of {} tick(s) on which both run; largest difference {:.6} s \
+                     at tick {} (ours {}, recorded {})",
+                    r.differing, r.compared, r.largest, d.tick, d.ours, d.recorded
                 )),
             }
         }

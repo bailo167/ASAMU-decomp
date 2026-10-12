@@ -23,13 +23,14 @@
 //! - [`move_input`]: the move axes of a gamepad recording, from the pawn's
 //!   recorded acceleration (with the evidence for the mapping).
 //! - [`state`]: the script state the recorder read on every frame (with
-//!   the eye height), kept in the trace's notes so that a replay can start
-//!   from any tick.
+//!   the eye height and, from recorder 0.2.0, the floor normal, the weapon's
+//!   state and refire timer and the cylinder's size), kept in the trace's
+//!   notes so that a replay can start from any tick.
 //! - [`segments`]: where a replay of a recording may start (standing still,
 //!   nothing held), what the player did in between, and the events a replay
 //!   of the inputs cannot follow (respawn teleports, level-script state
 //!   changes) or a sample cannot show (an attach released inside its
-//!   frame).
+//!   frame), and the recording's markers.
 //! - [`replay`]: drives [`asamu_game::Game`] (graybox or a converted level,
 //!   optionally with Kismet) with a trace's initial state and inputs: with
 //!   fixed ticks for a fixed-rate trace, with each sample's own frame length

@@ -188,6 +188,7 @@ values above U+10FFFF) replaced by U+FFFD, so every JSON reader accepts the file
 | `benchmarking`, `fixed_delta_time` | `GIsBenchmarking` and `GFixedDeltaTime` at the first sample |
 | `bindings` | the game's key bindings (`[{name, command}]`) read from the running `PlayerInput`, so rebinding is honoured |
 | `notes` | free-form |
+| `optional_fields`, `optional_layout` | recorder 0.2.0 only: the names of the optional record members the recording has, and the id of the file their offsets came from (6.10); a version-1 header has neither |
 
 | Record field | Source |
 |---|---|
@@ -203,6 +204,31 @@ values above U+10FFFF) replaced by U+FFFD, so every JSON reader accepts the file
 | `eye_height` | pawn `EyeHeight` (0x378, CONFIRMED offset): the camera height above the centre before bob; not in v1 samples, kept per tick in the `state:` note (3.5) |
 | `gun` | `grappling`, `released`, `can_grapple`, `anchor` (the helper actor's location: the anchor only while it rides a moving target, 3.3), `grapple_location` (`vGrappleLocation`: the anchor), `distance` (`vDistance`), `times_grappled`, `max_grapples` |
 | `pawn_flags`, `boots` | `ASAMUPawn` flags; boots `enabled`, `finished` |
+| optional members of `player` and `gun` | recorder 0.2.0 only (6.10): `base_level`, `fov_default`, `fov_locked`, `fov_lock`, `camera_pov`, `floor`, `base_eye_height`, `walk_bob`, `bob`, `cylinder`; `gun.state`, `gun.timers` |
+
+**The reader** (`tools/asamu-trace/src/raw.rs`) is typed and strict: a member it does not know is refused with
+its line number, in a record and in the header's `optional_fields`; so is a `null` where the recorder writes a
+value. Every optional member is absent by default, so a version-1 file is read, and written again, member for
+member as before (the three recordings of 2026-10-10 convert to the same bytes: 14 traces, 24,966,404 bytes,
+compared before and after the change). A record may lack a member its header announces (the recorder leaves a
+group out of a record whose value it could not read or check) and may carry one the header does not announce (a
+group whose check failed on the first object and passed on a later one); neither is an error, and
+`asamu-trace validate` counts the records that carry each member and names both cases.
+
+**The sidecar.** Next to `<name>.raw.jsonl` the Windows recorder writes `<name>.stats.json` when the recording
+ends: its counters and timings and, from recorder 0.2.0 on, two lists that are in no record
+(`tools/asamu-trace/src/sidecar.rs`):
+
+| Member | Entries | Meaning |
+|---|---|---|
+| `markers` | `{name, id, frame, records, state, utc}` | what `asamu_win.py mark NAME` set while recording: `frame` is the `GFrameCounter` of the last record written when the marker was taken (`null` before the first record) |
+| `stats.drops` | `{frame, last, count, reason, detail}` | the dropped-frame log: the frames `frame..=last` got no record (`missed`, `skipped`, `unconfirmed`, `torn`, `late`) or a record without its frame's input (`no-input`); at most 2,000 entries, `stats.drops_omitted` counts the frames beyond |
+
+`asamu-trace convert` and `validate` read the sidecar when it is there (`--stats FILE` names another one,
+`--no-stats` converts without); the Python converter does the same. The two lists are read strictly, the rest
+of the file (the recorder's diagnostics) is not read. The file's `records`, `first_frame` and `last_frame` must
+be the raw file's, or the conversion is refused: frame numbers mean nothing in another recording. A sidecar of
+recorder 0.1.0 has neither list, and converting with it is converting without it.
 
 ### 3.3 Canonical trace (schema v1, unchanged)
 
@@ -216,31 +242,44 @@ writes the format of `crates/asamu-player/src/trace.rs` ([PARITY.md](PARITY.md#t
 | sample `k ≥ 1`: buttons | keys of `R_(k−1)` mapped through the recorded bindings: `jump_held` (`Jump`), `grapple_held` (`StartFire`), `sprint_held` (`StartSprinting`), `power_jump_held` (`PowerJumpKeyDown`); `jump_pressed` = jump key rising edge against `R_(k−2)` or a rising `bPressedJump` (catches a press and release inside one frame; at `k = 1` there is no `R_(−1)`, so only a set `bPressedJump` counts); `use_pressed` = rising edge of `use`. Aliases are expanded up to depth 8 and at most 256 command parts per key (a hostile table cannot stall the conversion; real tables use a few). A gamepad's buttons are keys like any other (`XboxTypeS_A`, ...) |
 | sample `k ≥ 1`: `move_forward`, `move_right` | **keyboard:** summed signs of the held keys' `Axis aBaseY` / `Axis aStrafe` commands (clamped to ±1). **Gamepad:** the stick's direction, derived from the pawn's `Acceleration` of `R_k` in the axes of `R_(k−1)`'s pawn rotation (3.4). Chosen per run (`--move-input auto`): the keys if any record of the run holds a key bound to a move axis, else the acceleration if the run has any |
 | look deltas | wrapped change of the controller rotation `R_(k−1) → R_k`, × 2π/65536 — exact and independent of the mouse scaling we have not ported (PARITY deviation 13) |
-| state | `R_k`: `position`, `velocity`; `yaw`/`pitch` = signed 16-bit rotator units × 2π/65536; `fov` = camera POV FOV, else `FOVAngle` (**the cached view FOV, which does not show the zoom**: see "The FOV column" below); `grapple_state` attached ⇔ `bIsGrappling`, anchor = the gun's `vGrappleLocation` (see below); without gun data (weapon not a `GrappleGun`) no anchor is known, so the sample is idle even in `Physics` 4, and such samples are counted in a `check:` note; `rope_length` null; `grounded` ⇔ `Physics` 1 |
+| state | `R_k`: `position`, `velocity`; `yaw`/`pitch` = signed 16-bit rotator units × 2π/65536; `fov` = the camera's FOV where the record has the camera's lock (`fov_lock` while `fov_locked`, else `fov_camera`), otherwise camera POV FOV, else `FOVAngle` (**the cached view FOV, which does not show the zoom**: see "The FOV column" below); `grapple_state` attached ⇔ `bIsGrappling`, anchor = the gun's `vGrappleLocation` (see below); without gun data (weapon not a `GrappleGun`) no anchor is known, so the sample is idle even in `Physics` 4, and such samples are counted in a `check:` note; `rope_length` null; `grounded` ⇔ `Physics` 1 |
 | `time` | Σ `DeltaSeconds` of `R_1..R_k` |
 | `tick_rate` | `1 / DeltaSeconds` when every frame of the run had the same length (rounded to an integer within 0.001 Hz), else `null` |
-| `notes` | recorder, sample point, launch options, scenario, frame range and segment; `input:` (bindings); `move input:` (where the move axes come from, how many samples got a direction and how many got 0 for which reason, 3.4); `anchor:` and `check:` lines (counts: axes vs keys, acceleration without a move key, grapple flag vs `PHYS_Flying`, `PHYS_Flying` without gun data, helper away from the anchor, `vDistance` vs the distance to the anchor, FOV fallbacks, an eye height left out of the state note); `fov: cached view FOV …` (on how many samples the FOV column is the camera's cached view FOV); `event:` lines (teleports, level-script state changes, attaches of the grapple: 3.6); `state: {...}` (the recorded script state of every tick, 3.5); `init: {...}` (the older form: tick 0 only) |
+| `notes` | recorder, sample point, launch options, scenario, frame range and segment; `input:` (bindings); `move input:` (where the move axes come from, how many samples got a direction and how many got 0 for which reason, 3.4); `anchor:` and `check:` lines (counts: axes vs keys, acceleration without a move key, grapple flag vs `PHYS_Flying`, `PHYS_Flying` without gun data, helper away from the anchor, `vDistance` vs the distance to the anchor, FOV fallbacks, an eye height left out of the state note); `fov: cached view FOV …` (on how many samples the FOV column is the camera's cached view FOV); `fov: camera FOV lock read …` (on how many samples the camera's lock was read, and on how many it was set); `event:` lines (teleports, level-script state changes, attaches of the grapple, markers: 3.6); `markers: {...}` (the run's markers as JSON, 3.6); `dropped:` lines (the frames without a record next to the run and why, 3.6); `state: {...}` (the recorded script state of every tick, 3.5); `init: {...}` (the older form: tick 0 only) |
 
-A run ends at a frame gap, a paused frame, a frame without a player, a change of map, pawn object or class, and
+A run ends at a frame gap, after a record that the recorder's dropped-frame log lists as written without its
+input (3.6), at a paused frame, a frame without a player, a change of map, pawn object or class, and
 where `WorldInfo.TimeSeconds` goes back (the level was loaded again); each run of at least two records is one
 trace (`<stem>.trace.jsonl`, or `<stem>.seg<i>.trace.jsonl`). A respawn after a death ends no run (same map,
 same pawn object, consecutive frames): it is marked as an event instead (3.6). Without recorded bindings the
 converter falls back to the signs of `aBaseY`/`aStrafe` (of `R_k`) and `bPressedJump`, and says so in the notes.
 
-**The FOV column** ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N1). `fov_camera` is the camera's cached view FOV
-(`CameraCache.POV.FOV`). The camera writes its default FOV into that field on every view update, while the zoom
-locks the FOV in other fields of the camera, which recorder 0.1.0 does not read: the field is 90.0 on all 45,237
-records of 2026-10-10, through zoom-button holds (CONFIRMED that it cannot show the zoom; whether the original
-zoomed in those frames is UNKNOWN until a recording has the lock fields). The converter therefore writes
-`fov: cached view FOV (the camera's CameraCache.POV.FOV) on N of M samples: …`, and `asamu-trace compare` leaves
-the FOV out of the **verdict** of a trace whose note covers **every** sample (`on N of N samples`;
-`--fov-verdict auto`, the default; `count` and `exclude` state it). A trace whose note covers only part of its
-samples (the rest is the controller's `FOVAngle`, of which nothing says that it cannot show the zoom), or whose
-note cannot be read, keeps its FOV in the verdict unless `exclude` is given; all 14 traces of 2026-10-10 are
-covered in full. A converter that reads the camera's locked FOV must not write the note. Nothing else changes:
-the FOV's tolerance, its statistics and its first exceedance are reported as before, and the summary says
-whether the FOV counted and why. (A comparison in which only an excluded FOV differs has the verdict `Exact`:
-exact in every field that counts. The text and the report show the FOV's numbers next to it.)
+**The FOV column** ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N1, V19). The camera's FOV accessor returns the
+locked FOV (`LockedFOV`) while the lock flag (`bLockedFOV`) is set, else the cached view FOV
+(`CameraCache.POV.FOV`); the view update writes the camera's default FOV into the cached field every time, so
+that field alone cannot show a zoom. The converter applies the camera's rule record by record:
+
+| The record has | FOV of the sample | Counted in |
+|---|---|---|
+| `fov_locked` true and `fov_lock` above 0 and below 180 degrees (recorder 0.2.0) | `fov_lock` | `fov: camera FOV lock read (bLockedFOV, LockedFOV) on N of M samples: … while the lock is set (L samples) …` |
+| `fov_locked` false | `fov_camera`; without a usable one the controller's `FOVAngle` | the same note (and `fov: controller FOVAngle used …` for the fallback) |
+| no lock members (recorder 0.1.0, the Mac recorder, a record the group was left out of) | `fov_camera`, else `FOVAngle` | `fov: cached view FOV (the camera's CameraCache.POV.FOV) on N of M samples: a locked camera FOV (the zoom) does not show in it` |
+| `fov_locked` true without a usable `fov_lock` | as the row above (the lock is not believed) | the cached-view note, and `check: the camera's FOV lock is set without a usable LockedFOV on N samples` |
+
+On the recordings of 2026-10-10 (recorder 0.1.0) `fov_camera` is 90.0 on all 45,237 records, through
+zoom-button holds: CONFIRMED that the field cannot show the zoom; whether the original zoomed in those frames is
+UNKNOWN until a recording has the lock members. `asamu-trace compare` leaves the FOV out of the **verdict** of a
+trace whose cached-view note covers **every** sample (`on N of N samples`; `--fov-verdict auto`, the default;
+`count` and `exclude` state it). The rule keys on that note and nothing else: a run recorded with the lock on
+every sample has no such note, so its FOV column is the camera's FOV and counts; a trace whose note covers only
+part of its samples (the rest is the camera's FOV, or the controller's `FOVAngle`), or whose note cannot be
+read, keeps its FOV in the verdict unless `exclude` is given. All 14 traces of 2026-10-10 are covered in full
+and are excluded as before. Nothing else changes: the FOV's tolerance, its statistics and its first exceedance
+are reported as before, and the summary says whether the FOV counted and why. (A comparison in which only an
+excluded FOV differs has the verdict `Exact`: exact in every field that counts. The text and the report show
+the FOV's numbers next to it.) That the lock is what the zoom sets on this build is read from the camera's
+accessors (V19, identifier names only); no recording has shown a locked FOV yet: the rule is CONFIRMED as the
+camera's, its effect on a real zoom is still to be seen.
 
 **The anchor** (corrected 2026-10-10). The converter used to write the location of the gun's helper actor
 (raw `anchor`). The first recordings show that this is the anchor only for some grapples: the gun's own
@@ -294,6 +333,29 @@ line may have 1 MiB, so a run whose eye height changes on more than 16,000 ticks
 so in a `check:` note (a limit of the format, not of the game). Traces converted before the field was kept do
 not have it.
 
+A recording of recorder 0.2.0 adds fields to the line, each only in a run in which at least one record carries
+its optional member (6.10), so the line of a version-1 recording is what it was:
+
+| Field | From | |
+|---|---|---|
+| `base_level` | `base_level` | the package of the level the base actor lies in (base names are not unique across streamed levels, N9) |
+| `base_eye_height` | `base_eye_height` | pawn `BaseEyeHeight` |
+| `cylinder_radius`, `cylinder_half_height` | `cylinder` | the pawn's collision cylinder |
+| `floor` | `floor` | the pawn's floor normal as `[x, y, z]` |
+| `weapon_state` | `gun.state` | name of the weapon's script state (`Active`, `WeaponFiring`, ...) |
+| `gun_timers` | `gun.timers` | number of entries in the weapon's timer list; `null` when the list was not read |
+| `refire_rate`, `refire_count` | `gun.timers` | period and elapsed time of the entry named `RefireCheckTimer` (names compare without case, as the engine's do); `null` while the weapon has no such timer |
+
+A field is `null` on a tick whose record lacks the member. `walk_bob`, `bob`, `camera_pov` and `fov_default` are
+read and kept in the raw file only: they change on every frame of a moving pawn and nothing starts from them
+yet. Three fields can change on most ticks (`eye_height`; `refire_count` while the weapon fires; `floor` on
+uneven ground) and share the bytes the eye height alone had: 16,000 changes × 45 bytes = 720,000. They are
+admitted in that order, each if its changes × its cost (45, 52 and 100 bytes per change: the longest form of
+one change in the line) fit into what the fields before it left. One that does not fit is left out of that
+run's line and named in a `check:` note with the numbers. For `eye_height` this is the rule it had (16,000
+changes), and a line cannot grow beyond what it could before. A refire timer that is paused on some
+sample is named in a `check:` note (its count then stands still, which the line alone does not show).
+
 `asamu-trace replay` starts from any tick `T` (`--from-tick`): position, velocity, view and walking/falling
 from sample `T`, and from the recording, never from a guess:
 
@@ -308,9 +370,12 @@ from sample `T`, and from the recording, never from a guess:
 | button levels before `T` (for press and release edges in the first tick) | sample `T`'s own input; at the first sample they are unknown and taken as released |
 | FOV | sample `T` |
 
-Not recorded, so they start as our simulation starts them: "sprint after landing", the pawn's and the power
+Not recorded, or recorded by recorder 0.2.0 only and **not applied at a start yet**, so they start as our
+simulation starts them: "sprint after landing", the pawn's and the power
 jump's state code (jump-release damping, a charging power jump, a running zoom), zoom availability, the gun's
-attachment and timers, the boots' boost, the walk bob, the floor normal. All of
+attachment and timers (the weapon's state and refire timer are in the `state:` note of a 0.2.0 recording and
+are compared after every tick, 3.6, but not written into our state), the boots' boost, the walk bob, the floor
+normal (in the note of a 0.2.0 recording likewise). All of
 these are at rest when the pawn stands still with nothing held, so **a replay of an original recording starts
 only there**: at a sample that is walking, has zero velocity, no attached grapple, no move input and no jump,
 grapple or power-jump button (a held sprint button is fine), whose previous sample is the same, and in whose
@@ -335,8 +400,9 @@ replay before any rule of movement is exercised. Whenever the start state is wri
 
 `asamu-trace starts TRACE` lists the standing-still stretches with the recorded state at each (speed, story
 mode, air control, grapple budget, floor actor) and what happens between them (moves, sprint, jumps, power-jump
-button, grapple button, attach, release by the button or with it held, leaving the ground, landing; `--events`
-for every event with its tick): that is how a segment is picked.
+button, grapple button, attach, release by the button or with it held, leaving the ground, landing, and the
+recording's markers under their names; `--events` for every event with its tick): that is how a segment is
+picked, and how a scenario's boundaries are found in a session recorded in one piece.
 
 ### 3.6 Events a replay cannot follow, and attaches no sample shows
 
@@ -353,6 +419,27 @@ so they are also found in traces converted before the notes existed. The schema 
 | grapple capacity changed | `iMaxGrapples` changes | 1: PLAY2 seg4 2535 (2 → 3) |
 | rocket boots enabled / disabled | the boots' `bEnabled` changes | none |
 | grapple attached and released within the frame | the gun's used-grapple counter `iTimesGrappled` rose, but the attached flag did not rise in that sample: the attach, its pull and a release all ran inside one frame. Every attach raises the counter (GRAPPLE.md G-AT-1), so the attaches of a recording are **counted from the counter** | 15 of 134 attaches (DC1 seg0 3655; PLAY2 seg1 2176; PLAY2 seg7 1436, 1449, 1462, 1517; PLAY2 seg8 13, 40, 128, 156, 184, 212, 238, 265, 278) |
+| marker `"NAME"` | a marker of the recorder's `mark NAME` command (the sidecar, 3.2), at the tick of the last record written when it was taken: tick = marker frame − first frame of the run. Not computed from the samples: read from the `markers:` note | none (recorder 0.1.0 has no markers) |
+
+**Markers.** A marker whose frame is a record of a run is an event of that run at that record's tick. One whose
+frame is in no run (set before the first record, in a pause or a menu, or on a record that became no run) goes
+to the first tick of the next run and says so (`(set before this run, at frame F)`, or `(set before the first
+record)`); one set after the last run goes to that run's last tick (`(set after this run, at frame F)`). Every
+marker is in exactly one run's notes: an `event: N marker(s) …: T "NAME", …` line for people and a
+`markers: {"markers":[{"frame":F,"name":"…","tick":T,"where":"at"}],"v":1}` line that `asamu-trace starts`
+reads. Names are written as the recorder stores them (printable, at most 64 characters). A marker ends no run
+and changes no sample; it does not end a replay's validity.
+
+**Dropped frames.** A frame without a record is a frame gap and ends a run, as before. With the recorder's
+dropped-frame log (the sidecar, 3.2) the notes of the runs on both sides say which frames are missing and why:
+`dropped: N frame(s) without a record after this run (frames A..=B): A torn: <the recorder's detail>; …`, and
+the same with `before`; a gap the log has no entry for says `no entry in the recorder's dropped-frame log`. A
+record the log lists as written without its frame's input (`no-input`) **ends its run** even when the next
+frame has a record: sample `k` takes its input from record `k − 1`, and that record's keys are not its
+frame's; as the last record of a run its keys are used by no sample (`dropped: the run ends with frame F, whose
+record was written without its frame's input (…): its keys are not used`). The recorder itself writes such a
+record only as the last of a run (6.3); the converter does not rely on it. Without a log (recorder 0.1.0, the
+Mac recorder) there are no such notes and no such split.
 
 **Validity of a replay** (`replay --level-events stop|inject|ignore`; original recordings only, since our own
 simulation reproduces its own respawns). A teleport and the level-script changes (the four rows from "story
@@ -375,7 +462,10 @@ which a per-sample replay runs.
 The replay also counts both sides' attaches the same way (`attaches:` note: the attached flag rose or the
 counter rose) and compares, after every tick, our `GroundSpeed`, `AirControl`, sprint flag, used grapples,
 capacity and eye height with the recorded ones (`state check:` notes), because canonical samples do not carry
-them ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N7, N10).
+them ([PARITY_FINDINGS.md](PARITY_FINDINGS.md) N7, N10). For a recording of recorder 0.2.0 it compares two more:
+the weapon's firing state (recorded `Active` or `WeaponFiring` against ours; a tick whose recorded state has
+another name is not compared) and, on the ticks on which both sides have a refire check running, its elapsed
+time (`state check: our refire timer … RefireCheckTimer count …`, with the largest difference and its tick).
 
 ### 3.7 One-step replays and what a comparison reports
 
@@ -391,7 +481,7 @@ its summary JSON and the report mark the mode).
 | | |
 |---|---|
 | Resynchronised before each tick, from sample `k − 1` and the `state:` note at `k − 1` | position, velocity, yaw, pitch; the physics mode (walking, falling, or attached at the recorded anchor: an attachment we do not have is created on world geometry, one the original does not have is released); `GroundSpeed` with the story mode it shows, `AirControl`, `JumpZ`, `AirSpeed`, the sprint flag; the gun's used count, capacity, fire latch and released flag; rocket boots enabled; the eye height |
-| **Not** resynchronised: no record shows them, so they continue from our own previous tick | the pawn's and the power jump's state code and timers (jump-release damping, a charging power jump, a running zoom); "sprint after landing"; the move-input lock; the gun's weapon state and timers; the boots' boost; the walk bob; the FOV (the recorded one is the cached view FOV); the floor normal and the "has a base" flag while the physics mode agrees (set from the recorded base when the mode has to be changed); the level's objects and Kismet; the placeholder rope grapple of `--placeholder` |
+| **Not** resynchronised: no record shows them, so they continue from our own previous tick | the pawn's and the power jump's state code and timers (jump-release damping, a charging power jump, a running zoom); "sprint after landing"; the move-input lock; the gun's weapon state and timers (recorded by recorder 0.2.0 and compared, 3.6, not written); the boots' boost; the walk bob; the FOV (of a version-1 recording the recorded one is the cached view FOV); the floor normal and the "has a base" flag while the physics mode agrees (set from the recorded base when the mode has to be changed); the level's objects and Kismet; the placeholder rope grapple of `--placeholder` |
 | Left alone | button levels: both sides get the same inputs |
 | Options | `--story-mode` states the story mode at the start only; on later ticks the recorded `GroundSpeed` decides wherever it shows it (264, 440, 880), and where it does not (132 in AG-Workshop) the stated mode stays. With `--no-init` the recorded script state is not written on any tick: position, velocity, view and physics mode only |
 | Left out | a tick with a teleport or a level-script state change (3.6): its sample is missing from our trace and the next tick starts from the recording after it (unless `--level-events ignore`). On a hand-made level replayed with fixed ticks the level's clock (its movers) falls one tick behind per tick left out |
@@ -1078,10 +1168,22 @@ the Mac layout has none of them (its recorder writes version-1 records as before
 
 **How a recording says what it has.** The header gets `optional_fields`, the sorted names of the members being
 written (`player.fov_locked`, `player.gun.timers`, ...), and `optional_layout`, the id of the file the offsets
-came from; a version-1 header has neither. A converter can tell from `optional_fields` which field-of-view
-members exist. The rule it should then apply is the camera's own: the effective field of view is `fov_lock`
-while `fov_locked` is true, else `fov_camera` (PARITY_FINDINGS.md V19; that the lock is what the zoom sets on
-this build is still to be seen on the game). No converter reads the optional members yet.
+came from (`null` when only `base_level`, which needs no offset, is written); a version-1 header has neither.
+The list says what the recorder set out to write, not what every record has: see "A group is read whole or not
+at all" below, and 3.2 for how the reader treats the difference.
+
+**What the converters do with them** (`asamu-trace convert`, and `asamu_recorder_core.py convert` to the same
+values, `tools/asamu-trace/tests/python_crosscheck.rs`):
+
+| Member | Use | Where |
+|---|---|---|
+| `fov_locked`, `fov_lock` | the sample's FOV is `fov_lock` while `fov_locked` is true, else `fov_camera`: the camera's own rule (PARITY_FINDINGS.md V19). Such samples are not counted as "cached view FOV", so the FOV of a run recorded with the lock counts in a comparison's verdict | 3.3, "The FOV column" |
+| `floor`, `gun.state`, `gun.timers` (the `RefireCheckTimer` entry), `cylinder` (radius, half height), `base_level`, `base_eye_height` | per-tick fields of the `state:` note; the weapon's firing state and the refire timer are also compared with ours after every tick of a replay | 3.5, 3.6 |
+| `fov_default`, `camera_pov`, `walk_bob`, `bob`; `cylinder.translation`, `cylinder.collision_component`; timers other than the refire check | read, typed and kept in the raw file; no conversion uses them yet | — |
+
+That the lock is what the zoom sets on this build is read from the camera's accessors; no recording has shown a
+locked FOV yet (the first session with recorder 0.2.0 will: [PARITY_FINDINGS.md](PARITY_FINDINGS.md) section 6,
+step 2). A replay does not start from the recorded weapon state, refire timer or floor normal yet (3.5).
 
 **A group is read whole or not at all.**
 
@@ -1095,20 +1197,39 @@ this build is still to be seen on the game). No converter reads the optional mem
 - None of this costs a record or a version-1 field, and none of it is fatal: only the 10 sentinels of the main
   layout stop a recording.
 
-**Reading a recording with optional fields.** The raw reader of `asamu-trace` refuses a member it does not
-know, so `validate`, `convert` and everything after them need the version-1 view until that reader has the
-optional members (`tools/asamu-trace/src/raw.rs`: `optional_fields` and `optional_layout` in the header, the
-members of the table above in the player and gun structures, all defaulting to absent):
+**Reading a recording with optional fields.** The raw reader of `asamu-trace` reads every member of the table
+above, typed, and still refuses one it does not know (3.2), so a recording of recorder 0.2.0 goes straight into
+`validate` and `convert`, with its `.stats.json` next to it for the markers and the dropped-frame log:
+
+```sh
+cargo run -p asamu-trace -- validate research/local/traces/win/<file>.raw.jsonl
+#   ...: raw v1 (asamu_win 0.2.0), N records, ...
+#       optional members (layout win-x86-steam-1822049-optional), of N records with a player: player.floor on N, ...
+#       .../<file>.stats.json: M marker(s), dropped-frame log with D entries for F frame(s)
+cargo run -p asamu-trace -- convert research/local/traces/win/<file>.raw.jsonl --list   # fov:, event:, dropped: notes
+cargo run -p asamu-trace -- starts <trace> --events                                    # markers at their ticks
+```
+
+Tested without the game: the recorder's fake-game test writes a 0.2.0 recording with every optional member in
+every record (`test_win_glue.py --keep DIR`), which `tools/asamu-trace/tests/pipeline.rs` reads, validates and
+converts with the Rust tool: the 12 samples in which the fake game locks the FOV at 50 have FOV 50, the other
+58 have 90, the `state:` note holds each record's floor normal, weapon state, refire timer, cylinder size and
+base level, and the Python converter writes the same trace.
+
+**The version-1 view** is still there for a reader of plain version-1 files (an older `asamu-trace`):
 
 ```sh
 python3 -I tools/trace-recorder/asamu_win.py v1view research/local/traces/win/<file>.raw.jsonl
-cargo run -p asamu-trace -- validate research/local/traces/win/v1/<file>.raw.jsonl
 ```
 
 The view keeps the file name, lies in `v1/` next to the recording, has exactly the version-1 members and a
-header note that says which optional fields were removed; it is never written over a file. `fetch --validate`
-does this by itself. A version-1 recording is its own view (45,237 of 45,237 records of the first three), and
-`--raw-v1` records that way from the start. The Python converter (`asamu_recorder_core.py convert`) reads both.
+header note that says which optional fields were removed; it is never written over a file. A version-1
+recording is its own view (45,237 of 45,237 records of the first three), and `--raw-v1` records that way from
+the start. A view converts to the samples of its recording except for the FOV of the samples in which the
+camera's lock is set, which it cannot show (and it says so in its `fov: cached view FOV` note); it has no
+sidecar next to it, so no markers. `win_remote.sh fetch --validate` still validates through the view (it was
+written before the reader had the optional members); validating and converting the fetched recording itself, as
+above, is what gives the zoom, the recorded state, the markers and the reasons of the gaps.
 
 **Two fields that were examined and not added.**
 

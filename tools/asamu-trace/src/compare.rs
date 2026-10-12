@@ -25,10 +25,13 @@
 //!
 //! # FOV and the verdict ([`FovPolicy`])
 //!
-//! The FOV column of a converted recording is the camera's cached view FOV,
-//! which cannot show the zoom ([`crate::convert`], "Units and fields";
+//! The FOV column of a recording made without the camera's FOV lock
+//! (recorder 0.1.0, the Mac recorder) is the camera's cached view FOV,
+//! which cannot show the zoom ([`crate::convert`], "The FOV column";
 //! PARITY_FINDINGS.md N1): comparing it with our FOV measures the recorder,
-//! not the simulation. [`FovPolicy::Auto`] (the default) therefore leaves
+//! not the simulation. A recording of recorder 0.2.0 has the lock, its FOV
+//! column is the camera's FOV, and the converter does not write the note
+//! for such samples. [`FovPolicy::Auto`] (the default) therefore leaves
 //! the FOV out of the **verdict** when either trace's notes say so (a note
 //! starting with [`crate::convert::FOV_CACHED_NOTE_PREFIX`]) **for every
 //! sample of the trace** (`on N of N samples`) and counts it otherwise:

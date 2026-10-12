@@ -344,15 +344,24 @@ fn the_start_samples_input_gives_the_first_tick_its_button_edges() {
     // sample's level against that tick's (the sprint is edge-driven).
     const START: u64 = 30;
     const RELEASE: u64 = 31;
+    // (Three ticks of walking first: a pawn that has walked stands where
+    // its floor check rests it, as every pawn of a recording does, whatever
+    // height the level start placed it at. A replay from a standing tick
+    // re-seats a pawn without a recorded base, which our own run does only
+    // once it moves.)
     let steps: Vec<common::Step> = (1..=110)
         .map(|i| common::Step {
             sprint: i < RELEASE as usize,
-            forward: i32::from(i >= 40),
+            forward: i32::from(i <= 3 || i >= 40),
             ..common::Step::default()
         })
         .collect();
     let (raw, ours) = common::scripted_steps(&steps, 300, false);
     let fake = common::fake_original(&raw, &ours);
+    assert!(
+        asamu_trace::segments::is_clean_start(&fake.samples, START as usize),
+        "the pawn has come to rest again by the start tick"
+    );
     let pawn = PlayerParams::asamu_original().pawn.unwrap();
     let walk = f64::from(pawn.move_speed.value);
     let sprint = walk * f64::from(pawn.sprint_speed_multiplier.value);
