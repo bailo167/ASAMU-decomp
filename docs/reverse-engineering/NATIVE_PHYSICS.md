@@ -1674,6 +1674,43 @@ rotations. Consequences: the turn's speed depends on the frame time (9102 units/
 12.82 ms, 151 a tick at 1/60 s), and a rate below one unit per frame never turns the actor. Measured: a
 rock in the rotating physics turned by the truncated step in 2,249 of 2,251 frames.
 
+**Ours turns at the designed rate (a deliberate difference from the rule above; the owner's decision,
+2026-10-12).** The original's rule is in the runtime as it is, `asamu_game::kismet_host::rotation_step`,
+with its tests; the game does not turn its actors by it. The reason is the fixed tick: what a frame drops
+is up to one unit, so the rule makes the speed of a turn a function of the frame time, a different one for
+every rate, and at 60 Hz it would turn 2184 units/s at 2160 beside Matinee tracks that keep their time
+(KISMET_RUNTIME.md §6, the merry-go-round). So the game turns every such actor at the rate its level gives
+it (`TurnRule::DesignedRate`, `carried_rotation_step`): a tick's step is the rate times the tick **plus the
+fraction of a unit the ticks before left over**, in whole units (towards zero), and what is left of it is
+kept for the next tick, for each actor and each member of its rate. The rotation is a whole number of
+units after every tick, as the sine table and the attached-actor rules below take it; after any number of
+ticks the actor has turned by the truncation of its rate times the time that passed, at every tick rate;
+a negative rate turns the other way by the same steps; a tick without time (zero, negative, not a number)
+is no turn, as in the original's rule, and keeps what was carried.
+
+Precision: the tick is taken as the `f32` it is and the sum is kept in `f64`. An `f32` of 2^-10 s or more
+is a whole multiple of 2^-33, so is its product with an integer rate, so is the carried fraction, and an
+`f64` holds every such multiple below 2^20 exactly: for ticks of a millisecond or more and steps below a
+million units no operation rounds, and the steps sum exactly to the truncation of the rate times the sum
+of the ticks, however long the run (outside that range a tick rounds by at most 2^-53 of its step). The
+`f32` nearest 1/60 s is 28 parts in 2^29 longer than 1/60 s; that is the game's tick, which the Matinee
+tracks step by too, and amounts to 0.08 units in 10,000 ticks at 9102 units/s.
+
+By how much ours is faster than the original, which is what the original drops (units/s):
+
+| Rate | The original at 60 frames a second | The original at the recorded frames of 12.8206 ms (78 a second) | Ours, at every tick rate |
+|---|---|---|---|
+| 9102 | 151 of 151.7 units a frame: 9060; ours +42 (0.46 %) | 116 of 116.69: 9047.9; ours +54.1 (0.60 %) | 9102 |
+| 4551 | 75 of 75.85: 4500; ours +51 (1.13 %) | 58 of 58.35: 4524.0; ours +27.0 (0.60 %) | 4551 |
+| 2184 | 36 of 36.4: 2160; ours +24 (1.11 %) | 28 of 28.0002: 2183.985; ours +0.015 (0.001 %) | 2184 |
+
+A script host turns by the original's rule when it is told to
+(`LevelScript::set_turn_rule(TurnRule::Native)`): a replay of a recording stepped by the recording's own
+frame times needs the turn the original made at those frame times. Nothing in the app and no loader
+selects it. Tests: both rules in the unit tests of `kismet_host` (the carried step against whole-number
+arithmetic, the wheel at 50, 60 and 144 Hz) and on the real levels in
+`crates/asamu-game/tests/turning_rocks.rs` and `parity_moving_anchor.rs`.
+
 **What moves a Matinee's actor.** The movement track has no update of its own: its vtable slot (+0x2D8) is
 the base class's `UInterpTrack::UpdateTrack @ 0x1008CE400`, an empty function, so the sequence update of a
 `SeqAct_Interp` only advances the action's position. The actor moves itself, in its own tick:
@@ -1757,7 +1794,8 @@ gets the actor into its attached list, so nothing based on world geometry is car
 
 Not read: the pawn's script side of a turn of its base, and what an encroaching mover does to actors that
 are not attached to it. **Ours:** `asamu_player::grapple_gun::carried_by_base` (rule 3 for the grapple's
-anchor helper) and `asamu_game::kismet_host` ("Turning actors", "Attached actors").
+anchor helper) and `asamu_game::kismet_host` ("Turning actors", "Attached actors"); the turn by a rate is
+taken at the designed rate, not by the original's truncated step (above).
 
 ## 11. Verification log
 
@@ -1850,3 +1888,6 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   action classes and stored properties). No claim changed; added: nothing switches an actor's physics when
   its Matinee starts, the three static mesh actors a Matinee names without moving them (one measured), and
   the stored relative transforms of attached actors against their placements.
+- 2026-10-12 (the designed rate): 10.5 says what ours does with the turn by `RotationRate` and why: the
+  game turns at the level's rate, carrying each tick's fraction (the owner's decision), and keeps the
+  original's rule selectable for replays. Nothing about the original changed.

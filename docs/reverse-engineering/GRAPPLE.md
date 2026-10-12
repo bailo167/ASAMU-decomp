@@ -293,7 +293,8 @@ Gameplay state:
 
   The base moves in its own tick (a Matinee mover to its track's value, an actor in the rotating physics
   by its `RotationRate`; KISMET_RUNTIME.md §6), and map-placed actors tick before the gun (G-TM-2), so the
-  anchor the gun reads is the helper's place after this frame's move of its base.
+  anchor the gun reads is the helper's place after this frame's move of its base. (How fast ours turns an
+  actor in the rotating physics is not the original's truncated step: G-WO-6.)
 
   Measured on KM1 (the recorder reads the helper's location and the gun's anchor every frame). The
   helper's path over the 13 stretches between one attach on an `InterpActor` and the next:
@@ -570,7 +571,13 @@ KISMET_RUNTIME.md §6]: rocks a Matinee track turns (`PHYS_Interpolating`; e.g. 
 turn of roll in 7.2 s), rocks the engine turns by their `RotationRate` (`PHYS_Rotating`; `InterpActor_51`
 at 9102 units/s of yaw, and `InterpActor_25` and `_101`, which a Matinee group names without moving them),
 and rocks hard-attached to either (9 `grappleRock` actors on Matinee platforms, 1 on the turning
-`InterpActor_16`).
+`InterpActor_16`). The speeds are the level's rates. The original turns an actor in the rotating physics
+by its rate times the frame time with the fraction dropped, so a little slower and by an amount that
+depends on the frame rate (9102 units/s: 9048 at the recorded 78 frames a second, 9060 at 60; 4551: 4524
+and 4500; 2184: 2184.0 and 2160). **Ours turns them at the rate itself** (9102, 4551 and 2184 units/s at
+every tick rate, each tick's fraction carried to the next), a deliberate difference decided by the owner
+on 2026-10-12; what rides a rock, the anchor included, rides it by the rules of G-AT-8 either way
+(NATIVE_PHYSICS.md 10.5, KISMET_RUNTIME.md §6).
 → Rust (G-WO-*): world objects expose `on_grappled/on_ungrappled`, `release_instant`, `accepts_decal`,
 `anchor_follows` (true iff InterpActor-like); `asamu-world` owns their state machines.
 
@@ -763,3 +770,5 @@ bytecode literal search and native re-reads, as in §0. Outcome per item:
   recording KM1 in which the helper rides an `InterpActor`, 10 of them on turning rocks); G-AT-7: the
   helper keeps its last base through attaches on other targets; G-WO-3 and G-WO-6 say what follows; open
   question 4 answered.
+- 2026-10-12 (the designed rate): G-WO-6 and G-AT-8 say how fast ours turns the rocks of the rotating
+  physics (at the level's rate, not by the original's truncated step; the owner's decision).
