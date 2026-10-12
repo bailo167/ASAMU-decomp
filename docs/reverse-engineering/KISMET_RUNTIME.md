@@ -685,7 +685,10 @@ touch events are kept from repeating by the same load through their restored tri
 - `Runtime::set_start_state` hands a state to the level start, which puts it back between the adaptive
   music start and the "save loaded" events (`Runtime::restore_state`: the rules of the table, entry by
   entry; entries that do not fit their object are skipped). `interp_set_position` is the native
-  `SetPosition`; the director cut and fade outputs of a Matinee that is only put in place are dropped.
+  `SetPosition`; the director cut and fade outputs of a Matinee that is only put in place are dropped, and
+  so are the sounds its sound keys started in that update (the stock sound track instance stops its sound
+  when it is torn down, STRONG, not re-read natively; PLACEHOLDER for a track set to let its sound outlive
+  the Matinee, a setting the converted data does not hold).
 - Not saved by ours: vector variables (the runtime has no such class and no shipped level sequence has
   one), the stored value of random and player variables (computed on every read).
 - A death, the quick-load key and the pause menu's restart load nothing; the restart in Workshop and
