@@ -5017,4 +5017,222 @@ mod tests {
         assert!(close(l, Vec3::new(1000.0, -100.0, 10.0)), "{l}");
         assert_eq!(r, [0, -32_268, 0]);
     }
+
+    // --- Long runs of the wheel (a second set of checks).
+
+    /// The wheel of [`wheel_map`] with a lamp (actor 7) attached to the hub
+    /// without a hard attachment, 250 uu out along the hub's Y axis and 300
+    /// up, turned an eighth of a quarter turn: an actor the base's change of
+    /// transform carries, tick by tick.
+    fn wheel_game_with_a_lamp(rate: i32) -> (Game, LevelScript) {
+        let (mut map, s) = wheel_map(rate, false);
+        map.placed.push(PlacedActor {
+            id: 7,
+            name: "Lamp".into(),
+            kind: "light".into(),
+            location: Vec3::new(0.0, 250.0, 300.0),
+            rotation: [0, 4096, 0],
+            draw_scale: 1.0,
+            draw_scale3d: Vec3::ONE,
+            pre_pivot: Vec3::ZERO,
+            physics: PlacedPhysics::Other,
+            rotation_rate: [0; 3],
+            base: Some(5),
+            hard_attach: false,
+            ignore_base_rotation: false,
+            block_actors: false,
+        });
+        let movers = prepare_movers(&mut map, &s);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        (game, script)
+    }
+
+    #[test]
+    fn a_wheel_and_what_it_carries_stay_together_for_ten_thousand_ticks() {
+        // 6030 units/s: 100 units a tick.
+        let (mut game, mut script) = wheel_game_with_a_lamp(6030);
+        assert_eq!(script.mover_ids(), vec![5, 6, 7]);
+        const TICKS: i32 = 10_000;
+        for _ in 0..TICKS {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        // The rotation is not wrapped: 15 turns and a bit.
+        let yaw = TICKS * 100;
+        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, yaw, 0])));
+        // The hard-attached rock is rebuilt from its kept transform every
+        // tick: no error adds up.
+        let (rock, rock_rotation) = script.mover_transform(6).unwrap();
+        let expected = at_yaw(300.0, yaw, 100.0);
+        assert!((rock - expected).length() < 1e-2, "{rock} vs {expected}");
+        // A rotation rebuilt from a matrix is given within half a turn.
+        assert_eq!(rock_rotation, [0, rotation::normalize_axis(yaw), 0]);
+        // The lamp is carried from where it is by each tick's change of the
+        // hub's transform, in single precision: ten thousand carries leave
+        // it within a twentieth of a unit of its circle (250 uu out, a
+        // quarter turn ahead of the hub's X axis).
+        let (lamp, lamp_rotation) = script.mover_transform(7).unwrap();
+        let expected = at_yaw(250.0, 16_384 + yaw, 300.0);
+        assert!(
+            (lamp - expected).length() < 0.05,
+            "the lamp is at {lamp}, the hub took its place to {expected}"
+        );
+        // Its own rotation gained each tick's change of the hub's, which is
+        // taken from the two rotations' low 16 bits: whole turns apart from
+        // the hub's own count.
+        assert_eq!((lamp_rotation[0], lamp_rotation[2]), (0, 0));
+        assert_eq!((lamp_rotation[1] - (4096 + yaw)).rem_euclid(65_536), 0);
+        // Each of the three is reported once for drawing.
+        let moved = script.moved_actors();
+        assert_eq!(moved.iter().map(|m| m.0).collect::<Vec<_>>(), vec![5, 6, 7]);
+        assert!(
+            script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+            "{:?} {:?}",
+            script.runtime().errors(),
+            script.host_errors()
+        );
+    }
+
+    #[test]
+    fn a_pawn_on_a_turning_platform_keeps_its_place_on_it_for_two_thousand_ticks() {
+        let (mut game, mut script) = wheel_game(6030, false);
+        const TICKS: i32 = 2000;
+        let mut height = None;
+        for tick in 1..=TICKS {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+            let p = game.player();
+            assert!(
+                p.grounded,
+                "tick {tick}: off the platform at {}",
+                p.position
+            );
+            // 100 uu from the hub's axis, where it stood at the start, at
+            // the height it stands at, at rest.
+            let radius = p.position.truncate().length();
+            assert!(
+                (radius - 100.0).abs() < 0.25,
+                "tick {tick}: {radius} uu from the axis"
+            );
+            let stands_at = *height.get_or_insert(p.position.z);
+            assert!(
+                (stands_at - 96.0).abs() < 3.0 && (p.position.z - stands_at).abs() < 0.05,
+                "tick {tick}: at height {} (first {stands_at})",
+                p.position.z
+            );
+            assert!(p.velocity.length() < 1e-3, "tick {tick}: {}", p.velocity);
+        }
+        // Around the axis with the hub, and turned with it.
+        let yaw = TICKS * 100;
+        let p = game.player();
+        let carried = at_yaw(100.0, yaw, f64::from(p.position.z));
+        assert!(
+            (p.position - carried).length() < 0.25,
+            "the pawn is at {}, the hub took its place to {carried}",
+            p.position
+        );
+        let turned = f64::from(rotation::normalize_axis(yaw)) * std::f64::consts::TAU / 65_536.0;
+        let off = (f64::from(p.yaw) - turned + std::f64::consts::PI)
+            .rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        assert!(
+            off.abs() < 2e-3,
+            "the view is {off} rad from the hub's turn"
+        );
+    }
+
+    #[test]
+    fn the_pawn_s_box_meets_a_turning_rock_where_it_is_and_not_where_it_was() {
+        let (mut game, mut script) = wheel_game(6030, false);
+        let half = Vec3::new(21.0, 21.0, 44.0);
+        let down = |game: &Game, x: f32, y: f32| {
+            game.world()
+                .sweep_box(Vec3::new(x, y, 900.0), Vec3::new(x, y, -990.0), half)
+        };
+        // Placed: the rock's top (150) is under (325, 0).
+        let hit = down(&game, 325.0, 0.0).expect("the rock");
+        assert_eq!(hit.hit.surface.actor, Some(6));
+        assert!((hit.hit.position.z - 194.0).abs() < 1e-2, "{:?}", hit.hit);
+        const TICKS: i32 = 64;
+        for _ in 0..TICKS {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        // 6400 units of yaw on: the box comes down on the rock over the
+        // rock's centre as it is now ...
+        let centre = at_yaw(325.0, TICKS * 100, 0.0);
+        let hit = down(&game, centre.x, centre.y).expect("the rock");
+        assert_eq!(hit.hit.surface.actor, Some(6));
+        assert!((hit.hit.position.z - 194.0).abs() < 1e-2, "{:?}", hit.hit);
+        // ... and falls past where it was, to the floor (top at −1000).
+        let hit = down(&game, 325.0, 0.0).expect("the floor");
+        assert_eq!(hit.hit.surface.actor, None);
+        assert!((hit.hit.position.z + 956.0).abs() < 1e-2, "{:?}", hit.hit);
+        // The same from the side, at the rock's mid height: towards the
+        // hub's axis along the rock's ray, the box (21 uu to its face on an
+        // axis; here turned against the rock) stops outside the rock's
+        // outer face, 350 uu out.
+        let out = at_yaw(600.0, TICKS * 100, 125.0);
+        let hit = game
+            .world()
+            .sweep_box(out, Vec3::new(0.0, 0.0, 125.0), half)
+            .expect("the rock");
+        assert_eq!(hit.hit.surface.actor, Some(6));
+        let stopped = hit.hit.position.truncate().length();
+        assert!(
+            stopped > 350.0 + 21.0 - 0.01 && stopped < 350.0 + 31.0,
+            "the box stopped {stopped} uu from the axis"
+        );
+        // Along the ray the rock was placed on, nothing of it is left: the
+        // box reaches the platform's edge instead.
+        let hit = game.world().sweep_box(
+            Vec3::new(600.0, 0.0, 125.0),
+            Vec3::new(0.0, 0.0, 125.0),
+            half,
+        );
+        assert!(
+            hit.is_none_or(|h| h.hit.surface.actor != Some(6)),
+            "{hit:?}"
+        );
+    }
+
+    #[test]
+    fn a_respawn_leaves_a_turning_actor_to_its_turn() {
+        let (mut game, mut script) = wheel_game(6030, false);
+        for _ in 0..30 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        let before = (script.mover_transform(5), script.mover_transform(6));
+        game.respawn();
+        assert_eq!(
+            (script.mover_transform(5), script.mover_transform(6)),
+            before,
+            "a respawn moves no actor"
+        );
+        // Put back on the platform, which has turned under it.
+        let put = game.player().position;
+        assert!(
+            put.truncate().length() < 150.0,
+            "the respawn put the pawn at {put}"
+        );
+        for _ in 0..30 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0, 6000, 0])));
+        let (rock, _) = script.mover_transform(6).unwrap();
+        let expected = at_yaw(300.0, 6000, 100.0);
+        assert!((rock - expected).length() < 1e-2, "{rock} vs {expected}");
+        // The pawn was carried again from where it was put: 3000 units of
+        // yaw about the hub's axis (it may take a tick or two to stand; a
+        // tick's carry is 0.0096 rad).
+        let p = game.player();
+        assert!(p.grounded, "standing on the hub");
+        let radius = f64::from(put.truncate().length());
+        let from = f64::from(put.y).atan2(f64::from(put.x)) * 65_536.0 / std::f64::consts::TAU;
+        let carried = at_yaw(radius, from.round() as i32 + 3000, f64::from(p.position.z));
+        assert!(
+            f64::from((p.position - carried).length()) < 0.03 * radius + 0.1,
+            "the pawn is at {}, the hub took it from {put} to {carried}",
+            p.position
+        );
+    }
 }
