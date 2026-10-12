@@ -6,6 +6,10 @@
 // The depth binding's type is filled in by the plugin (single- or
 // multi-sampled depth; `textureLoad(.., 0)` reads mip 0 or sample 0). With
 // the fog off the pass only copies the scene (see `FogOutput`).
+//
+// The level's fog volumes are blended after the height fog, the original's
+// order. `FogVolume` and `fog_volume_transmittance` come from
+// fog_volumes.wgsl, which the plugin puts in front of this text.
 
 struct PostFx {
     world_from_clip: mat4x4<f32>,
@@ -25,6 +29,9 @@ struct PostFx {
     tonemap2: vec4<f32>,
     grade: vec4<f32>,
     bloom: vec4<f32>,
+    // xyz: unit view axis (render space); w: number of fog volumes set.
+    fog_view: vec4<f32>,
+    fog_volumes: array<FogVolume, 8>,
 }
 
 // The fogged scene, twice: the post-processing chain's next texture and a
@@ -34,6 +41,10 @@ struct FogOutput {
     @location(1) pre_bloom: vec4<f32>,
 }
 
+// Ray length (UU) of a pixel where nothing was drawn (`fx.fog_light.w`
+// carries the same value while the height fog is on).
+const EMPTY_PIXEL_DISTANCE_UU: f32 = 1.0e9;
+
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
 @group(0) @binding(1) var depth_texture: DEPTH_TEXTURE_TYPE;
 @group(0) @binding(2) var<uniform> fx: PostFx;
@@ -42,7 +53,9 @@ struct FogOutput {
 fn fragment(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> FogOutput {
     let coord = vec2<i32>(position.xy);
     let scene = textureLoad(screen_texture, coord, 0);
-    if (fx.fog_inscatter.a < 0.5) {
+    let height_fog = fx.fog_inscatter.a >= 0.5;
+    let volume_count = min(u32(max(fx.fog_view.w, 0.0)), 8u);
+    if (!height_fog && volume_count == 0u) {
         return FogOutput(scene, scene);
     }
     let depth = textureLoad(depth_texture, coord, 0).x;
@@ -51,25 +64,42 @@ fn fragment(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) 
     let ray = near_h.xyz / near_h.w - fx.camera.xyz;
     let dir = ray / max(length(ray), 1e-12);
     // Reverse-Z: depth 0 is the infinite far plane (nothing drawn).
-    var dist = fx.fog_light.w;
+    var dist = EMPTY_PIXEL_DISTANCE_UU;
     if (depth > 0.0) {
         let h = fx.world_from_clip * vec4<f32>(ndc, depth, 1.0);
         dist = length(h.xyz / h.w - fx.camera.xyz) * fx.camera.w;
     }
-    // Render +Y is UE3 +Z.
-    var rise = dir.y * dist;
-    if (abs(rise) <= 0.01) {
-        rise = 0.01;
+    var color = scene.rgb;
+    if (height_fog) {
+        // Render +Y is UE3 +Z.
+        var rise = dir.y * dist;
+        if (abs(rise) <= 0.01) {
+            rise = 0.01;
+        }
+        let kz = fx.fog.y * rise;
+        var line_integral = 0.6931472;
+        if (abs(kz) > 1e-6) {
+            line_integral = (1.0 - exp2(clamp(-kz, -126.0, 126.0))) / kz;
+        }
+        let integral = fx.fog.x * line_integral * max(dist - fx.fog.w, 0.0);
+        let transmittance = max(clamp(exp2(-integral), 0.0, 1.0), fx.fog_opposite.a);
+        let w = pow(abs(0.5 - 0.499 * dot(fx.fog_light.xyz, dir)), fx.fog.z);
+        let fog_color = mix(fx.fog_inscatter.rgb, fx.fog_opposite.rgb, w);
+        color = color * transmittance + fog_color * (1.0 - transmittance);
     }
-    let kz = fx.fog.y * rise;
-    var line_integral = 0.6931472;
-    if (abs(kz) > 1e-6) {
-        line_integral = (1.0 - exp2(clamp(-kz, -126.0, 126.0))) / kz;
+    // Fog volumes: each blends what is behind it towards its colour.
+    let cos_view = max(dot(dir, fx.fog_view.xyz), 1e-4);
+    for (var i = 0u; i < volume_count; i++) {
+        let t = fog_volume_transmittance(
+            fx.fog_volumes[i],
+            fx.camera.xyz,
+            dir,
+            cos_view,
+            fx.camera.w,
+            dist,
+        );
+        color = color * t + fx.fog_volumes[i].color.rgb * (1.0 - t);
     }
-    let integral = fx.fog.x * line_integral * max(dist - fx.fog.w, 0.0);
-    let transmittance = max(clamp(exp2(-integral), 0.0, 1.0), fx.fog_opposite.a);
-    let w = pow(abs(0.5 - 0.499 * dot(fx.fog_light.xyz, dir)), fx.fog.z);
-    let color = mix(fx.fog_inscatter.rgb, fx.fog_opposite.rgb, w);
-    let fogged = vec4<f32>(scene.rgb * transmittance + color * (1.0 - transmittance), scene.a);
+    let fogged = vec4<f32>(color, scene.a);
     return FogOutput(fogged, fogged);
 }

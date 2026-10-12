@@ -75,6 +75,7 @@ mod audio;
 mod capture;
 mod converted;
 mod fly;
+mod fog_volumes;
 mod gamepad;
 mod hud;
 mod kismet;

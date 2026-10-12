@@ -8,8 +8,9 @@
 //!
 //! - an **exponential height fog** pass with the original's maths (density
 //!   at the camera height, line integral along each view ray, start
-//!   distance, max opacity, two-colour directional inscattering), replacing
-//!   the placeholder distance fog;
+//!   distance, max opacity, two-colour directional inscattering);
+//! - the level's **fog volumes** in the same pass, after the height fog,
+//!   with the original's density integrals (`crate::fog_volumes`);
 //! - the original's **post-process volume rules**: world defaults,
 //!   overridden by the highest-priority enabled volume containing the
 //!   camera, blended over time with the settings' interpolation durations
@@ -22,15 +23,15 @@
 //! - **bloom** through Bevy's bloom, mapped from the settings (an
 //!   approximation: Bevy's bloom has no tint and a different kernel).
 //!
-//! Not rendered yet: fog volumes, depth of field (off in every shipped
+//! Not rendered yet: depth of field (off in every shipped
 //! level), motion blur, ambient occlusion, film grain, the hidden material
 //! effects of the chain. `docs/reverse-engineering/POST_FOG_SKY.md` has the
 //! evidence and the mapping; `post/ue3.rs` the UE3 rules with tests.
 //!
-//! `ASAMU_POST=off` disables the plugin (Bevy's default look and the
-//! placeholder fog), for before/after comparisons; `ASAMU_POST=no-fog,
-//! no-bloom,no-lut,no-tonemap` leaves out single parts ([`PostSwitches`]).
-//! `--no-fog` disables the fog pass. The graybox level is not affected.
+//! `ASAMU_POST=off` disables the plugin (Bevy's default look, no fog), for
+//! before/after comparisons; `ASAMU_POST=no-fog,no-bloom,no-lut,no-tonemap`
+//! leaves out single parts ([`PostSwitches`]). `--no-fog` disables the
+//! height fog and the fog volumes. The graybox level is not affected.
 
 mod dds;
 mod render;
@@ -39,14 +40,13 @@ pub(crate) mod ue3;
 use std::collections::BTreeMap;
 
 use asamu_assets::ConvertedDir;
-use asamu_assets::scene::{PostProcessVolumeInfo, UeLightKind};
+use asamu_assets::scene::{PostProcessVolumeInfo, SceneLight, UeLightKind};
 use asamu_core::coords::{bevy_pos_to_ue, ue_dir_to_bevy};
 use asamu_core::glam as sim_glam;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{CameraOutputMode, Exposure, Hdr};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::image::ImageSampler;
-use bevy::pbr::DistanceFog;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
@@ -57,6 +57,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 
 use crate::PlayerCamera;
 use crate::converted::ConvertedLevel;
+use crate::fog_volumes::{self, FogVolume};
 use render::{PostFx, PostFxRenderPlugin, PostFxUniform};
 use ue3::{
     ColorTransform, HeightFog, Lut, PostBlender, PostSettings, TonemapperType, UberEffect,
@@ -103,6 +104,8 @@ struct LevelAtmosphere {
     /// Volumes in priority order with their parsed settings.
     volumes: Vec<(PostProcessVolumeInfo, PostSettings)>,
     fog: Option<HeightFog>,
+    /// The enabled fog volumes (constant density and linear half-space).
+    fog_volumes: Vec<FogVolume>,
     /// Direction the fog light shines along (UE3, unit), when a
     /// directional light exists.
     fog_light_ue: Option<sim_glam::Vec3>,
@@ -200,10 +203,11 @@ fn poll_loading(mut rt: ResMut<PostRuntime>) {
     match result {
         Ok(a) => {
             info!(
-                "atmosphere of {}: height fog {}, {} post-process volumes, uber effect {}, \
-                 LUTs {:?}",
+                "atmosphere of {}: height fog {}, {} fog volume(s), {} post-process volumes, \
+                 uber effect {}, LUTs {:?}",
                 a.level,
                 if a.fog.is_some() { "on" } else { "none" },
+                a.fog_volumes.len(),
                 a.volumes.len(),
                 if a.uber.is_some() { "on" } else { "none" },
                 a.luts.keys().collect::<Vec<_>>()
@@ -262,19 +266,11 @@ fn load(dir: &ConvertedDir, level: &str) -> Result<LevelAtmosphere, String> {
         .collect();
     // UE3 sets up the first exponential height fog of the scene.
     let fog = a.height_fogs.iter().find_map(HeightFog::from_component);
-    // The light that colours the fog: a dominant directional light first,
-    // else any directional light (TENTATIVE, see the doc).
-    let directional = |dominant: bool| {
-        scene.lights.iter().find(|l| {
-            l.enabled
-                && l.kind == UeLightKind::Directional
-                && l.light_class.to_ascii_lowercase().contains("dominant") == dominant
-        })
-    };
-    let fog_light_ue = directional(true)
-        .or_else(|| directional(false))
-        .map(|l| l.direction_ue)
-        .filter(|d| d.is_finite() && d.length() > 0.5);
+    // The light that colours the fog: the first dominant directional light
+    // of the scene (CONFIRMED, see the doc). Without one the fog is
+    // brightest straight up, also when the level has ordinary directional
+    // lights.
+    let fog_light_ue = fog_light(&scene.lights);
     let uber = a.post_process_chain.as_ref().and_then(|c| {
         c.effects
             .iter()
@@ -282,15 +278,27 @@ fn load(dir: &ConvertedDir, level: &str) -> Result<LevelAtmosphere, String> {
             .map(|e| UberEffect::from_props(&e.params))
             .find(|u| u.show_in_game)
     });
-    // LUT textures referenced by the world settings and the volumes.
+    // LUT textures referenced by the world settings and the volumes, and
+    // the bounds of the fog volumes' meshes.
     let mut luts = BTreeMap::new();
+    let mut drawn_fog_volumes = Vec::new();
     let wanted: Vec<String> = std::iter::once(world.color_grading_lut.clone())
         .chain(volumes.iter().map(|(_, s)| s.color_grading_lut.clone()))
         .flatten()
         .collect();
-    if !wanted.is_empty() {
+    if !wanted.is_empty() || !a.fog_volumes.is_empty() {
         match dir.load_manifests() {
             Ok(m) => {
+                drawn_fog_volumes = fog_volumes::from_scene(
+                    &a.fog_volumes,
+                    |mesh| {
+                        m.meshes
+                            .as_ref()?
+                            .get_for_package(mesh, &scene.package)
+                            .and_then(|(_, e)| e.bounds_ue.as_ref())
+                    },
+                    &mut notes,
+                );
                 for path in wanted {
                     let key = path.to_ascii_lowercase();
                     if luts.contains_key(&key) {
@@ -304,7 +312,7 @@ fn load(dir: &ConvertedDir, level: &str) -> Result<LevelAtmosphere, String> {
                     }
                 }
             }
-            Err(e) => notes.push(format!("texture manifest: {e}")),
+            Err(e) => notes.push(format!("manifests: {e} (no LUT, no fog volumes)")),
         }
     }
     Ok(LevelAtmosphere {
@@ -313,11 +321,26 @@ fn load(dir: &ConvertedDir, level: &str) -> Result<LevelAtmosphere, String> {
         persist: a.persist_post_process,
         volumes,
         fog,
+        fog_volumes: drawn_fog_volumes,
         fog_light_ue,
         uber,
         luts,
         notes,
     })
+}
+
+/// Direction the height fog's light shines along (UE3): that of the first
+/// enabled dominant directional light, the only kind the original looks for.
+fn fog_light(lights: &[SceneLight]) -> Option<sim_glam::Vec3> {
+    lights
+        .iter()
+        .find(|l| {
+            l.enabled
+                && l.kind == UeLightKind::Directional
+                && l.light_class.to_ascii_lowercase().contains("dominant")
+        })
+        .map(|l| l.direction_ue)
+        .filter(|d| d.is_finite() && d.length() > 0.5)
 }
 
 /// Largest LUT file read (a 256 × 16 32-bit DDS with every mip is about
@@ -483,6 +506,20 @@ fn uniform_for(
     u
 }
 
+/// Puts the level's fog volumes into the uniform, in blending order for
+/// this camera position.
+fn set_fog_volumes(
+    u: &mut PostFxUniform,
+    volumes: &[FogVolume],
+    camera_ue: sim_glam::Vec3,
+    scale: f32,
+) {
+    let (count, data) = fog_volumes::pack(volumes, camera_ue, scale);
+    // At most `MAX_GPU_VOLUMES` (8): exact as a float.
+    u.fog_view.w = f32::from(u8::try_from(count).unwrap_or(u8::MAX));
+    u.fog_volumes = data;
+}
+
 fn new_lut_image(lut: &Lut) -> Image {
     let mut image = Image::new(
         Extent3d {
@@ -554,7 +591,6 @@ fn apply_atmosphere(
     cameras: Query<&Camera, With<Camera3d>>,
     exposures: Query<&Exposure>,
     mut camera3d: Query<&mut Camera3d>,
-    has_fog: Query<(), With<DistanceFog>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let rt = &mut *rt;
@@ -624,8 +660,15 @@ fn apply_atmosphere(
         level.options.lights.directional_lux_per_brightness,
         exposure,
     );
-    let fog_on = sw.fog && level.settings.fog && a.fog.is_some();
-    let uniform = uniform_for(a, uber.as_ref(), camera_ue, scale, fog_on, lut_on);
+    // `--no-fog` and `ASAMU_POST=no-fog` turn off the height fog and the
+    // fog volumes alike.
+    let fog_allowed = sw.fog && level.settings.fog;
+    let fog_on = fog_allowed && a.fog.is_some();
+    let volumes_on = fog_allowed && !a.fog_volumes.is_empty();
+    let mut uniform = uniform_for(a, uber.as_ref(), camera_ue, scale, fog_on, lut_on);
+    if volumes_on {
+        set_fog_volumes(&mut uniform, &a.fog_volumes, camera_ue, scale);
+    }
     let lut_handle = rt.lut_image.clone().unwrap_or_default();
     let targets = atmosphere_cameras(&player, &cameras);
     release_except(&mut commands, rt, &targets);
@@ -638,7 +681,7 @@ fn apply_atmosphere(
             Hdr,
             PostFx {
                 uniform,
-                fog: fog_on,
+                fog: fog_on || volumes_on,
                 uber: uber.is_some(),
                 lut: lut_handle.clone(),
             },
@@ -655,11 +698,6 @@ fn apply_atmosphere(
             // tonemapping again.
             rt.tonemapped.swap_remove(i);
             e.insert((Tonemapping::default(), DebandDither::default()));
-        }
-        // The height fog pass (or the level's lack of height fog) replaces
-        // the placeholder distance fog.
-        if has_fog.contains(entity) {
-            e.remove::<DistanceFog>();
         }
         match uber
             .as_ref()
@@ -782,6 +820,7 @@ mod tests {
             persist: None,
             volumes: Vec::new(),
             fog: Some(fog),
+            fog_volumes: Vec::new(),
             // Light shining straight down (UE3 −Z): towards it is render +Y.
             fog_light_ue: Some(sim_glam::Vec3::NEG_Z),
             uber: Some(UberEffect::default()),
@@ -820,6 +859,65 @@ mod tests {
         };
         let u = uniform_for(&no_light, None, sim_glam::Vec3::ZERO, 1.0, true, false);
         assert!((u.fog_light.truncate() - Vec3::Y).length() < 1e-6);
+    }
+
+    #[test]
+    fn the_fog_light_is_the_first_dominant_directional_light() {
+        let light =
+            |class: &str, kind: UeLightKind, dir: sim_glam::Vec3, enabled: bool| SceneLight {
+                level: 0,
+                actor_slot: 0,
+                actor_name: String::new(),
+                light_class: class.to_owned(),
+                kind,
+                location_ue: sim_glam::Vec3::ZERO,
+                direction_ue: dir,
+                brightness: 1.0,
+                color_srgb: [255, 255, 255],
+                radius: None,
+                falloff_exponent: None,
+                inner_cone_angle: None,
+                outer_cone_angle: None,
+                enabled,
+                cast_shadows: false,
+            };
+        let x = sim_glam::Vec3::X;
+        let y = sim_glam::Vec3::Y;
+        let down = sim_glam::Vec3::NEG_Z;
+        let dominant = "DominantDirectionalLightComponent";
+        let plain = "DirectionalLightComponent";
+        // No light, or only ordinary directional and other lights: none
+        // (the fog then brightens straight up).
+        assert_eq!(fog_light(&[]), None);
+        assert_eq!(
+            fog_light(&[
+                light(plain, UeLightKind::Directional, x, true),
+                light("PointLightComponent", UeLightKind::Point, y, true),
+                light("DominantSpotLightComponent", UeLightKind::Spot, y, true),
+            ]),
+            None
+        );
+        // The first enabled dominant directional light, wherever it stands
+        // in the list.
+        assert_eq!(
+            fog_light(&[
+                light(plain, UeLightKind::Directional, x, true),
+                light(dominant, UeLightKind::Directional, y, false),
+                light(dominant, UeLightKind::Directional, down, true),
+                light(dominant, UeLightKind::Directional, x, true),
+            ]),
+            Some(down)
+        );
+        // A direction that is not one is no light.
+        assert_eq!(
+            fog_light(&[light(
+                dominant,
+                UeLightKind::Directional,
+                sim_glam::Vec3::splat(f32::NAN),
+                true
+            )]),
+            None
+        );
     }
 
     #[test]
