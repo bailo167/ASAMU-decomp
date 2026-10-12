@@ -444,6 +444,105 @@ mod tests {
         assert_eq!(visibility_of::<DevReadout>(&mut app), [Visibility::Hidden]);
     }
 
+    /// Whether the one entity carrying `C` would be drawn: neither it nor an
+    /// ancestor is hidden (the HUD uses `Hidden` and `Inherited` only).
+    fn on_screen<C: Component>(app: &mut App) -> bool {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<C>>();
+        let mut at = q.iter(world).next().expect("the entity exists");
+        loop {
+            match world.get::<Visibility>(at) {
+                Some(Visibility::Hidden) => return false,
+                Some(Visibility::Visible) => return true,
+                _ => {}
+            }
+            match world.get::<ChildOf>(at) {
+                Some(parent) => at = parent.parent(),
+                None => return true,
+            }
+        }
+    }
+
+    fn press_f1(app: &mut App) {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(KeyCode::F1);
+        keys.clear();
+        keys.press(KeyCode::F1);
+    }
+
+    /// The play session of 2026-10-12 had the ability line over the title
+    /// card between two levels: with no game loaded, and under the title
+    /// logo, Kismet's HUD switch shows the HUD's panels. The developer
+    /// read-outs stay off the screen through all of that, and F1 brings them
+    /// up and takes them away again in each of those states.
+    #[test]
+    fn developer_read_outs_stay_off_the_title_card_and_between_levels() {
+        use crate::kismet::{Presentation, TitleOverlay, apply_overlays, spawn_overlays};
+        let mut app = App::new();
+        app.insert_resource(DebugInfo(false))
+            .init_resource::<HudStyle>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Presentation>()
+            .add_systems(Startup, (spawn_hud, spawn_overlays))
+            .add_systems(
+                Update,
+                (apply_overlays, toggle_debug_info, sync_crosshair_box).chain(),
+            );
+        // No game: the main menu, or the load between two levels. Kismet's
+        // switch shows the panel; its box keeps it off the screen.
+        app.update();
+        assert_eq!(
+            visibility_of::<AbilityPanel>(&mut app),
+            [Visibility::Inherited],
+            "Kismet's switch shows the panel without a game"
+        );
+        assert!(!on_screen::<HudAbilities>(&mut app));
+        assert!(!on_screen::<HudInfo>(&mut app));
+        assert!(!on_screen::<Crosshair>(&mut app));
+        // F1 between two levels, and off again.
+        press_f1(&mut app);
+        app.update();
+        assert!(on_screen::<HudAbilities>(&mut app) && on_screen::<HudInfo>(&mut app));
+        press_f1(&mut app);
+        app.update();
+        assert!(!on_screen::<HudAbilities>(&mut app) && !on_screen::<HudInfo>(&mut app));
+        // A game showing the title card (the end of the Workshop).
+        let mut game = asamu_game::Game::graybox().unwrap();
+        game.start();
+        app.insert_resource(crate::Sim::new(game, String::new()));
+        app.world_mut().resource_mut::<Presentation>().title_logo = true;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.update();
+        assert!(on_screen::<TitleOverlay>(&mut app), "the title card is up");
+        assert!(!on_screen::<HudAbilities>(&mut app));
+        assert!(!on_screen::<HudInfo>(&mut app));
+        // F1 over the title card, and off again.
+        press_f1(&mut app);
+        app.update();
+        assert!(on_screen::<TitleOverlay>(&mut app));
+        assert!(on_screen::<HudAbilities>(&mut app) && on_screen::<HudInfo>(&mut app));
+        press_f1(&mut app);
+        app.update();
+        assert!(!on_screen::<HudAbilities>(&mut app) && !on_screen::<HudInfo>(&mut app));
+        // The level change itself: the game goes away, the next one comes.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut().remove_resource::<crate::Sim>();
+        app.update();
+        assert!(!on_screen::<HudAbilities>(&mut app));
+        assert!(!on_screen::<Crosshair>(&mut app));
+        let mut next = asamu_game::Game::graybox().unwrap();
+        next.start();
+        app.insert_resource(crate::Sim::new(next, String::new()));
+        app.world_mut().resource_mut::<Presentation>().title_logo = false;
+        app.update();
+        assert!(!on_screen::<HudAbilities>(&mut app) && !on_screen::<HudInfo>(&mut app));
+        assert!(on_screen::<Crosshair>(&mut app), "gameplay: the + is back");
+    }
+
     #[test]
     fn the_plus_box_is_hidden_without_a_game_and_in_story_mode() {
         let mut app = App::new();
