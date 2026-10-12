@@ -11,7 +11,7 @@ use asamu_player::grapple_gun::{
 };
 use asamu_player::pawn::{self, PawnStateName};
 use asamu_player::rocket_boots::{self, BootsStateName};
-use asamu_player::world::{ActorClass, ActorTag, Surface};
+use asamu_player::world::{ActorClass, ActorTag, PULL_BACK_BSP_LINE, Surface};
 use asamu_player::{
     BoxWorld, InputFrame, PlayerParams, PlayerState, StepEvents, Ue3PawnMovement, step_with,
 };
@@ -76,17 +76,34 @@ fn level_pitch(distance: f32) -> f32 {
     (-38.0_f32).atan2(distance)
 }
 
-/// Where the fire trace of [`level_pitch`] meets a wall at `distance` from a
+/// Where the ray of [`level_pitch`] meets a wall at `distance` from a
 /// pawn centred at z = 1000: the original aims along the pitch's rotator
 /// unit floored to a multiple of 4 (ABILITIES.md A-CM-8), so the hit is
 /// `distance · tan` of that angle below the eye (38 above the centre), up to
 /// `distance · tan(3.5 units)` away from the centre's height.
-fn level_anchor(distance: f32) -> Vec3 {
+fn level_hit(distance: f32) -> Vec3 {
     let turn = std::f64::consts::TAU;
     let units = (f64::from(level_pitch(distance)) * 65_536.0 / turn).round();
     let floored = (units / 4.0).floor() * 4.0;
     let drop = f64::from(distance) * (floored * turn / 65_536.0).tan();
     Vec3::new(distance, 0.0, (1038.0 + drop) as f32)
+}
+
+/// The hit location the original's fire trace reports for a ray from `eye`
+/// that meets a surface of these test worlds at `hit`. A zero-extent trace
+/// reports its hit short of the surface (GRAPPLE.md G-AT-4): the worlds here
+/// answer as level BSP does, whose routine moves the hit back along the
+/// trace by a flat 0.5 uu whatever the trace's length (NATIVE_PHYSICS.md
+/// 10.2; the constant −0.5 read in the user's executable).
+fn reported(eye: Vec3, hit: Vec3) -> Vec3 {
+    hit - (hit - eye).normalize() * PULL_BACK_BSP_LINE
+}
+
+/// How far behind `distance` a wall must stand for the fire trace of
+/// [`level_pitch`] to report its hit at `distance`: the 0.5 uu of
+/// [`reported`] along a ray that drops 38 uu over `distance`.
+fn behind(distance: f32) -> f32 {
+    PULL_BACK_BSP_LINE * distance / distance.hypot(38.0)
 }
 
 /// A grapple-able wall whose face is at `x` (facing −X), large enough.
@@ -124,7 +141,11 @@ fn attach_events(e: &StepEvents) -> bool {
 /// speed handed over).
 fn straight_pull(distance: f32, dt: f32) -> (u32, f32) {
     let params = original();
-    let world = wall_at(distance);
+    // The spec's model starts with the anchor `distance` away. The anchor
+    // is the hit as the fire trace reports it, 0.5 uu before the surface
+    // along the ray ([`reported`]), so the wall stands that much behind:
+    // the reported hit is then the point of the ray at `distance`.
+    let world = wall_at(distance + behind(distance));
     let mut s = floating(
         &params,
         Vec3::new(0.0, 0.0, 1000.0),
@@ -135,10 +156,7 @@ fn straight_pull(distance: f32, dt: f32) -> (u32, f32) {
     let e = tick_dt(&mut s, &fire(), &params, &world, dt);
     assert!(attach_events(&e), "{e:?}");
     let anchor = s.grapple_anchor().expect("attached");
-    assert!(
-        (anchor - level_anchor(distance)).length() < 0.05,
-        "{anchor}"
-    );
+    assert!((anchor - level_hit(distance)).length() < 0.05, "{anchor}");
     if let Some(r) = e.gun.released {
         return (1, r.velocity.length());
     }
@@ -199,7 +217,20 @@ fn g_ph_2_pull_is_ten_million_over_d_after_physics() {
     let e = tick(&mut s, &fire(), &params, &world);
     assert!(attach_events(&e));
     assert_eq!(s.position, p0, "no gravity, no motion in the attach tick");
-    let d = 3000.0_f32;
+    // The anchor is the hit as the trace reports it, 0.5 uu before the wall
+    // along the ray ([`reported`]); this pawn is 500 lower than the one
+    // `level_hit` is written for. `d` is the centre's distance to it:
+    // 0.5 uu less than the wall's 3000 (before the pull-back was applied to
+    // the fire trace the anchor was on the wall and `d` was 3000).
+    let lower = Vec3::new(0.0, 0.0, 500.0);
+    let anchor = reported(Vec3::new(0.0, 0.0, 538.0), level_hit(3000.0) - lower);
+    let attached = e.gun.attached.expect("attached").anchor;
+    assert!(
+        (attached - anchor).length() < 0.01,
+        "{attached} vs {anchor}"
+    );
+    let d = (attached - p0).length();
+    assert!((d - 2999.5).abs() < 0.01, "{d}");
     let expected = DT * 10_000.0 / (d / 1000.0);
     assert!(
         (s.velocity.x - expected).abs() < 1e-3,
@@ -341,7 +372,12 @@ fn g_ph_6_blocked_pull_stays_attached_pressed_against_the_obstacle() {
     let mut s = floating(&params, Vec3::new(0.0, 0.0, 1000.0), 0.0, 0.0, 3);
     let e = tick(&mut s, &fire(), &params, &world);
     let anchor = e.gun.attached.unwrap().anchor;
-    assert!((anchor.x - 1000.0).abs() < 0.01, "{anchor}");
+    // A level ray: the reported hit is 0.5 uu before the face at 1000
+    // ([`reported`]).
+    assert!(
+        (anchor.x - (1000.0 - PULL_BACK_BSP_LINE)).abs() < 0.01,
+        "{anchor}"
+    );
     let mut pressed = None;
     for _ in 0..240 {
         let e = tick(&mut s, &fire(), &params, &world);
