@@ -305,9 +305,10 @@ disk, and they have nothing to do with the game's save system.
   script-driven interface are not part of it and are not rewound. The slot list says so.
 
 **Rewind** steps back through keyframes taken every 30 ticks (half a second), 120 of them (one minute). It is
-available on the box levels only (the graybox test level and the lab arenas, not the playground) and is not an
-exact per-tick rewind. No keyframes are taken while a recording
-runs.
+available on the hand-made levels (the playground, the graybox test level and the lab arenas), not on converted
+maps, and is not an exact per-tick rewind. No keyframes are taken while a recording runs. On the playground a
+keyframe holds the pawn and everything that turns and moves (the map data itself is shared between the
+keyframes, so a keyframe copies only the state of the run).
 
 ## 7. Hotkeys
 
@@ -325,7 +326,7 @@ window). The inspector key also works with the mouse free.
 | `,` / `.` / `/` | Slower / faster / back to 1x |
 | 1 to 4 | Select a save-state slot |
 | K / L | Save to / load from the selected slot |
-| Z | Rewind one keyframe (the graybox and the lab arenas) |
+| Z | Rewind one keyframe (the playground, the graybox and the lab arenas) |
 | T / G | Teleport to the crosshair hit / to the next teleport target |
 | B / V | Set the "quick" bookmark / return to it |
 | N | Fly placement on/off |
@@ -417,7 +418,7 @@ From the start, facing ahead:
 | To the right | **The medium chain**: five islands 3,700 to 4,250 uu apart as the grapple flies, going down and up by as much as 1,000 uu | Grapple runs: every gap is far beyond a jump |
 | To the left, past the runway | **The far chain**: two shots at 93 % of the Classic grapple range, then a stretch of five hooks without a landing, where two recharge crystals hang beside the line | Long pulls, and the budget: five hooks, three grapples |
 | Left | **The runway**: a straight of 9,000 uu between two launch ramps; a sprint up either ramp lands on the island beyond it | Speed, the sprint, the ramps |
-| Behind | **The ferry** to **the yard**, **the carousel** (six rocks on a hub that turns once in 40 s, at two heights) and **the wheel** (six gondolas that stay level, once round in 48 s). A hook rides over every rock and every gondola | Things that move: ride them, grapple them, be carried |
+| Behind | **The ferry** to **the yard** (walk onto it from the hub's pier while it waits; it crosses in 9 s and waits 3 s at each end), **the carousel** (six rocks on a hub that turns once in 40 s, at two heights) and **the wheel** (six gondolas that stay level, once round in 48 s), with **a pier** from the yard along the wheel: at its far end a gondola passes the pier's edge every 8 s, a short step below it. A hook rides over every rock and every gondola, all the way round | Things that move: ride them, grapple them, be carried |
 | Ahead and to the right | **The tower**: seven ledges a jump apart, the top a power jump above the last (or one pull from the bridge to the hook beside the top), a board, and under it **the catch** | Height, and a drop of more than 6,000 uu that ends at the hub |
 
 Reading it at a glance (the colours are the view's; the roles are the level's):
@@ -450,11 +451,21 @@ The rules behind the picture are the game's own, unchanged:
   chain the crystals hang beside the line, to be taken in passing.
 - **Only the hub is a checkpoint.** The catch under the tower and the depths below the level kill, and you wake
   at the hub. The other places worth going to are teleport targets of the tools (G steps through them; the Rules
-  tab lists them): `near`, `medium`, `far`, `crystals`, `runway`, `ferry`, `yard`, `carousel`, `wheel`, `tower`.
+  tab lists them by these names): `near`, `medium`, `far`, `crystals`, `runway`, `ferry`, `yard`, `carousel`,
+  `wheel` (the end of the wheel's pier, where a gondola is boarded), `tower`.
 - **What moves, moves by the game layer's rules**: the hubs are placed in the rotating physics with a rate, the
-  rocks, gondolas and their hooks are attached to them (the gondolas with the flag that keeps their own rotation),
+  rocks, their hooks and the gondolas are attached to them (the gondolas with the flag that keeps their own rotation),
+  each gondola's hook is attached to its gondola (attached to the hub it would go round the gondola once a turn),
   the ferry is moved by a Matinee of ours, and a grapple's anchor rides all of them (section 11 says how the
   level reaches the simulation).
+- **What moves carries whoever stands on it and pushes nobody** (the game layer does not model pushing or
+  crushing by a mover). So nothing that moves passes through a place to stand (a test holds the level to that),
+  and boarding is always level or a step down: the ferry's deck is level with both piers while it waits, and a
+  gondola passes the wheel's pier 14 uu below its edge. A floor that rises past a pawn is not stepped onto: with
+  a gondola level with the pier at its lowest point, the pawn was dragged along the pier's edge instead (measured
+  while the level was checked).
+- **A fall off the level lasts about four seconds** before the pawn wakes at the hub (3.7 to 4.3 s measured, from
+  the hub, the last landing of each chain, the yard and the tower's island).
 
 **Timed routes.** Four routes have a clock: the near chain, the medium chain and the far chain, each from its arch
 at the hub (or the runway's edge) to the frame on its last island, and the runway sprint between its two gates. The
@@ -481,6 +492,17 @@ steers at the landing, so a route it finishes is one a player can):
 | `the_wheels_turn_and_the_ferry_keeps_its_timetable` | The hubs turn by their rate times the time; rocks keep their height and arm; gondolas keep level; the ferry is across after a crossing and home after the timetable |
 | `a_pawn_rides_the_ferry_the_carousel_and_the_wheel` | A pawn stands on each of them for 24 s |
 | `a_grapple_takes_a_moving_hook_and_the_pawn_ends_on_what_carries_it` | The anchor rides the hook; the pull ends over the rock or the gondola; the pawn rides on |
+| `what_moves_keeps_clear_of_the_places_to_stand` | For a minute of the level's time, nothing that moves enters the room a pawn takes on any paving, island or ramp |
+| `the_landing_behind_the_runway_is_left_alone_by_the_carousel` | A pawn stands under the carousel's circle on that landing for a whole turn, undisturbed |
+| `every_station_is_a_place_to_stand` | Every station: the pawn is put there, stays and looks the station's way |
+| `the_tools_list_the_stations_by_name` | The teleport list names the stations, in order, and each entry puts the pawn at its station |
+| `the_grapple_routes_are_timed_from_the_arch_to_the_frame` | The medium and the far route by grapple from under the arch into the frame, with a time |
+| `a_fall_from_anywhere_soon_ends_at_the_hub` | Walking off the hub, the last landing of each chain, the yard and the tower's island: awake at the hub within six seconds, never at rest on the way |
+| `a_hook_stays_over_its_gondola_all_the_way_round` | Every gondola's hook is right over it for a whole turn of the wheel |
+| `the_wheel_is_taken_from_the_yard_and_ridden_all_the_way_round` | From the yard: a pull to a gondola's hook, the drop onto the gondola, a whole turn on it |
+| `the_wheel_is_boarded_on_foot_from_its_pier` | From the pier's edge: a few steps onto the passing gondola, a whole turn, and off onto the pier again |
+| `the_ferry_is_walked_onto_and_off_at_both_ends` | From the hub's pier onto the ferry when it comes in, across, and off to the yard, walking |
+| `the_keyframe_rewind_works_on_the_playground` | A rewind goes back to a keyframe exactly (the pawn and everything that moves), and the run goes on from there as if it had never been further |
 | `a_session_on_the_playground_keeps_its_promises` | The level's name everywhere, save states with what moves, and a pristine session against none, tick for tick |
 
 What the Classic set does there, measured in this recreation (not the original's numbers, and they move if the
@@ -714,6 +736,10 @@ ASAMU_LAB_VIEW="play@4,at:near@3,pull:near hook 1@4,at:wheel@4,stage@4" \
   asamu --sandbox --hidden-window --watch-window DIR --exit-after 20
 ```
 
+In a run on converted data the playground shows no converted level, and the app's unattended captures wait for a
+converted level's assets: there `--screenshot` is taken at its deadline (two seconds before `--exit-after`), and
+`--record-frames` does not start by itself (F12 starts it). Without converted data both work as in any run.
+
 ## 12. Known limitations, and what comes later
 
 Limitations of this version:
@@ -740,8 +766,9 @@ Limitations of this version:
 - **Spawn-only keys do not follow** on a level the loader built; the level's own ability state wins.
 - **Save states on scripted levels restore the simulation only**, and are in memory only. There are no save
   states on disk.
-- **Rewind** exists on the box levels only (the graybox and the lab arenas; not on the playground, which is a
-  scene level like a converted map) and steps by keyframe, not by tick. Save states work everywhere.
+- **Rewind** exists on the hand-made levels only (the playground, the graybox and the lab arenas; not on
+  converted maps, where the cost of a keyframe is unmeasured) and steps by keyframe, not by tick. Save states work
+  everywhere.
 - **Time control scales everything on the virtual clock**, including presentation timers and audio timing.
 - **The predicted arc assumes a static world.**
 - **A shared in-memory save session.** In a run that is not a `--sandbox` process but keeps its saves in memory

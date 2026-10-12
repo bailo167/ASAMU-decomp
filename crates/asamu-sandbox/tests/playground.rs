@@ -891,7 +891,9 @@ fn a_grapple_takes_a_moving_hook_and_the_pawn_ends_on_what_carries_it() {
         (
             "gondola hook 1",
             "gondola 1",
-            Vec3::new(YARD.x, 2050.0, YARD.z),
+            // On the wheel's pier, as far from the wheel's lowest point as
+            // the step this was first taken from.
+            Vec3::new(playground::WHEEL_BOARDING.x, 2050.0, YARD.z),
             330.0,
         ),
     ] {
@@ -1057,5 +1059,649 @@ fn a_session_on_the_playground_keeps_its_promises() {
     assert_eq!(
         with.script.as_ref().unwrap().moved_actors(),
         script.as_ref().unwrap().moved_actors()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What a player meets that the pilots above do not ask about: whether what
+// moves leaves the places to stand alone, whether every place the tools
+// offer can be stood on, whether the routes are timed from arch to frame by
+// grapple, how long a fall lasts, and a whole turn on the wheel.
+// ---------------------------------------------------------------------------
+
+/// The box around `points` turned by `rotation` and placed at `location`.
+/// A piece turned about the vertical only is turned exactly; one turned
+/// about another axis is bounded by the ball around its origin.
+fn bounds(points: &[[f32; 3]], location: Vec3, rotation: [i32; 3]) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    if rotation[0] == 0 && rotation[2] == 0 {
+        let angle = rotation[1] as f32 / 65_536.0 * std::f32::consts::TAU;
+        let (sin, cos) = angle.sin_cos();
+        for p in points {
+            let at = location + Vec3::new(p[0] * cos - p[1] * sin, p[0] * sin + p[1] * cos, p[2]);
+            min = min.min(at);
+            max = max.max(at);
+        }
+    } else {
+        let reach = points
+            .iter()
+            .map(|p| Vec3::from_array(*p).length())
+            .fold(0.0f32, f32::max);
+        min = location - Vec3::splat(reach);
+        max = location + Vec3::splat(reach);
+    }
+    (min, max)
+}
+
+/// Nothing that moves passes through the room a pawn takes on a place that
+/// is there to be stood on (the paving, the islands, the ramps): a rock of
+/// the carousel that swept a landing at head height would knock whoever
+/// had just landed there.
+#[test]
+fn what_moves_keeps_clear_of_the_places_to_stand() {
+    let mut rig = Rig::new();
+    let level = playground();
+    // The room over a place to stand: a pawn, and air for a look around
+    // (ours).
+    let room = 2.0 * rig.game.params().movement.capsule_half_height.value + 60.0;
+    let mut places = Vec::new();
+    for piece in &level.pieces {
+        if piece.role != Role::Fixed
+            || !matches!(
+                piece.look,
+                playground::Look::Paving | playground::Look::Island | playground::Look::Ramp
+            )
+        {
+            continue;
+        }
+        let points = &level.shapes[piece.shape].vertices;
+        let (min, max) = bounds(points, piece.location, piece.rotation);
+        // The top's own outline (an island is wider just under it).
+        let top: Vec<[f32; 3]> = points
+            .iter()
+            .copied()
+            .filter(|p| piece.location.z + p[2] > max.z - 1.0)
+            .collect();
+        let (top_min, top_max) = bounds(&top, piece.location, piece.rotation);
+        let flat = (top_max - top_min).truncate().min_element() > 1.0;
+        let (low, high) = if flat { (top_min, top_max) } else { (min, max) };
+        places.push((
+            piece.name.as_str(),
+            Vec3::new(low.x, low.y, if flat { max.z } else { min.z } + 1.0),
+            Vec3::new(high.x, high.y, max.z + room),
+        ));
+    }
+    assert!(places.len() > 20, "{}", places.len());
+    let movers: Vec<&playground::Piece> = level
+        .pieces
+        .iter()
+        .filter(|p| !matches!(p.role, Role::Fixed | Role::Decor | Role::Crystal))
+        .collect();
+    let mut swept = std::collections::BTreeSet::new();
+    // A minute: longer than the carousel's turn, the wheel's and the
+    // ferry's timetable.
+    for _ in 0..(60 * TICKS_PER_SECOND / 6) {
+        rig.idle(6);
+        for mover in &movers {
+            let (at, rotation) = rig.transform_of(&mover.name);
+            let (min, max) = bounds(&level.shapes[mover.shape].vertices, at, rotation);
+            for (name, low, high) in &places {
+                if min.cmplt(*high).all() && max.cmpgt(*low).all() {
+                    swept.insert(format!("{} over {name}", mover.name));
+                }
+            }
+        }
+    }
+    assert!(swept.is_empty(), "{swept:?}");
+}
+
+/// A pawn that landed off the ramp behind stands there undisturbed for a
+/// whole turn of the carousel, whose rocks pass overhead.
+#[test]
+fn the_landing_behind_the_runway_is_left_alone_by_the_carousel() {
+    let mut rig = Rig::new();
+    let landing = piece_location("runway landing behind");
+    // Under the circle the rocks go round on.
+    let arm = (landing - CAROUSEL_CENTRE).truncate().normalize() * CAROUSEL_RADIUS;
+    let under = Vec3::new(
+        CAROUSEL_CENTRE.x + arm.x,
+        CAROUSEL_CENTRE.y + arm.y,
+        landing.z,
+    );
+    assert!((under - landing).truncate().length() < 600.0, "{under}");
+    rig.stand_at(under, 0.0);
+    let stood = rig.feet();
+    assert!(rig.stands_on(landing, 900.0), "{stood}");
+    for second in 0..45 {
+        for _ in 0..TICKS_PER_SECOND {
+            let report = rig.tick(&InputFrame::default());
+            assert!(!report.respawned, "killed after {second} s");
+        }
+        assert!(
+            rig.game.player().grounded && (rig.feet() - stood).length() < 2.0,
+            "after {} s: feet at {}, stood at {stood}",
+            second + 1,
+            rig.feet()
+        );
+    }
+}
+
+/// Every place the tools offer to go to (G, the Rules tab) is a place to
+/// stand: the pawn is put there and stays.
+#[test]
+fn every_station_is_a_place_to_stand() {
+    let mut rig = Rig::new();
+    let stations = &playground().stations;
+    assert!(stations.len() >= 10, "{}", stations.len());
+    for station in stations {
+        rig.run(Command::Teleport {
+            to: station.teleport(),
+        });
+        let mut died = false;
+        for _ in 0..(3 * TICKS_PER_SECOND) {
+            died |= rig.tick(&InputFrame::default()).respawned;
+        }
+        assert!(!died, "station {}: the pawn died there", station.id);
+        assert!(
+            rig.game.player().grounded && (rig.feet() - station.feet).length() < 30.0,
+            "station {}: feet at {}, meant {}",
+            station.id,
+            rig.feet(),
+            station.feet
+        );
+        // Looking the station's way (as an angle: a half turn is the same
+        // direction with either sign).
+        let turn = (rig.game.player().yaw - station.yaw).rem_euclid(std::f32::consts::TAU);
+        assert!(
+            turn.min(std::f32::consts::TAU - turn) < 1.0e-3,
+            "station {}: looking along {}, meant {}",
+            station.id,
+            rig.game.player().yaw,
+            station.yaw
+        );
+    }
+}
+
+/// The medium and the far route by grapple, from under the arch into the
+/// frame: the clock is ready under the arch, runs on the way and stops in
+/// the frame with a time.
+#[test]
+fn the_grapple_routes_are_timed_from_the_arch_to_the_frame() {
+    let course_index = |id: &str| {
+        playground()
+            .courses
+            .iter()
+            .position(|c| c.id == id)
+            .unwrap()
+    };
+    let ready = |rig: &Rig, course: usize| {
+        let clock = rig.game.clock();
+        assert_eq!(
+            rig.session.course().running(clock.tick(), clock.dt()),
+            Some((course, 0.0))
+        );
+    };
+    let finished = |rig: &mut Rig, course: usize, label: &str| {
+        let frame = playground().courses[course].finish;
+        rig.walk_to((frame.min + frame.max) * 0.5);
+        let run =
+            rig.session.course().last().unwrap_or_else(|| {
+                panic!("the {label} route was not timed: feet at {}", rig.feet())
+            });
+        assert_eq!(run.course, course);
+        assert!(
+            run.best && run.seconds > 5.0 && run.seconds < 180.0,
+            "{run:?}"
+        );
+        eprintln!(
+            "MEASURE {label} route by grapple: {}",
+            rig.session.course().line(&rig.game).unwrap()
+        );
+    };
+
+    // The medium chain.
+    let medium = course_index("medium");
+    let mut rig = Rig::new();
+    rig.stand_at(Vec3::new(0.0, 1250.0, 0.0), std::f32::consts::FRAC_PI_2);
+    ready(&rig, medium);
+    for (i, (top, radius)) in MEDIUM_CHAIN.into_iter().enumerate() {
+        let hook = piece_location(&format!("medium hook {}", i + 1));
+        assert!(rig.pull(&|_| hook, 0.0), "medium hook {}", i + 1);
+        assert!(
+            rig.land_at(&|_| top, 600) && rig.stands_on(top, radius),
+            "medium landing {}: feet at {}",
+            i + 1,
+            rig.feet()
+        );
+        rig.idle(5);
+    }
+    finished(&mut rig, medium, "medium");
+
+    // The far chain.
+    let far = course_index("far");
+    let mut rig = Rig::new();
+    rig.stand_at(FAR_EDGE, -std::f32::consts::FRAC_PI_2);
+    ready(&rig, far);
+    for i in 0..FAR_SHOTS {
+        let hook = piece_location(&format!("far hook {}", i + 1));
+        let top = piece_location(&format!("far island {}", i + 1));
+        assert!(rig.pull(&|_| hook, 0.0), "far hook {}", i + 1);
+        assert!(rig.land_at(&|_| top, 600), "far island {}", i + 1);
+        rig.walk_to(top + Vec3::new(0.0, -480.0, 0.0));
+    }
+    let last = FAR_AIR.len() - 1;
+    for (i, is_crystal) in FAR_AIR.into_iter().enumerate() {
+        let name = if is_crystal {
+            format!("far crystal {}", i + 1)
+        } else {
+            format!("far air hook {}", i + 1)
+        };
+        let target = piece_location(&name);
+        assert!(
+            rig.pull(&|_| target, if i == last { 0.0 } else { 1000.0 }),
+            "{name}"
+        );
+    }
+    let end = piece_location("far end");
+    assert!(rig.land_at(&|_| end, 900) && rig.stands_on(end, 950.0));
+    finished(&mut rig, far, "far");
+}
+
+/// A fall off the level does not last: from the hub's edge, from the last
+/// landing of each chain and from a gondola at the top of the wheel, the
+/// pawn wakes at the hub within a few seconds, and never comes to rest
+/// anywhere on the way.
+#[test]
+fn a_fall_from_anywhere_soon_ends_at_the_hub() {
+    let far_end = piece_location("far end");
+    for (label, from, yaw_degrees) in [
+        ("the hub", Vec3::new(-900.0, -900.0, 0.0), 225.0f32),
+        ("the near chain's end", NEAR_CHAIN[4].0, -90.0),
+        ("the medium chain's end", MEDIUM_CHAIN[4].0, 0.0),
+        ("the far chain's end", far_end, 180.0),
+        ("the yard", YARD, 180.0),
+        ("the tower's island", TOWER_BASE, 135.0),
+    ] {
+        let mut rig = Rig::new();
+        let yaw = yaw_degrees.to_radians();
+        rig.stand_at(from, yaw);
+        let mut left_at = None;
+        let mut woke_at = None;
+        for i in 0..(30 * TICKS_PER_SECOND) {
+            rig.game.player_mut().yaw = yaw;
+            rig.game.player_mut().pitch = 0.0;
+            let report = rig.tick(&InputFrame {
+                move_forward: 1.0,
+                ..InputFrame::default()
+            });
+            if report.respawned {
+                woke_at = Some(i);
+                break;
+            }
+            let below = rig.feet().z < from.z - 300.0;
+            if left_at.is_none() && below {
+                left_at = Some(i);
+            }
+            // Below where it started, it is falling, not standing.
+            assert!(
+                !(below && rig.game.player().grounded && left_at.is_some_and(|at| i > at + 30)),
+                "{label}: came to rest at {}",
+                rig.feet()
+            );
+        }
+        let (left, woke) = (
+            left_at.unwrap_or_else(|| panic!("{label}: never left the ground")),
+            woke_at.unwrap_or_else(|| panic!("{label}: the fall never ended, at {}", rig.feet())),
+        );
+        let seconds = (woke - left) as f32 / TICKS_PER_SECOND as f32;
+        eprintln!("MEASURE fall from {label}: {seconds:.1} s");
+        assert!(seconds < 6.0, "{label}: a fall of {seconds} s");
+        rig.idle(30);
+        assert!(rig.stands_on(HUB_START, 60.0), "{label}: {}", rig.feet());
+    }
+}
+
+/// The wheel from the yard itself: the hook of whichever gondola is within
+/// a comfortable shot is taken, the pull ends over the gondola, and the
+/// pawn rides it all the way round, over the top and down again.
+#[test]
+fn the_wheel_is_taken_from_the_yard_and_ridden_all_the_way_round() {
+    let mut rig = Rig::new();
+    let yard = playground().station("yard").unwrap();
+    rig.stand_at(yard.feet, yard.yaw);
+    let reach = rig.reach();
+    let mut taken = None;
+    'wait: for _ in 0..(60 * TICKS_PER_SECOND) {
+        for i in 1..=WHEEL_GONDOLAS {
+            let hook = rig.where_is(&format!("gondola hook {i}"));
+            if (hook - rig.game.eye_position()).length() < 0.75 * reach {
+                taken = Some(i);
+                break 'wait;
+            }
+        }
+        rig.idle(1);
+    }
+    let i = taken.expect("a gondola's hook comes within a comfortable shot of the yard");
+    let hook = format!("gondola hook {i}");
+    let gondola = format!("gondola {i}");
+    assert!(rig.pull(&|rig| rig.where_is(&hook), 0.0), "{hook}");
+    assert!(
+        rig.land_at(&|rig| rig.where_is(&gondola), 600),
+        "{gondola}: feet at {}",
+        rig.feet()
+    );
+    let (mut lowest, mut highest) = (f32::INFINITY, f32::NEG_INFINITY);
+    // One turn takes 65,536 / WHEEL_RATE seconds (48).
+    let turn = (65_536.0 / WHEEL_RATE as f32).ceil() as usize + 2;
+    for second in 0..turn {
+        rig.idle(TICKS_PER_SECOND);
+        let now = rig.where_is(&gondola);
+        assert!(
+            rig.stands_on(now, 330.0),
+            "{gondola} {} s after landing: feet at {}, it is at {now}",
+            second + 1,
+            rig.feet()
+        );
+        lowest = lowest.min(rig.feet().z);
+        highest = highest.max(rig.feet().z);
+    }
+    assert!(
+        highest - lowest > 1.9 * WHEEL_RADIUS,
+        "all the way round: from {lowest} up to {highest}"
+    );
+    eprintln!(
+        "MEASURE wheel ride from the yard: {gondola}, from {lowest:.0} up to {highest:.0} uu"
+    );
+}
+
+/// The hook of a gondola stays right over it all the way round the wheel
+/// (it is attached to the gondola; attached to the hub it would go round
+/// the gondola once a turn and hang under it at the top).
+#[test]
+fn a_hook_stays_over_its_gondola_all_the_way_round() {
+    let mut rig = Rig::new();
+    let (mut lowest, mut highest) = (f32::INFINITY, f32::NEG_INFINITY);
+    for _ in 0..(50 * TICKS_PER_SECOND / 10) {
+        rig.idle(10);
+        for i in 1..=WHEEL_GONDOLAS {
+            let gondola = rig.where_is(&format!("gondola {i}"));
+            let (hook, rotation) = rig.transform_of(&format!("gondola hook {i}"));
+            assert!(
+                (hook - gondola - Vec3::Z * playground::RIDER_HOOK_LIFT).length() < 1.0,
+                "gondola hook {i} at {hook}, its gondola at {gondola}, after {:.1} s",
+                rig.time()
+            );
+            assert_eq!(rotation, [0; 3], "gondola hook {i} keeps level");
+            if i == 1 {
+                lowest = lowest.min(gondola.z);
+                highest = highest.max(gondola.z);
+            }
+        }
+    }
+    assert!(
+        highest - lowest > 1.9 * WHEEL_RADIUS,
+        "{lowest} to {highest}"
+    );
+}
+
+/// The wheel is boarded on foot: from the edge of its pier, a few steps
+/// onto the gondola that passes a short step below it, and the ride goes
+/// all the way round and back to the pier.
+#[test]
+fn the_wheel_is_boarded_on_foot_from_its_pier() {
+    let mut rig = Rig::new();
+    let wait_at = Vec3::new(playground::WHEEL_PIER_EDGE + 30.0, WHEEL_CENTRE.y, YARD.z);
+    rig.stand_at(wait_at, std::f32::consts::PI);
+    assert!(
+        rig.game.player().grounded && (rig.feet() - wait_at).length() < 5.0,
+        "on the pier: feet at {}",
+        rig.feet()
+    );
+    // A gondola comes down to the pier: its top is a step below the pier's
+    // edge while it passes.
+    let mut passing = None;
+    'wait: for _ in 0..(20 * TICKS_PER_SECOND) {
+        for i in 1..=WHEEL_GONDOLAS {
+            let at = rig.where_is(&format!("gondola {i}"));
+            let ahead = at.y - WHEEL_CENTRE.y;
+            if ahead > 0.0 && ahead < 150.0 && at.z < YARD.z {
+                assert!(YARD.z - at.z <= playground::WHEEL_BOARDING_STEP + 0.5);
+                passing = Some(i);
+                break 'wait;
+            }
+        }
+        rig.idle(1);
+    }
+    let gondola = format!("gondola {}", passing.expect("a gondola passes the pier"));
+    // Onto it: forward, without a jump.
+    let mut on = false;
+    let mut trace = Vec::new();
+    for tick in 0..(2 * TICKS_PER_SECOND) {
+        rig.game.player_mut().yaw = std::f32::consts::PI;
+        rig.game.player_mut().pitch = 0.0;
+        let report = rig.tick(&InputFrame {
+            move_forward: 1.0,
+            ..InputFrame::default()
+        });
+        assert!(!report.respawned);
+        let now = rig.where_is(&gondola);
+        if tick % 3 == 0 {
+            trace.push(format!(
+                "{tick}: feet {} grounded {} it {now}",
+                rig.feet(),
+                rig.game.player().grounded
+            ));
+        }
+        if rig.stands_on(now, 200.0) {
+            on = true;
+            break;
+        }
+    }
+    assert!(
+        on,
+        "{gondola}: feet at {}, it is at {}\n{}",
+        rig.feet(),
+        rig.where_is(&gondola),
+        trace.join("\n")
+    );
+    let (mut lowest, mut highest) = (f32::INFINITY, f32::NEG_INFINITY);
+    let turn = (65_536.0 / WHEEL_RATE as f32).ceil() as usize;
+    for second in 0..turn {
+        rig.idle(TICKS_PER_SECOND);
+        let now = rig.where_is(&gondola);
+        assert!(
+            rig.stands_on(now, 330.0),
+            "{gondola} {} s after boarding: feet at {}, it is at {now}",
+            second + 1,
+            rig.feet()
+        );
+        lowest = lowest.min(rig.feet().z);
+        highest = highest.max(rig.feet().z);
+    }
+    assert!(
+        highest - lowest > 1.9 * WHEEL_RADIUS,
+        "{lowest} to {highest}"
+    );
+    // Back at the bottom: off again, onto the pier.
+    for _ in 0..(3 * TICKS_PER_SECOND) {
+        let d = playground::WHEEL_BOARDING - rig.feet();
+        rig.game.player_mut().yaw = d.y.atan2(d.x);
+        rig.tick(&InputFrame {
+            move_forward: 1.0,
+            jump_pressed: false,
+            ..InputFrame::default()
+        });
+        if (rig.feet() - playground::WHEEL_BOARDING)
+            .truncate()
+            .length()
+            < 60.0
+        {
+            break;
+        }
+    }
+    rig.idle(20);
+    assert!(
+        rig.game.player().grounded && (rig.feet() - playground::WHEEL_BOARDING).length() < 120.0,
+        "back on the pier: feet at {}",
+        rig.feet()
+    );
+}
+
+/// The keyframe rewind works on the playground: it goes back to a keyframe
+/// exactly (the pawn, and everything that turns and moves), and the run
+/// goes on from there as if it had never been further.
+#[test]
+fn the_keyframe_rewind_works_on_the_playground() {
+    let forward = InputFrame {
+        move_forward: 1.0,
+        ..InputFrame::default()
+    };
+    let mut rig = Rig::new();
+    for _ in 0..(3 * TICKS_PER_SECOND) {
+        rig.tick(&forward);
+    }
+    let summary = Inspection::new(&rig.game, rig.script.as_ref(), &rig.session).summary();
+    assert!(summary.rewind_available, "the tools offer it");
+    assert!(
+        summary.rewind_keyframes >= 5,
+        "{}",
+        summary.rewind_keyframes
+    );
+    assert!(summary.rewind_seconds > 2.0, "{}", summary.rewind_seconds);
+    let now = rig.game.clock().tick();
+    rig.run(Command::Rewind);
+    let back = rig.game.clock().tick();
+    let interval = u64::from(asamu_sandbox::session::REWIND_INTERVAL_TICKS);
+    assert!(back < now && now - back <= 2 * interval, "{now} to {back}");
+    // The same run, played only as far as the keyframe.
+    let mut straight = Rig::new();
+    while straight.game.clock().tick() < back {
+        straight.tick(&forward);
+    }
+    let same = |a: &Rig, b: &Rig, when: &str| {
+        assert_eq!(
+            format!("{:?}", a.game.player()),
+            format!("{:?}", b.game.player()),
+            "{when}"
+        );
+        assert_eq!(
+            a.script.as_ref().unwrap().moved_actors(),
+            b.script.as_ref().unwrap().moved_actors(),
+            "{when}"
+        );
+    };
+    same(&rig, &straight, "at the keyframe");
+    for tick in 0..(2 * TICKS_PER_SECOND) {
+        let a = rig.tick(&forward);
+        let b = straight.tick(&forward);
+        assert_eq!(a, b, "tick {tick} after the rewind");
+    }
+    same(&rig, &straight, "two seconds on");
+    // A converted map's own limits are not changed by this: only the
+    // playground among the scene levels keeps keyframes (`tests/session.rs`,
+    // `slots_work_and_rewind_is_refused_on_a_converted_level`).
+    assert!(asamu_sandbox::session::keeps_keyframes(&rig.game));
+    // What a full ring of keyframes costs here (printed, not asserted: a
+    // time depends on the machine and the build).
+    let started = std::time::Instant::now();
+    let ring: Vec<asamu_sandbox::snapshot::SimSnapshot> = (0
+        ..asamu_sandbox::session::REWIND_KEYFRAMES)
+        .map(|i| {
+            asamu_sandbox::snapshot::SimSnapshot::capture(
+                &rig.game,
+                rig.script.as_ref(),
+                format!("keyframe {i}"),
+            )
+        })
+        .collect();
+    eprintln!(
+        "MEASURE {} keyframes of the playground: {:.1} ms",
+        ring.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// The tools list the places to go to by the stations' names, in their
+/// order, and each entry puts the pawn at its station.
+#[test]
+fn the_tools_list_the_stations_by_name() {
+    let mut rig = Rig::new();
+    let targets = rig.session.teleport_targets(&rig.game);
+    let labels: Vec<&str> = targets.iter().map(|t| t.label.as_str()).collect();
+    let mut expected = vec!["start"];
+    expected.extend(playground().stations.iter().map(|s| s.id));
+    assert_eq!(labels, expected);
+    for (target, station) in targets.iter().skip(1).zip(&playground().stations) {
+        rig.run(Command::Teleport {
+            to: target.target.clone(),
+        });
+        rig.idle(30);
+        assert!(
+            rig.game.player().grounded && (rig.feet() - station.feet).length() < 30.0,
+            "{}: feet at {}, the station is at {}",
+            target.label,
+            rig.feet(),
+            station.feet
+        );
+    }
+}
+
+/// The way to the yard on foot: from the hub's pier onto the ferry when it
+/// comes in, across with it, off onto the yard's pier and on to the yard.
+#[test]
+fn the_ferry_is_walked_onto_and_off_at_both_ends() {
+    let mut rig = Rig::new();
+    let rest = piece_location("ferry");
+    let deck = Vec3::Z * 30.0;
+    // On the hub's pier, a few steps from its edge, facing the ferry.
+    rig.stand_at(Vec3::new(-1640.0, 0.0, 0.0), std::f32::consts::PI);
+    assert!(rig.game.player().grounded, "{}", rig.feet());
+    // The ferry leaves and comes in again.
+    let (mut was_away, mut came_in) = (false, false);
+    for _ in 0..(40 * TICKS_PER_SECOND) {
+        let home = (rig.where_is("ferry") - rest).length() < 0.5;
+        if was_away && home {
+            came_in = true;
+            break;
+        }
+        was_away |= (rig.where_is("ferry") - rest).length() > 500.0;
+        rig.idle(1);
+    }
+    assert!(came_in, "the ferry comes in at the hub");
+    // Onto its deck, walking.
+    rig.walk_to(rest);
+    assert!(
+        rig.stands_on(rig.where_is("ferry") + deck, 300.0),
+        "on the deck: feet at {}, the ferry is at {}",
+        rig.feet(),
+        rig.where_is("ferry")
+    );
+    // Across with it.
+    let far = rest + FERRY_TRAVEL;
+    let mut across = false;
+    for _ in 0..(20 * TICKS_PER_SECOND) {
+        assert!(!rig.tick(&InputFrame::default()).respawned);
+        if (rig.where_is("ferry") - far).length() < 0.5 {
+            across = true;
+            break;
+        }
+    }
+    assert!(
+        across,
+        "the ferry crosses: it is at {}",
+        rig.where_is("ferry")
+    );
+    assert!(
+        rig.stands_on(far + deck, 300.0),
+        "carried across: feet at {}",
+        rig.feet()
+    );
+    // Off onto the yard's pier and on to the yard, walking.
+    rig.walk_to(YARD + Vec3::new(400.0, 0.0, 0.0));
+    assert!(
+        rig.stands_on(YARD, 900.0),
+        "on the yard: feet at {}",
+        rig.feet()
     );
 }

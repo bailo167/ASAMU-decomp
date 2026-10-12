@@ -41,7 +41,7 @@
 //! | Near chain (ahead) | Islands a sprint jump or a short grapple apart, each one higher: the warm-up |
 //! | Medium chain (right) | Islands well beyond a jump, at heights that go down and up: grapple, power jump, leap |
 //! | Far chain (left, past the runway) | Shots at the edge of the grapple's reach, then a stretch of hooks without a landing, with recharge crystals where the budget runs out |
-//! | Yard (behind) | A ferry of ours to ride there, a carousel of rocks and a big wheel with level gondolas to grapple and ride |
+//! | Yard (behind) | A ferry of ours to ride there, a carousel of rocks and a big wheel with level gondolas to grapple and ride, and a pier beside the wheel's lowest point to board it from |
 //! | Tower | Ledges a jump apart up a column, a board at the top, and a long drop into the red catch, which returns you to the hub |
 //! | Runway | A long flat straight between two launch ramps, each of which throws a sprinting pawn onto the landing beyond it |
 //!
@@ -302,6 +302,17 @@ pub fn level_label(game: &Game) -> String {
     } else {
         game.level().name.clone()
     }
+}
+
+/// The station the playground's checkpoint number `index` stands for
+/// (`None`: `game` does not run the playground, or it has no such
+/// checkpoint): the tools list the places to go to by these names.
+#[must_use]
+pub fn station_of_checkpoint(game: &Game, index: i32) -> Option<&'static Station> {
+    if !is_playground(game) {
+        return None;
+    }
+    playground().stations.get(usize::try_from(index).ok()?)
 }
 
 /// The Sandbox's name for a level the game's loader named `name`: `Some`
@@ -784,7 +795,8 @@ enum Solid {
         rate: [i32; 3],
     },
     Attached {
-        /// Scene slot of the hub.
+        /// Scene slot of what carries it: a turning hub, or (for the hook
+        /// over a gondola) the gondola, which is itself carried.
         hub: usize,
         /// Keeps its own rotation.
         level: bool,
@@ -1199,11 +1211,30 @@ pub const CAROUSEL_CENTRE: Vec3 = Vec3::new(-7000.0, -3600.0, 900.0);
 pub const CAROUSEL_RADIUS: f32 = 2000.0;
 /// Rocks on the carousel.
 pub const CAROUSEL_ROCKS: u32 = 6;
+/// Heights of the tops of the carousel's rocks from its hub's centre, UU:
+/// every other rock is a low one. The low ones go round over the landing
+/// behind the runway, which is why a rock is no deeper than
+/// [`CAROUSEL_ROCK_DEPTH`].
+pub const CAROUSEL_LOW: f32 = -500.0;
+/// See [`CAROUSEL_LOW`].
+pub const CAROUSEL_HIGH: f32 = 100.0;
+/// How far a carousel rock reaches below its top, UU: the underside of a
+/// low rock passes 290 uu over the landing behind the runway, well above
+/// the head of a pawn that stands there (`tests/playground.rs`,
+/// `what_moves_keeps_clear_of_the_places_to_stand`).
+pub const CAROUSEL_ROCK_DEPTH: f32 = 260.0;
 /// The carousel's rate, rotator units per second about the vertical: one
 /// turn in 40 s.
 pub const CAROUSEL_RATE: i32 = 1638;
+/// How far below the wheel's pier the top of a gondola is at the wheel's
+/// lowest point, UU: boarding is a short step down, and stays one for as
+/// long as the gondola is beside whoever waits there. (A gondola level with
+/// the pier at its lowest point is above it a moment later, and the pawn
+/// does not step up onto a floor that is rising past it: measured, it is
+/// dragged along the pier's edge instead.)
+pub const WHEEL_BOARDING_STEP: f32 = 14.0;
 /// Centre of the big wheel's hub, UU.
-pub const WHEEL_CENTRE: Vec3 = Vec3::new(-7000.0, 3400.0, 2700.0);
+pub const WHEEL_CENTRE: Vec3 = Vec3::new(-7000.0, 3400.0, 2700.0 - WHEEL_BOARDING_STEP);
 /// Distance of the wheel's gondolas from its axis, UU.
 pub const WHEEL_RADIUS: f32 = 2100.0;
 /// Gondolas on the wheel.
@@ -1211,6 +1242,20 @@ pub const WHEEL_GONDOLAS: u32 = 6;
 /// The wheel's rate, rotator units per second about its axle (roll): one
 /// turn in 48 s.
 pub const WHEEL_RATE: i32 = 1365;
+
+/// `x` of the edge of the wheel's pier that faces the wheel, UU: a gondola
+/// (which reaches 330 uu from the wheel's plane) passes it 20 uu away, and
+/// its flat top 35 uu away, less than a pawn is wide.
+pub const WHEEL_PIER_EDGE: f32 = -6650.0;
+/// Width of the wheel's pier, UU.
+pub const WHEEL_PIER_WIDTH: f32 = 360.0;
+/// Where to wait for a gondola: the floor point on the wheel's pier beside
+/// the wheel's lowest point, UU.
+pub const WHEEL_BOARDING: Vec3 = Vec3::new(
+    WHEEL_PIER_EDGE + 0.5 * WHEEL_PIER_WIDTH,
+    WHEEL_CENTRE.y,
+    YARD.z,
+);
 
 /// Where the ferry rests at the hub: the centre of its deck, UU.
 pub const FERRY_REST: Vec3 = Vec3::new(-2020.0, 0.0, 0.0);
@@ -1624,12 +1669,21 @@ fn build() -> Playground {
                 0.4,
                 0.03,
                 150,
-                &[(0.0, 1.0), (-70.0, 1.06), (-300.0, 0.6), (-520.0, 0.0)],
+                &[
+                    (0.0, 1.0),
+                    (-70.0, 1.06),
+                    (-170.0, 0.6),
+                    (-CAROUSEL_ROCK_DEPTH, 0.0),
+                ],
             )
         });
         for i in 0..CAROUSEL_ROCKS {
             let angle = std::f32::consts::TAU * i as f32 / CAROUSEL_ROCKS as f32;
-            let lift = if i % 2 == 0 { -500.0 } else { 100.0 };
+            let lift = if i % 2 == 0 {
+                CAROUSEL_LOW
+            } else {
+                CAROUSEL_HIGH
+            };
             let top = CAROUSEL_CENTRE
                 + v(
                     CAROUSEL_RADIUS * angle.cos(),
@@ -1686,11 +1740,12 @@ fn build() -> Playground {
             )
         });
         for i in 0..WHEEL_GONDOLAS {
-            // The first gondola starts at the bottom, level with the yard.
+            // The first gondola starts at the bottom, a short step below
+            // the yard and the wheel's pier.
             let angle = std::f32::consts::TAU * i as f32 / WHEEL_GONDOLAS as f32;
             let top =
                 WHEEL_CENTRE + v(0.0, WHEEL_RADIUS * angle.sin(), -WHEEL_RADIUS * angle.cos());
-            b.add(
+            let carrier = b.add(
                 &format!("gondola {}", i + 1),
                 gondola,
                 top,
@@ -1698,28 +1753,44 @@ fn build() -> Playground {
                 Look::Rider,
                 Some(Solid::Attached { hub, level: true }),
             );
+            // Its hook is attached to the gondola, not to the hub: attached
+            // to the hub it would go round the gondola once a turn (above
+            // it at the bottom of the wheel, under it at the top), and a
+            // pull to it would end beside or below the gondola.
             let hook = b.hook_shape(200.0, 152);
-            b.add(
-                &format!("gondola hook {}", i + 1),
-                hook,
-                top + Vec3::Z * RIDER_HOOK_LIFT,
-                [0; 3],
-                Look::Hook,
-                Some(Solid::Attached { hub, level: true }),
-            );
+            if let Some(carrier) = carrier {
+                b.add(
+                    &format!("gondola hook {}", i + 1),
+                    hook,
+                    top + Vec3::Z * RIDER_HOOK_LIFT,
+                    [0; 3],
+                    Look::Hook,
+                    Some(Solid::Attached {
+                        hub: carrier,
+                        level: true,
+                    }),
+                );
+            }
         }
     }
-    // Where to board: a step out from the yard towards the wheel's lowest
-    // point.
-    b.island(
-        "wheel step",
-        v(YARD.x, 2050.0, YARD.z),
-        360.0,
-        Look::Island,
-        160,
+    // Where to board: a pier from the yard along the wheel, beside its
+    // lowest point. The gondolas go round in the wheel's own plane and pass
+    // the pier's edge a short step below it and a step away; nothing of the
+    // wheel ever passes over the pier.
+    b.slab(
+        "wheel pier",
+        v(WHEEL_PIER_EDGE, 500.0, YARD.z - 70.0),
+        v(
+            WHEEL_PIER_EDGE + WHEEL_PIER_WIDTH,
+            WHEEL_CENTRE.y + 360.0,
+            YARD.z,
+        ),
+        Look::Paving,
+        fixed(),
     );
     b.landmark("yard landmark", YARD + v(-620.0, 0.0, 0.0), 2200.0, 3, 161);
-    b.station("wheel", v(YARD.x, 2050.0, YARD.z), 90.0, 24.0);
+    // Looking along the pier at the gondolas that come down to it.
+    b.station("wheel", WHEEL_BOARDING, 108.0, 20.0);
 
     // --- The tower and the long drop ----------------------------------------
     b.slab(

@@ -295,7 +295,7 @@ impl<'a> Inspection<'a> {
     #[must_use]
     pub fn summary(&self) -> SessionSummary {
         let session = self.session;
-        let hand_made = self.game.scene_map().is_none();
+        let hand_made = crate::session::keeps_keyframes(self.game);
         let rewind = session.rewind();
         SessionSummary {
             label: session.label(),
