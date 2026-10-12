@@ -26,7 +26,12 @@
 //! - `ASAMU_VFX_SELFTEST_PIN=1`: the pawn is kept where it was when the
 //!   button went down, at rest, for as long as it is held (the pull would
 //!   carry it to the anchor within a second or two and let go): the picture
-//!   of a grapple held from one place for seconds.
+//!   of a grapple held from one place for seconds;
+//! - `ASAMU_VFX_SELFTEST_VELOCITY=X,Y,Z`: the pawn's velocity in the frame
+//!   the button goes down, UU/s (UE axes, Z up; each component at most
+//!   20,000), and the pawn is taken off the ground: `0,0,-2500` is a grapple
+//!   fired and held while falling fast. Not with `PIN`, which keeps the pawn
+//!   at rest.
 //!
 //! This is the only place in `vfx` that writes the simulation; it never
 //! runs in normal play.
@@ -48,6 +53,9 @@ const RANGE_UU: (f32, f32) = (600.0, 1800.0);
 /// How far from a turning rock the pawn is put unless the target option
 /// says otherwise, UU.
 const STANDOFF_UU: f32 = 1200.0;
+/// The largest component `ASAMU_VFX_SELFTEST_VELOCITY` may give, UU/s (ours:
+/// far beyond anything the game reaches).
+const MAX_VELOCITY_UU: f32 = 20_000.0;
 /// Half sizes of the box that has to be free where the pawn is put, UU
 /// (ours: a little more than the pawn's collision cylinder).
 const FREE_BOX_UU: sim_glam::Vec3 = sim_glam::Vec3::new(24.0, 24.0, 48.0);
@@ -69,6 +77,17 @@ struct Options {
     hold: f32,
     target: Target,
     pin: bool,
+    velocity: Option<[f32; 3]>,
+}
+
+/// `X,Y,Z` as a velocity, UU/s; `None` when it is not one.
+fn parse_velocity(text: &str) -> Option<[f32; 3]> {
+    let mut parts = text.split(',').map(|p| p.trim().parse::<f32>().ok());
+    let v = [parts.next()??, parts.next()??, parts.next()??];
+    (parts.next().is_none()
+        && v.iter()
+            .all(|c| c.is_finite() && c.abs() <= MAX_VELOCITY_UU))
+    .then_some(v)
 }
 
 /// `MIN,MAX` as a range of distances; `None` when it is not one.
@@ -120,6 +139,7 @@ impl Options {
                 .and_then(|v| parse_target(&v))
                 .unwrap_or(Target::Around),
             pin: get("ASAMU_VFX_SELFTEST_PIN").is_some_and(|v| v.trim() == "1"),
+            velocity: get("ASAMU_VFX_SELFTEST_VELOCITY").and_then(|v| parse_velocity(&v)),
         })
     }
 }
@@ -211,6 +231,12 @@ fn drive(
         }
         if options.pin {
             test.pinned = Some(sim.game.player().position);
+        } else if let Some([x, y, z]) = options.velocity {
+            let p = sim.game.player_mut();
+            p.velocity = sim_glam::Vec3::new(x, y, z);
+            p.grounded = false;
+            p.pawn.based = false;
+            info!("vfx self-test: the pawn starts at {} uu/s", p.velocity);
         }
         pending.grapple_armed = true;
         mouse.press(MouseButton::Left);
@@ -346,8 +372,38 @@ mod tests {
                 hold: HOLD_SECONDS,
                 target: Target::Around,
                 pin: false,
+                velocity: None,
             })
         );
+    }
+
+    #[test]
+    fn a_velocity_is_three_finite_numbers() {
+        assert_eq!(parse_velocity("0, 0,-2500"), Some([0.0, 0.0, -2500.0]));
+        assert_eq!(parse_velocity("1.5,2,3"), Some([1.5, 2.0, 3.0]));
+        for bad in [
+            "",
+            "1,2",
+            "1,2,3,4",
+            "a,b,c",
+            "1,2,nan",
+            "0,0,inf",
+            "0,0,-20001",
+        ] {
+            assert_eq!(parse_velocity(bad), None, "{bad}");
+        }
+        let o = Options::read(env(&[
+            ("ASAMU_VFX_SELFTEST", "5"),
+            ("ASAMU_VFX_SELFTEST_VELOCITY", "0,0,-2500"),
+        ]))
+        .unwrap();
+        assert_eq!(o.velocity, Some([0.0, 0.0, -2500.0]));
+        let o = Options::read(env(&[
+            ("ASAMU_VFX_SELFTEST", "5"),
+            ("ASAMU_VFX_SELFTEST_VELOCITY", "fast"),
+        ]))
+        .unwrap();
+        assert_eq!(o.velocity, None);
     }
 
     #[test]
