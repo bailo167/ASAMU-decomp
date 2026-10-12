@@ -349,6 +349,13 @@ revision below 3 (the caller ignores the result in both cases). Afterwards the p
 checkpoint index (all shipped instances keep the default `Index` −1 = "fire on any load"; 1 in ParadiseCave,
 3 in BeautifulCity, 2 in Darkcave, 1 in StarHaven) [CONFIRMED (src, cdo, map)].
 
+What that load means for a level's script (when it runs within the level start, the event, variable and
+Matinee rules entry by entry, the native `SetPosition`, and the bool variables behind which the shipped
+levels put their openings, so that a load does not play them again) is in
+[KISMET_RUNTIME.md](KISMET_RUNTIME.md) §12, which also answers open question 5 below. One more fact from
+that reading: `ASAMUCheckpoint` has save and load functions for its `activated` flag but does not
+implement the save interface, so the flag is never saved [CONFIRMED (src)].
+
 ### 4.4 `TTS.bin` — `TimeTrialSavefile` (file version 3, plain)
 
 | Property | Type | Meaning |
@@ -373,7 +380,8 @@ Index i = level enum − 2 (ParadiseCave 0, BeautifulCity 1, Darkcave 2, StarHav
 | Main menu "New Game" | — | fresh `SaveGame.bin` (written from the menu world: empty checkpoint table), `GeneralSave.bin` with cleared pointer (flags kept); then opens `AG-Workshop` |
 | Level select (chapter) | — | fresh `SaveGame.bin` as above; opens that chapter's map |
 | Continue | `PlayerProgression.bin` again | — ; opens `LevelFileNames[currentLevelIndex]` |
-| Death, F7 quick-restart (`QuickLoad`: death sequence → latest checkpoint; disabled in Workshop and Epilogue and when the HUD option is off) | — | nothing (no disk access) |
+| Death, F7 quick-restart (`QuickLoad`: death sequence → latest checkpoint; disabled in Workshop and Epilogue and when the HUD option is off) | — | nothing (no disk access): the death sequence's reset resets the grapple rocks, fires the death event and moves the pawn; the call that would load the save there is commented out in the script |
+| Pause menu "restart from checkpoint" (offered while the HUD option is on, which Kismet's `SeqAct_ToggleRestartFromCheckpointOption` switches) | in Workshop and Epilogue (level index 1 and 7): `SaveGame.bin`, through `restartlevel` and the reloaded map's level start | nothing. In every other level it is the death sequence of the row above. Added 2026-10-13; the row above used to stand for the menu too, which was wrong for those two levels. CONFIRMED (src) |
 | Kismet `SeqAct_LoadGame` | `SaveGame.bin` | (not placed in any shipped map) |
 | Time-trial end (`EndTimeTrial`) | — | `TTS.bin` always (new best stored only if faster or first); all five golds → achievement → `PlayerProgression.bin` |
 | Main menu / time-trial HUD start | `TTS.bin` | — |
@@ -618,8 +626,10 @@ Real-file tests read `ASAMU_ORIGINAL_DIR` + an optional `ASAMU_ORIGINAL_SAVES` f
 3. Exact user-config ini names on Mac (game-name prefix) — check after one launch on a machine where running
    the original is acceptable, or read `appCreateIniNames` natively.
 4. Q6 (Continue after a reset) and Q8 (ability carry-over) need behavioural confirmation.
-5. How each chapter's Kismet uses the "save loaded" index (KISMET.md workstream) — determines which world
-   state a resumed checkpoint restores beyond actors.
+5. ~~How each chapter's Kismet uses the "save loaded" index~~ — answered 2026-10-13
+   (KISMET_RUNTIME.md §12): no shipped event reads the index (all seven keep `Index` −1); each guards a
+   first-start branch with a bool variable that the save holds, which is what a resumed checkpoint
+   restores beyond actors.
 6. ~~Whether the leftover console commands (6.1) are truly inert~~ — answered in the verification pass
    (STRONG: no handler in any cooked package, the executable or the ini files).
 7. On the first real `GeneralSave.bin`: confirm that `latestSaveMap` holds a chapter title (4.1; STRONG
