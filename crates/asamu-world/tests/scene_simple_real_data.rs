@@ -175,8 +175,16 @@ fn placements_by_how_the_pawn_meets_them() {
             }
         }
         let s = loaded.stats;
+        // The classes above are by the mesh. The loader also leaves out the
+        // body of a placement too small for the original to look at it
+        // (`scene::simple_body_checked`): those are counted with "none" and
+        // on their own.
         assert_eq!(
-            [s.pawn_simple, s.pawn_none, s.pawn_triangles],
+            [
+                s.pawn_simple + s.pawn_scale_skipped,
+                s.pawn_none - s.pawn_scale_skipped,
+                s.pawn_triangles
+            ],
             derived,
             "{map}: the loader's counts"
         );
@@ -189,11 +197,12 @@ fn placements_by_how_the_pawn_meets_them() {
         let own = classify(&file, &manifest, false, &mut BTreeMap::new());
         eprintln!(
             "{map:<18} {:>22} {:>22} {:>22}   persistent level by derived flags {own:?}, \
-             simple parts {}, levels {}",
+             simple parts {}, too small for their body {}, levels {}",
             format!("{expected:?}"),
             format!("{stored:?}"),
             format!("{derived:?}"),
             s.simple_parts,
+            s.pawn_scale_skipped,
             loaded.levels.len(),
         );
         // Where the two rules differ, the actor's flags are not its stored

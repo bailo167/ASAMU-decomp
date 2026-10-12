@@ -1062,3 +1062,119 @@ fn gameplay_sizes_do_not_follow_the_body() {
     let hit = sweep(&map, start, end).unwrap();
     assert!(close(hit.point(start, end).z, 744.0));
 }
+
+/// A placement whose three scales multiply to 1e-4 or less has no simple
+/// collision at all: the original's static-mesh check does not go to the
+/// body then (`UStaticMeshComponent::LineCheck` at 0x100C58AD4 to 0x100C58C95
+/// in the user's macOS executable: the lengths of the matrix's three rows,
+/// their product against the double 1e-4 at 0x1016393A0). The pawn and line
+/// traces meet nothing of it; bullet traces keep the triangles.
+///
+/// The mesh is the block `[-100, 100]² × [0, 100]` with its lower half as
+/// the body.
+///
+/// - Scale 0.05 (product 1.25e-4, above): the body's top is at 50 × 0.05 =
+///   2.5 and the box rests at 2.5 + 44.
+/// - Scale 0.04 (product 6.4e-5): nothing for the pawn or a line trace; a
+///   bullet ends on the triangles at 100 × 0.04 = 4.
+/// - Mirrored, (−0.04, 0.04, 0.04): the product's size counts, so nothing;
+///   (−0.05, 0.05, 0.05): the body again.
+/// - Turned: a rotation does not change the lengths of the rows.
+/// - Not uniform: (0.2, 0.2, 0.002) is nothing (8e-5); (10, 10, 2e-4) is the
+///   body (0.02), its top at 50 × 2e-4 = 0.01.
+/// - A row whose squared length is not above 1e-8 counts as a scale of zero
+///   (the float at 0x10163FED4): (100, 100, 5e-5) is 20,000 uu wide, its
+///   scales multiply to 0.5, and it is still nothing.
+/// - A mesh that sends the pawn to its triangles is not concerned: at 0.04
+///   the box rests on the triangles at 4 + 44.
+#[test]
+fn a_very_small_placement_has_no_simple_collision() {
+    let mut m = MeshFixtures::new();
+    let lo = Vec3::new(-100.0, -100.0, 0.0);
+    let (v, t) = box_mesh(lo, Vec3::new(100.0, 100.0, 100.0));
+    let (hv, ht) = box_mesh(lo, Vec3::new(100.0, 100.0, 50.0));
+    m.add("Pkg.Meshes.Block", MAP, v.clone(), t.clone());
+    m.add_convex("Pkg.Meshes.Block", &hv, &ht);
+    m.add("Pkg.Meshes.BlockTri", MAP, v, t);
+    m.add_convex("Pkg.Meshes.BlockTri", &hv, &ht);
+    m.set_switches("Pkg.Meshes.BlockTri", false, false);
+    let place = |mesh: &str, scale: Vec3, rotation: [i32; 3]| {
+        let mut s = SceneFixture::new(MAP, -5000.0);
+        s.static_mesh(
+            mesh,
+            Place {
+                location: Vec3::ZERO,
+                rotation,
+                scale,
+            },
+        );
+        load(&s, &m)
+    };
+    let flat = [0; 3];
+    for (scale, rotation, rest) in [
+        (Vec3::splat(0.05), flat, Some(46.5)),
+        (Vec3::splat(0.04), flat, None),
+        (Vec3::new(-0.04, 0.04, 0.04), flat, None),
+        (Vec3::new(-0.05, 0.05, 0.05), flat, Some(46.5)),
+        (Vec3::splat(0.04), [3000, 7000, -5000], None),
+        (Vec3::new(0.2, 0.2, 0.002), flat, None),
+        (Vec3::new(10.0, 10.0, 2.0e-4), flat, Some(44.01)),
+        (Vec3::new(100.0, 100.0, 5.0e-5), flat, None),
+    ] {
+        let map = place("Pkg.Meshes.Block", scale, rotation);
+        assert!(map.warnings.is_empty(), "{scale}: {:?}", map.warnings);
+        let s = map.stats;
+        match rest {
+            Some(z_expected) => {
+                assert_eq!(
+                    (
+                        s.pawn_simple,
+                        s.pawn_none,
+                        s.pawn_scale_skipped,
+                        s.simple_parts
+                    ),
+                    (1, 0, 0, 1),
+                    "{scale}"
+                );
+                let (z, hit) = drop_at(&map, 0.0, 0.0).unwrap();
+                assert!((z - z_expected).abs() < 1.0e-4, "{scale}: {z}");
+                assert_eq!(hit.kind, PrimitiveKind::SimpleHull);
+            }
+            None => {
+                assert_eq!(
+                    (
+                        s.pawn_simple,
+                        s.pawn_none,
+                        s.pawn_scale_skipped,
+                        s.simple_parts
+                    ),
+                    (0, 1, 1, 0),
+                    "{scale}"
+                );
+                assert_eq!(drop_at(&map, 0.0, 0.0), None, "{scale}");
+                assert_eq!(
+                    trace_down(&map, 0.0, 0.0, QueryFilter::LINE),
+                    None,
+                    "{scale}"
+                );
+                // Only the triangles are placed, for bullets.
+                assert_eq!(map.collision.statics().len(), 1);
+                assert_eq!(map.collision.statics()[0].kind, PrimitiveKind::TriangleMesh);
+            }
+        }
+    }
+    // A bullet at scale 0.04 ends on the triangles' top.
+    let map = place("Pkg.Meshes.Block", Vec3::splat(0.04), flat);
+    let (z, hit) = trace_down(&map, 0.0, 0.0, QueryFilter::TRACE).unwrap();
+    assert!(close(z, 4.0), "{z}");
+    assert_eq!(hit.kind, PrimitiveKind::TriangleMesh);
+    // The pawn's route to the triangles does not depend on the scale.
+    let map = place("Pkg.Meshes.BlockTri", Vec3::splat(0.04), flat);
+    assert_eq!(
+        (map.stats.pawn_triangles, map.stats.pawn_scale_skipped),
+        (1, 0)
+    );
+    let (z, hit) = drop_at(&map, 0.0, 0.0).unwrap();
+    assert!(close(z, 48.0), "{z}");
+    assert_eq!(hit.kind, PrimitiveKind::TriangleMesh);
+}

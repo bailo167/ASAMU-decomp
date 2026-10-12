@@ -80,7 +80,8 @@ pub struct Body {
     /// Spheres and capsules: shapes that never stop a swept box and that
     /// zero-extent traces cannot be tested against here.
     pub untraced: usize,
-    /// Shapes that could not be used (no vertex, no size).
+    /// Shapes that could not be used (no vertex, no size, or neither a solid
+    /// nor a surface).
     pub skipped: usize,
 }
 
@@ -152,6 +153,19 @@ pub fn build_body(
             .map(|v| Vec3::from_array(*v))
             .collect();
         match builder.add_convex_hull(vertices, element_triangles(shape), &face, &edge) {
+            // An element that gives no solid (no usable face direction, or
+            // more vertices or directions than a solid may hold) and has no
+            // surface either would be placed as loose points: a box would
+            // pass between them without a word. It is left out and counted,
+            // so the loader says so. With a surface it stays and is swept
+            // triangle by triangle. No element of the original is either
+            // (the largest has 79 vertices and each has a face direction).
+            Some(mesh)
+                if shape.face_triangles.is_empty()
+                    && builder.mesh(mesh).is_none_or(|m| m.hull().is_none()) =>
+            {
+                body.skipped += 1;
+            }
             Some(mesh) => body.parts.push(BodyPart {
                 mesh,
                 local: Affine::IDENTITY,
@@ -227,6 +241,39 @@ mod tests {
                 hull.edge_directions(),
                 [glam::DVec3::X, glam::DVec3::Y, glam::DVec3::Z]
             );
+        }
+    }
+
+    /// An element without a surface is kept when its lists make a solid and
+    /// left out (and counted) when they do not: without a face direction,
+    /// or with more vertices than a solid may hold, it would be loose
+    /// points.
+    #[test]
+    fn an_element_that_is_neither_a_solid_nor_a_surface_is_left_out() {
+        let mut bare = tetra();
+        bare.face_triangles.clear();
+        let mut no_directions = bare.clone();
+        no_directions.face_normal_directions.clear();
+        no_directions.edge_directions.clear();
+        let mut cloud = bare.clone();
+        cloud.vertices = (0..1000)
+            .map(|i| [i as f32, (i * 7 % 13) as f32, (i * 3 % 11) as f32])
+            .collect();
+        // With its surface an element without directions is still a solid
+        // (the directions then come from the triangles).
+        let mut surface_only = tetra();
+        surface_only.vertices.truncate(4);
+        surface_only.face_normal_directions.clear();
+        surface_only.edge_directions.clear();
+        let mut b = CollisionSceneBuilder::new();
+        let shapes = SimpleCollision {
+            convex: vec![bare, no_directions, cloud, surface_only],
+            ..SimpleCollision::default()
+        };
+        let body = build_body(&mut b, &shapes, &mut |_| true).unwrap();
+        assert_eq!((body.parts.len(), body.skipped), (2, 2));
+        for part in &body.parts {
+            assert!(b.mesh(part.mesh).unwrap().hull().is_some());
         }
     }
 

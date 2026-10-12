@@ -60,6 +60,20 @@
 //! all. [`LoadStats`] counts the pawn-blocking components of each kind
 //! (`pawn_simple`, `pawn_triangles`, `pawn_none`).
 //!
+//! **A placement that is very small has no simple collision at all.** Before
+//! it hands a trace to the body, the original's static-mesh check takes the
+//! lengths of the three rows of the component's matrix as the placement's
+//! scale, and skips the body when their product is not above 1e-4
+//! ([`simple_body_checked`]; in the user's macOS executable at 0x100C58AD4
+//! to 0x100C58C95 of `UStaticMeshComponent::LineCheck`, the threshold is the
+//! double at 0x1016393A0, CONFIRMED by reading it). Uniformly that is a scale
+//! of 0.0464 or less. The pawn and line traces then meet nothing of such a
+//! placement; bullet traces still go to its triangles. 7 pawn-blocking
+//! placements of the shipped game are that small (4 in AG-ParadiseCave: two
+//! lanterns and two poles at 0.027 to 0.042; 3 in AG-IceCave: a rock at
+//! 0.0116), and the next smallest product is 2.9e-4.
+//! `LoadStats::pawn_scale_skipped` counts them (they are in `pawn_none`).
+//!
 //! Every instance placed from converted data (triangles, body shapes,
 //! volume hulls) is under [`crate::collision::NativeRule`]: the box is swept
 //! with the original's own rule for leaving separating axes out, which
@@ -872,8 +886,14 @@ pub struct LoadStats {
     /// `false`.
     pub pawn_triangles: usize,
     /// ... and not at all: the box switch is on and the mesh has no body, or
-    /// a body without a shape a swept trace can hit.
+    /// a body without a shape a swept trace can hit, or the placement is too
+    /// small for the original to look at its body
+    /// ([`simple_body_checked`]).
     pub pawn_none: usize,
+    /// ... of `pawn_none`: components whose mesh has a body the pawn would
+    /// meet, placed at a scale whose product is not above
+    /// [`SIMPLE_MIN_SCALE_PRODUCT`].
+    pub pawn_scale_skipped: usize,
     /// ... at the mesh's triangles only because the simple-collision data is
     /// missing (a mesh manifest older than version 2, or an unreadable
     /// shapes file): approximate.
@@ -1481,6 +1501,44 @@ pub fn mesh_routes(record: Option<&SimpleCollisionEntry>) -> MeshRoutes {
     }
 }
 
+/// The product of a placement's three scales at or below which the original
+/// does not test a static mesh's simple body at all (the double at
+/// 0x1016393A0 in the user's macOS executable, compared at 0x100C58C8D).
+pub const SIMPLE_MIN_SCALE_PRODUCT: f64 = 1.0e-4;
+
+/// Whether the original tests the simple body of a static mesh placed by
+/// `to_world` (the component's `LocalToWorld`).
+///
+/// `UStaticMeshComponent::LineCheck` separates the component's matrix into
+/// rows of length one and a scale before it calls the body's check
+/// (0x100C58AD4 to 0x100C58C95 in the user's macOS executable, CONFIRMED by
+/// reading it): the scale on an axis is the length of that row, or zero when
+/// the row's squared length is not above 1e-8 (the float at 0x10163FED4);
+/// and when the absolute product of the three is not above
+/// [`SIMPLE_MIN_SCALE_PRODUCT`] the body is not tested: the trace, with or
+/// without an extent, hits nothing of this component on the simple path.
+/// Mirroring does not enter (the lengths are positive; the mirror stays in
+/// the rows).
+///
+/// The lengths and the product are computed in `f32` in the original's
+/// order, as it does.
+#[must_use]
+pub fn simple_body_checked(to_world: &Affine) -> bool {
+    let scale = |row: glam::DVec3| {
+        let (x, y, z) = (row.x as f32, row.y as f32, row.z as f32);
+        let squared = z * z + (y * y + x * x);
+        // 1e-8 as the original's float holds it.
+        if squared > 1.0e-8_f32 {
+            squared.sqrt()
+        } else {
+            0.0
+        }
+    };
+    let [s0, s1, s2] = to_world.rows.map(scale);
+    let product = (s1 * s0 * s2).abs();
+    f64::from(product) > SIMPLE_MIN_SCALE_PRODUCT
+}
+
 /// `bEnabled` of a volume that has that switch (`Engine.DynamicBlockingVolume`
 /// and anything derived from it: the only blocking volumes with the
 /// property), else `None`.
@@ -1789,6 +1847,20 @@ fn component_placements(
              the pawn, which is approximate"
         ));
     }
+    // A placement too small for the original to look at its body: both
+    // routes to the body lead to nothing (bullet traces keep the triangles).
+    let mut scale_skipped = false;
+    if !simple_body_checked(&to_world) {
+        if routes.pawn == TraceRoute::Body {
+            routes.pawn = TraceRoute::Nothing;
+            // Counted below only when the body has a shape the pawn would
+            // have met.
+            scale_skipped = pawn && cache.record(key).is_some_and(|r| r.convex + r.boxes > 0);
+        }
+        if routes.line == TraceRoute::Body {
+            routes.line = TraceRoute::Nothing;
+        }
+    }
     let needs_body =
         (pawn && routes.pawn == TraceRoute::Body) || (traces && routes.line == TraceRoute::Body);
     let body = if needs_body {
@@ -1814,7 +1886,12 @@ fn component_placements(
         stats.pawn_components += 1;
         match routes.pawn {
             TraceRoute::Body if !parts.is_empty() => stats.pawn_simple += 1,
-            TraceRoute::Body | TraceRoute::Nothing => stats.pawn_none += 1,
+            TraceRoute::Body | TraceRoute::Nothing => {
+                stats.pawn_none += 1;
+                if scale_skipped {
+                    stats.pawn_scale_skipped += 1;
+                }
+            }
             TraceRoute::Triangles if routes.recorded => stats.pawn_triangles += 1,
             TraceRoute::Triangles => stats.pawn_approximate += 1,
         }
