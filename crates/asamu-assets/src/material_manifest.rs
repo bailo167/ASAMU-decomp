@@ -1053,8 +1053,8 @@ mod tests {
         let plain = r#"{"uv_channel": 0, "component": "u", "scale": 1, "offset": 0, "power": 1}"#;
         for (factors, drawn) in [
             (plain.to_owned(), true),
-            (vec![plain; MAX_GRADIENT_FACTORS].join(","), true),
-            (vec![plain; MAX_GRADIENT_FACTORS + 1].join(","), false),
+            ([plain; MAX_GRADIENT_FACTORS].join(","), true),
+            ([plain; MAX_GRADIENT_FACTORS + 1].join(","), false),
             (String::new(), false),
             (plain.replace("\"scale\": 1", "\"scale\": 1e39"), false),
             (plain.replace("\"power\": 1", "\"power\": -2"), false),

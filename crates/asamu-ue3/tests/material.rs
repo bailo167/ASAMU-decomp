@@ -1847,7 +1847,7 @@ fn an_opacity_built_from_depth_alone() {
     assert!(o.resolved);
     assert_eq!(o.value[0], 0.0, "{:?}", a.notes);
     assert_eq!(a.dropped.get("opacity"), Some(&vec!["depth"]));
-    assert!(a.dropped.get("emissive").is_none());
+    assert!(!a.dropped.contains_key("emissive"));
     assert_eq!(a.emissive.value, [0.25, 1.5, 4.0, 1.0]);
 
     // The depth alone as the opacity: unresolved, and the reason is kept.
@@ -2047,7 +2047,7 @@ fn coordinates_from_components() {
     let t = a.base_color.texture.as_ref().unwrap();
     assert_eq!(t.uv.scale, [3.0, 1.0]);
     assert_eq!(t.uv.offset, [0.0, 0.0]);
-    assert!(a.dropped.get("base_color").is_none(), "{:?}", a.notes);
+    assert!(!a.dropped.contains_key("base_color"), "{:?}", a.notes);
     let o = a.opacity.as_ref().unwrap().texture.as_ref().unwrap();
     assert_eq!(o.texture.as_deref(), Some("Mats.M_One.F_Tex"));
     assert_eq!(o.uv.scale, [0.0, 1.0], "{:?}", a.notes);

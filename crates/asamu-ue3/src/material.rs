@@ -1828,17 +1828,31 @@ fn uv_axis(uv: &UvTransform, component: usize) -> Option<GradientFactor> {
     })
 }
 
-/// A term as one coordinate axis for `AppendVector`: a constant (`None`
-/// axis) or a plain single-factor gradient.
-fn append_axis(t: &Term) -> Option<(Option<(i32, &'static str)>, f32, f32)> {
+/// A term as one coordinate axis for `AppendVector`: `scale * coordinate +
+/// offset` along `source` (a UV channel and `"u"` or `"v"`), or a constant
+/// (no source, scale 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Axis {
+    source: Option<(i32, &'static str)>,
+    scale: f32,
+    offset: f32,
+}
+
+/// The axis a term is, when it is a constant or a plain single-factor
+/// gradient.
+fn append_axis(t: &Term) -> Option<Axis> {
     match t {
-        Term::Const(v, 1) => Some((None, 0.0, v[0])),
+        Term::Const(v, 1) => Some(Axis {
+            source: None,
+            scale: 0.0,
+            offset: v[0],
+        }),
         Term::Grad(g) if g.n == 1 => match g.factors.as_slice() {
-            [f] if f.power == 1.0 => Some((
-                Some((f.uv_channel, f.component)),
-                f.scale * g.value[0],
-                f.offset * g.value[0],
-            )),
+            [f] if f.power == 1.0 => Some(Axis {
+                source: Some((f.uv_channel, f.component)),
+                scale: f.scale * g.value[0],
+                offset: f.offset * g.value[0],
+            }),
             _ => None,
         },
         _ => None,
@@ -2313,19 +2327,19 @@ impl Eval<'_, '_> {
                         // Coordinates put together from their components:
                         // U from a value along u (or a constant), V from a
                         // value along v (or a constant), of one channel.
-                        (Some((ua, us, uo)), Some((va, vs, vo)))
-                            if (ua.is_some() || va.is_some())
-                                && ua.is_none_or(|(_, c)| c == "u")
-                                && va.is_none_or(|(_, c)| c == "v")
-                                && match (ua, va) {
+                        (Some(u), Some(v))
+                            if (u.source.is_some() || v.source.is_some())
+                                && u.source.is_none_or(|(_, c)| c == "u")
+                                && v.source.is_none_or(|(_, c)| c == "v")
+                                && match (u.source, v.source) {
                                     (Some((x, _)), Some((y, _))) => x == y,
                                     _ => true,
                                 } =>
                         {
                             Term::Uv(UvTransform {
-                                channel: ua.or(va).map_or(0, |(c, _)| c),
-                                scale: [us, vs],
-                                offset: [uo, vo],
+                                channel: u.source.or(v.source).map_or(0, |(c, _)| c),
+                                scale: [u.scale, v.scale],
+                                offset: [u.offset, v.offset],
                                 ..UvTransform::default()
                             })
                         }
