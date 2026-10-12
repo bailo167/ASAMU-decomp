@@ -16,6 +16,8 @@
 //! the same Continue on screen. A developer's aid; the folder is user-local
 //! data and never part of the repository.
 
+#![allow(clippy::unwrap_used)]
+
 use std::path::PathBuf;
 
 use asamu_game::asamu_kismet::{Output, ToggleMode, VarState};
