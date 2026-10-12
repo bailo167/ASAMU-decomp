@@ -86,10 +86,13 @@ Read in `FExponentialHeightFogSceneInfo::FExponentialHeightFogSceneInfo` (@0x100
   (`x = 0.999995` when `cos θ < −0.99999`). The code uses the natural logarithm with a log10(2) numerator
   (constants @0x10168ffec…0x10168fff8; the call at 0x1003bb543 goes to the `_logf` stub although `_log10f` is also
   imported); we reproduce it as it is.
-- The fog vector handed to the shader is a light direction negated, from the first light of one particular type
-  in the scene's light list, or `(0, 0, 1)` when there is none. Which type: TENTATIVE (we use the first enabled
-  dominant directional light, else any directional light — the fog is then brighter towards the sun, which matches
-  the colour names).
+- The fog vector handed to the shader is a light direction negated: that of the first light in the scene's light
+  list whose type is 3, or `(0, 0, 1)` when there is none. Type 3 is the dominant directional light (CONFIRMED:
+  the value `UDominantDirectionalLightComponent::GetLightType` returns; an ordinary directional light is 2). So a
+  level without a dominant directional light — AG-ParadiseCave, AG-BeautifulCity — has its fog brightest straight
+  up, towards the inscattering colour, and darkest downwards. The runtime does the same (it used to fall back to
+  an ordinary directional light; no shipped map with height fog has one without a dominant light, so no picture
+  changed).
 - Pixel shader, for the vector `R` from the eye to the pixel (length `d`, vertical part `z`, with `|z| ≤ 0.01`
   replaced by 0.01): line factor `(1 − 2^(−falloff·z)) / (falloff·z)`; integral = eye density × line factor ×
   `max(d − StartDistance, 0)`; scene transmittance `t = max(clamp(2^(−integral)), 1 − FogMaxOpacity)`;
@@ -103,7 +106,7 @@ Read in `FExponentialHeightFogSceneInfo::FExponentialHeightFogSceneInfo` (@0x100
 Bevy's `DistanceFog` only depends on distance, so it cannot reproduce the height falloff (fog that thickens below
 the camera, a clear sky above). The runtime draws the fog as its own full-screen pass (`apps/asamu/src/post/
 height_fog.wgsl`, reference maths and tests in `post/ue3.rs`, `HeightFog`) with exactly the evaluation above, on
-the player camera and the screenshot camera; it replaces the old placeholder `DistanceFog`. Our approximations:
+the player camera and the screenshot camera. Our approximations:
 
 - colours are scaled from UE3 scene units to render radiance by `lux_per_brightness · exposure / π` (the factor
   the light and lightmap mapping implies; `post.rs`, `render_per_ue`);
@@ -111,22 +114,151 @@ the player camera and the screenshot camera; it replaces the old placeholder `Di
 - with MSAA the depth of sample 0 is used; translucent surfaces receive the fog of what is behind them (UE3 fogs
   translucency per vertex).
 
-## 3. Fog volumes — data CONFIRMED, rendering not done
+## 3. Fog volumes
+
+### Data — CONFIRMED
 
 Fog volume actors (`FogVolumeConstantDensityInfo`, `FogVolumeLinearHalfspaceDensityInfo`) carry a density
 component and an automatic mesh component (`EngineMeshes.Cube`, whose bounds are ±128 UU — meshes manifest)
 scaled to the volume. The export (`atmosphere.fog_volumes`) has the component values (`Density`; or
-`HalfspacePlane` + `PlaneDistanceFactor`; `bEnabled`, `MaxDistance`, `ApproxFogLightColor`,
-`bAffectsTranslucency`), the fog material's own vector/scalar parameters and the mesh matrix. All seven
-AG-Darkcave volumes are linear half-space volumes with a horizontal plane at their own height,
-`PlaneDistanceFactor` 0.1 and a black `EmissiveColor`: dark mist that thickens below each plane. The stored plane
-has normal (0, 0, 1) and `W` = −(actor height) (all seven), i.e. it is kept for an `n·x + W` evaluation, not as
-UE3's usual `n·x = W` (sign convention CONFIRMED from the data; how the shader uses it UNKNOWN). The AG-StarHaven
-volume is disabled.
+`HalfspacePlane` + `PlaneDistanceFactor`; `bEnabled`, `StartDistance`, `MaxDistance`, `SimpleLightColor`,
+`ApproxFogLightColor`, `bAffectsTranslucency`), the fog material's own vector/scalar parameters and the mesh matrix.
 
-How the original integrates the density is in material-based shaders (`TFogIntegralPixelShader<…Policy>`,
-`FFogVolumeApplyPixelShader`, whose code lives in the material shader caches, not the global one): UNKNOWN. The
-runtime does not draw fog volumes yet.
+| Map | Volume | Density function | Colour (linear) | Box (full size, UU) | Distances (UU) |
+|---|---|---|---|---|---|
+| AG-Workshop, AG-Epilogue, ASAMUFrontEndMap | `…ConstantDensityInfo_3` | constant, `Density` 3·10⁻⁵ | (0.5, 0.5, 0.7) | 2,582 × 2,582 × 1,024 | max 65,535 |
+| | `…ConstantDensityInfo_0` | constant, 7·10⁻⁵ | (0.5, 0.5, 0.7) | 1,466 × 2,873 × 620 | max 65,535 |
+| AG-ParadiseCave | `…ConstantDensityInfo_1` | constant, 3·10⁻⁶ | (0.434, 0.7, 0.527) | 235,995 × 208,024 × 56,612 (the whole level) | max 65,535 |
+| AG-BeautifulCity | `…ConstantDensityInfo_0` | constant, 10⁻⁶ | (0.148, 0.125, 0.221) | 10,080,180 cubed | start 30,000, max 65,535 |
+| AG-Darkcave | seven `…LinearHalfspaceDensityInfo` | half-space, `PlaneDistanceFactor` 0.1 | black | from 3,600 to 413,000 across | max 65,535 |
+| AG-StarHaven | `…ConstantDensityInfo_0` | constant, 10⁻⁶, **`bEnabled` false** | (0.7, 0.6, 0.489) | — | — |
+| AG-IceCave | `…ConstantDensityInfo_0` | constant, 4·10⁻⁶ | (0.5, 0.5, 0.7) (engine material) | 476,791 × 229,209 × 138,601 | start 20,000, max 65,535 |
+| | `…LinearHalfspaceDensityInfo_2` | half-space, 6·10⁻⁶ | (0.5, 0.5, 0.7) (engine material) | | max 650,000 |
+| | `…LinearHalfspaceDensityInfo_0`, `_8`, `_4` | half-space, 7·10⁻⁴, 0.03, 4·10⁻⁴ | (0.310, 0.310, 0.597) | | max 65,535 |
+
+- Every volume is shaped by its own cube. `FogVolumeActors` (other actors whose meshes shape a volume) is empty
+  everywhere.
+- The stored half-space plane has a vertical normal in all eleven cases, and its `W` is minus the actor's height
+  (also where the normal points down, `…HalfspaceDensityInfo_4` of AG-IceCave).
+- No level script touches a fog volume: no Kismet object and no Matinee track of any map names one (search of the
+  converted `kismet/` and `matinee/` data for the actor names; AG-IceCave's Kismet does name its
+  `ExponentialHeightFog_0`, which is the height fog, not handled here). The volumes are static: what `bEnabled`
+  says at load is what the level shows.
+- The actors inherit `bHidden = true` from `Engine.Info`; only AG-ParadiseCave's stores `bHidden = false`. That
+  makes no difference in the original (next section).
+
+### What the original does
+
+Read in the unstripped Mac executable (`objdump` of the named functions; addresses below) and in the GLSL of the
+fog volume material's shaders in `RefShaderCache-PC-OpenGL.upk` (decompressed locally with `asamu-inspect
+decompress`; the apply shader is the one small pixel shader that reads one texture and ends in a base-2
+exponential, and the three integral shaders are stored right behind it, one per density policy named in that
+cache: constant, linear half-space, sphere).
+
+**The mesh is the volume's bounds, never a surface — CONFIRMED.**
+- The mesh component template (`Default__FogVolumeDensityInfo.AutomaticMeshComponent0`) has
+  `bIgnoreOwnerHidden = true`, and `UPrimitiveComponent::ShouldComponentAddToScene` (@0x100535390) adds a component
+  of a hidden owner exactly when that flag is set. So the cube of every volume is in the scene, whatever the
+  actor's `bHidden`.
+- `UFogVolumeDensityComponent::Attach` (@0x1003c2390) does nothing more when `bEnabled` is clear. Otherwise it puts
+  the fog material on the mesh — after writing the component's `SimpleLightColor` into the parameter
+  `EmissiveColor` when the material is an instance — and registers the mesh with the scene as that component's fog
+  volume (`FScene::AddFogVolume`), then the meshes of `FogVolumeActors` (`AddFogVolumeComponents`, @0x1003c1e90).
+- A translucent mesh whose material is marked for fog volumes is drawn by `RenderFogVolume` (@0x1003c8b00), which
+  looks the mesh up among the scene's fog volumes and draws the two steps below. What it does when the mesh is not
+  registered (a disabled volume) was not traced: TENTATIVE that nothing is drawn.
+- `CreateFogVolumeDensityInfo` makes no volume when the density (`PlaneDistanceFactor` for a half-space) is not
+  positive (seen in the half-space variant, @0x1003c3150).
+- The shipped configuration has `FogVolumes=True` (`BaseSystemSettings.ini`, the platform file).
+
+**Two steps per volume — CONFIRMED for the blend states and the face signs, STRONG for the shader reading.**
+1. *Integral.* The volume's faces are drawn into a buffer of their own with additive blending. The pixel shader
+   writes the density integrated from the eye to that face, times −1 for a front face and +1 for a back face (a
+   two-entry table, @0x101663ff0), so the buffer ends up with back minus front: the density along the part of the
+   view ray that is inside the mesh. From inside the volume there is no front face and the integral starts at the
+   eye.
+2. *Apply.* The mesh is drawn again; the shader outputs the material's emissive colour and, as alpha,
+   `clamp(2^(−integral))`. The blend is `source × (1 − alpha) + destination × alpha`
+   (`TStaticBlendState<BO_Add, BF_InverseSourceAlpha, BF_SourceAlpha, …>`): **scene × T + colour × (1 − T)** with
+   **T = 2^(−integral)**.
+
+**The integrals.** Both shaders first choose a view depth `d`: the face's own depth, but never more than the
+scene's depth (four neighbouring depth samples, each limited to `MaxDistance`, averaged) and never more than
+65,535 UU (a constant of the shader, whatever `MaxDistance` is).
+- *Constant density*: `Density × max(d − StartDistance, 0)`. The measure is view depth, not ray length: towards
+  the screen edges the same depth is a longer ray, and the original ignores that.
+- *Linear half-space*: the point at depth `d` on the pixel's ray is rebuilt in world space, and the density is
+  integrated along the straight line from the eye to it in closed form: no fog above the plane, and under it a
+  density of `PlaneDistanceFactor × 10⁻⁴` per UU of depth under the plane (the shader's constant is −0.00005,
+  i.e. −½ · 10⁻⁴; a 10⁻⁴ is added to the divisor so that a level ray stays finite). `StartDistance` is not used.
+  A point `p` is `HalfspacePlane.XYZ · p + HalfspacePlane.W` above the plane.
+  `UFogVolumeLinearHalfspaceDensityComponent::SetParentToWorld` (@0x1003c30a0) sets the normal to the component's
+  normalised Z axis and `W` to minus the origin's height — right for a level plane only (every shipped one is
+  level; the one that points down in AG-IceCave therefore has its plane at minus its own height, and we evaluate
+  what the engine evaluates). `GetSecondDensityFunctionParameters` (@0x1003c61b0) moves `W` into the view's
+  translated space.
+- The scene info (`FFogVolumeDensitySceneInfo`, @0x1003c56b0, and the per-class constructors behind it) holds
+  `StartDistance`, `MaxDistance`, `bAffectsTranslucency`, `ApproxFogLightColor`, the bounds, and the density
+  parameter. `GetMaxIntegral` is the density × 10⁶ (constant) or the factor × 10⁵ (half-space): a scale for the
+  stored integral, with no effect on the result.
+- Spherical and cone volumes: in no map; not read.
+
+**Order — CONFIRMED.** The height fog pass (`FSceneRenderer::RenderFog`, @0x1003bb6b0) runs on the opaque scene of
+the world depth group; fog volumes are translucent primitives and are blended afterwards, over the height-fogged
+scene.
+
+**The colour.** The material's `EmissiveColor`. The engine overwrites it with `SimpleLightColor` when a volume
+attaches, in actor order, so the last volume on a shared instance decides; in the shipped maps the cooked value of
+every instance already is that colour (checked by `fog_volumes::tests::the_real_levels_fog_volumes`), and the two
+AG-IceCave volumes on the engine's own material have its default, (0.5, 0.5, 0.7).
+
+### Runtime mapping (ours)
+
+- **No surface.** `asamu-assets` never turns the mesh of a `FogVolume*DensityInfo` actor into a draw
+  (`scene.rs`, counted in `stats.fog_volume_meshes`). Before, the actor's `bHidden` decided, which let exactly one
+  volume through: AG-ParadiseCave's cube, drawn with its unlit additive fog material. From inside that cube
+  nothing of it was visible (a one-sided surface seen from behind); it was a wrong picture waiting for a camera
+  outside it.
+- **The volume.** `apps/asamu/src/fog_volumes.rs` builds each enabled volume from the scene data
+  (`FogVolume::from_info`) and the fog pass (`post/height_fog.wgsl`, prefixed with `fog_volumes.wgsl`) blends them
+  per pixel after the height fog, in the original's order: for the pixel's ray, where it enters and leaves the
+  volume's box (the box of the mesh's bounds: exact for the cube) stands for the front and back faces, and the
+  integrals above are evaluated at those two depths, limited by the scene's depth, `MaxDistance` and 65,535 UU.
+  The camera inside a volume, outside it, or in several at once are all the same formula (inside, the front term is
+  zero). For a camera inside a constant-density volume this is an exponential distance fog of that density, up to
+  the volume's far side. Several volumes are blended one after the other, the farthest centre first (the
+  original sorts them as translucent primitives; TENTATIVE where two overlap).
+- Colours are scaled like the height fog's (`render_per_ue`). At most eight volumes reach the shader (AG-Darkcave
+  has seven); with more, the ones nearest the camera are kept.
+- `--no-fog` and `ASAMU_POST=no-fog` turn the volumes off together with the height fog.
+- Our approximations: the pixel's own depth instead of the average of four neighbours; translucent surfaces get
+  the fog of what is behind them; spherical and cone volumes and `FogVolumeActors` shapes are not drawn (the log
+  says so if a scene has one).
+- The invented distance fog that used to stand in for the height fog (`converted.rs`, a grey-blue linear ramp
+  sized from the level) is gone: fog comes from the level's data only. A scene converted before the `atmosphere`
+  block existed has no fog until it is converted again.
+
+### How much fog that is — from the data
+
+Opacity `1 − 2^(−integral)` of the volume's colour:
+
+| Map | Where | Opacity |
+|---|---|---|
+| AG-ParadiseCave | inside the level-wide volume, by view depth | 0.02 % at 100 UU, 1.0 % at 5,000, 4.1 % at 20,000, at most 12.7 % (65,535) |
+| AG-Workshop / AG-Epilogue | through a room volume | 5 % and 13 % along the longest edge, 8 % and 15 % corner to corner |
+| AG-BeautifulCity | beyond 30,000 UU | at most 2.4 % |
+| AG-IceCave | constant volume beyond 20,000 UU | at most 11.9 % |
+| AG-Darkcave | black; 500 UU under a plane, 1,000 UU of level ray | integral 5: 97 % black |
+
+The volumes of the first four are a faint veil in the distance. AG-Darkcave's are what the data says they are:
+pits that go black a few hundred UU under each plane.
+
+### The first-person hand — CONFIRMED
+
+The hand is not fogged in the original, and stays unfogged in ours (it is drawn by an overlay camera after the
+fog pass). `FSceneRenderer::RenderFog` returns at once for every depth priority group but the world's (its first
+comparison), and the hand's mesh component (`asamu.Default__GrappleGun.FirstPersonMesh`) is in
+`SDPG_Foreground`, which is drawn after the world group and its translucency, fog volumes included.
 
 ## 4. Post-process settings and volumes
 
@@ -290,7 +422,7 @@ with a later order and no clear) to clear to transparent and blend over the wind
 Checked on a window capture: scene, hands and HUD composite correctly.
 
 `ASAMU_POST=off` restores Bevy's default look for comparisons; `ASAMU_POST=no-fog,no-bloom,no-lut,no-tonemap`
-leaves out single parts; `--no-fog` disables the fog pass. When no atmosphere applies to the current level (it is
+leaves out single parts; `--no-fog` disables the height fog and the fog volumes. When no atmosphere applies to the current level (it is
 still loading, failed to load, or another level is current) the plugin takes its components off the cameras and
 gives back Bevy's tonemapping, so another level's fog and grade never linger. A scene whose `atmosphere` block has
 an unexpected shape still loads (the block is ignored and the reason logged). The uber pass is skipped on frames
@@ -298,7 +430,7 @@ where the fog pass cannot run (pipeline still compiling), since it needs the fog
 The first-person overlay camera keeps Bevy's own tonemapping (only the player and screenshot cameras get the UE3
 tonemapper and LUT).
 
-Not rendered: fog volumes (section 3), DOF (off in every map's settings), motion blur, SSAO, film grain, FXAA, the
+Not rendered: DOF (off in every map's settings), motion blur, SSAO, film grain, FXAA, the
 hidden material effects, the view's colour scale / overlay (camera fades, script and Matinee post-process
 overrides), LUT blending over time (one LUT per level).
 
@@ -311,8 +443,8 @@ with gameplay and the hands; images stay local and were deleted. No render valid
 - **AG-Darkcave** (no height fog; `LUT_Night`; level-wide volume: highlights (1, 1, 0.7), bloom 0.3, threshold 1).
   Before: neutral-to-warm colours from Bevy's tonemapper (orange stepping stones, green foliage). After: a cold
   moonlit grade — the night LUT and the volume's blue highlight boost turn mid-tones blue-grey, crystals and
-  glowing props bloom blue, overall darker. The seven half-space fog volumes (black mist in the pits) are not
-  drawn yet.
+  glowing props bloom blue, overall darker. (The seven half-space fog volumes, black mist in the pits, were
+  not drawn then; they are since section 3's runtime mapping.)
 - **AG-StarHaven** (height fog with `FogHeight` far below the islands, `LUT_Daytime`, volume midtones
   (1.25, 1.3, 1.3), bloom 1 with screen-blend threshold 10; the player start is just outside the volume,
   section 4, so a view from the start uses the world settings: bloom 0.8, screen-blend threshold 50000).
@@ -322,6 +454,99 @@ with gameplay and the hands; images stay local and were deleted. No render valid
   `DistanceFog` cannot give); sunlit faces render warm and saturated (the per-channel UE3 curve keeps hues that
   Bevy's tonemapper desaturated); bloom halos appear around bright islands over darker backgrounds and fade on
   the bright surfaces themselves. The sky dome renders too dark (unlit-material scale, section 5).
+
+**AG-ParadiseCave mist (2026-10-12).** The owner, continuing from the level's first checkpoint, found the cave "so
+misty I almost couldn't see": a teal veil over everything, near and far. It was first put down to the level's fog
+volume being drawn as a glowing surface. That is not what the frames show. Checked on the Windows machine with the
+build that was played (`--level AG-ParadiseCave --fly --camera 147241,-154469,95875,-55,0 --hidden-window
+--screenshot`, the eye position of that checkpoint's respawn; offscreen 1600 x 900; mean sRGB of image regions;
+images stay local):
+
+| Run | Dark gap between rocks (far) | Lit ground (near) |
+|---|---|---|
+| as played | (53, 91, 106) | (112, 147, 143) |
+| `--no-fog` (the fog pass off; the cube still in the draw list) | (18, 24, 11) | (171, 207, 185) |
+| `ASAMU_POST=no-lut,no-bloom` | (41, 54, 75) | (93, 89, 98) |
+
+- **The veil is the level's exponential height fog, not the fog volume.** With the fog pass off the view is clear;
+  the cube contributed nothing (the camera is inside it and its surface was one-sided).
+- **The veil is what the level's data says** (section 2: `FogDensity` 5, `FogHeightFalloff` 1, `FogMaxOpacity` 0.7,
+  `StartDistance` 1, the fog actor at height 100,930). The density at the eye is
+  `0.005 × 2^((100,930 − eye height) / 1000)` per UU, and a level ray reaches the maximum opacity after
+  `2.5 / density` UU:
+
+  | Place | Height | Density at the eye (per UU) | Fog at its 70 % limit beyond |
+  |---|---:|---:|---:|
+  | checkpoint 16 (respawn eye) | 95,875 | 0.17 | 15 UU |
+  | checkpoint 20 | about 97,100 | 0.073 | 35 UU |
+  | checkpoint 19 | about 97,800 | 0.044 | 57 UU |
+  | checkpoints 17, 18 | about 99,900 | 0.010 | 245 UU |
+  | checkpoint 21 | about 107,100 | 0.00007 | 35,900 UU (half opacity at 20,600) |
+  | checkpoint 22, the player start | about 111,000 | 0.000005 | never within the level |
+
+  The first five checkpoints lie below the fog actor: there every pixel is 30 % scene and 70 % fog colour, at any
+  distance — a flat veil with no depth in it. From checkpoint 21 on the player is above it and the view is clear,
+  with the mist lying below. The recorded frames agree: veiled up to checkpoint 20, clear at 21.
+- The fog pass draws that and nothing more: without the LUT the darkest regions are (41, 54, 75); 70 % of the fog
+  colour for a level ray, (0.035, 0.054, 0.095) linear, is (47, 58, 75) through a plain 2.2 gamma.
+- **The colour grading makes the veil bright and teal.** The level's LUT (`MapTemplates.lut.LUT_Night`, read from
+  the converted texture) lifts and cools mid-tones — neutral grey 68 becomes (86, 99, 105), 102 becomes
+  (125, 143, 152) — so the dark navy veil comes out as (53, 91, 106).
+- **Looking up it is brighter still.** Without a dominant directional light the fog's bright side is straight up
+  (section 2): 26 % of the light-blue inscattering colour at 60° above the horizon against 7 % level.
+- An earlier build of the same day showed none of this in the same place only because the level's atmosphere was
+  not applied after a level change, which left the invented distance fog of `converted.rs`.
+
+What the runtime shows there now (same camera, and three more at the places of the recorded frames): the veil
+unchanged — it is the data — and behind it the level's fog volume, which was missing: 2 % of its mint colour at
+the 11,000 UU of that dark gap, up to 12.7 % in the distance. Far cave walls, pillars and floating rocks, which
+were lost in an even dark teal, stand as silhouettes in a paler green mist; near things do not change (ground
+(112, 147, 144), gap (63, 109, 116)).
+
+**The fog volume against the original (2026-10-13) — STRONG.** One of the original's stills that ship in the UI
+package (`LIGHTING.md`, 2.6) is taken on the start bridge of this level, above the fog actor, where the height fog
+is thin; `LIGHTING.md` noted that it has "more and greener fog" than our render and nothing darker than about 21
+of 255. That fog is the level's fog volume. Our render from the start platform
+(`--camera 205560,-97397,109470,180,-6`; not the still's exact view, so only the far field compares), mean sRGB of
+the same parts of the frame:
+
+| Part of the frame | Before (no fog volume) | With the fog volume | The original's still |
+|---|---|---|---|
+| far cave, top centre | (11, 17, 15) | (51, 91, 69) | (57, 101, 76) |
+| far wall on the left | (12, 18, 18) | (36, 61, 47) | (36, 63, 49) |
+| floating rocks and island in the middle distance | (40, 69, 78) | (80, 139, 126) | (75, 127, 121) |
+| mossy wall on the right | (38, 57, 40) | (53, 87, 64) | (49, 82, 62) |
+
+Before, the cave beyond the first rocks was black; with the volume, evaluated as section 3 describes and with no
+value of ours in it, the distance has the original's pale green mist to within a few counts.
+
+OPEN, for the veiled places below the fog actor: no still of the original shows one for certain. A second still
+(a mossy slope with a lantern, very likely this level, place unknown) has an even far fog of about (41, 72, 80)
+behind near rocks that stay dark, (13, 19, 18) to (18, 24, 19): a place where the height fog needs some distance
+to fill up, so above or near the fog actor's height. Our far veil over a dark background is (53, 91, 106) before
+the fog volume is added: the same hue, brighter. Whether that is the place, the build the still came from, or our
+tone curve and LUT handling is not known; the fog's values and maths are the level's and the engine's
+(`FSceneRenderer::InitFogConstants`, the scene info's constructor and the fog shader were re-read for this). A
+capture of the original at checkpoint 16 would settle it.
+
+**Fog volumes in the other maps (2026-10-13).** Offscreen renders before and after (`--fly --hidden-window
+--screenshot`, 1600 x 900, mean sRGB of image regions; images stay local). The log names the volumes read: 2 in
+AG-Workshop, 1 in AG-ParadiseCave, 7 in AG-Darkcave, 5 in AG-IceCave (none in AG-StarHaven, whose only one is
+disabled).
+
+- **AG-Workshop**, from the player start, inside the larger room volume: a faint blue-grey lift on the dark walls,
+  (12, 4, 3) to (17, 12, 14) in the middle of the view, (6, 3, 2) to (9, 6, 7) at the ceiling. AG-Epilogue is the
+  same room.
+- **AG-IceCave**, from the player start: the cave more than 20,000 UU away (the constant volume's start distance)
+  turns from near black, (10, 12, 21), to a pale grey-violet haze, (65, 65, 79); everything nearer is the same to
+  the count. Looking down the shaft at checkpoints 10 to 12 (`--camera -66700,-107900,-29300,0,-70`), the
+  half-space volume there fills the bottom with a pale violet pool that the ice columns sink into, (12, 14, 22) to
+  (145, 146, 176) in the middle; above its plane nothing changes.
+- **AG-Darkcave**: no difference in the views tried (the start, the start looking down, checkpoint 33, two places
+  above the long crossings). Its seven volumes are black and act under their planes only, 1,300 UU or more below
+  every checkpoint, where those views are black already. What they do is hide whatever light would reach the
+  bottom of the pits.
+- **AG-BeautifulCity**: at most 2.4 % beyond 30,000 UU; not told apart from the view without it.
 
 **AG-Workshop brightness (2026-10-12).** The owner found the Workshop very dark away from its lamps. Checked on
 the Windows machine with the converted data (`--level AG-Workshop --fly --screenshot`, offscreen 1600 x 900, the
