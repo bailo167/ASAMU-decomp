@@ -133,8 +133,9 @@ view, subtitles, the level's own prompts, notices, and in the chapters that have
 window title names the level being played (`ASAMU-decomp - AG-Workshop (converted, pre-alpha)`; `main menu`
 while you are in the menu) and follows every level change. The gloved hand and the grapple crosshair appear when
 the original shows them: not in the Workshop before the suit is taken (there, and in every story section, only
-a small ring marks the centre of the view), and not while a menu is open. The four small circles at the bottom
-right stand in for the lights on the glove.
+a small ring marks the centre of the view), not while a cutscene camera has the view, and not while a menu is
+open. A level started with `--level` waits for your click: until then neither is drawn. The four small circles
+at the bottom right stand in for the lights on the glove.
 
 Developer keys (not in the original): F1 shows the developer drawings (a read-out of the simulation's state with
 the key list, a line with the grapple count and ability states at the bottom left, and a wire marker where you

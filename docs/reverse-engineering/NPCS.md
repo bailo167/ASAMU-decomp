@@ -431,6 +431,35 @@ and during the suit-on window the hand shows its ordinary animation, because `as
 and `skins.rs` have no suit-on state. To make this exact the simulation would need one more field: the gun's
 hide-blend state, set by every hide and cleared by every show.
 
+Two more rules of the runtime (verification pass, 2026-10-12):
+
+- **Nothing before the first tick.** The level script's start is applied in the simulation's first tick (the
+  Workshop's switch to story mode is wired to its level-loaded event), so before that tick the state says
+  nothing about the hand. A level waiting for the click that starts it (`--level`) and the frames between a load
+  and the first tick show no hand. Ours: the original has no such waiting state. Before this rule a Workshop
+  started with `--level` showed the glove until the click.
+- **Only in the pawn's own view.** The gun marks its mesh as seen by its owner only, each time it shows or hides
+  the hand (CONFIRMED (src)). In the stock engine such a mesh is drawn only in a view whose view actor is that
+  owner (STRONG: the engine's rule for the flag; not observed in this game), so the hand is not drawn while a
+  Matinee director cut or a camera-target action has the view on another actor. It matters in AG-ParadiseCave's
+  opening flight: the level script hides the hand (mesh off) and shows it again in the same frame (the show is
+  wired to the output of the cinematic-mode action, which fires when the mode is switched on and when it is
+  switched off), so the script alone has the hand raised from the first frame.
+
+Checked against the converted Workshop's own script (a data-gated test in `hands.rs`,
+`the_converted_workshop_keeps_the_hand_down_except_for_the_suit_on`; 60 ticks per second): no hand from the first
+tick, through a minute of the level; the suit interaction at tick 3,601 starts the suit-on animation at tick 4,053 (7.53 s later; the
+Matinee is 7.51 s long), the hand is on screen for 358 ticks (5.97 s) and is lowered again; the hide wired 15 s
+after the fade-in runs once and changes nothing; the launch's hide switches the mesh off.
+
+Against the owner's recording of the original (KM1; it has no field for the hand, so the comparison is of the
+events that move it): story mode from the first sample (frame 1,179, 0.41 s into the level; ground speed 132 in
+all 14,017 Workshop samples), which is our first tick; the suit is taken at frame 10,192 (115.99 s) and the
+player's input is used again from frame 10,722 (6.79 s later; the script gives input back at the Matinee's
+fade-in event, 6.01 s), so by the script the suit-on animation runs from about 123.5 s to 129.5 s (frames
+10,770 to 11,230 at the recording's 76.8 frames per second), which is where our rule shows the hand: 7.53 s to
+13.50 s after the interaction.
+
 ## 12. Implementation in this repository
 
 | Piece | Where |
