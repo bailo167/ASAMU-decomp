@@ -487,9 +487,20 @@ Changes to the sections above:
 - **What changed in ours:** anchors ride what turns; 14 actors of three levels turn by their rate (7 in
   AG-ParadiseCave, 2 in AG-BeautifulCity, 5 in AG-StarHaven) with what is attached to them; six actors of
   AG-ParadiseCave left the Matinee groups that name them.
-- **Consequence to decide (owner):** the turn by a rate depends on the frame time. At 60 Hz the merry-go-round's
-  arm that turns by its rate falls 0.131° a second behind the arm on the track; at the recorded 78 frames a second
-  the arms stay half a turn apart.
+- **Decided (owner, 2026-10-12): the game turns these actors at their designed rate.** The original's turn by a
+  rate depends on the frame time (the rate times the frame time, the fraction dropped). Taken at our 60 Hz tick
+  it made the merry-go-round's arm that turns by its rate fall 0.131° a second behind the arm on the track. Ours
+  now turns every `PHYS_Rotating` actor at the level's rate and carries each tick's fraction to the next. This is
+  a deliberate difference from the original's frame-rate-dependent turn: ours is faster than the original at 60
+  frames a second by 42 units/s (rate 9102), 51 (4551) and 24 (2184), and faster than the original at the
+  recorded 78 frames a second by 54.1, 27.0 and 0.015. The arms now keep their places to the level's own 16 units
+  (0.088°) per 30 s loop of the track (2184 units/s are 65,520 of the loop's 65,536 units); the original at the
+  recorded frame time does the same. The original's rule stays in the code, selectable for replays (PARITY.md
+  deviation 25).
+- **Seen while testing, not changed:** the Matinee of the arm on the track starts after an activation delay of
+  1 s on its Play input (level data), and nothing delays the arm in the rotating physics, which is 2220 units
+  (12.2°) ahead of its place opposite the other arm in ours from the 62nd tick on. The original has the same
+  delay in its data; its size there is not measured. NEEDS EVIDENCE: a recording that shows both arms.
 - **NEEDS EVIDENCE:** a recording with an anchor on a rock of `InterpActor_16` held across a loop of its track
   (30 s), and one standing on `StaticMeshActor_347` or `_4`.
 - **Left:** movers move before the frame's input events; encroachment (a turning rock passes into a pawn beside

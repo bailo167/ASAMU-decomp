@@ -32,8 +32,10 @@ _Session journal. Newest entry first. Each entry: what was done, what is true no
   in `PHYS_Rotating` turn by their truncated `RotationRate` (7 in AG-ParadiseCave, 2 in AG-BeautifulCity, 5 in
   AG-StarHaven); six actors of AG-ParadiseCave are no longer moved by Matinee groups that name them (the original
   does not move them). Evidence: `docs/PARITY_FINDINGS.md` P14, NATIVE_PHYSICS.md 10.5, GRAPPLE.md G-AT-8.
-  **Owner's decision open:** at our 60 Hz tick the merry-go-round's two arms drift apart by 0.131° a second (as
-  the original does at 60 fps, not at the recorded 78).
+  **Owner's decision (2026-10-12):** these actors turn at their designed rate at any tick rate, not by the
+  original's frame-rate-dependent rule (which at 60 Hz made the merry-go-round's two arms part by 0.131° a
+  second); a labelled deviation (`docs/PARITY.md`, deviation 25); the original's rule stays selectable for
+  replays.
 - A conversion made before this wave (mesh manifest version 1) must be re-imported (`asamu-import meshes`):
   with it collision is approximate. The Mac's local conversion is version 1.
 - **Fixes for what the play session's screenshots showed are merged** (`play/fixes`; each package built, then
