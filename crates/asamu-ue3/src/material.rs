@@ -74,8 +74,17 @@ use crate::object::{ObjResult, ObjectError};
 use crate::package::Package;
 use crate::property::{Property, Value};
 use crate::reader::Reader;
+use crate::texture::{TextureDecoder, decode_to_rgba8};
 use crate::types::{FName, Guid, PackageIndex};
 use crate::writer::Writer;
+
+#[path = "material_extra.rs"]
+mod extra;
+
+pub use extra::{
+    GREY_CHROMA, GradientFactor, Lost, MAX_GRADIENT_FACTORS, STATS_MAX_EDGE, TextureStats,
+    UvGradient,
+};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -963,6 +972,28 @@ pub struct MaterialDecoder<'a> {
     classes: RefCell<HashMap<String, Option<MaterialClass>>>,
     defaults: RefCell<HashMap<String, Arc<Vec<Property>>>>,
     expressions: RefCell<ExpressionCache>,
+    textures: TextureDecoder<'a>,
+    texture_info: RefCell<HashMap<String, TextureInfo>>,
+}
+
+/// Longest edge of a texture whose largest mip is checked for being one
+/// colour everywhere ([`TextureStats::uniform`]): a small mip of a large
+/// texture can average sparse detail (stars, thin lines) away, so only a
+/// texture this small is ever called uniform.
+pub const UNIFORM_MAX_EDGE: u32 = 256;
+
+/// What the reduction knows about a referenced texture.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct TextureInfo {
+    /// Statistics of a small mip (`None`: not found, not a 2D texture with
+    /// stored texels, or not decodable).
+    stats: Option<TextureStats>,
+    /// The object is filled while the game runs (a render target, a movie
+    /// or a scripted texture): there are no texels to convert.
+    runtime: bool,
+    /// The object is a cube map: whatever expression samples it, the
+    /// lookup is by a direction and has no place on the surface.
+    cube: bool,
 }
 
 impl<'a> MaterialDecoder<'a> {
@@ -973,12 +1004,161 @@ impl<'a> MaterialDecoder<'a> {
             classes: RefCell::default(),
             defaults: RefCell::default(),
             expressions: RefCell::default(),
+            textures: TextureDecoder::new(set),
+            texture_info: RefCell::default(),
         }
     }
 
     /// The package set.
     pub fn set(&self) -> &'a PackageSet {
         self.set
+    }
+
+    /// What the texture at `path` holds on average, looked for in the
+    /// packages `near` (the material's own, then its chain's) and then in
+    /// the whole set. `None` when it is not found or has no texels stored
+    /// in its package for a small mip.
+    pub fn texture_stats(&self, near: &[Arc<LoadedPackage>], path: &str) -> Option<TextureStats> {
+        self.texture_info(near, path).stats
+    }
+
+    /// Tells the decoder what the texture at `path` is instead of letting
+    /// it read the packages: its statistics (`None`: unknown), whether it
+    /// is filled at run time and whether it is a cube map. For a caller
+    /// that knows better than the packages at hand, and for tests whose
+    /// textures have no texels.
+    pub fn assume_texture(
+        &self,
+        path: &str,
+        stats: Option<TextureStats>,
+        runtime: bool,
+        cube: bool,
+    ) {
+        self.texture_info.borrow_mut().insert(
+            path.to_ascii_lowercase(),
+            TextureInfo {
+                stats,
+                runtime,
+                cube,
+            },
+        );
+    }
+
+    fn texture_info(&self, near: &[Arc<LoadedPackage>], path: &str) -> TextureInfo {
+        let key = path.to_ascii_lowercase();
+        if let Some(i) = self.texture_info.borrow().get(&key) {
+            return *i;
+        }
+        let info = self.read_texture_info(near, path);
+        self.texture_info.borrow_mut().insert(key, info);
+        info
+    }
+
+    fn read_texture_info(&self, near: &[Arc<LoadedPackage>], path: &str) -> TextureInfo {
+        let located = near
+            .iter()
+            .find_map(|lp| lp.export_by_qualified(path).map(|i| (lp.clone(), i)))
+            .or_else(|| self.set.locate(path));
+        let Some((lp, index)) = located else {
+            return TextureInfo::default();
+        };
+        let class = crate::object::export_class_path(&lp.package, Some(&lp.name), index)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let runtime = ["rendertarget", "texturemovie", "scriptedtexture"]
+            .iter()
+            .any(|k| class.contains(k));
+        let cube = class.contains("texturecube");
+        TextureInfo {
+            stats: if runtime {
+                None
+            } else if cube {
+                self.read_cube_stats(&lp, index)
+            } else {
+                self.read_texture_stats(&lp, index)
+            },
+            runtime,
+            cube,
+        }
+    }
+
+    /// The mean of a cube map's faces (`FacePosX` ... `FaceNegZ`, each a
+    /// 2D texture): every face that is found and readable counts the same.
+    /// A cube map is never called uniform.
+    fn read_cube_stats(&self, lp: &Arc<LoadedPackage>, index: usize) -> Option<TextureStats> {
+        let cube = self.set.decode(lp, index).ok()?;
+        let mut sum = [0.0f32; 4];
+        let mut chroma = 0.0f32;
+        let mut faces = 0u8;
+        for name in [
+            "FacePosX", "FaceNegX", "FacePosY", "FaceNegY", "FacePosZ", "FaceNegZ",
+        ] {
+            let Some(path) = get_object(&cube.properties, name) else {
+                continue;
+            };
+            let located = lp
+                .export_by_qualified(path)
+                .map(|i| (lp.clone(), i))
+                .or_else(|| self.set.locate(path));
+            let Some(s) = located.and_then(|(flp, i)| self.read_texture_stats(&flp, i)) else {
+                continue;
+            };
+            for (slot, v) in sum.iter_mut().zip(s.mean) {
+                *slot += v;
+            }
+            chroma += s.chroma;
+            faces += 1;
+        }
+        (faces > 0).then(|| {
+            let n = f32::from(faces);
+            TextureStats {
+                mean: sum.map(|v| v / n),
+                chroma: chroma / n,
+                uniform: false,
+            }
+        })
+    }
+
+    /// Statistics of the largest mip within [`STATS_MAX_EDGE`] that is
+    /// stored in the package itself (the small mips are; nothing is read
+    /// from a texture file cache). `uniform` is decided on the texture's
+    /// largest mip, and only when that is within [`UNIFORM_MAX_EDGE`].
+    fn read_texture_stats(&self, lp: &Arc<LoadedPackage>, index: usize) -> Option<TextureStats> {
+        let tex = self.textures.decode(lp, index).ok()?;
+        let format = tex.format?;
+        let srgb = tex.props.srgb.unwrap_or(false);
+        let payload = lp.package.export_data(tex.export_index).ok()?;
+        let first = tex.first_stored_mip()?;
+        let mips = tex.mips();
+        let read = |level: usize| -> Option<TextureStats> {
+            let mip = mips.get(level)?;
+            let (w, h) = (
+                u32::try_from(mip.size_x).ok()?,
+                u32::try_from(mip.size_y).ok()?,
+            );
+            let texels = tex.load_mip(payload, None, level).ok()?;
+            let rgba = decode_to_rgba8(format, w, h, &texels).ok()?;
+            TextureStats::of_rgba8(&rgba, srgb)
+        };
+        let edge = |level: usize| -> Option<u32> {
+            let mip = mips.get(level)?;
+            Some(u32::try_from(mip.size_x.max(mip.size_y)).ok()?.max(1))
+        };
+        // A texture without a mip that small (one stored without a mip
+        // chain) is read whole when it is not large.
+        let small = (first..mips.len())
+            .find(|l| edge(*l).is_some_and(|e| e <= STATS_MAX_EDGE))
+            .or_else(|| {
+                let last = mips.len().checked_sub(1)?;
+                edge(last)
+                    .is_some_and(|e| e <= UNIFORM_MAX_EDGE * 4)
+                    .then_some(last)
+            })?;
+        let mut stats = read(small)?;
+        stats.uniform = stats.uniform
+            && edge(first).is_some_and(|e| e <= UNIFORM_MAX_EDGE)
+            && (small == first || read(first).is_some_and(|s| s.uniform));
+        Some(stats)
     }
 
     /// Material class of the class at qualified `class_path`.
@@ -1553,6 +1733,52 @@ struct TexTerm {
     factor: [f32; 4],
     bias: [f32; 4],
     vertex_color: bool,
+    /// What the texture holds on average, when known.
+    stats: Option<TextureStats>,
+    /// The sample's coordinates follow the mesh's (false: they came from
+    /// something not representable, a view vector for instance, and `uv`
+    /// is only a stand-in).
+    placed: bool,
+}
+
+impl TexTerm {
+    /// The term's mean value and component count, when the texture's
+    /// statistics are known: what stands in for the sample when another
+    /// texture is kept in its place.
+    fn mean(&self) -> Option<([f32; 4], u8)> {
+        let s = self.stats?;
+        let mut m = [0.0f32; 4];
+        if let [c] = self.swizzle.as_slice() {
+            let v = s.mean[usize::from((*c).min(3))];
+            for (slot, (f, b)) in m.iter_mut().zip(self.factor.iter().zip(self.bias.iter())) {
+                *slot = v * f + b;
+            }
+            Some((m, self.width.clamp(1, 4)))
+        } else {
+            for (i, c) in self.swizzle.iter().enumerate().take(4) {
+                m[i] = s.mean[usize::from((*c).min(3))] * self.factor[i] + self.bias[i];
+            }
+            Some((m, u8::try_from(self.swizzle.len().clamp(1, 4)).unwrap_or(4)))
+        }
+    }
+
+    /// A sample of more than one channel whose texture is known to carry
+    /// colour (`Some(true)`) or to be grey (`Some(false)`).
+    fn coloured(&self) -> Option<bool> {
+        if self.swizzle.len() < 2 {
+            return None;
+        }
+        self.stats.map(|s| !s.grey())
+    }
+}
+
+/// A value computed from the texture coordinates: `value` times the
+/// product of the factors (see [`UvGradient`]).
+#[derive(Debug, Clone, PartialEq)]
+struct GradTerm {
+    factors: Vec<GradientFactor>,
+    value: [f32; 4],
+    n: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1567,8 +1793,56 @@ enum Term {
     VertexColor,
     /// Game time times a factor.
     Time(f32),
-    /// Not representable.
+    /// A function of the texture coordinates.
+    Grad(Box<GradTerm>),
+    /// Not representable: a factor the reduction treats as neutral (1 in a
+    /// product, 0 in a sum) next to something it can represent.
     Unknown(String),
+    /// Not representable, and a length or position in world units
+    /// ([`Lost::is_dimensional`]): it keeps the constants combined with it
+    /// (they scale and offset *it*), and becomes a neutral factor once it
+    /// is clamped or meets something representable.
+    Dim(String),
+}
+
+/// A not representable value as a neutral factor.
+fn demote(t: Term) -> Term {
+    match t {
+        Term::Dim(k) => Term::Unknown(k),
+        t => t,
+    }
+}
+
+/// One texture coordinate component as `scale * uv[channel][component] +
+/// offset`, when the transform has it that simple (no panning, no rotation).
+fn uv_axis(uv: &UvTransform, component: usize) -> Option<GradientFactor> {
+    if uv.rotated() || uv.panning != [0.0, 0.0] {
+        return None;
+    }
+    Some(GradientFactor {
+        uv_channel: uv.channel,
+        component: if component == 0 { "u" } else { "v" },
+        scale: *uv.scale.get(component)?,
+        offset: *uv.offset.get(component)?,
+        power: 1.0,
+    })
+}
+
+/// A term as one coordinate axis for `AppendVector`: a constant (`None`
+/// axis) or a plain single-factor gradient.
+fn append_axis(t: &Term) -> Option<(Option<(i32, &'static str)>, f32, f32)> {
+    match t {
+        Term::Const(v, 1) => Some((None, 0.0, v[0])),
+        Term::Grad(g) if g.n == 1 => match g.factors.as_slice() {
+            [f] if f.power == 1.0 => Some((
+                Some((f.uv_channel, f.component)),
+                f.scale * g.value[0],
+                f.offset * g.value[0],
+            )),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn splat(v: f32) -> [f32; 4] {
@@ -1624,6 +1898,26 @@ struct Eval<'e, 'a> {
     extra_textures: BTreeSet<String>,
     visits: usize,
     lossy: bool,
+    /// The walk, one line per evaluated link (only when asked for).
+    trace: Option<Vec<String>>,
+    /// What the link under evaluation lost so far.
+    lost: Lost,
+    /// What the link evaluated last lost in all.
+    last_lost: Lost,
+    /// The gradient of the material input reduced last, if it is one.
+    gradient: Option<UvGradient>,
+    /// The coordinates read last follow the mesh's (see `TexTerm::placed`).
+    placed: bool,
+    /// Packages of the instance chain (texture lookups).
+    homes: Vec<Arc<LoadedPackage>>,
+    /// Statistics of the textures sampled, by path.
+    stats: BTreeMap<String, TextureStats>,
+    /// Sampled objects that are filled at run time.
+    runtime_textures: BTreeSet<String>,
+    /// What each reduced material input lost, by channel key.
+    dropped: BTreeMap<&'static str, Vec<&'static str>>,
+    /// The gradient of each material input that is one, by channel key.
+    gradients: BTreeMap<&'static str, UvGradient>,
 }
 
 /// Function-call frame: inputs of the call, evaluated in the caller's frame.
@@ -1644,7 +1938,27 @@ impl Eval<'_, '_> {
     fn unknown(&mut self, kind: &str) -> Term {
         *self.unsupported.entry(kind.to_owned()).or_insert(0) += 1;
         self.lossy = true;
-        Term::Unknown(kind.to_owned())
+        if Lost::is_dimensional(kind) {
+            Term::Dim(kind.to_owned())
+        } else {
+            Term::Unknown(kind.to_owned())
+        }
+    }
+
+    /// Records that the link under evaluation does not have `what`.
+    fn lose(&mut self, what: Lost) {
+        self.lossy = true;
+        self.lost.insert(what);
+    }
+
+    /// A value derived from a not representable one keeps its kind (and so
+    /// its class) without counting it again.
+    fn derived(kind: &str, bounded: bool) -> Term {
+        if !bounded && Lost::is_dimensional(kind) {
+            Term::Dim(kind.to_owned())
+        } else {
+            Term::Unknown(kind.to_owned())
+        }
     }
 
     /// Evaluate a link (applying its mask).
@@ -1655,6 +1969,7 @@ impl Eval<'_, '_> {
         frame: Option<&Frame<'_>>,
         depth: usize,
     ) -> Option<Term> {
+        self.last_lost = Lost::NONE;
         let path = link.expression.as_deref()?;
         if depth > MAX_EXPRESSION_DEPTH || self.visits >= MAX_EXPRESSION_VISITS {
             return Some(self.unknown("depth-or-work-limit"));
@@ -1663,11 +1978,37 @@ impl Eval<'_, '_> {
         let Some(node) = self.dec.expression(pkg, path) else {
             return Some(self.unknown("missing-expression"));
         };
+        let slot = self.trace.as_mut().map(|t| {
+            t.push(String::new());
+            t.len() - 1
+        });
+        // What this link loses is what its inputs lost plus what its own
+        // node drops; the link above gets the union.
+        let outer = std::mem::take(&mut self.lost);
         let t = self.node(pkg, &node, link.output_index, frame, depth + 1);
-        Some(match link.mask {
+        let t = match link.mask {
             Some(m) => self.mask(t, m),
             None => t,
-        })
+        };
+        let mine = self.lost;
+        self.lost = outer.with(mine);
+        self.last_lost = mine;
+        if let Some(line) = slot.and_then(|i| self.trace.as_mut().and_then(|tr| tr.get_mut(i))) {
+            let lost = if mine.is_empty() {
+                String::new()
+            } else {
+                format!(" (lost {})", mine.names().join(", "))
+            };
+            *line = format!(
+                "{:indent$}{}{} -> {}{lost}",
+                "",
+                node.kind,
+                describe_node(&node, link),
+                describe_term(&t),
+                indent = depth.min(MAX_EXPRESSION_DEPTH) * 2
+            );
+        }
+        Some(t)
     }
 
     fn mask(&mut self, t: Term, m: [bool; 4]) -> Term {
@@ -1701,6 +2042,21 @@ impl Eval<'_, '_> {
                 };
                 Term::Tex(tx)
             }
+            // One component of the texture coordinates is a value along
+            // that axis (both components are still coordinates).
+            Term::Uv(uv) if m[0] != m[1] => match uv_axis(&uv, usize::from(m[1])) {
+                Some(f) => Term::Grad(Box::new(GradTerm {
+                    factors: vec![f],
+                    value: splat(1.0),
+                    n: 1,
+                })),
+                None => self.unknown("coordinate-math"),
+            },
+            Term::Grad(mut g) => {
+                let (v, n) = select4(bcast(g.value, g.n), m);
+                (g.value, g.n) = (v, n);
+                Term::Grad(g)
+            }
             other => other,
         }
     }
@@ -1713,6 +2069,7 @@ impl Eval<'_, '_> {
         frame: Option<&Frame<'_>>,
         depth: usize,
     ) -> Option<Term> {
+        self.last_lost = Lost::NONE;
         let l = node.link(name)?;
         self.link(pkg, &l, frame, depth)
     }
@@ -1783,6 +2140,7 @@ impl Eval<'_, '_> {
             // (class model in Engine.u): its texture with a soft depth fade.
             "depthbiasblend" => {
                 self.note("DepthBiasBlend (soft depth fade) ignored: its texture used");
+                self.lose(Lost::DEPTH);
                 self.texture_sample(pkg, n, "texturesample", frame, depth)
             }
             k if is_texture_sample(k) => self.texture_sample(pkg, n, k, frame, depth),
@@ -1837,6 +2195,8 @@ impl Eval<'_, '_> {
                     Some(Term::Const(v, k)) => {
                         Term::Const(v.map(|x| x.clamp(lo.min(hi), hi.max(lo))), k)
                     }
+                    // A clamped length is a factor in a fixed range.
+                    Some(Term::Dim(k) | Term::Unknown(k)) => Term::Unknown(k),
                     Some(t) => {
                         self.note("clamp of a non-constant value ignored");
                         t
@@ -1852,6 +2212,7 @@ impl Eval<'_, '_> {
                     (Some(Term::Const(v, k)), Some(Term::Const(a, _)), Some(Term::Const(b, _))) => {
                         Term::Const(zip(zip(v, a, f32::max), b, f32::min), k)
                     }
+                    (Some(Term::Dim(k) | Term::Unknown(k)), _, _) => Term::Unknown(k),
                     (Some(t), _, _) => {
                         self.note("clamp of a non-constant value ignored");
                         t
@@ -1874,6 +2235,18 @@ impl Eval<'_, '_> {
                         // folded constants reach converted data.
                         Term::Const(v.map(|c| crate::portable_math::powf(c.max(0.0), x[0])), k)
                     }
+                    // (v * f^p)^x = v^x * f^(p x) for the non-negative
+                    // bases a gradient has.
+                    (Some(Term::Grad(mut g)), Some(Term::Const(x, _))) => {
+                        for f in &mut g.factors {
+                            f.power *= x[0];
+                        }
+                        g.value = g
+                            .value
+                            .map(|c| crate::portable_math::powf(c.max(0.0), x[0]));
+                        Term::Grad(g)
+                    }
+                    (Some(t @ (Term::Dim(_) | Term::Unknown(_))), _) => t,
                     (Some(t), _) => {
                         self.note("Power of a non-constant value ignored");
                         t
@@ -1930,6 +2303,32 @@ impl Eval<'_, '_> {
                         }
                         Term::Const(v, u8::try_from(k.max(1)).unwrap_or(4))
                     }
+                    (Some(a), Some(b)) => match (append_axis(&a), append_axis(&b)) {
+                        // Coordinates put together from their components:
+                        // U from a value along u (or a constant), V from a
+                        // value along v (or a constant), of one channel.
+                        (Some((ua, us, uo)), Some((va, vs, vo)))
+                            if (ua.is_some() || va.is_some())
+                                && ua.is_none_or(|(_, c)| c == "u")
+                                && va.is_none_or(|(_, c)| c == "v")
+                                && match (ua, va) {
+                                    (Some((x, _)), Some((y, _))) => x == y,
+                                    _ => true,
+                                } =>
+                        {
+                            Term::Uv(UvTransform {
+                                channel: ua.or(va).map_or(0, |(c, _)| c),
+                                scale: [us, vs],
+                                offset: [uo, vo],
+                                ..UvTransform::default()
+                            })
+                        }
+                        _ => match (a, b) {
+                            (Term::Dim(k) | Term::Unknown(k), _)
+                            | (_, Term::Dim(k) | Term::Unknown(k)) => Self::derived(&k, false),
+                            _ => self.unknown("AppendVector"),
+                        },
+                    },
                     _ => self.unknown("AppendVector"),
                 }
             }
@@ -1957,11 +2356,20 @@ impl Eval<'_, '_> {
                         };
                         Term::Const(v.map(g), k)
                     }
+                    // A function of something not representable is not
+                    // representable for the same reason; the periodic ones
+                    // and the fraction are bounded.
+                    Some(Term::Dim(k) | Term::Unknown(k)) => {
+                        Self::derived(&k, matches!(kind.as_str(), "frac" | "sine" | "cosine"))
+                    }
+                    Some(Term::Time(_)) => self.unknown(&format!("{}(Time)", n.kind)),
+                    Some(Term::Uv(_) | Term::Grad(_)) => self.unknown("coordinate-math"),
                     _ => self.unknown(&n.kind),
                 }
             }
             "depthbiasedblend" => {
                 self.note("DepthBiasedBlend (soft depth fade) ignored: RGB input used");
+                self.lose(Lost::DEPTH);
                 match self.input(pkg, n, "RGB", frame, depth) {
                     Some(t) => t,
                     None => self.unknown("DepthBiasedBlend-unconnected"),
@@ -1982,11 +2390,16 @@ impl Eval<'_, '_> {
                             None => self.unknown("If-unconnected"),
                         }
                     }
+                    // A comparison with something not representable is not
+                    // representable for the same reason (a 0/1-like choice).
+                    (Some(Term::Dim(k) | Term::Unknown(k)), _)
+                    | (_, Some(Term::Dim(k) | Term::Unknown(k))) => Self::derived(&k, true),
                     _ => self.unknown("If"),
                 }
             }
             "depthbiasedalpha" => {
                 self.note("DepthBiasedAlpha (soft depth fade) ignored");
+                self.lose(Lost::DEPTH);
                 match self.input(pkg, n, "Alpha", frame, depth) {
                     Some(t) => t,
                     None => self.unknown("DepthBiasedAlpha-unconnected"),
@@ -2018,20 +2431,29 @@ impl Eval<'_, '_> {
         frame: Option<&Frame<'_>>,
         depth: usize,
     ) -> UvTransform {
-        match self.input(pkg, n, name, frame, depth) {
+        let input = self.input(pkg, n, name, frame, depth);
+        self.placed = matches!(input, None | Some(Term::Uv(_)));
+        match input {
             None => UvTransform::default(),
             Some(Term::Uv(uv)) => uv,
             Some(Term::Const(..)) => {
                 self.note("texture sampled at constant coordinates");
                 UvTransform::default()
             }
-            Some(Term::Unknown(k)) => {
+            Some(Term::Unknown(k) | Term::Dim(k)) => {
                 self.note(format!(
                     "texture coordinates not derivable ({k}): UV 0 used"
                 ));
+                self.lose(Lost::of_kind(&k));
                 UvTransform::default()
             }
-            Some(_) => {
+            Some(t) => {
+                self.lose(match t {
+                    Term::Tex(_) => Lost::TEXTURE,
+                    Term::VertexColor => Lost::VERTEX_COLOR,
+                    Term::Time(_) => Lost::TIME,
+                    _ => Lost::COORDINATES,
+                });
                 self.note("texture coordinates not derivable: UV 0 used");
                 UvTransform::default()
             }
@@ -2079,6 +2501,7 @@ impl Eval<'_, '_> {
                 uv.offset[1] += speed[1] * c;
             }
             TimeInput::Other => {
+                self.lose(Lost::TIME);
                 self.note("Panner driven by a non-linear time input: plain speed used");
                 uv.panning[0] += speed[0];
                 uv.panning[1] += speed[1];
@@ -2104,6 +2527,7 @@ impl Eval<'_, '_> {
             // A constant time is a fixed angle of `speed * time` radians.
             TimeInput::Constant(c) => uv.rotation_angle += speed * c,
             TimeInput::Other => {
+                self.lose(Lost::TIME);
                 self.note("Rotator driven by a non-linear time input: plain speed used");
                 uv.rotation += speed;
             }
@@ -2144,7 +2568,36 @@ impl Eval<'_, '_> {
         if n.link("TextureObject").is_some() {
             self.note("TextureObject input ignored");
         }
+        let info = texture.as_deref().map(|t| self.texture_info(pkg, t));
+        let stats = info.and_then(|i| i.stats);
+        if let (Some(t), Some(i)) = (&texture, info) {
+            if i.runtime || sampler == "movie" {
+                self.runtime_textures.insert(t.clone());
+            }
+            if let Some(s) = i.stats {
+                self.stats.insert(t.clone(), s);
+            }
+        }
+        // A texture that is one colour everywhere is that colour (the
+        // placeholder a texture parameter defaults to, usually).
+        if let Some(s) = stats.filter(|s| s.uniform && sampler == "2d") {
+            return Term::Const(s.mean, 4);
+        }
         let uv = self.coordinates(pkg, n, "Coordinates", frame, depth);
+        let cube = sampler == "cube" || info.is_some_and(|i| i.cube);
+        if cube {
+            self.placed = false;
+        }
+        // A sample whose coordinates are not the mesh's (a lookup by the
+        // view or reflection vector, say, or any lookup in a cube map) has
+        // no place on the surface: the texture's mean is all that can be
+        // said of it.
+        if let Some(s) = stats.filter(|_| !self.placed && (sampler == "2d" || cube)) {
+            self.note(
+                "a texture sampled at coordinates that are not the mesh's stands in by its mean",
+            );
+            return Term::Const(s.mean, 4);
+        }
         Term::Tex(Box::new(TexTerm {
             texture,
             parameter,
@@ -2155,7 +2608,16 @@ impl Eval<'_, '_> {
             factor: splat(1.0),
             bias: splat(0.0),
             vertex_color: false,
+            stats,
+            placed: self.placed,
         }))
+    }
+
+    fn texture_info(&mut self, pkg: &Arc<LoadedPackage>, path: &str) -> TextureInfo {
+        let mut near = Vec::with_capacity(self.homes.len() + 1);
+        near.push(pkg.clone());
+        near.extend(self.homes.iter().cloned());
+        self.dec.texture_info(&near, path)
     }
 
     fn binary(
@@ -2179,7 +2641,17 @@ impl Eval<'_, '_> {
         let (Some(a), Some(b)) = (a, b) else {
             return self.unknown("unconnected-input");
         };
-        match (a, b) {
+        // A length or position keeps the constants (and the other not
+        // representable values) combined with it: `depth * k - offset` is
+        // still a depth, and `k` says nothing without it.
+        match (&a, &b) {
+            (Term::Dim(_), Term::Const(..) | Term::Dim(_) | Term::Unknown(_) | Term::Time(_)) => {
+                return a;
+            }
+            (Term::Const(..) | Term::Unknown(_) | Term::Time(_), Term::Dim(_)) => return b,
+            _ => {}
+        }
+        match (demote(a), demote(b)) {
             (Term::Const(x, nx), Term::Const(y, ny)) => {
                 let (x4, y4) = (bcast(x, nx), bcast(y, ny));
                 let n = nx.max(ny);
@@ -2227,27 +2699,53 @@ impl Eval<'_, '_> {
                 }
                 Term::Tex(t)
             }
-            (Term::Tex(x), Term::Tex(y)) => {
-                // Keep the sample with more channels (colour over mask); on
-                // a tie the one with the coarser tiling (base layer over
-                // detail layer), then the first. The other is recorded as
-                // dropped.
-                let coarse = |t: &TexTerm| t.uv.scale[0].abs().max(t.uv.scale[1].abs());
-                let keep_first = match x.swizzle.len().cmp(&y.swizzle.len()) {
-                    std::cmp::Ordering::Greater => true,
-                    std::cmp::Ordering::Less => false,
-                    std::cmp::Ordering::Equal => coarse(&x) <= coarse(&y),
-                };
-                let (keep, drop) = if keep_first { (x, y) } else { (y, x) };
-                if let Some(d) = &drop.texture {
-                    self.extra_textures.insert(d.clone());
+            (Term::Tex(x), Term::Tex(y)) => self.combine_textures(op, x, y),
+            (Term::Grad(mut g), Term::Const(c, nc)) => {
+                let c4 = bcast(c, nc);
+                match op {
+                    Op::Mul => {
+                        g.value = zip(bcast(g.value, g.n), c4, |a, b| a * b);
+                        g.n = g.n.max(nc);
+                        Term::Grad(g)
+                    }
+                    Op::Div => {
+                        let r = c4.map(|v| if v == 0.0 { 0.0 } else { 1.0 / v });
+                        g.value = zip(bcast(g.value, g.n), r, |a, b| a * b);
+                        g.n = g.n.max(nc);
+                        Term::Grad(g)
+                    }
+                    Op::Add => self.gradient_offset(g, 1.0, c[0], nc),
+                    Op::Sub => self.gradient_offset(g, 1.0, -c[0], nc),
                 }
+            }
+            (Term::Const(c, nc), Term::Grad(mut g)) => match op {
+                Op::Mul => {
+                    g.value = zip(bcast(g.value, g.n), bcast(c, nc), |a, b| a * b);
+                    g.n = g.n.max(nc);
+                    Term::Grad(g)
+                }
+                Op::Add => self.gradient_offset(g, 1.0, c[0], nc),
+                // c - g
+                Op::Sub => self.gradient_offset(g, -1.0, c[0], nc),
+                Op::Div => self.unknown("coordinate-math"),
+            },
+            (Term::Grad(mut x), Term::Grad(y)) => {
+                if op == Op::Mul && x.factors.len() + y.factors.len() <= MAX_GRADIENT_FACTORS {
+                    x.factors.extend(y.factors.iter().copied());
+                    x.value = zip(bcast(x.value, x.n), bcast(y.value, y.n), |a, b| a * b);
+                    x.n = x.n.max(y.n);
+                    Term::Grad(x)
+                } else {
+                    self.unknown("coordinate-math")
+                }
+            }
+            (Term::Tex(t), Term::Grad(_)) | (Term::Grad(_), Term::Tex(t)) => {
                 self.note(format!(
-                    "{} of two textures: kept the {}-channel sample",
-                    op.name(),
-                    keep.swizzle.len()
+                    "{} of a texture and a function of the coordinates: kept the texture",
+                    op.name()
                 ));
-                Term::Tex(keep)
+                self.lose(Lost::COORDINATES);
+                Term::Tex(t)
             }
             (Term::Uv(uv), Term::Const(c, nc)) => {
                 if uv.rotated() {
@@ -2281,31 +2779,119 @@ impl Eval<'_, '_> {
                     Term::Time(s)
                 }
             },
-            (Term::VertexColor, other) | (other, Term::VertexColor) => {
-                self.note(format!("vertex colour {} ignored", op.name()));
-                match other {
+            // Vertex colour is not exported: it counts as white, the colour
+            // of a mesh that was never painted (`color * x` is `x`, `color +
+            // x` is `1 + x`), and the channel is flagged.
+            (a @ Term::VertexColor, b) | (a, b @ Term::VertexColor) => {
+                self.note(format!("vertex colour in a {} taken as white", op.name()));
+                self.lose(Lost::VERTEX_COLOR);
+                let white = |t: Term| match t {
+                    Term::VertexColor => Term::Const(splat(1.0), 1),
+                    t => t,
+                };
+                match self.combine(op, Some(white(a)), Some(white(b))) {
                     Term::Tex(mut t) => {
                         t.vertex_color = true;
                         Term::Tex(t)
                     }
-                    Term::VertexColor => Term::VertexColor,
-                    o => o,
+                    t => t,
                 }
+            }
+            // A component of a direction (centred on 0) scaled by a
+            // constant is still one; it only drops out of a sum.
+            (Term::Unknown(k), Term::Const(..))
+                if Lost::is_direction(&k) && matches!(op, Op::Mul | Op::Div) =>
+            {
+                Term::Unknown(k)
+            }
+            (Term::Const(..), Term::Unknown(k)) if Lost::is_direction(&k) && op == Op::Mul => {
+                Term::Unknown(k)
             }
             (Term::Unknown(k), other) | (other, Term::Unknown(k)) => {
                 self.note(format!(
                     "unsupported {k} treated as neutral in {}",
                     op.name()
                 ));
+                self.lose(Lost::of_kind(&k));
                 other
             }
-            (x, _) => {
+            (x, y) => {
                 self.note(format!(
                     "{} of incompatible values approximated by its first input",
                     op.name()
                 ));
+                self.lose(match y {
+                    Term::Uv(_) | Term::Grad(_) => Lost::COORDINATES,
+                    Term::Time(_) => Lost::TIME,
+                    _ => Lost::OTHER,
+                });
                 x
             }
+        }
+    }
+
+    /// `sign * g + c` for a gradient of one plain factor (`value * (s x +
+    /// o)` stays one factor); anything else is not a product of powers.
+    fn gradient_offset(&mut self, mut g: Box<GradTerm>, sign: f32, c: f32, nc: u8) -> Term {
+        let v = g.value[0];
+        match g.factors.as_mut_slice() {
+            [f] if g.n == 1 && nc == 1 && f.power == 1.0 => {
+                f.scale *= v * sign;
+                f.offset = f.offset * v * sign + c;
+                g.value = splat(1.0);
+                Term::Grad(g)
+            }
+            _ => self.unknown("coordinate-math"),
+        }
+    }
+
+    /// Two texture samples combined: one is kept, the other is recorded as
+    /// dropped and stands in by its mean value when that is known.
+    ///
+    /// Kept: a sample whose coordinates follow the mesh's over one whose
+    /// coordinates could not be derived; then the sample with more channels
+    /// (colour over a mask channel); between two colour samples of a
+    /// product the one whose texture carries colour over one that is grey
+    /// (a tiling surface texture over the occlusion or weight map that
+    /// modulates it); otherwise (and always in a sum, whose terms are
+    /// peers) the one with the coarser tiling (base layer over detail
+    /// layer), then the first.
+    fn combine_textures(&mut self, op: Op, x: Box<TexTerm>, y: Box<TexTerm>) -> Term {
+        let coarse = |t: &TexTerm| t.uv.scale[0].abs().max(t.uv.scale[1].abs());
+        let keep_first = if x.placed != y.placed {
+            x.placed
+        } else {
+            match x.swizzle.len().cmp(&y.swizzle.len()) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                // In a product a grey texture modulates a coloured one.
+                // The terms of a sum are peers: the tiling decides.
+                std::cmp::Ordering::Equal => match (x.coloured(), y.coloured()) {
+                    (Some(true), Some(false)) if matches!(op, Op::Mul | Op::Div) => true,
+                    (Some(false), Some(true)) if matches!(op, Op::Mul | Op::Div) => false,
+                    _ => coarse(&x) <= coarse(&y),
+                },
+            }
+        };
+        let (keep, drop) = if keep_first { (x, y) } else { (y, x) };
+        if let Some(d) = &drop.texture {
+            self.extra_textures.insert(d.clone());
+        }
+        self.note(format!(
+            "{} of two textures: kept the {}-channel sample",
+            op.name(),
+            keep.swizzle.len()
+        ));
+        self.lose(Lost::TEXTURE);
+        let Some((mean, n)) = drop.mean() else {
+            return Term::Tex(keep);
+        };
+        self.note("a dropped texture stands in by its mean value");
+        let (keep, mean) = (Some(Term::Tex(keep)), Some(Term::Const(mean, n)));
+        if keep_first {
+            self.combine(op, keep, mean)
+        } else {
+            self.combine(op, mean, keep)
         }
     }
 
@@ -2319,11 +2905,15 @@ impl Eval<'_, '_> {
         let a = self.input(pkg, n, "A", frame, depth);
         let b = self.input(pkg, n, "B", frame, depth);
         let alpha = self.input(pkg, n, "Alpha", frame, depth);
+        // A constant that stands in for something that varies in the
+        // original (a depth or view term treated as neutral on the way) is
+        // not a blend weight.
+        let alpha_varies = !self.last_lost.is_empty();
         let (Some(a), Some(b)) = (a, b) else {
             return self.unknown("LinearInterpolate-unconnected");
         };
         match alpha {
-            Some(Term::Const(c, _)) => {
+            Some(Term::Const(c, _)) if !alpha_varies => {
                 let w = c[0];
                 if w <= 0.0 {
                     return a;
@@ -2337,34 +2927,93 @@ impl Eval<'_, '_> {
                 let tb = self.combine(Op::Mul, Some(b), Some(wb));
                 self.combine(Op::Add, Some(ta), Some(tb))
             }
-            _ => match (a, b) {
-                (Term::Const(x, nx), Term::Const(y, ny)) => {
-                    self.note("lerp with a varying alpha between constants: average used");
-                    Term::Const(
-                        zip(bcast(x, nx), bcast(y, ny), |p, q| 0.5 * (p + q)),
-                        nx.max(ny),
-                    )
-                }
-                (Term::Tex(t), Term::Tex(other)) => {
-                    if let Some(d) = &other.texture {
-                        self.extra_textures.insert(d.clone());
+            alpha => {
+                // Where the alpha is known to be 1 and above (or 0 and
+                // below) everywhere, the lerp is its input B (or A) and
+                // nothing is lost by saying so. That can only be said of
+                // a constant or of a texture term's range (a texel is in
+                // 0..1), and only when nothing but texture detail and
+                // vertex colour (taken as white) was left out of it: an
+                // alpha that assumed a neutral depth, view or world term
+                // says nothing about the blend.
+                let known = Lost::TEXTURE
+                    .with(Lost::VERTEX_COLOR)
+                    .contains(self.last_lost);
+                let range = match &alpha {
+                    Some(Term::Tex(t)) if known => {
+                        let (f, b) = (t.factor[0], t.bias[0]);
+                        Some((b.min(f + b), b.max(f + b)))
                     }
-                    self.note("lerp with a varying alpha between two textures: kept input A");
-                    Term::Tex(t)
+                    Some(Term::Const(c, _)) if known => Some((c[0], c[0])),
+                    Some(Term::VertexColor) => Some((1.0, 1.0)),
+                    _ => None,
+                };
+                let side = match range {
+                    Some((lo, _)) if lo >= 1.0 => Some(true),
+                    Some((_, hi)) if hi <= 0.0 => Some(false),
+                    _ => None,
+                };
+                match &alpha {
+                    Some(Term::Unknown(k) | Term::Dim(k)) => self.lose(Lost::of_kind(k)),
+                    Some(Term::Tex(_)) => self.lose(Lost::TEXTURE),
+                    Some(Term::VertexColor) => self.lose(Lost::VERTEX_COLOR),
+                    Some(Term::Uv(_) | Term::Grad(_)) => self.lose(Lost::COORDINATES),
+                    Some(Term::Time(_)) => self.lose(Lost::TIME),
+                    Some(Term::Const(..)) | None => {}
                 }
-                (Term::Tex(t), _) | (_, Term::Tex(t)) => {
-                    self.note("lerp with a varying alpha: kept the textured input");
-                    Term::Tex(t)
+                // A clamped depth is a factor that is 1 beyond its range:
+                // the blend it drives between two tilings of one texture
+                // (a finer one near the camera) shows its far side over
+                // most of what is on screen.
+                let by_distance = matches!(
+                    &alpha,
+                    Some(Term::Unknown(k)) if Lost::of_kind(k) == Lost::DEPTH
+                );
+                match side {
+                    Some(true) => b,
+                    Some(false) => a,
+                    None => self.lerp_varying(a, b, by_distance),
                 }
-                (Term::Unknown(_), x) => {
-                    self.note("lerp with a varying alpha: kept the supported input");
-                    x
+            }
+        }
+    }
+
+    /// A lerp whose alpha varies: one side stands for both.
+    fn lerp_varying(&mut self, a: Term, b: Term, by_distance: bool) -> Term {
+        match (demote(a), demote(b)) {
+            (Term::Const(x, nx), Term::Const(y, ny)) => {
+                self.note("lerp with a varying alpha between constants: average used");
+                Term::Const(
+                    zip(bcast(x, nx), bcast(y, ny), |p, q| 0.5 * (p + q)),
+                    nx.max(ny),
+                )
+            }
+            (Term::Tex(t), Term::Tex(other)) if by_distance && t.texture == other.texture => {
+                self.note(
+                    "distance blend between two tilings of one texture: kept the far one (input B)",
+                );
+                Term::Tex(other)
+            }
+            (Term::Tex(t), Term::Tex(other)) => {
+                if let Some(d) = &other.texture {
+                    self.extra_textures.insert(d.clone());
                 }
-                (x, _) => {
-                    self.note("lerp with a varying alpha: kept input A");
-                    x
-                }
-            },
+                self.note("lerp with a varying alpha between two textures: kept input A");
+                self.lose(Lost::TEXTURE);
+                Term::Tex(t)
+            }
+            (Term::Unknown(_), x) | (x, Term::Unknown(_)) => {
+                self.note("lerp with a varying alpha: kept the supported input");
+                x
+            }
+            (Term::Tex(t), _) | (_, Term::Tex(t)) => {
+                self.note("lerp with a varying alpha: kept the textured input");
+                Term::Tex(t)
+            }
+            (x, _) => {
+                self.note("lerp with a varying alpha: kept input A");
+                x
+            }
         }
     }
 
@@ -2442,7 +3091,7 @@ impl Eval<'_, '_> {
         };
         let fname = fp.rsplit('.').next().unwrap_or(fp).to_owned();
         match self.input(&fpkg, &out_node, "A", Some(&inner), depth) {
-            Some(Term::Unknown(_)) | None => {
+            Some(Term::Unknown(_) | Term::Dim(_)) | None => {
                 // Image-adjustment and blend functions reduce to unsupported
                 // math; approximate the call by its textured (or first
                 // representable) input.
@@ -2455,7 +3104,7 @@ impl Eval<'_, '_> {
                         continue;
                     };
                     let better = match (&best, &t) {
-                        (_, Term::Unknown(_)) => false,
+                        (_, Term::Unknown(_) | Term::Dim(_)) => false,
                         (None, _) => true,
                         (Some(Term::Tex(_)), _) => false,
                         (Some(_), Term::Tex(_)) => true,
@@ -2515,6 +3164,102 @@ impl Eval<'_, '_> {
             Some(t) => t,
             None => self.unknown("FunctionInput-unbound"),
         }
+    }
+}
+
+/// The properties of an expression node that the walk reads, for the
+/// trace: names and numbers only (a local diagnostic, never written to the
+/// converted data).
+fn describe_node(n: &ExpressionNode, link: &ExprLink) -> String {
+    let mut out = String::new();
+    for key in ["ParameterName", "Texture", "MaterialFunction"] {
+        let v = n.name(key).or_else(|| n.object(key));
+        if let Some(v) = v {
+            out.push_str(&format!(" {key}={}", v.rsplit('.').next().unwrap_or(v)));
+        }
+    }
+    for key in [
+        "R",
+        "G",
+        "B",
+        "A",
+        "DefaultValue",
+        "UTiling",
+        "VTiling",
+        "SpeedX",
+        "SpeedY",
+        "Speed",
+        "Min",
+        "Max",
+        "Bias",
+        "Scale",
+        "ConstExponent",
+        "Exponent",
+    ] {
+        if let Some(v) = n.f32(key) {
+            out.push_str(&format!(" {key}={v}"));
+        } else if let Some(v) = n.bool(key) {
+            out.push_str(&format!(" {key}={v}"));
+        }
+    }
+    if let Some(v) = prop(&n.properties, "DefaultValue").and_then(value_linear_color) {
+        out.push_str(&format!(" DefaultValue={v:?}"));
+    }
+    if let Some(i) = get_i32(&n.properties, "CoordinateIndex") {
+        out.push_str(&format!(" CoordinateIndex={i}"));
+    }
+    if link.output_index != 0 {
+        out.push_str(&format!(" out={}", link.output_index));
+    }
+    if let Some(m) = link.mask {
+        let sel: String = ['r', 'g', 'b', 'a']
+            .iter()
+            .zip(m)
+            .filter(|(_, on)| *on)
+            .map(|(c, _)| *c)
+            .collect();
+        out.push_str(&format!(" mask={sel}"));
+    }
+    out
+}
+
+/// A reduced value, for the trace.
+fn describe_term(t: &Term) -> String {
+    match t {
+        Term::Const(v, n) => format!("const{n} {:?}", &v[..usize::from((*n).clamp(1, 4))]),
+        Term::Tex(x) => format!(
+            "tex {}.{} w{} *{:?} +{:?} uv{} x{:?} +{:?} pan{:?}",
+            x.texture
+                .as_deref()
+                .map_or("(none)", |p| p.rsplit('.').next().unwrap_or(p)),
+            channels_text(&x.swizzle),
+            x.width,
+            &x.factor[..usize::from(x.width.clamp(1, 4))],
+            &x.bias[..usize::from(x.width.clamp(1, 4))],
+            x.uv.channel,
+            x.uv.scale,
+            x.uv.offset,
+            x.uv.panning
+        ),
+        Term::Uv(uv) => format!(
+            "uv{} x{:?} +{:?} pan{:?} rot{}",
+            uv.channel, uv.scale, uv.offset, uv.panning, uv.rotation
+        ),
+        Term::VertexColor => "vertex colour".to_owned(),
+        Term::Time(s) => format!("time x{s}"),
+        Term::Grad(g) => format!(
+            "gradient {:?} * {:?}",
+            &g.value[..usize::from(g.n.clamp(1, 4))],
+            g.factors
+                .iter()
+                .map(|f| format!(
+                    "({} * {}{} + {})^{}",
+                    f.scale, f.component, f.uv_channel, f.offset, f.power
+                ))
+                .collect::<Vec<_>>()
+        ),
+        Term::Unknown(k) => format!("unsupported {k}"),
+        Term::Dim(k) => format!("unsupported {k} (a length)"),
     }
 }
 
@@ -2745,6 +3490,24 @@ pub struct ApproxMaterial {
     pub unsupported: BTreeMap<String, usize>,
     /// What was simplified.
     pub notes: Vec<String>,
+    /// Per channel (`base_color`, `normal`, `emissive`, `specular`,
+    /// `specular_power`, `opacity`): the inputs of the original graph the
+    /// channel does not have ([`Lost::NAMES`]). A channel that lost nothing
+    /// is absent.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub dropped: BTreeMap<&'static str, Vec<&'static str>>,
+    /// Per channel: the function of the texture coordinates that multiplies
+    /// the channel's `value` (a channel computed from coordinates alone).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gradients: BTreeMap<&'static str, UvGradient>,
+    /// What each bound texture holds on average (those whose small mips are
+    /// stored in the package).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub texture_stats: BTreeMap<String, TextureStats>,
+    /// Bound objects that are filled while the game runs (render targets,
+    /// movies, scripted textures): there is no picture to convert.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runtime_textures: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2799,6 +3562,7 @@ impl Eval<'_, '_> {
         pkg: &Arc<LoadedPackage>,
         props: &[Property],
         name: &str,
+        key: &'static str,
         shape: InputShape,
         default: [f32; 4],
     ) -> Channel {
@@ -2836,6 +3600,11 @@ impl Eval<'_, '_> {
                 resolved: true,
             };
         };
+        if let Some(t) = self.trace.as_mut() {
+            t.push(format!("== {name}"));
+        }
+        self.lost = Lost::NONE;
+        self.gradient = None;
         let term = self.link(pkg, &link, None, 0);
         let mut ch = self.channel(term, default, name);
         if shape == InputShape::Scalar {
@@ -2843,6 +3612,13 @@ impl Eval<'_, '_> {
             // (the shader compiler's cast truncates to `.r`).
             ch.value = splat(ch.value[0]);
             ch.bias = splat(ch.bias[0]);
+        }
+        let lost = std::mem::take(&mut self.lost);
+        if !lost.is_empty() {
+            self.dropped.insert(key, lost.names());
+        }
+        if let Some(g) = self.gradient.take() {
+            self.gradients.insert(key, g);
         }
         ch
     }
@@ -2882,17 +3658,28 @@ impl Eval<'_, '_> {
             }
             Some(Term::VertexColor) => {
                 self.note(format!("{name}: vertex colour alone approximated by white"));
+                self.lose(Lost::VERTEX_COLOR);
                 ch.value = splat(1.0);
                 ch.vertex_color = true;
             }
-            Some(Term::Uv(_) | Term::Time(_)) => {
+            Some(Term::Grad(g)) => {
+                ch.value = pad(bcast(g.value, g.n), usize::from(g.n), 1.0);
+                self.gradient = Some(UvGradient { factors: g.factors });
+            }
+            Some(t @ (Term::Uv(_) | Term::Time(_))) => {
                 self.note(format!(
                     "{name}: coordinates/time used as a colour; default kept"
                 ));
+                self.lose(if matches!(t, Term::Time(_)) {
+                    Lost::TIME
+                } else {
+                    Lost::COORDINATES
+                });
                 ch.resolved = false;
             }
-            Some(Term::Unknown(k)) => {
+            Some(Term::Unknown(k) | Term::Dim(k)) => {
                 self.note(format!("{name}: unsupported {k}; default kept"));
+                self.lose(Lost::of_kind(&k));
                 ch.resolved = false;
             }
             None => ch.resolved = false,
@@ -2945,6 +3732,29 @@ impl MaterialDecoder<'_> {
         lp: &Arc<LoadedPackage>,
         index: usize,
     ) -> Result<ApproxMaterial, MaterialError> {
+        self.approximate_inner(lp, index, false).map(|(a, _)| a)
+    }
+
+    /// [`Self::approximate`] plus the walk of every material input: one
+    /// line per evaluated expression (kind, the properties read, the reduced
+    /// value), indented by depth, under a line naming the input. A local
+    /// diagnostic for `asamu-import materials --explain`; it describes the
+    /// original's graph, so it is printed and never written to converted
+    /// data or the repository.
+    pub fn approximate_traced(
+        &self,
+        lp: &Arc<LoadedPackage>,
+        index: usize,
+    ) -> Result<(ApproxMaterial, Vec<String>), MaterialError> {
+        self.approximate_inner(lp, index, true)
+    }
+
+    fn approximate_inner(
+        &self,
+        lp: &Arc<LoadedPackage>,
+        index: usize,
+        trace: bool,
+    ) -> Result<(ApproxMaterial, Vec<String>), MaterialError> {
         let chain = self.resolve_chain(lp, index);
         let Some((_, leaf)) = chain.links.first() else {
             return Err(MaterialError::Malformed {
@@ -2968,6 +3778,16 @@ impl MaterialDecoder<'_> {
             extra_textures: BTreeSet::new(),
             visits: 0,
             lossy: false,
+            trace: trace.then(Vec::new),
+            lost: Lost::NONE,
+            last_lost: Lost::NONE,
+            gradient: None,
+            placed: true,
+            homes: chain.links.iter().map(|(p, _)| p.clone()).collect(),
+            stats: BTreeMap::new(),
+            runtime_textures: BTreeSet::new(),
+            dropped: BTreeMap::new(),
+            gradients: BTreeMap::new(),
         };
         let phys_material = chain
             .links
@@ -2998,7 +3818,7 @@ impl MaterialDecoder<'_> {
                 resolved: true,
                 ..grey.clone()
             };
-            return Ok(ApproxMaterial {
+            let approx = ApproxMaterial {
                 class: leaf.class,
                 chain: chain_paths,
                 base_material: None,
@@ -3036,7 +3856,12 @@ impl MaterialDecoder<'_> {
                 expressions: BTreeMap::new(),
                 unsupported: BTreeMap::new(),
                 notes: ev.notes.into_iter().collect(),
-            });
+                dropped: BTreeMap::new(),
+                gradients: BTreeMap::new(),
+                texture_stats: BTreeMap::new(),
+                runtime_textures: Vec::new(),
+            };
+            return Ok((approx, Vec::new()));
         };
         let props = &base.properties;
         let blend_mode = get_name(props, "BlendMode")
@@ -3053,7 +3878,14 @@ impl MaterialDecoder<'_> {
         if lighting_model.eq_ignore_ascii_case("MLM_Custom") {
             ev.note("MLM_Custom lighting approximated by Phong (CustomLighting inputs ignored)");
         }
-        let base_color = ev.material_input(bpkg, props, "DiffuseColor", InputShape::Color, black);
+        let base_color = ev.material_input(
+            bpkg,
+            props,
+            "DiffuseColor",
+            "base_color",
+            InputShape::Color,
+            black,
+        );
         let normal = prop(props, "Normal")
             .map(expr_link)
             .is_some_and(|l| l.expression.is_some())
@@ -3062,25 +3894,53 @@ impl MaterialDecoder<'_> {
                     bpkg,
                     props,
                     "Normal",
+                    "normal",
                     InputShape::Vector,
                     [0.0, 0.0, 1.0, 0.0],
                 )
             });
-        let emissive = ev.material_input(bpkg, props, "EmissiveColor", InputShape::Color, black);
-        let specular = ev.material_input(bpkg, props, "SpecularColor", InputShape::Color, black);
+        let emissive = ev.material_input(
+            bpkg,
+            props,
+            "EmissiveColor",
+            "emissive",
+            InputShape::Color,
+            black,
+        );
+        let specular = ev.material_input(
+            bpkg,
+            props,
+            "SpecularColor",
+            "specular",
+            InputShape::Color,
+            black,
+        );
         let specular_power = ev.material_input(
             bpkg,
             props,
             "SpecularPower",
+            "specular_power",
             InputShape::Scalar,
             splat(15.0),
         );
         let opacity = match alpha_mode {
             "opaque" => None,
-            "mask" => {
-                Some(ev.material_input(bpkg, props, "OpacityMask", InputShape::Scalar, splat(1.0)))
-            }
-            _ => Some(ev.material_input(bpkg, props, "Opacity", InputShape::Scalar, splat(1.0))),
+            "mask" => Some(ev.material_input(
+                bpkg,
+                props,
+                "OpacityMask",
+                "opacity",
+                InputShape::Scalar,
+                splat(1.0),
+            )),
+            _ => Some(ev.material_input(
+                bpkg,
+                props,
+                "Opacity",
+                "opacity",
+                InputShape::Scalar,
+                splat(1.0),
+            )),
         };
         let alpha_cutoff = (alpha_mode == "mask")
             .then(|| get_f32(props, "OpacityMaskClipValue").unwrap_or(0.3333));
@@ -3110,7 +3970,20 @@ impl MaterialDecoder<'_> {
             .filter(|t| !textures.contains(*t))
             .cloned()
             .collect();
-        Ok(ApproxMaterial {
+        let walk = ev.trace.take().unwrap_or_default();
+        let texture_stats: BTreeMap<String, TextureStats> = ev
+            .stats
+            .iter()
+            .filter(|(t, _)| textures.contains(*t))
+            .map(|(t, s)| (t.clone(), *s))
+            .collect();
+        let runtime_textures: Vec<String> = ev
+            .runtime_textures
+            .iter()
+            .filter(|t| textures.contains(*t))
+            .cloned()
+            .collect();
+        let approx = ApproxMaterial {
             class: leaf.class,
             chain: chain_paths,
             base_material: Some(base.path.clone()),
@@ -3141,7 +4014,12 @@ impl MaterialDecoder<'_> {
             expressions: ev.reached,
             unsupported: ev.unsupported,
             notes: ev.notes.into_iter().collect(),
-        })
+            dropped: ev.dropped,
+            gradients: ev.gradients,
+            texture_stats,
+            runtime_textures,
+        };
+        Ok((approx, walk))
     }
 }
 

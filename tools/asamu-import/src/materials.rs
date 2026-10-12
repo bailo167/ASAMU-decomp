@@ -78,6 +78,11 @@ pub struct Args {
     /// material resource Id (about 130 MB each; slower).
     #[arg(long)]
     shader_caches: bool,
+    /// With --check and --name: print how each matching material's inputs
+    /// were reduced (the walk of the original's graph: a local diagnostic,
+    /// keep the output local).
+    #[arg(long)]
+    explain: bool,
     /// Pretty-print materials.json.
     #[arg(long)]
     pretty: bool,
@@ -551,6 +556,51 @@ fn print_report(r: &Report) {
     }
 }
 
+/// Prints, for every entry, the walk that reduced each of its inputs and
+/// what the result lost (`--explain`). Local diagnostic output: it describes
+/// the original's material graphs.
+fn explain(dirs: &[PathBuf], files: &[PathBuf], entries: &BTreeMap<String, MaterialEntry>) {
+    let set = PackageSet::new(dirs);
+    let dec = MaterialDecoder::new(&set);
+    for (path, entry) in entries {
+        println!("\n===== {path}");
+        let file = files.iter().find(|f| {
+            f.file_stem()
+                .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(&entry.package))
+        });
+        let Some(lp) = file.and_then(|f| set.open_file(f).ok()) else {
+            println!("  (package {} not opened)", entry.package);
+            continue;
+        };
+        match dec.approximate_traced(&lp, entry.export_index) {
+            Ok((a, walk)) => {
+                println!(
+                    "  chain {:?}\n  {} {} unlit={} two_sided={}",
+                    a.chain, a.blend_mode, a.lighting_model, a.unlit, a.two_sided
+                );
+                for line in walk {
+                    println!("  {line}");
+                }
+                for (channel, lost) in &a.dropped {
+                    println!("  {channel} lost: {}", lost.join(", "));
+                }
+                for (texture, s) in &a.texture_stats {
+                    println!(
+                        "  texture {texture}: mean {:?} chroma {:.3}{}",
+                        s.mean,
+                        s.chroma,
+                        if s.uniform { " (one colour)" } else { "" }
+                    );
+                }
+                for n in &a.notes {
+                    println!("  note: {n}");
+                }
+            }
+            Err(e) => println!("  {e}"),
+        }
+    }
+}
+
 pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {
     let (cooked, maps, install_root) = install_dirs(ctx)?;
     let dirs = vec![cooked.clone(), maps.clone()];
@@ -571,6 +621,12 @@ pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
             print_report(&report);
+        }
+        if args.explain {
+            if args.name.is_none() {
+                bail!("--explain needs --name (it prints one walk per matching material)");
+            }
+            explain(&dirs, &files, &entries);
         }
         return Ok(());
     }
