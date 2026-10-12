@@ -36,6 +36,7 @@
 //! start a session and does nothing without one.
 
 use asamu_core::glam as sim_glam;
+use asamu_sandbox::arena::builtin_arenas;
 use asamu_sandbox::command::{Command, SlotOp, TeleportTarget, TimeOp, Toggle};
 use asamu_sandbox::playground::playground;
 use asamu_sandbox::snapshot::SLOT_COUNT;
@@ -43,7 +44,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use super::widgets::{Modifiers, QUICK_MARK, ViewState};
-use super::{Lab, LabRequest, LabSet, PanelState, PanelTab, VizSettings, lab_active};
+use super::{Lab, LabRequest, LabSet, PanelState, PanelTab, Stage, VizSettings, lab_active};
 use crate::ui::{Screen, UiState};
 use crate::{PendingInput, Sim};
 
@@ -281,12 +282,13 @@ fn wrapped(index: usize, steps: i32, count: usize) -> usize {
 /// | `respawn` | the inspector closed, one `respawn` command |
 /// | `at:<station>` | the inspector closed, the pawn placed at a station of the playground (`hub`, `near`, `medium`, `far`, `crystals`, `runway`, `ferry`, `yard`, `carousel`, `wheel`, `tower`) |
 /// | `pull:<piece>` | the inspector closed, the view turned to a piece of the playground (`near hook 1`, `carousel hook 1`, ...) and the grapple held for the step |
+/// | `go:<stage>` | what a click on that entry of the inspector's stage list does: this session ends and one starts on `playground`, `graybox`, an arena's id, or (anything else) the converted map of that name |
 ///
-/// It stands in for the inspector key, the tab buttons, the W key, the
-/// mouse button and a few commands, all inside a session: it does nothing
-/// without a session and cannot start one. A developer's tool: the two
-/// playground steps place the pawn and turn its view through the session's
-/// own teleport command, which is logged like any other.
+/// It stands in for the inspector key, the tab and stage buttons, the W
+/// key, the mouse button and a few commands, all inside a session: it does
+/// nothing without a session and cannot start the first one. A developer's
+/// tool: the two playground steps place the pawn and turn its view through
+/// the session's own teleport command, which is logged like any other.
 pub(super) const VIEW_ENV: &str = "ASAMU_LAB_VIEW";
 
 /// Frames a step of [`VIEW_ENV`] lasts when it names no time.
@@ -312,6 +314,8 @@ enum View {
     /// The inspector closed, the view on a piece of the playground and the
     /// grapple held.
     Pull(String),
+    /// The inspector closed, a new session on another stage.
+    Go(String),
 }
 
 /// A step and how long it lasts (`None`: [`VIEW_FRAMES`] frames).
@@ -349,6 +353,8 @@ fn parse_view(value: &str) -> Option<TimedView> {
                 View::At(named(station)?)
             } else if let Some(piece) = value.strip_prefix("pull:") {
                 View::Pull(named(piece)?)
+            } else if let Some(stage) = value.strip_prefix("go:") {
+                View::Go(named(stage)?)
             } else {
                 let (name, group) = match value.split_once(':') {
                     Some((name, group)) => (name, Some(group.trim().parse::<usize>().ok()?)),
@@ -423,6 +429,17 @@ impl Tour {
     }
 }
 
+/// The stage a `go:` step names: the playground, the graybox test level, a
+/// built-in arena by its id, or else a converted map of that name.
+fn stage_named(name: &str) -> Stage {
+    match name {
+        "playground" => Stage::Playground,
+        "graybox" => Stage::Graybox,
+        id if builtin_arenas().iter().any(|arena| arena.id == id) => Stage::Arena(id.to_owned()),
+        map => Stage::Map(map.to_owned()),
+    }
+}
+
 /// Where the piece `name` of the playground is now: where the level script
 /// has it, if it moves.
 fn piece_now(sim: &Sim, name: &str) -> Option<sim_glam::Vec3> {
@@ -481,7 +498,13 @@ fn hotkeys(
                     view.hud = true;
                 }
             }
-            View::Play | View::Show | View::Walk | View::Respawn | View::At(_) | View::Pull(_) => {
+            View::Play
+            | View::Show
+            | View::Walk
+            | View::Respawn
+            | View::At(_)
+            | View::Pull(_)
+            | View::Go(_) => {
                 if panel.open {
                     requests.write(LabRequest::CloseInspector);
                 }
@@ -524,6 +547,16 @@ fn hotkeys(
                     }
                     None => warn!("{VIEW_ENV}: the playground has no piece {name:?}"),
                 }
+            }
+            View::Go(stage) => {
+                requests.write(LabRequest::Start {
+                    stage: stage_named(stage),
+                    profile: lab
+                        .session
+                        .as_ref()
+                        .map(|session| session.profile().name.clone())
+                        .filter(|name| name != "classic"),
+                });
             }
             View::Tab(..) | View::Play | View::Walk => {}
         }
@@ -832,13 +865,24 @@ mod tests {
         );
         // The playground's steps, and a step with its own length.
         assert_eq!(
-            parse_views("at:wheel@4, pull: carousel hook 1 @2.5,play@0.5,stage@3"),
+            parse_views("at:wheel@4, pull: carousel hook 1 @2.5,play@0.5,stage@3,go:AG-Workshop@9"),
             Some(vec![
                 (View::At("wheel".to_owned()), Some(4.0)),
                 (View::Pull("carousel hook 1".to_owned()), Some(2.5)),
                 (View::Play, Some(0.5)),
                 (View::Tab(PanelTab::Stage, None), Some(3.0)),
+                (View::Go("AG-Workshop".to_owned()), Some(9.0)),
             ])
+        );
+        assert_eq!(stage_named("playground"), Stage::Playground);
+        assert_eq!(stage_named("graybox"), Stage::Graybox);
+        assert_eq!(
+            stage_named("grapple-lab"),
+            Stage::Arena("grapple-lab".to_owned())
+        );
+        assert_eq!(
+            stage_named("AG-Workshop"),
+            Stage::Map("AG-Workshop".to_owned())
         );
         for bad in [
             "",
@@ -850,6 +894,7 @@ mod tests {
             "play:2",
             "at:",
             "pull:  ",
+            "go:",
             "play@",
             "play@0",
             "play@-1",
@@ -899,18 +944,18 @@ mod tests {
         assert!((0..10).all(|_| none.step(0.0).is_none()));
         // A step with a length lasts that long in real time, whatever the
         // frame rate: half a second is 5 frames of 0.1 s, or 50 of 0.01 s.
-        for (delta, frames) in [(0.1f32, 5), (0.01, 50)] {
+        for (delta, frames) in [(0.1f32, 5i32), (0.01, 50)] {
             let mut timed = Tour {
                 read: true,
                 views: vec![(View::Play, Some(0.5)), (View::Show, None)],
                 ..Tour::default()
             };
-            let mut played = 0;
+            let mut played = 0i32;
             while matches!(timed.step(delta), Some((View::Play, _))) {
                 played += 1;
                 assert!(played < 1000);
             }
-            assert!((played as i32 - frames).abs() <= 1, "{delta}: {played}");
+            assert!((played - frames).abs() <= 1, "{delta}: {played}");
         }
     }
 

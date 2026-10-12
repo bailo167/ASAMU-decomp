@@ -305,7 +305,8 @@ disk, and they have nothing to do with the game's save system.
   script-driven interface are not part of it and are not rewound. The slot list says so.
 
 **Rewind** steps back through keyframes taken every 30 ticks (half a second), 120 of them (one minute). It is
-available on hand-made levels only and is not an exact per-tick rewind. No keyframes are taken while a recording
+available on the box levels only (the graybox test level and the lab arenas, not the playground) and is not an
+exact per-tick rewind. No keyframes are taken while a recording
 runs.
 
 ## 7. Hotkeys
@@ -324,7 +325,7 @@ window). The inspector key also works with the mouse free.
 | `,` / `.` / `/` | Slower / faster / back to 1x |
 | 1 to 4 | Select a save-state slot |
 | K / L | Save to / load from the selected slot |
-| Z | Rewind one keyframe (hand-made levels) |
+| Z | Rewind one keyframe (the graybox and the lab arenas) |
 | T / G | Teleport to the crosshair hit / to the next teleport target |
 | B / V | Set the "quick" bookmark / return to it |
 | N | Fly placement on/off |
@@ -487,10 +488,11 @@ The layout was fitted to these.
 
 **How it looks** is ours as well (`apps/asamu/src/sandbox/playground_view.rs`): flat-shaded meshes of the level's
 own solids, an evening sky, a low sun with shadows, a light haze, lamps on the hub. Nothing of it imitates the
-original, and nothing of it needs game data. In a run on converted data the game's own hand, grapple beam, hit
-mark and sounds are used as in any level, since they come from your data; without it the app's fallbacks are (no
-hand, a plain beam, and a flat blue patch where the grapple hits: the app's stand-in for the hit mark, PLACEHOLDER
-for the original's glowing decal, not something the Sandbox draws).
+original, and nothing of it needs game data. In a run on converted data the game's own hand and grapple beam are
+drawn as in any level, since they come from your data (so, presumably, are its hit mark and sounds: the unattended
+runs made for this document were silent, and none of their frames shows a hit); without it the app's fallbacks
+are used (no hand, a plain beam, and a flat blue patch where the grapple hits: the app's stand-in for the hit
+mark, PLACEHOLDER for the original's glowing decal, not something the Sandbox draws).
 
 ### The lab arenas
 
@@ -696,10 +698,11 @@ Nothing under `crates/` or `tools/` is compiled differently by the feature.
 comma-separated list of steps in a running session: the tab names (`tune`, `rules`, `time`, `view`, `profiles`,
 `stage`; `tune:<group index>` picks a parameter group), `play`, `show` (the read-outs and every visualiser on),
 `walk` (forward held), `respawn`, and for the playground `at:<station>` (the pawn placed at a station, section 9)
-and `pull:<piece>` (the view turned to a piece, such as `near hook 1` or `carousel hook 1`, and the grapple held).
-A step lasts 180 frames, or the seconds written after an `@` (`pull:far hook 1@4`). It cannot start a session and
-does nothing without one; the two playground steps act through the session's teleport command, which is logged
-like any other. A developer's tool, for example:
+and `pull:<piece>` (the view turned to a piece, such as `near hook 1` or `carousel hook 1`, and the grapple held),
+and `go:<stage>` (what a click on that entry of the stage list does: `playground`, `graybox`, an arena's id, or a
+converted map's name). A step lasts 180 frames, or the seconds written after an `@` (`pull:far hook 1@4`). It
+cannot start the first session and does nothing without one; the two playground steps act through the session's
+teleport command, which is logged like any other. A developer's tool, for example:
 
 ```sh
 ASAMU_LAB_VIEW="play@4,at:near@3,pull:near hook 1@4,at:wheel@4,stage@4" \
@@ -732,7 +735,8 @@ Limitations of this version:
 - **Spawn-only keys do not follow** on a level the loader built; the level's own ability state wins.
 - **Save states on scripted levels restore the simulation only**, and are in memory only. There are no save
   states on disk.
-- **Rewind** exists on hand-made levels only and steps by keyframe, not by tick.
+- **Rewind** exists on the box levels only (the graybox and the lab arenas; not on the playground, which is a
+  scene level like a converted map) and steps by keyframe, not by tick. Save states work everywhere.
 - **Time control scales everything on the virtual clock**, including presentation timers and audio timing.
 - **The predicted arc assumes a static world.**
 - **A shared in-memory save session.** In a run that is not a `--sandbox` process but keeps its saves in memory

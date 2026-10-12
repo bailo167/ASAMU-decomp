@@ -257,22 +257,20 @@ fn it_loads_through_the_games_loader_without_game_data() {
         moving,
         2 + 2 * CAROUSEL_ROCKS as usize + 2 * WHEEL_GONDOLAS as usize + 1
     );
-    // The data is gone again: nothing of it stays on disk.
-    let ours = format!("asamu-sandbox-playground-{}-", std::process::id());
-    let leftovers = std::fs::read_dir(std::env::temp_dir())
-        .unwrap()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(&ours))
-        .count();
-    assert_eq!(leftovers, 0);
+    // The data is gone again: nothing of it stays on disk. (A base of this
+    // test's own: other tests load the playground at the same time.)
+    let base = std::env::temp_dir().join(format!(
+        "asamu-sandbox-playground-test-base-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let (again, _) = playground::load_playground_under(&base).unwrap();
+    assert!(playground::is_playground(&again));
+    assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
     // A place that cannot hold the data is an error, not a panic.
-    let missing = std::env::temp_dir()
-        .join(format!(
-            "asamu-sandbox-playground-none-{}",
-            std::process::id()
-        ))
-        .join("nothing-here");
-    assert!(playground::load_playground_under(&missing).is_err());
+    assert!(playground::load_playground_under(&base.join("nothing-here")).is_err());
+    std::fs::remove_dir_all(&base).unwrap();
 }
 
 #[test]
@@ -890,7 +888,7 @@ fn a_session_on_the_playground_keeps_its_promises() {
     let script_input = |tick: usize| InputFrame {
         move_forward: if tick % 300 < 200 { 1.0 } else { 0.0 },
         move_right: if tick % 170 < 40 { -1.0 } else { 0.0 },
-        look_yaw_delta: if tick % 90 == 0 { 0.2 } else { 0.0 },
+        look_yaw_delta: if tick.is_multiple_of(90) { 0.2 } else { 0.0 },
         jump_pressed: tick % 240 == 30,
         jump_held: tick % 240 >= 30 && tick % 240 < 60,
         grapple_held: tick % 400 > 300,

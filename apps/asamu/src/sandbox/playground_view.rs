@@ -302,8 +302,10 @@ fn mesh_of(flat: Flat) -> Mesh {
 /// Rings and segments of the sky dome.
 const SKY_RINGS: u32 = 16;
 const SKY_SEGMENTS: u32 = 24;
-/// Radius of the sky dome, render units: inside every camera's far plane.
+/// Radius of the sky dome, render units: inside every camera's far plane
+/// (1,000 units or more in both compositions).
 const SKY_RADIUS: f32 = 700.0;
+const _: () = assert!(SKY_RADIUS < 1000.0);
 
 /// The sky: a sphere seen from inside, coloured by height.
 fn sky_mesh() -> Mesh {
@@ -1083,6 +1085,5 @@ mod tests {
             mesh.count_vertices(),
             ((SKY_RINGS + 1) * (SKY_SEGMENTS + 1)) as usize
         );
-        assert!(SKY_RADIUS < 1000.0);
     }
 }

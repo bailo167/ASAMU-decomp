@@ -171,7 +171,7 @@ fn spawn(commands: &mut Commands) {
 
 /// Shows the graphs while a session runs with them switched on (and the
 /// inspector closed), and removes them otherwise.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync(
     mut commands: Commands,
     lab: Res<Lab>,

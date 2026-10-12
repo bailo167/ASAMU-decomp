@@ -70,8 +70,9 @@ pub(super) struct LabUi;
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub(super) struct KeepClear;
 
-/// The view's own state, beside `PanelState` and `VizSettings`.
-#[derive(Resource, Clone, Debug, PartialEq)]
+/// The view's own state, beside `PanelState` and `VizSettings`. A session
+/// starts with all of it off or at the first page.
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub(super) struct ViewState {
     /// The tools are on screen (H; the tools key switches them on): the HUD
     /// read-outs, the graphs, the lines drawn over the game, the marker
@@ -89,19 +90,6 @@ pub(super) struct ViewState {
     pub launcher_profile: Option<usize>,
     /// A line from the view itself (a profile that could not be read).
     pub message: Option<String>,
-}
-
-impl Default for ViewState {
-    fn default() -> Self {
-        Self {
-            hud: false,
-            teleport_page: 0,
-            stage_page: 0,
-            profile_page: 0,
-            launcher_profile: None,
-            message: None,
-        }
-    }
 }
 
 /// How a text is coloured.
