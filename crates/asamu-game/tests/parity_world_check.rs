@@ -273,6 +273,174 @@ fn a_line_trace_reports_bsp_half_a_unit_short_and_triangles_four() {
     assert_eq!(c.check(TraceExtent::Zero).unwrap().hit.kind, SceneKind::Bsp);
 }
 
+/// The world check written out the long way, with no shortcut: **every**
+/// contact on the trace is a primitive of its own that reports its hit by
+/// its own rule (the rules themselves are the functions tested above and in
+/// `asamu-player`), and the earliest report wins. Returns the reported time
+/// of each candidate, or `None` when a contact lies so close to the end of
+/// the shortened trace that single-precision rounding decides whether it is
+/// on it.
+fn every_contact_asked(
+    extent: TraceExtent,
+    length: f32,
+    contacts: &[(SceneKind, f32)],
+) -> Option<Vec<(usize, f32)>> {
+    use asamu_game::world::routine_kind;
+    use asamu_player::world::{bsp_checked_fraction, pull_back, reported_time};
+    let on_trace = |d: f32| d <= length;
+    // 1. The level's BSP is asked first and reports its nearest hit.
+    let bsp = contacts
+        .iter()
+        .enumerate()
+        .filter(|(_, (kind, d))| *kind == SceneKind::Bsp && on_trace(*d))
+        .min_by(|a, b| a.1.1.total_cmp(&b.1.1));
+    let mut reports = Vec::new();
+    let mut fraction = 1.0_f32;
+    if let Some((i, (_, d))) = bsp {
+        let reported = pull_back(RoutineKind::Bsp, extent, length, d / length);
+        reports.push((i, reported));
+        // 2. The trace given to everything else ends 5 uu beyond it.
+        fraction = bsp_checked_fraction(reported, length);
+        if fraction <= 0.0 {
+            return Some(reports);
+        }
+    }
+    // 3. Every other primitive on that trace reports its own hit.
+    let reach = length * fraction;
+    for (i, (kind, d)) in contacts.iter().enumerate() {
+        if *kind == SceneKind::Bsp {
+            continue;
+        }
+        // (The product `length × part` and the quotient `distance / length`
+        // are each rounded to single precision: a few parts in ten million.)
+        if (d - reach).abs() <= 4.0e-6 * reach.max(1.0) {
+            return None;
+        }
+        if *d < reach {
+            reports.push((
+                i,
+                reported_time(routine_kind(*kind), extent, length, d / length, fraction),
+            ));
+        }
+    }
+    Some(reports)
+}
+
+#[test]
+fn the_shortcut_reports_what_asking_every_contact_reports() {
+    // `reported_first` asks for a class of primitives only when one of them
+    // could be reported before the best so far, and takes each class's first
+    // contact for its first report. Against the long way on 40,000 traces
+    // with one to seven contacts of mixed kinds, at the lengths the game's
+    // traces have (moves under and over 1 uu, the 20 and 28 uu floor
+    // checks, the placement's 88 uu, the crosshair's 6,000 and the fire
+    // trace's 16,384 uu) and with contacts crowded within a few uu of each
+    // other, where the order of the reports differs from the order touched.
+    const KINDS: [SceneKind; 5] = [
+        SceneKind::Bsp,
+        SceneKind::BrushHull,
+        SceneKind::SimpleHull,
+        SceneKind::TriangleMesh,
+        SceneKind::PawnCylinder,
+    ];
+    const LENGTHS: [f32; 10] = [
+        0.3, 0.95, 2.266, 7.0, 20.0, 28.0, 88.0, 100.0, 6_000.0, 16_384.0,
+    ];
+    // A fixed pseudo-random sequence (a 64-bit linear congruential
+    // generator; the constants are Knuth's MMIX ones).
+    let mut state = 0x4153_414D_5545_3031_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 40) as f32) / ((1_u64 << 24) as f32)
+    };
+    let (mut compared, mut unclear, mut none, mut not_first_touched) = (0, 0, 0, 0);
+    for case in 0..40_000 {
+        let length = LENGTHS[(next() * LENGTHS.len() as f32) as usize % LENGTHS.len()];
+        let extent = if next() < 0.5 {
+            TraceExtent::Box
+        } else {
+            TraceExtent::Zero
+        };
+        // A cluster of contacts within 12 uu (or the whole trace when that
+        // is shorter) somewhere on the trace, some of them beyond its end.
+        let spread = length.min(12.0);
+        let base = next() * (length * 1.05 - spread).max(0.0);
+        let count = 1 + (next() * 7.0) as usize % 7;
+        let contacts: Vec<(SceneKind, f32)> = (0..count)
+            .map(|_| {
+                let kind = KINDS[(next() * KINDS.len() as f32) as usize % KINDS.len()];
+                (kind, base + next() * spread)
+            })
+            .collect();
+        let Some(reports) = every_contact_asked(extent, length, &contacts) else {
+            unclear += 1;
+            continue;
+        };
+        let mut c = Contacts::new(length, &contacts);
+        let ours = c.check(extent);
+        let Some(best) = reports.iter().map(|r| r.1).min_by(f32::total_cmp) else {
+            assert_eq!(ours, None, "case {case}: {contacts:?} on {length} uu");
+            none += 1;
+            continue;
+        };
+        let ours =
+            ours.unwrap_or_else(|| panic!("case {case}: nothing for {contacts:?} on {length} uu"));
+        // The same reported time, to the rounding of the two ways a time on
+        // the shortened trace is formed (two units in the last place of a
+        // time near 1).
+        let ulps = 2.5e-7_f32;
+        assert!(
+            (ours.reported - best).abs() <= ulps,
+            "case {case}: {extent:?}, {length} uu, {contacts:?}: reported {} against {best} \
+             ({reports:?})",
+            ours.reported
+        );
+        // ... and it is the report of the contact handed back.
+        let InstanceRef::Static(index) = ours.hit.instance else {
+            panic!("case {case}: {:?}", ours.hit.instance)
+        };
+        let own = reports
+            .iter()
+            .find(|r| r.0 == index as usize)
+            .unwrap_or_else(|| panic!("case {case}: contact {index} is not on the trace"));
+        assert!(
+            (own.1 - ours.reported).abs() <= ulps,
+            "case {case}: contact {index} reports {} not {}",
+            own.1,
+            ours.reported
+        );
+        assert_eq!(ours.hit.kind, contacts[index as usize].0, "case {case}");
+        assert!(
+            (ours.time * length - contacts[index as usize].1).abs()
+                <= 1.0e-6 * length.max(1.0) + 1.0e-6,
+            "case {case}: time {} for a contact at {}",
+            ours.time,
+            contacts[index as usize].1
+        );
+        let first_touched = contacts
+            .iter()
+            .map(|c| c.1)
+            .min_by(f32::total_cmp)
+            .unwrap_or(0.0);
+        if contacts[index as usize].1 > first_touched {
+            not_first_touched += 1;
+        }
+        compared += 1;
+    }
+    eprintln!(
+        "{compared} traces compared ({not_first_touched} report a contact that is not the first \
+         touched), {none} with nothing on the trace, {unclear} left out (a contact at the end of \
+         the shortened trace)"
+    );
+    // The sequence must have given the comparison something to compare, of
+    // both sorts (bounds on this test's own generator, not on the rule).
+    assert!(compared > 30_000, "{compared}");
+    assert!(not_first_touched > 1_000, "{not_first_touched}");
+    assert!(unclear * 100 < compared, "{unclear}");
+}
+
 // ---------------------------------------------------------------------------
 // A converted scene: what the box and the trace meet.
 // ---------------------------------------------------------------------------
