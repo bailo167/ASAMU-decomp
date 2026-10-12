@@ -224,6 +224,9 @@ pub struct Runtime {
     pub(crate) started: bool,
     pub(crate) time_trial: bool,
     pub(crate) start_save_index: Option<i32>,
+    /// The saved script state the level start's load restores
+    /// ([`Runtime::set_start_state`]).
+    pub(crate) start_state: Option<crate::save_state::ScriptState>,
 }
 
 impl Runtime {
@@ -315,6 +318,7 @@ impl Runtime {
             started: false,
             time_trial: false,
             start_save_index: Some(-1),
+            start_state: None,
         }
     }
 
@@ -632,16 +636,21 @@ impl Runtime {
     /// a linked first output fire it); then the match starts: the pawn
     /// spawns, which starts the adaptive music manager (`AddAdaptiveTracks`
     /// run directly, beat events initialised) and the game info's load
-    /// (saved-game-state events, see [`Runtime::set_start_save_index`]);
-    /// finally `NotifyMatchStarted` (level-loaded events fire their first
-    /// output again, subject to their trigger count, and their second output
-    /// when linked).
+    /// (the saved script state of [`Runtime::set_start_state`] is put back,
+    /// then the saved-game-state events fire, see
+    /// [`Runtime::set_start_save_index`]); finally `NotifyMatchStarted`
+    /// (level-loaded events fire their first output again, subject to their
+    /// trigger count, which a load has just restored, and their second
+    /// output when linked).
     fn start(&mut self, host: &mut dyn Host) {
         self.started = true;
         for r in self.attached_roots() {
             self.begin_play(r, 0);
         }
         self.init_adaptive_music(host);
+        if let Some(state) = self.start_state.take() {
+            self.restore_state(&state, host);
+        }
         if let Some(i) = self.start_save_index {
             self.saved_game_state_loaded(i);
         }

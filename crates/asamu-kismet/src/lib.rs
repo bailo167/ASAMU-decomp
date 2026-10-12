@@ -12,6 +12,8 @@
 //! - [`host`]: the game side: [`Host`] for game-affecting effects, [`Output`]
 //!   for presentation events.
 //! - [`narrator`]: the narrator manager that `SeqAct_NarratorLine` drives.
+//! - [`save_state`]: what a checkpoint save keeps of a level script
+//!   ([`ScriptState`]) and how a load puts it back.
 //! - [`anim`]: Matinee animation-control tracks (`SetAnimPosition` calls).
 //! - [`camera_anim`]: camera animations (`CameraAnim` assets, the camera's
 //!   animation pool and blending, the gameplay script's calls).
@@ -30,6 +32,7 @@ pub mod matinee;
 pub mod narrator;
 pub mod ops;
 pub mod runtime;
+pub mod save_state;
 pub mod value;
 
 use std::collections::BTreeMap;
@@ -40,6 +43,7 @@ pub use host::{Host, NullHost, Output, PropertyValue, ToggleMode};
 pub use matinee::MatineeSet;
 pub use ops::{IMPLEMENTED, OpClass};
 pub use runtime::{Obj, Runtime, RuntimeStats};
+pub use save_state::{EventState, MatineeState, ScriptState, VarState};
 pub use value::KValue;
 
 /// Largest runtime graph or Matinee file read (bytes).
