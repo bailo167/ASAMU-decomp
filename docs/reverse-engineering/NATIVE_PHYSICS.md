@@ -1599,6 +1599,47 @@ Not the original's: "encroaches" is the exact overlap test of the pawn's collisi
 (`GameWorld::overlaps_box`), where the original runs its point checks (not read); and ours counts NPC
 pawn cylinders, which the original's flags leave out.
 
+### 10.4 The time of a tick is clamped, and a level's first tick is 0.4 s
+
+Read in the user's macOS executable (2026-10-12; CONFIRMED for the code, constants read from the file's
+bytes). In our own words.
+
+`UWorld::Tick @ 0x1009107A0` takes the frame's time and, in this order:
+
+1. adds it, unscaled, to the world info's real-time clock (+0x540) unless the world is paused
+   (0x100910B8F to 0x100910B9B);
+2. multiplies it by the time dilation (+0x530), and by a second factor (+0x534) while a certain object of
+   the world exists (0x100910BA7 to 0x100910BD6; which object was not read);
+3. **clamps it**: 0.0005 s when it is below 0.0005 s (`f32` at 0x101718EB4), else the smaller of it and
+   **0.4 s** (`f32` at 0x1016E9200) (0x100910BE1 to 0x100910C02);
+4. stores that as the world's delta seconds (+0x544) and adds it to the game-time clock (+0x538) unless
+   paused (0x100910C07 to 0x100910C29). Every actor's tick of that frame gets the clamped time.
+
+**A level's first tick** [CONFIRMED (measured), four level starts in three recordings]. The first frame
+after a level load is long (the load itself), so the first tick is the clamped 0.4 s and the game clock
+reads 0.400 s when the second tick starts:
+
+- AG-Workshop (KM1 record 1179): game time 0.41343 s with a previous delta of 0.01343 s, so the tick before
+  it began at 0.40000 s; the real-time clock reads 0.638 s there, 0.225 s more.
+- AG-BeautifulCity (DC1 7795, KM1 52199) and AG-Darkcave (PLAY2 25512): the recorded free fall of the pawn,
+  extrapolated back by its velocity over 1040 uu/s², begins at game time 0.4001, 0.4000 and 0.4000 s, at
+  the height of the `PlayerStart` (to 0.015, 0.004 and 0.0005 uu).
+
+The pawn exists and is possessed before that tick (the player is restarted at login). It is walking and
+has no base (ABILITIES.md A-CP-5), so the 0.4 s tick is one walking step without a move, which is the
+floor check of 3.3 and nothing else: a floor in reach takes the pawn to its standing height, and with no
+floor in reach the pawn is set falling without having moved and without time carried over (3.1 and 1.4:
+a step without a move ends the walking loop, and the time given back to the fall is 0 for it). That is
+why the recorded
+falls begin exactly when the first tick ends, and why a pawn that started falling at login is excluded:
+it would have fallen for 0.4 s in the first tick and landed in it (33.7 and 36.4 uu take 0.25 and 0.26 s).
+
+**Ours:** the game's first tick has the length of every other tick. The pawn's side is the same whatever
+that length is (a walking step without a move). Not reproduced: level script that runs in the original's
+first tick sees 0.4 s pass in it, so its delays and Matinees are up to 0.4 s further on, relative to the
+pawn, than ours. What a script does within that tick was not read: TENTATIVE, and a candidate for the
+timing leftovers of PARITY_FINDINGS P13.
+
 ## 11. Verification log
 
 An independent adversarial pass (2026-10-09) re-read the local decompilation, the disassembly and the
@@ -1677,3 +1718,5 @@ in place. A scan of this file for decompiler identifiers and pasted pseudo-C fou
   `UWorld::FindSpot` and `UWorld::CheckSlice`, with what `UWorld::FarMoveActor` does besides; measured on
   the five recorded respawns), and the last paragraph of 10.2 (how the game's world picks the hit that is
   reported first).
+- 2026-10-12 (game layer, second wave, second pass): section 10.4 (the clamp of a tick's time in
+  `UWorld::Tick` and the 0.4 s first tick of a level, measured on four recorded level starts).
