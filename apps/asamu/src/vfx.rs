@@ -1,8 +1,14 @@
 //! Gameplay visual effects and level decals (VFX_DECALS.md):
 //!
-//! - **grapple beam** (`GrappleGun.MyBeam`): two camera-facing noisy ribbons
-//!   (the two enabled beam emitters, 4 and 2 UU wide) from the hand to the
-//!   anchor while attached, coloured by the gun's mode ([`beam`]);
+//! - **grapple beam** (`GrappleGun.MyBeam`): the two enabled beam emitters
+//!   (4 and 2 UU wide, two strands each) as camera-facing noisy ribbons from
+//!   the hand mesh's socket to the anchor while attached, drawn with the hand
+//!   ([`emitter`]), with the beam material's three textures and the gun's
+//!   colour ([`beam`], [`beam_material`]);
+//! - the grapple's **flash at the hand** and **impact at the anchor**
+//!   (`grappleBeginEffect`, `ImpactParticleSystem`): the two converted
+//!   particle systems, run by the particle simulator and drawn as glowing
+//!   sprites ([`bursts`]);
 //! - **hit decal** at the anchor (`DecalManager.SpawnDecal` from
 //!   `ProcessInstantHit`; none on `ASAMUDoesNotAcceptGrappleDecal` targets)
 //!   and the **hard-landing decal**, sharing the manager's pool of 5 and its
@@ -32,8 +38,11 @@
 //! ([`lights::DecalLight`]), so no light is added at the anchor.
 
 mod beam;
+mod beam_material;
+mod bursts;
 mod cone;
 mod crosshair;
+mod emitter;
 mod hit_decals;
 mod level_decals;
 mod lights;
@@ -45,12 +54,12 @@ use std::path::{Path, PathBuf};
 
 use asamu_assets::manifest::AddressMode;
 use asamu_assets::{BlendMode, Manifests, RenderMaterial, TextureBinding};
-use asamu_core::coords::{ue_dir_to_bevy, ue_right_flat, ue_view_direction};
+use asamu_core::coords::ue_dir_to_bevy;
 use asamu_core::glam as sim_glam;
 use asamu_game::asamu_kismet::Output;
 use asamu_player::{BootsEvent, CollisionWorld, PowerJumpStateName};
-use bevy::asset::{AssetPath, RenderAssetUsages};
-use bevy::camera::visibility::NoFrustumCulling;
+use bevy::asset::{AssetEventSystems, AssetPath, RenderAssetUsages};
+use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
 use bevy::gltf::convert_coordinates::GltfConvertCoordinates;
 use bevy::gltf::{GltfAssetLabel, GltfLoaderSettings};
 use bevy::image::{
@@ -65,16 +74,22 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 
 use crate::converted::{ConvertedLevel, LevelEntity, RenderLevels, SOURCE};
 use crate::kismet::{KismetActor, KismetFrame, Presentation};
-use crate::{SCALE, Sim, to_render};
+use crate::{PlayerCamera, SCALE, Sim, to_render};
 
-/// Hand offset of the beam's start from the eye, UU: forward, right, down
-/// (ours: the hand mesh's `GrappleSocket` is drawn in the overlay layer and
-/// not exposed; the original draws the beam from that socket with the hand's
-/// 70° FOV).
+pub(crate) use beam_material::BeamMaterial;
+pub(crate) use emitter::{BeamSocket, BeamView, SOCKET_NODE};
+
+/// PLACEHOLDER: where the beam starts when there is no hand to start it
+/// from (no converted hand mesh, or its socket is missing): this far from
+/// the eye, UU: forward, right, down, leaving straight ahead. The original
+/// always has the hand; with it the beam starts at the hand's socket
+/// ([`emitter`]).
 const BEAM_HAND_OFFSET_UU: [f32; 3] = [24.0, 10.0, 12.0];
-/// Beam brightness over its colour (ours; the original's beam is an
-/// additive, strongly emissive material).
-const BEAM_BRIGHTNESS: f32 = 3.0;
+/// The narrowest a beam ribbon is drawn, pixels (ours: thinner strips break
+/// up into dots; see [`beam::ribbon`]).
+const BEAM_MIN_PIXELS: f32 = 1.5;
+/// Viewport height assumed when the camera has none yet, pixels (ours).
+const FALLBACK_VIEWPORT_HEIGHT: f32 = 720.0;
 /// Bevy depth bias of decal materials (ours, with the geometric lift).
 const DECAL_DEPTH_BIAS: f32 = 4.0;
 /// Visible time of the rocket-boots lens effect, s: the upper bound of its
@@ -125,6 +140,8 @@ struct VfxData {
     root: PathBuf,
     manifests: Manifests,
     opacity: HashMap<String, materials::OpacitySpec>,
+    /// The grapple's particle systems (taken by [`bursts::Bursts`]).
+    bursts: Option<bursts::BurstData>,
 }
 
 /// Loaded handles and the converted-data load.
@@ -136,8 +153,7 @@ struct VfxAssets {
     /// Decal materials by lower-case material path (`None`: the material's
     /// shape is unavailable, its decals are not drawn).
     decal_materials: HashMap<String, Option<Handle<StandardMaterial>>>,
-    beam_meshes: Vec<Handle<Mesh>>,
-    beam_material: Handle<StandardMaterial>,
+    beam_material: Handle<BeamMaterial>,
     grapple_decal: Handle<StandardMaterial>,
     hard_land_decal: Handle<StandardMaterial>,
     cone_material: Handle<StandardMaterial>,
@@ -151,7 +167,13 @@ struct VfxAssets {
 /// Effect state carried between frames.
 #[derive(Resource)]
 struct VfxState {
-    noise: beam::BeamNoise,
+    /// The noise of every beam strand, in the order of the ribbons
+    /// ([`BeamRibbon::index`]).
+    noise: Vec<beam::BeamNoise>,
+    /// Seconds the beam's material has run (its pulse pans with it).
+    beam_time: f32,
+    /// The beam is drawn this frame.
+    beam_on: bool,
     rng: beam::RenderRng,
     pool: hit_decals::DecalPool<Entity>,
     lights: lights::GrappleLights,
@@ -164,7 +186,11 @@ struct VfxState {
 impl Default for VfxState {
     fn default() -> Self {
         Self {
-            noise: beam::BeamNoise::new(0x5EED),
+            noise: strands()
+                .map(|(i, e, _)| beam::BeamNoise::for_strand(e, i as u64))
+                .collect(),
+            beam_time: 0.0,
+            beam_on: false,
             rng: beam::RenderRng::new(0xDECA1),
             pool: hit_decals::DecalPool::default(),
             lights: lights::GrappleLights::default(),
@@ -182,9 +208,24 @@ struct LevelDecals {
     task: Option<Task<Vec<(usize, String, level_decals::LevelDecalFile)>>>,
 }
 
-/// One of the beam's ribbons.
+/// One of the beam's ribbons: a strand of one of the beam's emitters.
 #[derive(Component)]
-struct BeamRibbon;
+struct BeamRibbon {
+    /// Which of [`beam::EMITTERS`].
+    emitter: usize,
+    /// Index of the strand among all ribbons (its noise in [`VfxState`]).
+    index: usize,
+}
+
+/// Every beam strand: its index, its emitter and the emitter's index.
+fn strands() -> impl Iterator<Item = (usize, &'static beam::BeamEmitter, usize)> {
+    beam::EMITTERS
+        .iter()
+        .enumerate()
+        .flat_map(|(e, emitter)| (0..beam::STRANDS_PER_EMITTER).map(move |_| (emitter, e)))
+        .enumerate()
+        .map(|(i, (emitter, e))| (i, emitter, e))
+}
 
 /// The speed-line cone.
 #[derive(Component)]
@@ -226,7 +267,10 @@ pub struct VfxPlugin;
 
 impl Plugin for VfxPlugin {
     fn build(&self, app: &mut App) {
+        beam_material::register(app);
+        bursts::register(app);
         app.init_resource::<VfxSettings>()
+            .init_resource::<bursts::Bursts>()
             .init_resource::<VfxAssets>()
             .init_resource::<VfxState>()
             .init_resource::<LevelDecals>()
@@ -239,6 +283,7 @@ impl Plugin for VfxPlugin {
                     consume_ticks,
                     route_kismet,
                     update_beam,
+                    update_bursts,
                     update_cone,
                     update_crosshair,
                     update_overlays,
@@ -246,6 +291,14 @@ impl Plugin for VfxPlugin {
                     resolve_pending_ids,
                 )
                     .chain(),
+            )
+            // The beam's shape needs this frame's hand pose and camera, and
+            // has to reach the renderer in the same frame.
+            .add_systems(
+                PostUpdate,
+                (shape_beam, shape_bursts)
+                    .after(bevy::transform::TransformSystems::Propagate)
+                    .before(AssetEventSystems),
             );
         selftest::add(app);
     }
@@ -418,15 +471,40 @@ fn load_mask(
     handle
 }
 
-/// A placeholder mesh for the beam ribbons before the first attach: one
-/// degenerate triangle (the renderer warns about meshes without vertices).
-fn empty_mesh() -> Mesh {
-    mesh_from(
-        vec![[0.0; 3]; 3],
-        vec![[0.0, 1.0, 0.0]; 3],
-        vec![[0.0; 2]; 3],
-        vec![0, 1, 2],
-    )
+/// Writes a beam ribbon into `mesh`. The beam's shader reads texture
+/// coordinates and vertex colours, so every beam mesh carries both; a ribbon
+/// without triangles becomes one degenerate triangle (the renderer warns
+/// about meshes without vertices).
+fn fill_beam_mesh(mesh: &mut Mesh, ribbon: beam::Ribbon) {
+    let beam::Ribbon {
+        mut positions,
+        mut uvs,
+        brightness,
+        mut indices,
+    } = ribbon;
+    let mut colors: Vec<[f32; 4]> = brightness.iter().map(|k| [*k, *k, *k, 1.0]).collect();
+    if indices.is_empty() {
+        positions = vec![[0.0; 3]; 3];
+        uvs = vec![[0.0; 2]; 3];
+        colors = vec![[0.0, 0.0, 0.0, 1.0]; 3];
+        indices = vec![0, 1, 2];
+    }
+    let n = positions.len();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+}
+
+/// A beam mesh without a beam in it yet.
+fn empty_beam_mesh() -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    fill_beam_mesh(&mut mesh, beam::Ribbon::default());
+    mesh
 }
 
 fn mesh_from(
@@ -451,24 +529,21 @@ fn setup_effects(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    beam_mats: Option<ResMut<Assets<BeamMaterial>>>,
     mut assets: ResMut<VfxAssets>,
 ) {
     let v = beam::beam_visuals(beam::BeamModes::default());
-    assets.beam_material = mats.add(StandardMaterial {
-        base_color: beam_color(v.beam_color),
-        unlit: true,
-        alpha_mode: AlphaMode::Add,
-        double_sided: true,
-        cull_mode: None,
-        ..default()
-    });
-    for _ in beam::BEAM_WIDTHS_UU {
-        let h = meshes.add(empty_mesh());
-        assets.beam_meshes.push(h.clone());
+    // Without a renderer the beam's material is not registered: the ribbons
+    // exist (the systems run) but have nothing to be drawn with.
+    if let Some(mut beam_mats) = beam_mats {
+        assets.beam_material = beam_mats.add(BeamMaterial::new(v.beam_color));
+    }
+    for (index, _, emitter) in strands() {
         commands.spawn((
-            BeamRibbon,
-            Mesh3d(h),
+            BeamRibbon { emitter, index },
+            Mesh3d(meshes.add(empty_beam_mesh())),
             MeshMaterial3d(assets.beam_material.clone()),
+            RenderLayers::layer(0),
             Transform::IDENTITY,
             Visibility::Hidden,
             NotShadowCaster,
@@ -525,15 +600,6 @@ fn setup_effects(
     ));
 }
 
-fn beam_color(c: [f32; 4]) -> Color {
-    Color::linear_rgba(
-        c[0] * BEAM_BRIGHTNESS,
-        c[1] * BEAM_BRIGHTNESS,
-        c[2] * BEAM_BRIGHTNESS,
-        1.0,
-    )
-}
-
 /// The hit decal's colour: `DecalColor` scaled so its brightest channel is
 /// 1 (the original multiplies it by `DecalEmissiveMultiplier`, 300 or 50, in
 /// an unlit material: always saturated).
@@ -558,10 +624,18 @@ fn start_data_load(level: Option<Res<ConvertedLevel>>, mut assets: ResMut<VfxAss
         } else {
             HashMap::new()
         };
+        // The grapple's two particle systems; without them the grapple
+        // has no flash and no impact, and everything else is as it was.
+        let bursts = bursts::BurstData::load(dir.root(), manifests.textures.as_ref())
+            .unwrap_or_else(|e| {
+                warn!("vfx: the grapple's particle systems are unavailable ({e})");
+                None
+            });
         Ok(VfxData {
             root: dir.root().to_path_buf(),
             manifests,
             opacity,
+            bursts,
         })
     }));
 }
@@ -596,6 +670,8 @@ fn poll_data_load(
     server: Res<AssetServer>,
     mut assets: ResMut<VfxAssets>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    beam_mats: Option<ResMut<Assets<BeamMaterial>>>,
+    mut bursts: ResMut<bursts::Bursts>,
     cones: Query<Entity, With<SpeedCone>>,
 ) {
     let Some(task) = assets.load.as_mut() else {
@@ -605,13 +681,22 @@ fn poll_data_load(
         return;
     };
     assets.load = None;
-    let data = match result {
+    let mut data = match result {
         Ok(d) => d,
         Err(e) => {
             warn!("vfx: converted data unavailable ({e}); effects use fallback materials");
             return;
         }
     };
+    info!(
+        "vfx: the grapple's flash and impact systems are {}",
+        if data.bursts.is_some() {
+            "converted"
+        } else {
+            "not converted: neither is drawn"
+        }
+    );
+    bursts.set_data(data.bursts.take());
     let VfxAssets {
         images,
         beam_material,
@@ -624,21 +709,27 @@ fn poll_data_load(
         ..
     } = &mut *assets;
     let textures = data.manifests.textures.as_ref();
-    let material = |path: &str| {
-        data.manifests
-            .materials
-            .as_ref()
-            .and_then(|m| m.render_material(path, textures))
-    };
-    // Beam: the converted beam material's texture and UV window, our colour.
-    if let Some(m) = material("AdventureSuitEffects.GrappleBeam_inst")
-        && let Some(mut beam) = mats.get_mut(&*beam_material)
+    // Beam: the three textures of the beam material (the shared material
+    // model keeps one of them; the beam's own material takes all three).
+    if let Some(mut beam_mats) = beam_mats
+        && let Some(mut beam) = beam_mats.get_mut(&*beam_material)
     {
-        beam.base_color_texture = m
-            .base_color_texture
-            .as_ref()
-            .map(|t| load_image(&server, images, t));
-        beam.uv_transform = uv_affine(&m);
+        let mut bind = |path: &str| {
+            asamu_assets::materials::bind_texture(textures, path, false)
+                .map(|t| load_image(&server, images, &t))
+        };
+        let (thin, core, pulse) = (
+            bind(beam::TEXTURE_THIN),
+            bind(beam::TEXTURE_MAIN),
+            bind(beam::TEXTURE_PULSE),
+        );
+        info!(
+            "vfx: beam textures: thin line {}, core {}, pulse {}",
+            thin.is_some(),
+            core.is_some(),
+            pulse.is_some()
+        );
+        beam.set_textures(thin, core, pulse);
     }
     // Hard landing: black, alpha from the impact texture of its opacity
     // channel (the shared model cannot combine the two textures).
@@ -708,13 +799,16 @@ fn apply_visuals(
     mut assets: ResMut<VfxAssets>,
     server: Res<AssetServer>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    beam_mats: Option<ResMut<Assets<BeamMaterial>>>,
 ) {
     let v = beam::beam_visuals(settings.extras.modes());
     if assets.visuals == Some(v) {
         return;
     }
-    if let Some(mut m) = mats.get_mut(&assets.beam_material) {
-        m.base_color = beam_color(v.beam_color);
+    if let Some(mut beam_mats) = beam_mats
+        && let Some(mut m) = beam_mats.get_mut(&assets.beam_material)
+    {
+        m.params.set_color(v.beam_color);
     }
     // The grapple decal: the converted decal texture, tinted.
     let converted = assets.data.as_ref().and_then(|d| {
@@ -784,10 +878,9 @@ fn decal_entity(
     )
 }
 
-/// The grapple's hit decal for an attach at `anchor`: the surface normal
-/// is re-traced from the eye (the tick report carries none; when the trace
-/// misses the anchor — a target that moved — the direction back to the eye
-/// stands in), then the decal box is projected onto the collision world.
+/// The surface normal at an attach's `anchor`, re-traced from the eye (the
+/// tick report carries none; when the trace misses the anchor — a target
+/// that moved — the direction back to the eye stands in).
 ///
 /// The anchor is the fire trace's hit as the original reports it, which is
 /// short of the surface along the trace: by 4.0 uu on a mesh's triangles,
@@ -795,20 +888,25 @@ fn decal_entity(
 /// `asamu_player::world::PULL_BACK_MAX_TRIANGLES`). The surface is therefore
 /// looked for up to that far beyond the anchor, plus the 2 uu of slack this
 /// search always had.
+fn anchor_normal(game: &asamu_game::Game, anchor: sim_glam::Vec3) -> sim_glam::Vec3 {
+    let eye = game.eye_position();
+    let to = anchor - eye;
+    let reach = asamu_player::world::PULL_BACK_MAX_TRIANGLES + 2.0;
+    game.world()
+        .raycast(eye, to, to.length() + reach)
+        .filter(|h| h.position.distance(anchor) < reach)
+        .map_or_else(|| (-to).normalize_or_zero(), |h| h.normal)
+}
+
+/// The grapple's hit decal for an attach at `anchor`: the decal box is
+/// projected onto the collision world along the surface normal there.
 fn grapple_decal(
     game: &asamu_game::Game,
     anchor: sim_glam::Vec3,
     random01: f32,
 ) -> hit_decals::DecalMesh {
-    let eye = game.eye_position();
-    let to = anchor - eye;
-    let reach = asamu_player::world::PULL_BACK_MAX_TRIANGLES + 2.0;
-    let normal = game
-        .world()
-        .raycast(eye, to, to.length() + reach)
-        .filter(|h| h.position.distance(anchor) < reach)
-        .map_or_else(|| (-to).normalize_or_zero(), |h| h.normal);
-    let spawn = hit_decals::DecalSpawn::grapple(anchor, normal, random01);
+    // See `anchor_normal` for how the surface is found again.
+    let spawn = hit_decals::DecalSpawn::grapple(anchor, anchor_normal(game, anchor), random01);
     hit_decals::project(&spawn, |o, d, len| {
         game.world()
             .raycast(o, d, len)
@@ -834,16 +932,6 @@ fn hard_landing_decal(game: &asamu_game::Game, random01: f32) -> hit_decals::Dec
     })
 }
 
-/// The beam's start: the eye plus the hand offset in view axes.
-fn beam_start(eye: sim_glam::Vec3, yaw: f32, pitch: f32) -> (sim_glam::Vec3, sim_glam::Vec3) {
-    let fwd = ue_view_direction(yaw, pitch);
-    let right = ue_right_flat(yaw);
-    // UE3 axes (X forward, Y right, Z up): up = forward × right.
-    let up = fwd.cross(right).normalize_or_zero();
-    let [f, r, d] = BEAM_HAND_OFFSET_UU;
-    (eye + fwd * f + right * r - up * d, fwd)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn consume_ticks(
     mut commands: Commands,
@@ -852,6 +940,7 @@ fn consume_ticks(
     assets: Res<VfxAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut state: ResMut<VfxState>,
+    mut bursts: ResMut<bursts::Bursts>,
     decals: Query<Entity, With<HitDecal>>,
 ) {
     let Some(sim) = sim else {
@@ -869,12 +958,17 @@ fn consume_ticks(
         state.crosshair = crosshair::CrosshairState::default();
         state.crosshair_fade = None;
         state.lens = 0.0;
+        bursts.reset();
     }
     let game = &sim.game;
     let dt = (1.0 / game.clock().tick_rate_hz()) as f32;
     state.tick_dt = dt;
     for tick in ticks.read() {
         let ev = &tick.0.events;
+        // The flash at the hand and the impact at the anchor.
+        if let Some(attach) = ev.gun.attached {
+            bursts.attached(attach.anchor, anchor_normal(game, attach.anchor));
+        }
         // The grapple's hit decal.
         if let Some(attach) = ev.gun.attached
             && !attach.surface.class.rejects_decal()
@@ -1010,68 +1104,375 @@ fn eye_now(sim: &Sim, fixed: &Time<Fixed>) -> sim_glam::Vec3 {
     sim.prev_eye.lerp(sim.curr_eye, a)
 }
 
+/// Where the beam ends now (UU), while the gun is attached.
+fn beam_anchor(sim: &Sim) -> Option<sim_glam::Vec3> {
+    let gun = &sim.game.player().script.gun;
+    gun.attached?;
+    Some(beam::beam_end(
+        gun.grapple_location,
+        gun.follow.map(|f| f.helper),
+    ))
+}
+
+/// Whether the beam is drawn: the gun is attached, and the hand it leaves
+/// from is on screen when there is a hand (`hand_shown`: `None` without a
+/// hand camera). Ours: the original's gun cannot fire with the hand hidden
+/// (GRAPPLE.md G-AC-3), and a beam whose hand is not drawn (a Matinee
+/// director cut that starts during a grapple) would start at nothing.
+fn beam_shown(attached: bool, hand_shown: Option<bool>) -> bool {
+    attached && hand_shown.unwrap_or(true)
+}
+
+/// Switches the beam on and off with the gun, puts its ribbons on the layer
+/// of the camera that draws them, and advances its noise and its pulse. The
+/// shape follows in [`shape_beam`], once this frame's poses are known.
 #[allow(clippy::too_many_arguments)]
 fn update_beam(
     sim: Option<Res<Sim>>,
-    fixed: Res<Time<Fixed>>,
     time: Res<Time>,
     assets: Res<VfxAssets>,
     mut state: ResMut<VfxState>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut ribbons: Query<&mut Visibility, With<BeamRibbon>>,
+    beam_mats: Option<ResMut<Assets<BeamMaterial>>>,
+    hands: Query<&BeamView>,
+    sockets: Query<(), With<BeamSocket>>,
+    mut ribbons: Query<(&mut Visibility, &mut RenderLayers), With<BeamRibbon>>,
 ) {
-    let anchor = sim.as_ref().and_then(|s| {
-        let gun = &s.game.player().script.gun;
-        gun.attached?;
-        Some(beam::beam_end(
-            gun.grapple_location,
-            gun.follow.map(|f| f.helper),
-        ))
-    });
-    let (Some(sim), Some(end)) = (sim, anchor) else {
-        for mut v in &mut ribbons {
-            if *v != Visibility::Hidden {
-                *v = Visibility::Hidden;
-            }
+    let hand = hands.iter().next();
+    let attached = sim.as_ref().is_some_and(|s| beam_anchor(s).is_some());
+    let on = beam_shown(attached, hand.map(|h| h.hand_shown));
+    if state.beam_on != on {
+        state.beam_on = on;
+    }
+    // With a hand and its socket the hand's camera draws the beam;
+    // otherwise the world's does (the fallback start).
+    let layer = if hand.is_some() && !sockets.is_empty() {
+        RenderLayers::layer(crate::FIRST_PERSON_LAYER)
+    } else {
+        RenderLayers::layer(0)
+    };
+    let wanted = if on {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for (mut visibility, mut layers) in &mut ribbons {
+        if *visibility != wanted {
+            *visibility = wanted;
         }
+        if *layers != layer {
+            *layers = layer.clone();
+        }
+    }
+    if !on {
+        return;
+    }
+    let dt = time.delta_secs();
+    for noise in &mut state.noise {
+        noise.update(dt);
+    }
+    if dt.is_finite() && dt > 0.0 {
+        // Kept small: only the pulse's phase matters.
+        state.beam_time = (state.beam_time + dt) % 3600.0;
+    }
+    if let Some(mut beam_mats) = beam_mats
+        && let Some(mut m) = beam_mats.get_mut(&assets.beam_material)
+    {
+        m.params.pulse.x = beam_material::pulse_offset(state.beam_time);
+    }
+}
+
+/// Advances the grapple's flash and impact with the running game (they
+/// stand still while it is paused), the impact riding the gun's anchor.
+fn update_bursts(
+    sim: Option<Res<Sim>>,
+    time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
+    mut bursts: ResMut<bursts::Bursts>,
+) {
+    let Some(sim) = sim else {
         return;
     };
-    state.noise.update(time.delta_secs());
-    let p = sim.game.player();
-    let eye = eye_now(&sim, &fixed);
-    let (start, fwd) = beam_start(eye, p.yaw, p.pitch);
-    let eye_r = to_render(eye);
-    for ((handle, width), strength) in assets
-        .beam_meshes
-        .iter()
-        .zip(beam::BEAM_WIDTHS_UU)
-        .zip(beam::SOURCE_TANGENT_STRENGTHS)
-    {
-        // Each emitter interpolates its own beam (the two differ in their
-        // source tangent strength).
-        let path = beam::beam_path(
-            start,
+    if sim.game.state() != asamu_game::GameState::Playing {
+        return;
+    }
+    bursts.advance(time.delta_secs(), beam_anchor(&sim), eye_now(&sim, &fixed));
+}
+
+/// What a frame's cameras and hand say about the beam: everything
+/// [`strand_ribbon`] needs, in the world camera's space ("view space": the
+/// eye at the origin, −z forward, render units).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BeamFrame {
+    /// Where the beam leaves, view space.
+    source: Vec3,
+    /// The direction it leaves in, view space, unit length.
+    axis: Vec3,
+    /// The anchor, view space.
+    end: Vec3,
+    /// From view space to the space of the camera that draws the beam.
+    map: emitter::FovMap,
+    /// World from the drawing camera's space.
+    world_from_draw: bevy::math::Affine3A,
+    /// The size of a pixel at unit depth in view space.
+    pixel: f32,
+}
+
+impl BeamFrame {
+    /// The frame of a beam that leaves the hand's socket: `socket` and
+    /// `socket_axis` are in the hand camera's space, `end` in the world
+    /// camera's; `view` and `hand` are the two cameras' half extents
+    /// ([`emitter::half_extents`]).
+    fn from_hand(
+        socket: Vec3,
+        socket_axis: Vec3,
+        end: Vec3,
+        view: Vec2,
+        hand: Vec2,
+        world_from_hand: bevy::math::Affine3A,
+        viewport_height: f32,
+    ) -> Self {
+        let map = emitter::FovMap::new(view, hand);
+        Self {
+            source: map.hand_to_view(socket),
+            axis: map.hand_dir_to_view(socket_axis),
             end,
-            fwd,
-            strength,
-            state.noise.offsets(),
-            beam::NOISE_RANGE_UU,
+            map,
+            world_from_draw: world_from_hand,
+            pixel: emitter::pixel_size(1.0, view.y, viewport_height),
+        }
+    }
+
+    /// PLACEHOLDER: the frame of a beam without a hand, drawn by the world
+    /// camera from [`BEAM_HAND_OFFSET_UU`], leaving straight ahead.
+    fn without_hand(
+        end: Vec3,
+        view: Vec2,
+        world_from_view: bevy::math::Affine3A,
+        viewport_height: f32,
+    ) -> Self {
+        let [forward, right, down] = BEAM_HAND_OFFSET_UU;
+        Self {
+            source: Vec3::new(right, -down, -forward) * SCALE.bevy_units_per_uu,
+            axis: Vec3::NEG_Z,
+            end,
+            map: emitter::FovMap::IDENTITY,
+            world_from_draw: world_from_view,
+            pixel: emitter::pixel_size(1.0, view.y, viewport_height),
+        }
+    }
+}
+
+/// One strand of the beam as a ribbon in world space: the emitter's curve
+/// from the source to the anchor in view space, with the strand's noise, as
+/// a strip facing the eye, never thinner than [`BEAM_MIN_PIXELS`]; then
+/// every vertex into the drawing camera's space and out to the world.
+fn strand_ribbon(
+    frame: &BeamFrame,
+    emitter: &beam::BeamEmitter,
+    noise: &[[f32; 2]],
+) -> beam::Ribbon {
+    let unit = SCALE.bevy_units_per_uu;
+    let path = beam::beam_path(
+        frame.source,
+        frame.end,
+        frame.axis,
+        emitter.source_strength,
+        noise,
+        unit,
+    );
+    let mut ribbon = beam::ribbon(&path, emitter.width_uu * unit, |depth| {
+        BEAM_MIN_PIXELS * frame.pixel * depth
+    });
+    for p in &mut ribbon.positions {
+        let drawn = frame.map.view_to_hand(Vec3::from_array(*p));
+        *p = frame.world_from_draw.transform_point3(drawn).to_array();
+    }
+    ribbon
+}
+
+/// Half extents of a camera's perspective view; `None` for another kind of
+/// projection.
+fn view_extents(projection: &Projection) -> Option<Vec2> {
+    match projection {
+        Projection::Perspective(p) => Some(emitter::half_extents(p.fov, p.aspect_ratio)),
+        _ => None,
+    }
+}
+
+/// Shapes the beam's ribbons for this frame (after the animation and the
+/// transforms of the frame are known, before the meshes go to the
+/// renderer): from the hand's socket as the hand camera draws it, or
+/// without a hand from the fallback start, to the anchor.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn shape_beam(
+    sim: Option<Res<Sim>>,
+    state: Res<VfxState>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    view: Query<(&GlobalTransform, &Projection, &Camera), With<PlayerCamera>>,
+    hands: Query<(&GlobalTransform, &Projection), With<BeamView>>,
+    sockets: Query<&GlobalTransform, With<BeamSocket>>,
+    ribbons: Query<(&BeamRibbon, &Mesh3d)>,
+    mut was_on: Local<bool>,
+) {
+    let first = state.beam_on && !*was_on;
+    *was_on = state.beam_on;
+    if !state.beam_on {
+        return;
+    }
+    let Some(end) = sim.as_ref().and_then(|s| beam_anchor(s)) else {
+        return;
+    };
+    let Some((view_tf, view_projection, camera)) = view.iter().next() else {
+        return;
+    };
+    let Some(view_half) = view_extents(view_projection) else {
+        return;
+    };
+    let viewport_height = camera
+        .physical_viewport_size()
+        .map_or(FALLBACK_VIEWPORT_HEIGHT, |s| s.y as f32);
+    let end = view_tf.affine().inverse().transform_point3(to_render(end));
+    let hand = hands
+        .iter()
+        .next()
+        .and_then(|(tf, projection)| Some((tf, view_extents(projection)?, sockets.iter().next()?)));
+    let frame = match hand {
+        Some((hand_tf, hand_half, socket)) => {
+            let hand_from_world = hand_tf.affine().inverse();
+            BeamFrame::from_hand(
+                hand_from_world.transform_point3(socket.translation()),
+                // The socket's X axis in the original's axes is the node's
+                // forward axis in the converted mesh's (SKELETAL.md).
+                hand_from_world.transform_vector3(socket.forward().as_vec3()),
+                end,
+                view_half,
+                hand_half,
+                hand_tf.affine(),
+                viewport_height,
+            )
+        }
+        None => BeamFrame::without_hand(end, view_half, view_tf.affine(), viewport_height),
+    };
+    if first {
+        // One line per grapple: where the beam leaves, for whoever compares
+        // a picture with the numbers.
+        let on_screen = frame.source.truncate() / (-frame.source.z).max(1e-6) / view_half;
+        info!(
+            "vfx: beam from {} at view ({:.1}, {:.1}, {:.1}) uu, {:.1}% right and {:.1}% up of the \
+             screen's half size, leaving along ({:.2}, {:.2}, {:.2}); anchor {:.0} uu away",
+            if hand.is_some() {
+                "the hand's socket"
+            } else {
+                "the fallback start (no hand)"
+            },
+            frame.source.x / SCALE.bevy_units_per_uu,
+            frame.source.y / SCALE.bevy_units_per_uu,
+            frame.source.z / SCALE.bevy_units_per_uu,
+            on_screen.x * 100.0,
+            on_screen.y * 100.0,
+            frame.axis.x,
+            frame.axis.y,
+            frame.axis.z,
+            frame.end.length() / SCALE.bevy_units_per_uu,
         );
-        let render: Vec<Vec3> = path.iter().map(|q| to_render(*q)).collect();
-        let rb = beam::ribbon(&render, width * SCALE.bevy_units_per_uu, eye_r);
-        if let Some(mut mesh) = meshes.get_mut(handle) {
-            let n = rb.positions.len();
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, rb.positions);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n]);
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, rb.uvs);
-            mesh.insert_indices(Indices::U32(rb.indices));
+    }
+    for (ribbon, mesh) in &ribbons {
+        let (Some(emitter), Some(noise)) = (
+            beam::EMITTERS.get(ribbon.emitter),
+            state.noise.get(ribbon.index),
+        ) else {
+            continue;
+        };
+        if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
+            fill_beam_mesh(&mut mesh, strand_ribbon(&frame, emitter, &noise.offsets()));
         }
     }
-    for mut v in &mut ribbons {
-        if *v != Visibility::Inherited {
-            *v = Visibility::Inherited;
+}
+
+/// Draws the grapple's flash and impact for this frame (same place in the
+/// frame as [`shape_beam`]): the impact by the world camera where it is,
+/// the flash at the hand's socket, by the hand's camera when there is a hand
+/// ([`bursts`] says why and how).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn shape_bursts(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    mut assets: ResMut<VfxAssets>,
+    mut bursts: ResMut<bursts::Bursts>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Option<ResMut<Assets<bursts::GlowMaterial>>>,
+    view: Query<(&GlobalTransform, &Projection), With<PlayerCamera>>,
+    hands: Query<(&GlobalTransform, &Projection, &BeamView)>,
+    sockets: Query<&GlobalTransform, With<BeamSocket>>,
+    mut existing: Query<(&Mesh3d, &mut Visibility, &mut RenderLayers), With<bursts::BurstMesh>>,
+) {
+    // Without a renderer the sprites' material is not registered.
+    let Some(mut materials) = materials else {
+        return;
+    };
+    let Some((view_tf, view_projection)) = view.iter().next() else {
+        return;
+    };
+    let Some(view_half) = view_extents(view_projection) else {
+        return;
+    };
+    let world = bursts::QuadView {
+        eye: view_tf.translation(),
+        right: view_tf.right().as_vec3(),
+        up: view_tf.up().as_vec3(),
+        pushed: None,
+    };
+    let hand = match hands.iter().next() {
+        // No hand at all: the flash is where the beam's fallback start is,
+        // drawn by the world camera (PLACEHOLDER, as that start).
+        None => {
+            let [forward, right, down] = BEAM_HAND_OFFSET_UU;
+            let source = Vec3::new(right, -down, -forward) * SCALE.bevy_units_per_uu;
+            Some((
+                bursts::socket_transform(
+                    view_tf.transform_point(source),
+                    view_tf.forward().as_vec3(),
+                    view_tf.right().as_vec3(),
+                    view_tf.up().as_vec3(),
+                ),
+                world,
+                0,
+            ))
         }
-    }
+        Some((hand_tf, hand_projection, beam_view)) => {
+            match (view_extents(hand_projection), sockets.iter().next()) {
+                (Some(hand_half), Some(socket)) if beam_view.hand_shown => Some((
+                    bursts::socket_transform(
+                        socket.translation(),
+                        socket.forward().as_vec3(),
+                        socket.right().as_vec3(),
+                        socket.up().as_vec3(),
+                    ),
+                    bursts::QuadView {
+                        pushed: Some((
+                            view_tf.affine().inverse(),
+                            emitter::FovMap::new(view_half, hand_half),
+                            hand_tf.affine(),
+                        )),
+                        ..world
+                    },
+                    crate::FIRST_PERSON_LAYER,
+                )),
+                // The hand is not on screen (or not there yet): no flash.
+                _ => None,
+            }
+        }
+    };
+    bursts::draw(
+        &mut commands,
+        &server,
+        &mut assets.images,
+        &mut bursts,
+        &mut meshes,
+        &mut materials,
+        &mut existing,
+        &bursts::DrawFrame { world, hand },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1596,16 +1997,165 @@ mod tests {
     use asamu_game::Game;
     use asamu_player::InputFrame;
 
+    /// Bevy's vertical field of view for a horizontal one.
+    fn vertical(horizontal_degrees: f32, aspect: f32) -> f32 {
+        2.0 * ((horizontal_degrees.to_radians() * 0.5).tan() / aspect).atan()
+    }
+
+    fn perspective(horizontal_degrees: f32, aspect: f32) -> bevy::camera::PerspectiveProjection {
+        bevy::camera::PerspectiveProjection {
+            fov: vertical(horizontal_degrees, aspect),
+            aspect_ratio: aspect,
+            near: 0.01,
+            far: 1000.0,
+            ..default()
+        }
+    }
+
+    /// The whole chain a frame goes through, with the renderer's own
+    /// projection matrices: the first row of every strand's ribbon, drawn by
+    /// the hand camera, straddles the pixel the hand camera draws the socket
+    /// on, and its last row the pixel the world camera gives the anchor: for
+    /// a turned and displaced camera, several windows, the world's field of
+    /// view at its default, zoomed and widened, and several hand poses.
     #[test]
-    fn beam_starts_at_the_lower_right_of_the_view() {
-        let eye = sim_glam::Vec3::new(0.0, 0.0, 100.0);
-        let (start, fwd) = beam_start(eye, 0.0, 0.0);
-        let [f, r, d] = BEAM_HAND_OFFSET_UU;
-        assert!((fwd - sim_glam::Vec3::X).length() < 1e-6);
-        assert!(
-            (start - sim_glam::Vec3::new(f, r, 100.0 - d)).length() < 1e-4,
-            "{start}"
+    fn the_beam_meets_the_socket_and_the_anchor_on_screen() {
+        use bevy::camera::CameraProjection;
+        let world_from_camera = bevy::math::Affine3A::from_rotation_translation(
+            Quat::from_euler(EulerRot::YXZ, 2.1, -0.4, 0.0),
+            Vec3::new(310.0, -42.0, 128.0),
         );
+        let camera_from_world = world_from_camera.inverse();
+        let anchors = [
+            Vec3::new(0.0, 0.0, -4.0),
+            Vec3::new(2.0, 3.0, -15.0),
+            Vec3::new(-9.0, 4.0, -48.0),
+        ];
+        let sockets = [
+            (Vec3::new(0.21, -0.19, -0.45), Vec3::new(-0.2, 0.3, -1.0)),
+            (Vec3::new(0.10, -0.05, -0.33), Vec3::new(0.0, 0.0, -1.0)),
+            (Vec3::new(0.30, -0.28, -0.60), Vec3::new(-0.5, 0.6, -0.4)),
+        ];
+        let mut worst = (0.0f32, 0.0f32);
+        for (w, h) in [(1280.0f32, 720.0f32), (1920.0, 1200.0), (2560.0, 1080.0)] {
+            let viewport = Vec2::new(w, h);
+            let aspect = w / h;
+            let hand = perspective(asamu_game::npc::HAND_MESH_FOV, aspect);
+            for fov in [90.0f32, 30.0, 110.0] {
+                let view = perspective(fov, aspect);
+                for (socket, axis) in sockets {
+                    for anchor in anchors {
+                        let frame = BeamFrame::from_hand(
+                            socket,
+                            axis,
+                            anchor,
+                            emitter::half_extents(view.fov, aspect),
+                            emitter::half_extents(hand.fov, aspect),
+                            world_from_camera,
+                            h,
+                        );
+                        let socket_pixel =
+                            emitter::pixel_of(hand.get_clip_from_view(), socket, viewport)
+                                .expect("the socket is in view");
+                        let anchor_pixel =
+                            emitter::pixel_of(view.get_clip_from_view(), anchor, viewport)
+                                .expect("the anchor is in view");
+                        for (i, e, _) in strands() {
+                            let noise = beam::BeamNoise::for_strand(e, i as u64).offsets();
+                            let rb = strand_ribbon(&frame, e, &noise);
+                            assert_eq!(rb.positions.len(), 2 * (beam::INTERPOLATION_POINTS + 1));
+                            // The ribbon is in world space; the hand camera
+                            // (at the world camera's place) draws it.
+                            let drawn = |k: usize| {
+                                let local = camera_from_world
+                                    .transform_point3(Vec3::from_array(rb.positions[k]));
+                                emitter::pixel_of(hand.get_clip_from_view(), local, viewport)
+                                    .expect("in view")
+                            };
+                            let first = (drawn(0) + drawn(1)) * 0.5;
+                            let n = rb.positions.len();
+                            let last = (drawn(n - 2) + drawn(n - 1)) * 0.5;
+                            let (es, ea) =
+                                (first.distance(socket_pixel), last.distance(anchor_pixel));
+                            worst = (worst.0.max(es), worst.1.max(ea));
+                            assert!(
+                                es < 1.0 && ea < 1.0,
+                                "{w}x{h} fov {fov}: start {first} for socket {socket_pixel}, end \
+                                 {last} for anchor {anchor_pixel}"
+                            );
+                            // The strip is at least the minimum wide on
+                            // screen everywhere.
+                            for row in 0..n / 2 {
+                                let wide = drawn(row * 2).distance(drawn(row * 2 + 1));
+                                assert!(wide > BEAM_MIN_PIXELS * 0.8, "row {row}: {wide}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "worst error: {} pixels at the socket, {} at the anchor",
+            worst.0, worst.1
+        );
+    }
+
+    /// Without a hand the beam is drawn by the world camera from the
+    /// fallback start at the lower right of the view, leaving straight
+    /// ahead.
+    #[test]
+    fn a_beam_without_a_hand_starts_at_the_lower_right_of_the_view() {
+        let half = emitter::half_extents(vertical(90.0, 16.0 / 9.0), 16.0 / 9.0);
+        let frame = BeamFrame::without_hand(
+            Vec3::new(0.0, 0.0, -10.0),
+            half,
+            bevy::math::Affine3A::IDENTITY,
+            720.0,
+        );
+        let [f, r, d] = BEAM_HAND_OFFSET_UU;
+        let unit = SCALE.bevy_units_per_uu;
+        assert!(frame.source.distance(Vec3::new(r, -d, -f) * unit) < 1e-6);
+        assert_eq!(frame.axis, Vec3::NEG_Z);
+        assert_eq!(frame.map, emitter::FovMap::IDENTITY);
+        let rb = strand_ribbon(&frame, &beam::EMITTERS[0], &[]);
+        let first = (Vec3::from_array(rb.positions[0]) + Vec3::from_array(rb.positions[1])) * 0.5;
+        assert!(first.distance(frame.source) < 1e-5);
+        assert!(first.x > 0.0 && first.y < 0.0 && first.z < 0.0);
+    }
+
+    #[test]
+    fn the_beam_is_shown_with_the_gun_and_the_hand() {
+        assert!(!beam_shown(false, None));
+        assert!(!beam_shown(false, Some(true)));
+        assert!(beam_shown(true, None), "no hand camera: the fallback");
+        assert!(beam_shown(true, Some(true)));
+        assert!(!beam_shown(true, Some(false)), "the hand is not on screen");
+        // Four strands: two of each emitter, the wide one first.
+        let all: Vec<(usize, usize)> = strands().map(|(i, _, e)| (i, e)).collect();
+        assert_eq!(all, [(0, 0), (1, 0), (2, 1), (3, 1)]);
+        assert_eq!(VfxState::default().noise.len(), all.len());
+    }
+
+    /// A beam mesh always has the attributes the beam's shader reads, also
+    /// before the first beam.
+    #[test]
+    fn beam_meshes_carry_what_the_shader_reads() {
+        let mut mesh = empty_beam_mesh();
+        assert_eq!(mesh.count_vertices(), 3);
+        for _ in 0..2 {
+            assert!(mesh.attribute(Mesh::ATTRIBUTE_POSITION).is_some());
+            assert!(mesh.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
+            assert!(mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
+            assert!(mesh.attribute(Mesh::ATTRIBUTE_COLOR).is_some());
+            let frame = BeamFrame::without_hand(
+                Vec3::new(1.0, 2.0, -30.0),
+                Vec2::new(1.0, 0.5625),
+                bevy::math::Affine3A::IDENTITY,
+                720.0,
+            );
+            fill_beam_mesh(&mut mesh, strand_ribbon(&frame, &beam::EMITTERS[1], &[]));
+        }
+        assert_eq!(mesh.count_vertices(), 2 * (beam::INTERPOLATION_POINTS + 1));
     }
 
     #[test]
@@ -1766,8 +2316,10 @@ mod tests {
     fn tints_are_normalised() {
         let c = decal_tint(beam::DEFAULT_BEAM_COLOR).to_linear();
         assert!((c.blue - 1.0).abs() < 1e-6 && c.red < 0.1);
-        let b = beam_color(beam::DEFAULT_BEAM_COLOR).to_linear();
-        assert!((b.blue - 0.79 * BEAM_BRIGHTNESS).abs() < 1e-5);
+        // The beam is not normalised: its material keeps the colour times
+        // the original's factor.
+        let b = BeamMaterial::new(beam::DEFAULT_BEAM_COLOR).params.light;
+        assert!((b.z - 0.79 * beam::EMISSIVE_SCALE).abs() < 1e-5);
     }
 
     /// Real-data check (skipped unless `ASAMU_CONVERTED_DIR` names a
@@ -1882,25 +2434,34 @@ mod tests {
         let gun = game.player().script.gun;
         let end = beam::beam_end(gun.grapple_location, gun.follow.map(|f| f.helper));
         assert!((end - anchor).length() < 1.0);
-        let (start, fwd) = beam_start(game.eye_position(), game.player().yaw, game.player().pitch);
-        let noise = beam::BeamNoise::new(1);
-        let path = beam::beam_path(
-            start,
-            end,
-            fwd,
-            beam::SOURCE_TANGENT_STRENGTHS[0],
-            noise.offsets(),
-            beam::NOISE_RANGE_UU,
-        );
-        assert_eq!(path.len(), beam::INTERPOLATION_POINTS + 1);
-        assert!((path[0] - start).length() < 1e-3 && (path[path.len() - 1] - end).length() < 0.5);
-        let render: Vec<Vec3> = path.iter().map(|q| to_render(*q)).collect();
-        let rb = beam::ribbon(
-            &render,
-            4.0 * SCALE.bevy_units_per_uu,
+        // The beam, as a frame without a hand shapes it: the camera at the
+        // eye, looking along the view.
+        let p = game.player();
+        let world_from_view = bevy::math::Affine3A::from_rotation_translation(
+            crate::bevy_quat(asamu_core::coords::ue_view_to_bevy_rotation(p.yaw, p.pitch)),
             to_render(game.eye_position()),
         );
-        assert_eq!(rb.positions.len(), 2 * path.len());
+        let frame = BeamFrame::without_hand(
+            world_from_view.inverse().transform_point3(to_render(end)),
+            emitter::half_extents(1.0, 16.0 / 9.0),
+            world_from_view,
+            720.0,
+        );
+        let start = world_from_view.transform_point3(frame.source);
+        for (i, e, _) in strands() {
+            let noise = beam::BeamNoise::for_strand(e, i as u64).offsets();
+            let rb = strand_ribbon(&frame, e, &noise);
+            assert_eq!(rb.positions.len(), 2 * (beam::INTERPOLATION_POINTS + 1));
+            let mid = |k: usize| {
+                (Vec3::from_array(rb.positions[k]) + Vec3::from_array(rb.positions[k + 1])) * 0.5
+            };
+            let n = rb.positions.len();
+            let unit = SCALE.bevy_units_per_uu;
+            assert!(mid(0).distance(start) < 1e-3, "{} {start}", mid(0));
+            assert!(mid(n - 2).distance(to_render(end)) < 0.5 * unit);
+        }
+        let start =
+            asamu_core::coords::bevy_pos_to_ue(sim_glam::Vec3::from_array(start.to_array()), SCALE);
         // Speed lines while pulled: the capped speed's parameter.
         let dt = (1.0 / game.clock().tick_rate_hz()) as f32;
         let mut capped = 0usize;
