@@ -34,7 +34,11 @@
 //!   `.bin`), and every light component
 //!   with its GUIDs and whether it is baked into a light map (the renderer
 //!   must not light light-mapped surfaces with it again) or casts a static
-//!   shadow map.
+//!   shadow map; and, when the level has one, `light_volume`: the file below.
+//! - `<map>.lightvolume.bin` — the level's precomputed light volume: the
+//!   lighting samples the original bakes for objects without a light map
+//!   (movable meshes, characters, the first-person hand), decoded by
+//!   [`volume`] into fixed 36-byte records.
 //!
 //! `--check` decodes and combines everything in memory, prints coverage and
 //! statistics and writes nothing.
@@ -62,6 +66,9 @@ use serde::Serialize;
 
 use crate::levels::{prepare_dir, select_maps};
 use crate::safety;
+
+#[path = "lightmaps_volume.rs"]
+pub mod volume;
 
 /// `format` of `<map>.lightmaps.json`.
 pub const FORMAT: &str = "asamu-lightmaps";
@@ -318,6 +325,10 @@ pub struct MapFile {
     pub lights: Vec<LightEntry>,
     /// Counts.
     pub stats: MapStats,
+    /// The level's precomputed light volume (absent when the level has none;
+    /// files written before this key existed have none either).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_volume: Option<volume::LightVolumeEntry>,
 }
 
 const ENCODING: &str = "atlas texels: linear RGB irradiance in UE3 light units (1.0 = a light of \
@@ -1237,6 +1248,30 @@ fn convert_map(
         entry
     });
 
+    // The precomputed light volume (lighting for objects without a light
+    // map), from the level export's own bytes.
+    let mut light_volume = None;
+    if let Some(info) = &scene.tail.light_volume {
+        let payload = pkg
+            .export_data(level_export)
+            .with_context(|| format!("reading the level export of {map}"))?;
+        let samples = volume::locate_samples(payload, info)
+            .with_context(|| format!("the precomputed light volume of {map}"))?;
+        let (bin, volume_stats) = volume::convert(samples, info, !args.check);
+        let rel = PathBuf::from(format!("{map}.lightvolume.bin"));
+        if !args.check {
+            outputs.push((rel.clone(), bin));
+        }
+        light_volume = Some(volume::LightVolumeEntry {
+            file: rel_string(&rel),
+            samples: volume_stats.samples,
+            record_size: volume::RECORD_SIZE,
+            bounds_min: info.bounds_min,
+            bounds_max: info.bounds_max,
+            stats: volume_stats,
+        });
+    }
+
     Ok(MapData {
         file: MapFile {
             format: FORMAT,
@@ -1250,6 +1285,7 @@ fn convert_map(
             bsp,
             lights,
             stats,
+            light_volume,
         },
         outputs,
     })
@@ -1308,6 +1344,28 @@ fn print_check(map: &MapFile) {
         "{:18} coefficient-0 max channel histogram (texels inside regions, 8 bins): {:?}",
         "", s.color_max_channel_histogram
     );
+    match &map.light_volume {
+        Some(v) => {
+            let t = &v.stats;
+            eprintln!(
+                "{:18} light volume: {} samples (outside the bounds {}, bad radius {}, bad flag \
+                 {}), radius min/median/max {:?}, shadowed from dominant lights {}, lit \
+                 indirect/environment/ambient {:?}, largest channel {:?}, median of indirect + \
+                 ambient {}",
+                "",
+                t.samples,
+                t.outside_bounds,
+                t.bad_radius,
+                t.bad_flag,
+                t.radius,
+                t.shadowed,
+                t.lit,
+                t.max_radiance,
+                t.median_indirect_plus_ambient
+            );
+        }
+        None => eprintln!("{:18} light volume: none", ""),
+    }
 }
 
 pub fn run(ctx: &crate::Ctx, args: Args) -> Result<()> {

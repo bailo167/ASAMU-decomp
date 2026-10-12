@@ -62,9 +62,13 @@ With your own copy imported, this works today:
   [docs/PARITY.md](docs/PARITY.md); nothing about "feels like the original" is claimed as verified.
 - **Nobody has played it start to finish.** The campaign chain above is proven by an automated run that jumps to
   each level's exit trigger. It shows the scripted transitions work, not that every route is traversable by hand.
-- **Rendering is an approximation.** Materials are reduced to a standard PBR model, lightmaps lose their
-  directional detail, some effects (fog volumes, motion blur, ambient occlusion) are not drawn, and a few
-  materials still show as flat placeholders. Lighting and colour can differ visibly from the original.
+- **Rendering is an approximation.** Materials are reduced to a standard PBR model with one colour texture each:
+  rocks show their tiling surface texture without the moss or grass the original blends onto up-facing sides and
+  without baked crevice shading; skies are one colour; outline glows on interactable objects are not drawn.
+  Lightmaps lose their directional detail, and some effects (fog volumes, motion blur, ambient occlusion) are not
+  drawn. Movable objects, characters and the hand get their indirect light from the level's baked light volume as
+  one value for the whole view, and are still lit by every nearby lamp without shadows; where the level baked no
+  light for them they can be close to black. Lighting and colour can differ visibly from the original.
 - **Some scripted objects never appear.** Props and platforms that start hidden and are shown later by the level
   script (13 across six maps) are not drawn yet.
 - **The original's menus and HUD are not reproduced.** They are Scaleform movies; a functional replacement stands

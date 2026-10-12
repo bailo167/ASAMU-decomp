@@ -19,6 +19,7 @@ cargo test --release -p asamu-ue3 --test material_real_data -- --nocapture   # e
 cargo test -p asamu-ue3 --test material --test material_hostile              # synthetic + hostile fixtures
 cargo run --release -p asamu-import -- materials --check                      # coverage report, writes nothing
 cargo run --release -p asamu-import -- materials --check --shader-caches      # + resource Id search (~45 s)
+cargo run --release -p asamu-import -- materials --check --name <text> --explain   # how each input was reduced (local output)
 cargo run --release -p asamu-import -- --out <user-local dir> materials       # writes <out>/materials/materials.json
 ```
 
@@ -214,14 +215,56 @@ From `FColorMaterialInput::Compile`, `FScalarMaterialInput::Compile`, `FVectorMa
    - `StaticSwitchParameter` / `StaticComponentMaskParameter` are resolved statically; material function calls are
      evaluated through the bound function graph (inputs evaluated in the caller), and a function that reduces to
      unsupported math (the shipped image-adjustment and blend functions) is replaced by its textured input.
-   - Combining two textures keeps one: the one with more channels (colour over mask), on a tie the one with coarser
-     tiling (base layer over detail layer), then the first; the other is listed in `dropped_textures`. A lerp with
-     a varying alpha keeps the textured side (input A between two textures; the mean between two constants).
-   - Vertex colour, `DepthBiasedAlpha`/`DepthBiasedBlend` (soft depth fades), un-mirrored coordinates, clamps of
-     textures and powers of textures are ignored with a note; vertex colour is flagged on the channel.
-   - Anything else (`Fresnel`, `ReflectionVector`, `CameraVector`, `PixelDepth`, `SceneTexture`, `DestColor`,
-     `Transform`, `DotProduct`, non-constant `AppendVector`, `Custom`, ...) is "unsupported": treated as neutral
-     inside a product or sum (1 resp. 0, noted), and as unresolved when it is the whole input.
+   - **Combining two textures keeps one**; the other is listed in `dropped_textures`. Kept, in this order: a sample
+     whose coordinates follow the mesh's over one whose coordinates could not be derived; the one with more
+     channels (colour over a mask channel); in a **product** of two colour samples the one whose texture carries
+     colour over one that is grey (see "Texture statistics": a tiling surface texture over the occlusion or weight
+     map that modulates it); otherwise, and always in a sum (its terms are peers), the one with the coarser tiling
+     (base layer over detail layer), then the first. In the `DiffuseColor` and `SpecularColor` inputs the dropped
+     sample stands in by its **mean** (a constant multiplied or added in), so the average colour is kept; an
+     emissive colour and an opacity drop it without a stand-in (a glow keeps its strength where its mask lets it
+     through, and a mean could push a whole cut-out under its clip value).
+   - **Lerp with an alpha that is not a constant.** One side stands for both: input A, except that (a) an alpha
+     known to be 1 and above (or 0 and below) everywhere picks input B (or A) exactly, which can only be said of a
+     constant or of a texture term's range, and only when nothing but texture detail and vertex colour was left out
+     of the alpha; (b) a **distance blend between two tilings of one texture** (alpha: a clamped depth) keeps the
+     far tiling, input B, which is what shows over most of the screen (kept near, the finer tiling repeats visibly
+     on the cave walls that fill most views); (c) a side that is not representable gives way to the other; between
+     two constants the mean is used. A constant alpha that stands in for something that varies (a depth or view
+     term treated as neutral on the way) is not taken as a blend weight.
+   - **Vertex colour is not exported and counts as white**, the colour of a mesh that was never painted
+     (TENTATIVE that this is what the shipped meshes carry; `color * x` is `x`, `color + x` is `1 + x`); the channel
+     is flagged. `DepthBiasedAlpha`/`DepthBiasedBlend` (soft depth fades), un-mirrored coordinates, clamps of
+     textures and powers of textures are ignored with a note.
+   - **Lengths.** `PixelDepth`, `SceneDepth`, `DestDepth`, world positions and `ObjectRadius` are lengths in world
+     units, not factors: a constant combined with one (its scale, its offset) stays part of it and is not folded
+     into the result. Once clamped it is a factor in a fixed range and neutral from there on. (Before, a depth
+     times 0.0005 reduced to the constant 0.0005: as a lerp weight it left rock materials at 0.05 % of their
+     texture, i.e. black, and as an opacity it made beams invisible or, with the reader's placeholder, solid.)
+   - **Directions.** A component of `ReflectionVector`, `CameraVector` or `LightVector` is centred on 0: scaled by
+     a constant it is still such a component, and in a sum it drops out (a lookup at `0.5 + view.x / k` is taken at
+     0.5, the middle of the texture, instead of at a constant built from `k`).
+   - **Functions of the texture coordinates.** One component of the coordinates (`ComponentMask` of a
+     `TextureCoordinate`) is a value along that axis; products, constant powers and `1 - x` of such values are a
+     **gradient**: the product of `max(scale * coordinate + offset, 0) ^ power` factors (at most 4). A channel that
+     reduces to one is resolved, with the gradient in `gradients`. `AppendVector` of a value along u (or a constant)
+     and a value along v (or a constant) of one UV channel is a coordinate transform again.
+   - **Texture statistics.** For every sampled texture the decoder reads the largest mip of at most 64 texels a
+     side that is stored in the package itself (the small mips are; nothing is read from a texture file cache, so
+     the stage still needs the packages only; a texture stored without a mip chain is read whole up to 1,024) and
+     computes its mean colour (linear), its mean saturation and whether it is one colour everywhere (decided on the
+     largest mip, and only for textures up to 256 texels a side: a small mip of a large texture can average stars
+     or thin lines away). Ours: statistics of the user's data, the same on every system. They decide four things: a
+     texture of **one colour** is that colour (the white or black placeholder a texture parameter defaults to); a
+     texture is **grey** below a mean saturation of 0.028 (occlusion and cavity maps of the shipped data measure up
+     to 0.021, coloured surface textures from 0.035; near-grey surface textures such as the black rock fall under
+     it and are then decided by the tiling rule); a sample **without a place on the surface** (coordinates from a
+     view or reflection vector, or any lookup in a cube map, whatever expression samples it) is the texture's mean
+     (a cube map: the mean of its faces); and the mean of a dropped sample (above). Without statistics (texture not
+     found, no texels) every rule falls back to what it was.
+   - Anything else (`Fresnel`, `SceneTexture`, `DestColor`, `Transform`, `DotProduct`, `Custom`, ...) is
+     "unsupported": treated as neutral inside a product or sum (1 resp. 0, noted), and as unresolved when it is the
+     whole input.
 4. **Output.** Scalar inputs (`Opacity`, `OpacityMask`, `SpecularPower`) read the first component of a wider value
    and are written splatted (TENTATIVE that the shader compiler's cast truncates this way; it is the standard UE3
    behaviour and the first component was already what consumers read: no shipped first component changed).
@@ -236,28 +279,60 @@ From `FColorMaterialInput::Compile`, `FScalarMaterialInput::Compile`, `FVectorMa
 5. **Status.** `approximated` when the chain reached a base material and the main colour channel (emissive for
    unlit materials, base colour otherwise) was derived; `fallback` otherwise (neutral grey, no textures).
    `lossless` when no rule above had to simplify anything (no `notes`).
+6. **What each channel lost.** While an input is reduced, every rule that leaves something out records its kind:
+   `depth` (scene or pixel depth: soft intersections, depth fades, depth-edge outlines, distance blends), `view`
+   (Fresnel, camera and reflection vectors), `coordinates` (texture coordinates used as a value that is not a
+   gradient), `time` (time used as a value), `vertex_color`, `scene` (the colour behind the surface), `world`
+   (world position, world normal, object placement: up-facing blends), `texture` (a second texture) and `other`.
+   The entry's `dropped` map lists them per channel. A renderer can read it to tell a value from a stand-in: an
+   opacity of 0 with `dropped: depth` is "nothing but depth decided this", not "invisible by design". (Our reader
+   does not read the map yet: it draws the reduced value as it is. The outline shell is invisible because its
+   opacity reduces to the constant 0 its lerp starts from, not because the reader saw `depth`.)
 
 ### Results (T for the counts; the approximation itself is ours, not a parity claim)
 
 | | All copies | Distinct object paths |
 |---|---:|---:|
 | materials + instances (no functions, no class default objects) | 1,710 | 1,100 |
-| approximated | 1,695 | 1,089 |
-| of which lossless | 809 | 473 |
-| fallback | 15 | 11 |
+| approximated | 1,703 | 1,093 |
+| of which lossless | 854 | 489 |
+| fallback | 7 | 7 |
 
-- The same path in several packages always approximates identically (610 repeats, 0 differing).
+(Before the play-session pass of 2026-10-12: approximated 1,695 / 1,089, lossless 809 / 473, fallback 15 / 11.)
+
+- The same path in several packages approximates alike in status and channels (610 repeats; the importer counts
+  609 identical entries and 1 that differs only in `texture_stats`: a cave-painting plane whose texture is not
+  among the exports of one of its four packages, so no statistics are read there; the first copy in package order
+  is written).
 - Distinct paths: alpha modes opaque 640, mask 200, blend 144, add 106, modulate 9, premultiplied 1; lighting
-  models Phong 877, Unlit 213, Custom 10; base colour from a texture 769, from the default (black) 255, from a graph
-  constant 73, vertex colour 3; 516 normal maps, 365 emissive textures, 64 materials with panning/rotating UVs, 230
-  with tiling/offset/fixed rotation/UV channel ≠ 0 (`asamu-import materials --check`; 227 before the verification
-  pass added constant-time panners and rotators).
-- The 11 distinct fallbacks are unlit materials whose emissive output is built from coordinate math (4
-  adventure-suit glow effects), custom HLSL or `If` (6 engine debug view materials) or a non-constant `AppendVector`
-  (`EngineMaterials.DefaultDecalMaterial`).
-- Most frequent simplifications (distinct paths): two textures added (322) or multiplied (304), lerp between two
-  textures by a varying alpha (231), desaturation of a texture (187), lerp between two constants by a varying alpha
-  (167), clamp of a texture (165), unsupported `PixelDepth` as a factor (161).
+  models Phong 877, Unlit 213, Custom 10; base colour from a texture 730, from the default (black) 255, from a graph
+  constant 112, vertex colour 3; 491 normal maps, 356 emissive textures, 64 materials with panning/rotating UVs,
+  215 with tiling/offset/fixed rotation/UV channel ≠ 0 (`asamu-import materials --check`). The texture counts fell
+  because uniform textures and lookups without a place on the surface are constants now (bound texture references
+  3,394 → 3,069, T).
+- The 7 distinct fallbacks are custom HLSL or `If` (6 engine debug view materials) and a non-constant
+  `AppendVector` (`EngineMaterials.DefaultDecalMaterial`). None is used by a level mesh. (The 4 adventure-suit glow
+  effects that were fallbacks reduce now.)
+- Most frequent simplifications (distinct paths): two textures added (280) or multiplied (243), a dropped texture
+  standing in by its mean (228), desaturation of a texture (186), lerp between two constants by a varying alpha
+  (176), distance blend between two tilings kept far (162), lerp between two textures by a varying alpha (156),
+  vertex colour in a product taken as white (155), a lookup without a place on the surface replaced by its mean
+  (151).
+- 591 entries have a `dropped` map (channels by kind: texture 900, depth 521, vertex_color 341, world 299, view
+  193, coordinates 41, other 38, time 32, scene 24); 2 have gradients (the checkpoint effect and its base); 1 binds
+  an object filled at run time (the Workshop monitor's render target).
+- **Against the previous manifest** (same install; a local comparison of the two `materials.json` files): of the
+  1,100 entries the displayed channel (emissive when unlit, else base colour) changed its **texture** on 108 (99
+  of them used by a level mesh), went from a texture to a **constant** on 47 (22 used: uniform placeholders,
+  cube-map and reflection lookups), changed only its tiling on 1 and only its **multiplier** on 74 (58 used).
+  24 entries displayed a texture at a multiplier of 0.004 or less, i.e. black; 2 still do (an editor preview
+  material, and one black-rock tunnel platform whose three factors are all small). Reviewed by name
+  in each direction: occlusion/cavity maps → the tiling rock, moss or snow texture of the same material (the
+  rock, platform and mountain families of every map); white placeholder → rock tile or ice colour; black rock at
+  multiplier 0 → the same texture at its real multiplier; a cube-map "texture" that could not be bound → the
+  constant the graph adds to it. Two changes are judgement calls and are listed under "Limits": the village cave
+  walls show their black rock where they showed moss (the blend is vertex-painted), and metal props whose two
+  textures are both grey keep the occlusion map times the metal's dark mean.
 - **Every reference resolves** (T): all 1,983 static-mesh section materials (all LODs), 9,864 component material
   overrides of level actors and 482 BSP surface materials are keys of the approximation set (materials referenced
   as imports, e.g. `EngineMaterials.DefaultMaterial`, are keyed from the package that exports them), and all 3,394
@@ -267,12 +342,31 @@ From `FColorMaterialInput::Compile`, `FScalarMaterialInput::Compile`, `FVectorMa
 ### Limits of the approximation
 
 What a renderer using `materials.json` does **not** get: UE3's lighting models (Phong, custom lighting, two-sided
-lighting, subsurface, anisotropy), rim/Fresnel terms, environment/reflection-vector lookups, scene-colour and depth
-effects (refraction, soft particles, depth fades), distortion, world-position offset, vertex-colour modulation (only
-flagged), world-aligned or screen-space UVs (`Transform`, `AppendVector` of positions), sub-UV/flip-book animation
-(the whole texture is bound), time-varying parameters beyond their first key, sine-driven animation, and second
-texture layers (listed in `dropped_textures`). Colours are linear; textures carry their own `srgb` flag in
-`textures/manifest.json`.
+lighting, subsurface, anisotropy), rim/Fresnel terms, environment/reflection-vector lookups (their mean colour
+only), scene-colour and depth effects (refraction, soft particles, depth fades, depth-edge outlines), distortion,
+world-position offset, vertex-colour modulation (flagged, taken as white), world-aligned or screen-space UVs
+(`Transform`, `AppendVector` of positions), sub-UV/flip-book animation (the whole texture is bound), time-varying
+parameters beyond their first key, sine-driven animation, desaturation, and second texture layers (listed in
+`dropped_textures`; in diffuse and specular colours their mean is kept). Colours are linear; textures carry their
+own `srgb` flag in `textures/manifest.json`.
+
+Graph features of the rock and platform families (`M_definedRock_UpVector_*`, the ice and black-rock variants)
+that remain dropped, with what is shown instead:
+
+| Feature of the original | Shown |
+|---|---|
+| Blend between a rock and a moss / grass / snow / ice layer by how far the surface faces up (world normal), sharpened by a mask texture | the rock layer everywhere (input A); grass-topped rocks have rock tops |
+| Occlusion and cavity map of the mesh, blended over the tiling texture (soft light, optionally twice) | its mean as a constant factor: no baked crevice shading |
+| Near and far tiling blended by distance | the far tiling at every distance |
+| Desaturation of the tiling texture towards the viewer, saturated at grazing angles (Fresnel) | the saturated texture at the desaturated layer's strength |
+| Blend between black rock and moss painted per vertex (village cave) | black rock (white vertex colour assumed) |
+| Second detail normal map, specular from a diffuse channel | first normal map, constant specular |
+
+A second layer (up-facing blend plus occlusion map) needs a material with two more textures and the world normal
+in its shader; the standard material this renderer uses has neither, so the single tiling texture was preferred
+over the occlusion map. Where both textures of a product are grey (dark metal over an occlusion map, black rock over
+an occlusion map) the tiling rule still keeps the unique occlusion map, now multiplied by the other texture's mean,
+so such props are as dark as their metal or rock instead of white.
 
 ## `materials.json` schema (format `asamu-materials`, version 1)
 
@@ -297,6 +391,12 @@ Entry = {
                   "switches": {name: bool}, "component_masks": {name: [r,g,b,a]}, "time_varying": n },
   "textures": [path...], "dropped_textures": [path...] (when any),
   "expressions": {kind: visits}, "unsupported": {kind: count} (when any), "notes": [text...],
+  "dropped": { "<channel>": ["depth" | "view" | "coordinates" | "time" | "vertex_color" | "scene" | "world" |
+                             "texture" | "other", ...] }                       (channels that lost something)
+  "gradients": { "<channel>": { "factors": [ { "uv_channel": i32, "component": "u" | "v",
+                                               "scale": f32, "offset": f32, "power": f32 }, ... ] } }
+  "texture_stats": { "<texture path>": { "mean": [r,g,b,a], "chroma": f32, "uniform": bool } }   (bound textures)
+  "runtime_textures": [path...]            (bound objects filled while the game runs: render targets, movies)
   "also_in": [package...], "differs_in": [package...]   (copies of the same path elsewhere)
 }
 Channel = {
@@ -310,6 +410,21 @@ Channel = {
   "vertex_color": bool, "resolved": bool
 }
 ```
+
+`dropped`, `gradients`, `texture_stats` and `runtime_textures` were added by the play-session pass as optional
+fields (absent when empty; the version stays 1: a file written before still loads, and a reader that ignores
+unknown fields is unaffected). A file written before is **not drawn exactly as before**, because three of the
+reader's rules need none of the new fields: a mask or opacity kept in another texture or channel is composed into
+a picture (cut-outs appear), an unresolved translucent opacity is the faint placeholder instead of solid, and a
+glow shaped by a texture's alpha channel uses that channel. What such a file lacks is everything the importer
+changed: the rock families keep their occlusion maps, beams keep the folded depth constant (they are invisible),
+and the checkpoint effect has no gradient (a faint sheet). Checked on screen with the conversion of 2026-10-11 and
+the new reader in AG-ParadiseCave, AG-Workshop, AG-StarHaven and AG-BeautifulCity; re-run
+`asamu-import materials --force` for the full result.
+
+`<channel>` is `base_color`, `normal`, `emissive`, `specular`, `specular_power` or `opacity`. A channel with a gradient equals `value × clamp(product of max(scale × uv[uv_channel].component +
+offset, 0) ^ power, 0, 1)` and is `resolved`. `texture_stats.mean` is linear (sRGB texels linearised before
+averaging), alpha as stored; `chroma` is the mean of `max(R,G,B) − min(R,G,B)` over the stored texel values.
 
 Values beyond a channel's component count are padded neutrally (value 1, bias 0). A single texture channel is
 broadcast: its multiplier and bias are repeated in all four components, or hold per-component values when the graph
@@ -388,6 +503,76 @@ input. Discrepancies the re-check found and fixed: the single-channel tint, cons
   reduced description). A runtime that wants exact UE3 shading would need a graph-to-shader translator.
 - `MaterialInstanceTimeVarying` curves beyond the first key, `FontParameterValues`, and `Mobile*` properties of
   `MaterialInterface` (unused by this PC build's renderer) are not applied.
-- `crates/asamu-assets/src/material_manifest.rs` (another workstream) reads `materials.json`; it uses each
-  channel's texture, `value` and the UV channel, scale and offset; it drops `bias`, panning and rotation (its own
-  module documentation).
+- Panning and rotation of texture coordinates are exported and not animated by the renderer.
+- A second texture layer in the renderer (the up-facing blend and the occlusion map of the rock families, a glow
+  mask multiplied with a colour texture) and a view-dependent rim for outline shells and beams.
+- Whether the placed meshes carry painted vertex colours where a material blends by them (white is assumed).
+  What is known: 881 of the 882 converted static meshes have no colour stream of their own (`stats.colors` in
+  `meshes/manifest.json`), and none of the 3,374 draws in the six story maps whose material blends by vertex colour
+  uses a mesh that has one, so white is what the *mesh assets* give (STRONG). Colours painted per placed instance
+  in the level are not exported by the levels stage, so they are UNKNOWN; the village cave walls are the visible
+  candidate.
+- A cut-out whose mask is sparse fades out with distance: the composed picture's mips are box averages, and a
+  mask of small bright dots falls under the clip value in the small ones. The texture's own stored mips do the
+  same. Measured on them for the village's background-light cards in AG-BeautifulCity (masked at 0.3333 by the
+  linear red of a 1,024 texture): 0.17 % of the texels pass at full size, 0.10 % in the 128 mip, none from the 64
+  mip down, so the lights show close by and are gone from across the cave (about 77,000 uu, where a card is some
+  75 pixels wide at 1280 × 720; offscreen renders from both distances).
+  Before this pass the cards were opaque black with every light glowing, which hid the houses behind them. Whether
+  the original shows the lights from that far is not checked (UNKNOWN).
+- Skinned meshes and effects do not get composed pictures (only level meshes do): a character whose hair or face
+  keeps its shape in a separate mask texture (3 materials of the two characters, plus stock engine characters no
+  map uses) is still drawn without the cut-out, as before.
+
+## How the renderer uses the description (runtime, ours)
+
+`crates/asamu-assets/src/material_manifest.rs` turns an entry into a `RenderMaterial`
+(`crates/asamu-assets/src/materials.rs`), and `apps/asamu/src/converted.rs` turns that into a Bevy standard
+material. Every level surface stays a standard material (light maps, shadows and fog work as before); what a
+standard material cannot take from the data directly is prepared as a **composed picture** when the level loads
+(`apps/asamu/src/material_pictures.rs`): one RGBA image with its mip chain, built from the converted DDS files
+(DXT1, DXT3, DXT5, 32-bit RGBA, 8-bit grey; at most 1,024 texels a side) or from a gradient (256 × 256).
+
+| In the entry | Drawn as |
+|---|---|
+| displayed texture × `value` + `bias` | texture × (`value` + `bias` / the texture's mean from `texture_stats`), at most 1; without the mean the bias is left out |
+| `opacity` = the alpha channel of the displayed texture | that texture, alpha × `value` |
+| `opacity` from another texture, or another channel of the displayed one, same coordinates | a picture: the displayed texture (or white) in RGB, `clamp(channel × value + bias)` in alpha, the channel as the GPU samples it. A plain factor in 0..1 stays on the material |
+| `opacity` or the displayed colour from `gradients` | a picture of the gradient (grey in RGB, the fade in alpha); over a tiled texture the texture gives way to the material's constant colour |
+| lit, black base colour, emissive from a gradient | the same picture as base colour texture and as emissive texture |
+| emissive × **one channel** of a texture (alpha always; a colour channel of a texture `texture_stats` calls coloured) | a picture of that channel in grey as emissive texture (not the texture's own colours) |
+| `opacity` texture with other coordinates than the displayed one, or not converted | PLACEHOLDER: alpha 0.1 for translucent modes, no cut-out for masked |
+| `opacity` unresolved, translucent modes | PLACEHOLDER: alpha 0.1 (was: solid) |
+| displayed texture in `runtime_textures` | PLACEHOLDER: a switched-off screen, linear (0.012, 0.012, 0.014); the original draws a picture into it |
+| displayed texture not converted otherwise, or `status: fallback` | the neutral palette colour of the path (× `value`) |
+
+The three placeholders are render-only stand-ins, not recovered values. Counts over the 664 materials that level
+meshes use (all maps): 593 display a texture, 70 a constant colour, 1 a run-time texture (the Workshop monitor's
+render target), 0 a texture that was not converted, 0 are fallbacks (the 7 unresolved fallbacks of the set are
+engine debug materials no level mesh uses). Composed pictures per level, as logged by the app: AG-Workshop 12,
+AG-ParadiseCave 24, AG-BeautifulCity 25, AG-StarHaven 11, AG-IceCave 7, AG-Darkcave 11; none failed.
+
+### The first play session (2026-10-12): causes and what is drawn now
+
+Evidence: the owner's screenshots of our build (local, not in the repository) and offscreen renders of the same
+views before and after, on the same converted data except `materials.json`.
+
+| Seen | Cause (CONFIRMED from the entry and the walk, `--explain`) | Now |
+|---|---|---|
+| Ground and rocks in one flat colour per area, white or grey floating rocks, black cave walls | the reduction kept the mesh's occlusion/cavity map (unique, tiling 1) over the tiling rock texture it modulates, or the white placeholder of an unset occlusion parameter; where a distance blend was involved, a depth scaled by 0.0005 became the lerp weight and left the texture at 0.05 % or 0 | the tiling rock (or moss, snow, black rock) texture at the far tiling, times the mean of the occlusion map; the layer blends above stay dropped |
+| Solid cyan quads in the cave | cave-painting planes: masked, black base, constant emissive, the drawing in the alpha channel of a texture that is not displayed; the reader bound an opacity texture only when it was the displayed one | cut-out drawings glowing in the material's colour |
+| Cyan shapes over the suit, jars, lever, world map | an unlit translucent shell on every interactable whose opacity is a comparison of scene depths around the pixel (a glow at depth edges, within a distance); depth was neutral, so opacity 1 | the opacity reduces to 0 (`dropped: depth`): the shell is not drawn and the object under it shows. PLACEHOLDER for the original's thin edge glow |
+| Teal hanging monitor in the Workshop | its displayed texture is a render target, which has no converted file; the palette colour showed | a switched-off screen |
+| Dark slabs at checkpoints | emissive and opacity are the fifth power of the V coordinate (times a colour, times a parameter): "coordinates used as a colour", unresolved, opacity default 1 | a gradient picture: the glow fades along the mesh as in the graph |
+| Hard-edged solid light cones under the lamps | unlit translucent beam: falloff textures looked up by the reflection vector and by V, times a parameter, times a clamped depth; the depth's scale constant was folded in (opacity 0.00025) and the reader's placeholder for "another texture" then drew a flat 10 % cone | the falloff texture along V as alpha (U at the middle), times the parameter and the mean of the view-dependent lookup: 4 to 8 % at most. The view-dependent softening of the cone's silhouette stays dropped |
+| Flat bright yellow lamp brackets | the lamp's emissive colour is multiplied by the alpha channel of its surface texture (the bulb); the renderer multiplied it by the texture's colours, so brass and shade glowed in their own colours | a picture of the alpha channel as emissive texture: the bulb glows, bracket and shade are lit by the lamp's light. The same for the lanterns (their glass band) |
+
+Time-trial markers (start planes and goal arrow): the start planes are hidden actors in the map and are unhidden
+on level load only when `SeqCond_IsTimeTrial` says yes; the goal arrow is visible in the map and is hidden on level
+load when it says no (CONFIRMED, converted Kismet of AG-ParadiseCave: `SeqEvent_LevelLoaded` →
+`SeqCond_IsTimeTrial` → `SeqAct_ToggleHidden`, with a Matinee on the yes branch). Nothing in their materials hides
+them. Our level plan leaves hidden actors out and the app applies Kismet's hide and unhide, so in story play they
+should not be drawn (the link is in the data: in AG-ParadiseCave the "no" output of the condition hides two
+actors, the arrow among them; a render of it in story play was not obtained, since an unattended run does not
+reach the end of the level). A render without a running game (the fly camera, or a level that was loaded and
+not yet started) shows the arrow, now as a bright cut-out instead of a faint quad.

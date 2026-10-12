@@ -292,6 +292,21 @@ boots, world objects):
 | 24 | `trace::record_run_with` (and any caller of `step_with`) uses one collision world for both halves of a tick; only `asamu-game` ticks map actors between the input events and the rest of the tick. A run with moving map actors therefore cannot be re-recorded from inputs alone against a static world. | Traces have no world-object state yet. |
 | 25 | An actor the level places in `PHYS_Rotating` with a `RotationRate` turns by the rate times the tick, the fraction dropped and not carried over (`AActor::physicsRotation`, CONFIRMED native; measured on KM1 for two rocks). The original's turning speed therefore depends on its frame time, and ours is the rule at the 60 Hz tick: 9102 units/s turn at 9060 (the recording, at 78 frames a second: 9048). One place shows it: the two arms of AG-ParadiseCave's merry-go-round, one on a Matinee track (2183.9 units/s) and one turned by its rate (2184 units/s nominal), stay half a turn apart at the recorded frame time and part by 0.131° a second at 60 Hz, as they would in the original at 60 frames a second. A Matinee's movement track moves an actor only in the interpolating physics: three rocks in the rotating physics and three static mesh actors of that level are named by Matinee groups and are not moved by them (measured for one rock and one static mesh; the others follow from the native rule alone). | Row 18 (fixed tick). Whether to take these turns at a reference frame time is open (owner's decision). Tests: `crates/asamu-game/tests/turning_rocks.rs`, `parity_moving_anchor.rs`. |
 
+### Presentation differences (not simulation)
+
+- First-person hand: shown or hidden by the original's rule, rebuilt in the presentation layer; a lowered hand is
+  hidden outright (original: a 0.3 s blend to its lowered pose), and the suit-on animation is replaced by the
+  ordinary hand animation for its 5.97 s. PLACEHOLDER.
+- First-person hand under a cutscene camera: not drawn while a Matinee director cut or a camera-target action has
+  the view (the engine rule is STRONG, not observed in this game).
+- A level started with `--level` shows neither hand nor "+" until the click that starts it (ours; the original has
+  no such state).
+- Story crosshair: a small ring stands for the original's story frames (art not ported); the gameplay "+" is
+  hidden in story mode and under menus. The ring is not re-shown on resume as the original does.
+- Hand lamps stay visible while the hand is lowered (original: they are on the hidden glove).
+- Display gamma: fixed at 2.2; the original applies its `Gamma` setting (default 0.5) through a native whose
+  mapping is UNKNOWN.
+
 ## Trace format
 
 Implemented in `crates/asamu-player/src/trace.rs` (schema version **1**). Recordings of the original (Windows

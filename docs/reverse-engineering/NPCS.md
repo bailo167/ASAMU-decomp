@@ -386,8 +386,80 @@ location plus the weapon bob, with the controller's rotation; its X/Y/Z offsets 
 mesh geometry carries the hand's placement (src). Bob: `BobDamping` 0.15, `JumpDamping` 1.0 (cdo), ABILITIES.md
 A-CM-5. The tree switches between sequences named `Idle`/`Idle_02..04` (random), `Sprint`, `JumpIdle`, `Falling`,
 `Jump`, `JumpLand`, `Grapple`, `Grapple_Loop`, `Grapple_Release`, `rocketBoots`, `RocketBoots_Land`,
-`powerJump`, `PowerJumpIdle`, `PowerJumpLand`, `HandsDown`, `SuitOn` (CONFIRMED (data)); which blend nodes the
-gun drives at which moment is only mapped approximately here (TENTATIVE).
+`powerJump`, `PowerJumpIdle`, `PowerJumpLand`, `HandsDown`, `SuitOn` (CONFIRMED (data)); which of the gameplay
+blend nodes the gun drives at which moment is only mapped approximately here (TENTATIVE).
+
+**When the hand is on screen** (CONFIRMED (data, src) unless noted; `asamu-inspect props Startup.upk
+PlayerHand.PlayerHand_AnimTree` and its children, followed through each node's `Children[i].Anim`: 47 node
+objects). The gun and its hand mesh exist from the first frame of every level (the owner's recording of the
+original, KM1, has the gun with capacity 0 in all 14,017 Workshop samples, idle in 13,989 and firing in 28); what
+puts the hand on screen is the tree:
+
+```
+AnimTree -> custom-animation node -> blend list "bHidden"
+    child 0 (shown):  the gameplay branch (IsGrappling / IsFalling / landings / MovingRate: Idle 1-4, Sprint ...)
+    child 1 (hidden): blend list "PlaySuitOnAnimation"
+        child 0: sequence HandsDown (1 frame)
+        child 1: sequence SuitOn (5.97 s, raises an anim-end event)
+```
+
+- The gun's hide function switches `bHidden` to child 1 and its show function to child 0, each over 0.3 s or at
+  once (the caller's "animate" argument). Entering story mode hides (animated, mesh kept visible); leaving story
+  mode shows (animated). Kismet's `SeqAct_ToggleVisibleGrapple` hides on input 0 and shows on input 1; with its
+  `Visibility` option off a hide also switches the mesh itself off, at once or 0.3 s later when animated, and sets
+  the "hand hidden" flag that blocks grappling (GRAPPLE.md G-AC-3); a show always switches the mesh back on.
+- `SeqAct_PlaySuitOnAnimation` switches the `PlaySuitOnAnimation` list to `SuitOn`; the sequence's end event puts
+  it back on `HandsDown` over 0.5 s. Because that list is the *hidden* branch, the suit-on animation is seen only
+  while the hand is lowered, and the hand is lowered again when it ends.
+- `SeqAct_PlayCustomGrappleAnim` would play on the custom-animation node above everything; no shipped map uses it.
+
+The Workshop therefore runs like this (its Kismet, values CONFIRMED): level start enters story mode, so there is no
+hand; taking the suit plays a 7.51 s Matinee (events at 1.00 s and 6.01 s), and at its end sets the grapple
+capacity to 0 and starts the 5.97 s suit-on animation; a hide that keeps the mesh is wired 15 s after the 6.01 s
+event (it finds the hand already lowered); the launch hides the hand with the mesh off. Every action of this kind
+in the shipped maps, by input and `Visibility`: Workshop hide/kept and hide/off; ParadiseCave show/kept and
+hide/off; Darkcave one action wired on both inputs, off;
+StarHaven two hide/off (7 actions in 4 maps, none animated; corrected in the verification pass, this said 8).
+
+**Runtime** (`apps/asamu/src/npc/hands.rs`, `HandPose`): the hand is drawn while the mesh is not switched off and
+the tree would be on its shown branch, or the suit-on animation runs. The simulation keeps the "hand hidden" flag
+but not the tree's `bHidden` state (a hide that keeps the mesh leaves no trace in `GunState`), so the presentation
+rebuilds it from what the simulation does expose: the edges of story mode, the edges of the flag, the activation
+counts of the level script's toggle actions (hide-only and show-only ones; an action wired on both inputs is
+followed through the flag, which covers the one shipped case) and Kismet's suit-on output, timed by the converted
+`SuitOn` sequence's own length. PLACEHOLDER: a lowered hand is not drawn at all (no 0.3 s blend to `HandsDown`),
+and during the suit-on window the hand shows its ordinary animation, because `asamu_game::npc::hand_animation`
+and `skins.rs` have no suit-on state. To make this exact the simulation would need one more field: the gun's
+hide-blend state, set by every hide and cleared by every show.
+
+Two more rules of the runtime (verification pass, 2026-10-12):
+
+- **Nothing before the first tick.** The level script's start is applied in the simulation's first tick (the
+  Workshop's switch to story mode is wired to its level-loaded event), so before that tick the state says
+  nothing about the hand. A level waiting for the click that starts it (`--level`) and the frames between a load
+  and the first tick show no hand. Ours: the original has no such waiting state. Before this rule a Workshop
+  started with `--level` showed the glove until the click.
+- **Only in the pawn's own view.** The gun marks its mesh as seen by its owner only, each time it shows or hides
+  the hand (CONFIRMED (src)). In the stock engine such a mesh is drawn only in a view whose view actor is that
+  owner (STRONG: the engine's rule for the flag; not observed in this game), so the hand is not drawn while a
+  Matinee director cut or a camera-target action has the view on another actor. It matters in AG-ParadiseCave's
+  opening flight: the level script hides the hand (mesh off) and shows it again in the same frame (the show is
+  wired to the output of the cinematic-mode action, which fires when the mode is switched on and when it is
+  switched off), so the script alone has the hand raised from the first frame.
+
+Checked against the converted Workshop's own script (a data-gated test in `hands.rs`,
+`the_converted_workshop_keeps_the_hand_down_except_for_the_suit_on`; 60 ticks per second): no hand from the first
+tick, through a minute of the level; the suit interaction at tick 3,601 starts the suit-on animation at tick 4,053 (7.53 s later; the
+Matinee is 7.51 s long), the hand is on screen for 358 ticks (5.97 s) and is lowered again; the hide wired 15 s
+after the fade-in runs once and changes nothing; the launch's hide switches the mesh off.
+
+Against the owner's recording of the original (KM1; it has no field for the hand, so the comparison is of the
+events that move it): story mode from the first sample (frame 1,179, 0.41 s into the level; ground speed 132 in
+all 14,017 Workshop samples), which is our first tick; the suit is taken at frame 10,192 (115.99 s) and the
+player's input is used again from frame 10,722 (6.79 s later; the script gives input back at the Matinee's
+fade-in event, 6.01 s), so by the script the suit-on animation runs from about 123.5 s to 129.5 s (frames
+10,770 to 11,230 at the recording's 76.8 frames per second), which is where our rule shows the hand: 7.53 s to
+13.50 s after the interaction.
 
 ## 12. Implementation in this repository
 

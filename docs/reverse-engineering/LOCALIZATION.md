@@ -248,6 +248,26 @@ from an independent census of the files.
   swap its tracks with `Localization::localize_tracks` (integration point, not wired: `audio.rs` belongs to the audio
   workstream).
 
+### Fonts
+
+- What the texts need (T, counted on a local conversion; code points only): 92 distinct characters outside ASCII
+  over the 14 language tables and the credits: 47 in Latin-1 Supplement, 44 in Latin Extended-A, and U+2019. Per
+  language: INT 0, NLD 3, FIN 5, DEU 7, ITA 9, ESN 12, TUR 13, HUN 16, POL 19, FRA 20, POR 20, BRA 22, CZE 27,
+  SLO 30 (credits 7). Hungarian is written with U+00F5 / U+00FB where the language has the double acute.
+- Bevy's built-in font has the 95 printable ASCII characters only (its character map, read locally), so none of
+  those 92 was drawn (seen 2026-10-12 on the Czech main menu: a box in place of each accented letter).
+- `ui::fonts` (runtime): at start-up the app looks in the system's font folders for a monospaced or general text
+  face by file name (Windows: Consolas, Cascadia Mono, Courier New, Segoe UI ...; macOS: Menlo, SF Mono ...; Linux:
+  DejaVu Sans Mono, Liberation Mono, Noto Sans Mono ..., searched four folders deep), reads it (32 MiB cap), checks
+  in its character map (formats 4 and 12, first face of a collection) that it has 16 probe characters, at least one
+  per translated language, and registers it. A text holding a character outside printable ASCII is then drawn with
+  that font first and the built-in one behind it, the whole string in one face; ASCII-only text keeps the built-in
+  font. `ASAMU_FONT=<file>` names the font instead. No font is shipped; without a usable one the app logs it once
+  and stays ASCII-only. Checked on Windows 11 (Consolas found; Czech main menu drawn with every accent). macOS and
+  Linux: unit tests of the folder lists and the search only, not run on screen.
+- The original's own font set-up (`GFxUI.<lang>` `[Fonts]` / `[FontLib]`, 9 languages) is exported as strings and
+  not used: its fonts live in Scaleform font libraries, which are not converted.
+
 ## 10. Open items
 
 - `UObject::LoadLocalizedProp` and the struct text import were not read; the struct and array rules marked

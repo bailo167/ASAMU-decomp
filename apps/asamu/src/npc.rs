@@ -16,8 +16,10 @@
 //!   turn the head and eye bones towards the player (`SeqAct_SetLookAtTarget`
 //!   actors) or the worm's aim;
 //! - renders the first-person hands (`PlayerHand`) on an overlay camera with
-//!   the original's mesh FOV (70°) and picks the hand animation from the
-//!   player's state ([`hands`]);
+//!   the original's mesh FOV (70°), picks the hand animation from the
+//!   player's state and draws the hand only while the original would have it
+//!   raised: not in story mode before the suit is taken, not while Kismet
+//!   has it hidden ([`hands`], `HandPose`);
 //! - gives every skinned mesh the converted (approximate) material of each
 //!   of its sections ([`materials`]);
 //! - draws state gizmos for collectibles, story interactables, glow flowers
@@ -49,6 +51,7 @@ impl Plugin for NpcPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NpcLoad>()
             .init_resource::<materials::SkinMaterials>()
+            .init_resource::<hands::HandPose>()
             .add_systems(
                 Update,
                 (
@@ -59,6 +62,7 @@ impl Plugin for NpcPlugin {
                     skins::update_skin_animations,
                     hands::spawn_hands,
                     hands::tag_overlay_meshes,
+                    hands::observe_hand,
                     hands::update_hands,
                     materials::load_skin_materials,
                     materials::apply_skin_materials,

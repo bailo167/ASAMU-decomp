@@ -247,7 +247,8 @@ ignored `research/`, never the install, never through symlinks):
 | `<map>/atlas_<n>.png` | `--png`: Reinhard tone-mapped sRGB preview |
 | `<map>/vertex.dds` | vertex light maps reduced to one constant each (4 x 4 texel cells) |
 | `<map>.bsp.bin` | geometry of every BSP element: positions, normals, texture UVs, light map UVs, triangles (UE3 world space) |
-| `<map>.lightmaps.json` | `format` `asamu-lightmaps`, version 1: atlases; one entry per lit static mesh component (actor, actor slot, component, mesh, kind, atlas, UV rectangle, UV channel, scale vectors, baked light count, shadow maps); BSP elements (material, byte spans; atlas and rectangle only when the element has a texture light map); every light component with `LightGuid`, `LightmapGuid`, `baked`, `shadow_mapped`; statistics |
+| `<map>.lightmaps.json` | `format` `asamu-lightmaps`, version 1: atlases; one entry per lit static mesh component (actor, actor slot, component, mesh, kind, atlas, UV rectangle, UV channel, scale vectors, baked light count, shadow maps); BSP elements (material, byte spans; atlas and rectangle only when the element has a texture light map); every light component with `LightGuid`, `LightmapGuid`, `baked`, `shadow_mapped`; statistics; `light_volume` when the level has one (added 2026-10-12, optional) |
+| `<map>.lightvolume.bin` | the level's precomputed light volume: the baked light for objects without a light map (`LIGHTING.md`, sections 3 and 4) |
 
 - Atlas texels: for each light map region, `irradiance = srgb(coefficient 0) x scale 0 x mean_i(srgb(coefficient
   1)_i x scale 1_i)` with that light map's own scale vectors (`lightmap::directional_irradiance`; the approximation
@@ -270,6 +271,12 @@ ignored `research/`, never the install, never through symlinks):
 - Each light-mapped draw gets a Bevy `Lightmap` (the atlas and the component's rectangle). Bevy samples light maps
   through `UV_1`; meshes whose light map is channel 0 and vertex-light-mapped meshes get a copy with a second UV set
   (for the constant kind the rectangle is a point, so any UV reads the component's constant).
+- A light-mapped draw whose material is alpha-masked (leaves, fences, grates: 1,768 draws in AG-ParadiseCave) is
+  taken out of the renderer's automatic batching (`needs_own_draw`; added 2026-10-12). Bevy 0.20 keeps light map
+  textures in groups of four and binds one group per batch; its opaque pass keeps batches of different groups
+  apart, its alpha-mask pass does not, so batched masked draws were drawn with the light maps of whichever draw
+  came first: black or wrongly lit plants, different on every run (`LIGHTING.md`, section 2.2). Drawn one by one,
+  each binds its own. Cost at one view of AG-ParadiseCave: 33 to 27 frames per second offscreen.
 - Bevy adds `lightmap x lightmap_exposure x diffuse colour` as indirect light. `lightmap_exposure` is set to
   `directional_lux_per_brightness / pi` of the app's dynamic-light mapping (`asamu_assets::lighting`), because a
   Lambertian surface turns `E` lux into `albedo x E / pi`: a baked brightness-1 light and a dynamic brightness-1
@@ -290,6 +297,10 @@ ignored `research/`, never the install, never through symlinks):
 - A light baked into light maps still lights the surfaces that have no light map (the 72 BSP elements above, draws
   without a pairing, dynamic objects); UE3 gives static surfaces without a light map no static light at all, so
   those surfaces are brighter here than in the original.
+- The ambient term, which reaches only surfaces without a light map, follows the level's precomputed light volume
+  at the viewer when that is converted (`LIGHTING.md`, section 4.3; added 2026-10-12); otherwise it is the constant
+  stand-in. The renderer gives a diffuse surface about 0.45 of the ambient brightness, so ambient light of a given
+  number is worth a little under half a light map texel of the same irradiance (`LIGHTING.md`, section 4.3).
 - What is lost: per-pixel directionality (normal-mapped detail in the baked light), the static shadow maps of
   dominant lights (Bevy's real-time shadows stand in), instanced meshes (not drawn), decal light maps.
 

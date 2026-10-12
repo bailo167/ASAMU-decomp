@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use asamu_ue3::Package;
 use asamu_ue3::material::{
-    ApproxStatus, ChannelSource, MaterialChain, MaterialClass, MaterialDecoder, MaterialNative,
-    NativeKind, ParameterValues, color_to_linear, decode_material_native, encode_material_native,
-    expression_kind, roughness_from_specular_power,
+    ApproxMaterial, ApproxStatus, ChannelSource, MaterialChain, MaterialClass, MaterialDecoder,
+    MaterialNative, NativeKind, ParameterValues, TextureStats, color_to_linear,
+    decode_material_native, encode_material_native, expression_kind, roughness_from_specular_power,
 };
 use asamu_ue3::model::{LoadedPackage, PackageSet};
 use asamu_ue3::property::{ObjRef, Property, Value};
@@ -1553,4 +1553,738 @@ fn null_texture_overrides_fall_through_to_the_parent() {
     );
     assert_eq!(p.textures.get("detail"), Some(&None));
     assert_eq!(p.textures.get("mask"), Some(&Some("P.T_Mask".to_owned())));
+}
+
+// ---------------------------------------------------------------------------
+// Added after the first play session: what a channel lost, lengths, gradients,
+// coordinates put together from components, vertex colour, texture statistics
+// ---------------------------------------------------------------------------
+
+/// A material with the given inputs (`DiffuseColor`, `EmissiveColor`,
+/// `Opacity`, ...), each one expression built inside the material.
+fn material_with(
+    b: &mut Builder,
+    build: impl FnOnce(&mut Builder, i32) -> Vec<(&'static str, i32, Option<[bool; 4]>)>,
+    blend: &str,
+    unlit: bool,
+) -> i32 {
+    let core = b.import("Core", "Package", 0, "Core");
+    let package_class = b.import("Core", "Class", core, "Package");
+    let root_payload = Tags::new(b).end();
+    let root = b.export(package_class, 0, "Mats", root_payload);
+    let material_class = b.class("Material");
+    let m = b.reserve(material_class, root, "M_One");
+    let inputs = build(b, m);
+    let mut bodies = Vec::new();
+    for (name, expr, mask) in inputs {
+        let kind = match name {
+            "Opacity" | "OpacityMask" | "SpecularPower" => "ScalarMaterialInput",
+            "Normal" => "VectorMaterialInput",
+            _ => "ColorMaterialInput",
+        };
+        bodies.push((name, kind, link(b, expr, 0, mask)));
+    }
+    let mut t = Tags::new(b);
+    for (name, kind, body) in bodies {
+        t = t.structure(name, kind, body);
+    }
+    t = t.enumeration("BlendMode", "EBlendMode", blend);
+    if unlit {
+        t = t.enumeration("LightingModel", "EMaterialLightingModel", "MLM_Unlit");
+    }
+    let mut payload = t.end();
+    payload.extend(material_tail(&[Res::simple(1)]));
+    b.fill(m, payload);
+    m
+}
+
+/// An expression without properties (`PixelDepth`, `VertexColor`, ...).
+fn bare(b: &mut Builder, outer: i32, kind: &str, name: &str) -> i32 {
+    let c = b.class(&format!("MaterialExpression{kind}"));
+    let p = Tags::new(b).end();
+    b.export(c, outer, name, p)
+}
+
+fn coordinates(b: &mut Builder, outer: i32, name: &str, tiling: [f32; 2]) -> i32 {
+    let c = b.class("MaterialExpressionTextureCoordinate");
+    let p = Tags::new(b)
+        .float("UTiling", tiling[0])
+        .float("VTiling", tiling[1])
+        .end();
+    b.export(c, outer, name, p)
+}
+
+/// `ComponentMask` of `input` keeping red (`false`) or green (`true`).
+fn component(b: &mut Builder, outer: i32, name: &str, input: i32, green: bool) -> i32 {
+    let c = b.class("MaterialExpressionComponentMask");
+    let body = link(b, input, 0, None);
+    let p = Tags::new(b)
+        .structure("Input", "ExpressionInput", body)
+        .boolean("R", !green)
+        .boolean("G", green)
+        .end();
+    b.export(c, outer, name, p)
+}
+
+/// `ConstantClamp` of `input` to 0..1.
+fn clamp01(b: &mut Builder, outer: i32, name: &str, input: i32) -> i32 {
+    let c = b.class("MaterialExpressionConstantClamp");
+    let body = link(b, input, 0, None);
+    let p = Tags::new(b)
+        .structure("Input", "ExpressionInput", body)
+        .float("Min", 0.0)
+        .float("Max", 1.0)
+        .end();
+    b.export(c, outer, name, p)
+}
+
+/// A texture sample of `<name>_Tex` at the coordinates `coords` (0: the
+/// mesh's own).
+fn sample_at(b: &mut Builder, outer: i32, name: &str, coords: i32) -> i32 {
+    let t = texture(b, outer, &format!("{name}_Tex"));
+    let c = b.class("MaterialExpressionTextureSample");
+    let mut tags = Tags::new(b).object("Texture", t);
+    if coords != 0 {
+        let body = link(tags.b, coords, 0, None);
+        tags = tags.structure("Coordinates", "ExpressionInput", body);
+    }
+    let p = tags.end();
+    b.export(c, outer, name, p)
+}
+
+fn approx_with(
+    b: &mut Builder,
+    m: i32,
+    prepare: impl FnOnce(&MaterialDecoder<'_>),
+) -> ApproxMaterial {
+    let (set, lp) = load(b.package());
+    let dec = MaterialDecoder::new(&set);
+    prepare(&dec);
+    dec.approximate(&lp, (m - 1) as usize).unwrap()
+}
+
+fn stats(mean: [f32; 3], chroma: f32, uniform: bool) -> TextureStats {
+    TextureStats {
+        mean: [mean[0], mean[1], mean[2], 1.0],
+        chroma,
+        uniform,
+    }
+}
+
+fn bound(a: &ApproxMaterial) -> Option<&str> {
+    a.base_color.texture.as_ref()?.texture.as_deref()
+}
+
+/// A depth scaled by a constant is still a depth: the constant says nothing
+/// without it and must not end up as a blend weight or as an opacity. (The
+/// distance blend between a near and a far tiling used to reduce to the far
+/// texture times 0.0005, and a depth fade to an opacity of 0.00125.)
+#[test]
+fn a_length_keeps_the_constants_combined_with_it() {
+    let mut b = Builder::new();
+    let m = material_with(
+        &mut b,
+        |b, m| {
+            let near = sample(b, m, "Near");
+            let far = sample(b, m, "Far");
+            let depth = bare(b, m, "PixelDepth", "Depth");
+            let k = constant(b, m, "K", 0.0005);
+            let scaled = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Scaled",
+                &[("A", depth, None), ("B", k, None)],
+            );
+            let alpha = clamp01(b, m, "Alpha", scaled);
+            let blend = binary(
+                b,
+                m,
+                "MaterialExpressionLinearInterpolate",
+                "Blend",
+                &[("A", near, RGB), ("B", far, RGB), ("Alpha", alpha, None)],
+            );
+            // Opacity = texture alpha * clamp(depth * 0.00125) * 0.4
+            let mask = sample(b, m, "Mask");
+            let depth2 = bare(b, m, "PixelDepth", "Depth2");
+            let k2 = constant(b, m, "K2", 0.00125);
+            let fade = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Fade",
+                &[("A", k2, None), ("B", depth2, None)],
+            );
+            let fade = clamp01(b, m, "FadeClamp", fade);
+            let strength = constant(b, m, "Strength", 0.4);
+            let faded = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Faded",
+                &[("A", mask, ALPHA), ("B", fade, None)],
+            );
+            let opacity = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Opacity",
+                &[("A", faded, None), ("B", strength, None)],
+            );
+            // Specular: one texture at a near (8) and a far (2) tiling,
+            // blended by the same kind of clamped depth: the far one.
+            let tile = texture(b, m, "Tile_Tex");
+            let ts = b.class("MaterialExpressionTextureSample");
+            let mut sides = Vec::new();
+            for (name, tiling) in [("TileNear", 8.0), ("TileFar", 2.0)] {
+                let tc = coordinates(b, m, &format!("{name}TC"), [tiling, tiling]);
+                let body = link(b, tc, 0, None);
+                let p = Tags::new(b)
+                    .object("Texture", tile)
+                    .structure("Coordinates", "ExpressionInput", body)
+                    .end();
+                sides.push(b.export(ts, m, name, p));
+            }
+            let depth3 = bare(b, m, "PixelDepth", "Depth3");
+            let k3 = constant(b, m, "K3", 0.0005);
+            let far = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Far3",
+                &[("A", depth3, None), ("B", k3, None)],
+            );
+            let far = clamp01(b, m, "Far3Clamp", far);
+            let tiles = binary(
+                b,
+                m,
+                "MaterialExpressionLinearInterpolate",
+                "Tiles",
+                &[
+                    ("A", sides[0], RGB),
+                    ("B", sides[1], RGB),
+                    ("Alpha", far, None),
+                ],
+            );
+            vec![
+                ("DiffuseColor", blend, None),
+                ("Opacity", opacity, None),
+                ("SpecularColor", tiles, None),
+            ]
+        },
+        "BLEND_Translucent",
+        false,
+    );
+    let a = approx_of(&mut b, m);
+    assert_eq!(bound(&a), Some("Mats.M_One.Near_Tex"), "{:?}", a.notes);
+    assert_eq!(a.base_color.value, [1.0, 1.0, 1.0, 1.0]);
+    assert_eq!(a.dropped.get("base_color"), Some(&vec!["depth", "texture"]));
+    assert_eq!(a.dropped_textures, vec!["Mats.M_One.Far_Tex".to_owned()]);
+    assert_eq!(a.specular.texture.as_ref().unwrap().uv.scale, [2.0, 2.0]);
+    assert_eq!(a.dropped.get("specular"), Some(&vec!["depth"]));
+    let o = a.opacity.as_ref().unwrap();
+    assert_eq!(
+        o.texture.as_ref().unwrap().texture.as_deref(),
+        Some("Mats.M_One.Mask_Tex")
+    );
+    assert!((o.value[0] - 0.4).abs() < 1e-6, "{:?}", o.value);
+    assert_eq!(a.dropped.get("opacity"), Some(&vec!["depth"]));
+    assert_eq!(a.unsupported.get("PixelDepth"), Some(&3));
+    assert!(!a.lossless);
+}
+
+/// An opacity that is nothing but a comparison of depths (a glow at depth
+/// edges) reduces to the lerp's representable side, and says what it lost.
+#[test]
+fn an_opacity_built_from_depth_alone() {
+    let mut b = Builder::new();
+    let m = material_with(
+        &mut b,
+        |b, m| {
+            let colour = constant3(b, m, "Colour", [0.25, 1.5, 4.0]);
+            let zero = constant(b, m, "Zero", 0.0);
+            let scene = bare(b, m, "SceneDepth", "Scene");
+            let pixel = bare(b, m, "PixelDepth", "Pixel");
+            let edge = binary(
+                b,
+                m,
+                "MaterialExpressionSubtract",
+                "Edge",
+                &[("A", scene, None), ("B", pixel, None)],
+            );
+            let pixel2 = bare(b, m, "PixelDepth", "Pixel2");
+            let k = constant(b, m, "K", 0.0015);
+            let near = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Near",
+                &[("A", pixel2, None), ("B", k, None)],
+            );
+            let near = clamp01(b, m, "NearClamp", near);
+            let near = binary(
+                b,
+                m,
+                "MaterialExpressionOneMinus",
+                "Inv",
+                &[("Input", near, None)],
+            );
+            let opacity = binary(
+                b,
+                m,
+                "MaterialExpressionLinearInterpolate",
+                "Lerp",
+                &[("A", zero, None), ("B", edge, None), ("Alpha", near, None)],
+            );
+            vec![("EmissiveColor", colour, None), ("Opacity", opacity, None)]
+        },
+        "BLEND_Translucent",
+        true,
+    );
+    let a = approx_of(&mut b, m);
+    assert_eq!(a.status, ApproxStatus::Approximated);
+    let o = a.opacity.as_ref().unwrap();
+    assert!(o.resolved);
+    assert_eq!(o.value[0], 0.0, "{:?}", a.notes);
+    assert_eq!(a.dropped.get("opacity"), Some(&vec!["depth"]));
+    assert!(!a.dropped.contains_key("emissive"));
+    assert_eq!(a.emissive.value, [0.25, 1.5, 4.0, 1.0]);
+
+    // The depth alone as the opacity: unresolved, and the reason is kept.
+    let mut b = Builder::new();
+    let m = material_with(
+        &mut b,
+        |b, m| {
+            let scene = bare(b, m, "SceneDepth", "Scene");
+            let k = constant(b, m, "K", 0.01);
+            let scaled = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Scaled",
+                &[("A", scene, None), ("B", k, None)],
+            );
+            vec![("Opacity", scaled, None)]
+        },
+        "BLEND_Additive",
+        false,
+    );
+    let a = approx_of(&mut b, m);
+    let o = a.opacity.as_ref().unwrap();
+    assert!(!o.resolved);
+    assert_eq!(o.value[0], 1.0, "the engine default, not 0.01");
+    assert_eq!(a.dropped.get("opacity"), Some(&vec!["depth"]));
+}
+
+/// A channel computed from one texture coordinate (a fade along a mesh) is
+/// a gradient: the product of powers of `scale * coordinate + offset`.
+#[test]
+fn a_function_of_one_coordinate_is_a_gradient() {
+    let mut b = Builder::new();
+    let m = material_with(
+        &mut b,
+        |b, m| {
+            let colour = constant3(b, m, "Colour", [0.125, 0.5, 1.0]);
+            let tc = coordinates(b, m, "TC", [1.0, 1.0]);
+            let v = component(b, m, "V", tc, true);
+            let five = constant(b, m, "Five", 5.0);
+            let fade = binary(
+                b,
+                m,
+                "MaterialExpressionPower",
+                "Pow",
+                &[("Base", v, None), ("Exponent", five, None)],
+            );
+            let emissive = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Glow",
+                &[("A", colour, None), ("B", fade, None)],
+            );
+            // Opacity = (1 - u * 2) * v^5 * 0.5, u from coordinates tiled 2 x 1.
+            let tc2 = coordinates(b, m, "TC2", [2.0, 1.0]);
+            let u = component(b, m, "U", tc2, false);
+            let inv = binary(
+                b,
+                m,
+                "MaterialExpressionOneMinus",
+                "Inv",
+                &[("Input", u, None)],
+            );
+            let half = constant(b, m, "Half", 0.5);
+            let both = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Both",
+                &[("A", inv, None), ("B", fade, None)],
+            );
+            let opacity = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Opacity",
+                &[("A", both, None), ("B", half, None)],
+            );
+            vec![
+                ("EmissiveColor", emissive, None),
+                ("Opacity", opacity, None),
+            ]
+        },
+        "BLEND_Translucent",
+        false,
+    );
+    let a = approx_of(&mut b, m);
+    assert!(a.emissive.resolved && a.emissive.texture.is_none());
+    assert_eq!(a.emissive.value, [0.125, 0.5, 1.0, 1.0]);
+    let g = a.gradients.get("emissive").unwrap();
+    assert_eq!(g.factors.len(), 1);
+    let f = g.factors[0];
+    assert_eq!(
+        (f.uv_channel, f.component, f.scale, f.offset, f.power),
+        (0, "v", 1.0, 0.0, 5.0)
+    );
+    let o = a.opacity.as_ref().unwrap();
+    assert!(o.resolved);
+    assert_eq!(o.value[0], 0.5);
+    let g = a.gradients.get("opacity").unwrap();
+    assert_eq!(g.factors.len(), 2);
+    let (u, v) = (g.factors[0], g.factors[1]);
+    assert_eq!(
+        (u.component, u.scale, u.offset, u.power),
+        ("u", -2.0, 1.0, 1.0)
+    );
+    assert_eq!(
+        (v.component, v.scale, v.offset, v.power),
+        ("v", 1.0, 0.0, 5.0)
+    );
+    // At (u, v) = (0.25, 1): (1 - 0.5) * 1 = 0.5.
+    assert!((g.eval(|_| [0.25, 1.0]) - 0.5).abs() < 1e-6);
+    assert!(a.dropped.is_empty(), "{:?}", a.dropped);
+    assert!(a.lossless, "{:?}", a.notes);
+
+    // Both coordinates at once are coordinates, not a value.
+    let mut b = Builder::new();
+    let m = material_with(
+        &mut b,
+        |b, m| {
+            let tc = coordinates(b, m, "TC", [1.0, 1.0]);
+            vec![("EmissiveColor", tc, None)]
+        },
+        "BLEND_Opaque",
+        true,
+    );
+    let a = approx_of(&mut b, m);
+    assert!(!a.emissive.resolved);
+    assert_eq!(a.status, ApproxStatus::Fallback);
+    assert_eq!(a.dropped.get("emissive"), Some(&vec!["coordinates"]));
+    assert!(a.gradients.is_empty());
+}
+
+/// Coordinates put together from components (`AppendVector` of a value
+/// along u and one along v, or a constant) are coordinates again, and a
+/// component of a view vector scaled and offset stands for its offset.
+#[test]
+fn coordinates_from_components() {
+    let mut b = Builder::new();
+    let m = material_with(
+        &mut b,
+        |b, m| {
+            let tc = coordinates(b, m, "TC", [1.0, 1.0]);
+            let u = component(b, m, "U", tc, false);
+            let three = constant(b, m, "Three", 3.0);
+            let wide = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Wide",
+                &[("A", u, None), ("B", three, None)],
+            );
+            let v = component(b, m, "V", tc, true);
+            let uv = binary(
+                b,
+                m,
+                "MaterialExpressionAppendVector",
+                "UV",
+                &[("A", wide, None), ("B", v, None)],
+            );
+            let diffuse = sample_at(b, m, "D", uv);
+            // Opacity: a falloff sampled at (0.5 + view.x / 2.5, v).
+            let view = bare(b, m, "ReflectionVector", "View");
+            let x = component(b, m, "X", view, false);
+            let k = constant(b, m, "K", 2.5);
+            let scaled = binary(
+                b,
+                m,
+                "MaterialExpressionDivide",
+                "Scaled",
+                &[("A", x, None), ("B", k, None)],
+            );
+            let half = constant(b, m, "Half", 0.5);
+            let across = binary(
+                b,
+                m,
+                "MaterialExpressionAdd",
+                "Across",
+                &[("A", scaled, None), ("B", half, None)],
+            );
+            let v2 = component(b, m, "V2", tc, true);
+            let uv2 = binary(
+                b,
+                m,
+                "MaterialExpressionAppendVector",
+                "UV2",
+                &[("A", across, None), ("B", v2, None)],
+            );
+            let falloff = sample_at(b, m, "F", uv2);
+            vec![("DiffuseColor", diffuse, RGB), ("Opacity", falloff, None)]
+        },
+        "BLEND_Translucent",
+        false,
+    );
+    let a = approx_of(&mut b, m);
+    let t = a.base_color.texture.as_ref().unwrap();
+    assert_eq!(t.uv.scale, [3.0, 1.0]);
+    assert_eq!(t.uv.offset, [0.0, 0.0]);
+    assert!(!a.dropped.contains_key("base_color"), "{:?}", a.notes);
+    let o = a.opacity.as_ref().unwrap().texture.as_ref().unwrap();
+    assert_eq!(o.texture.as_deref(), Some("Mats.M_One.F_Tex"));
+    assert_eq!(o.uv.scale, [0.0, 1.0], "{:?}", a.notes);
+    assert_eq!(o.uv.offset, [0.5, 0.0]);
+    assert_eq!(a.dropped.get("opacity"), Some(&vec!["view"]));
+}
+
+/// Vertex colour is not exported: it counts as white (an unpainted mesh),
+/// so a blend it saturates is decided, and a blend by a texture is not.
+#[test]
+fn vertex_colour_counts_as_white() {
+    let build = |alpha_from_texture: bool| {
+        let mut b = Builder::new();
+        let m = material_with(
+            &mut b,
+            |b, m| {
+                let moss = sample(b, m, "Moss");
+                let rock = sample(b, m, "Rock");
+                let mask = sample(b, m, "Mask");
+                let alpha = if alpha_from_texture {
+                    mask
+                } else {
+                    // vertex red + (1 - mask red), clamped: 1 and above.
+                    let paint = bare(b, m, "VertexColor", "Paint");
+                    let inv = binary(
+                        b,
+                        m,
+                        "MaterialExpressionOneMinus",
+                        "Inv",
+                        &[("Input", mask, RED)],
+                    );
+                    let sum = binary(
+                        b,
+                        m,
+                        "MaterialExpressionAdd",
+                        "Sum",
+                        &[("A", paint, RED), ("B", inv, None)],
+                    );
+                    clamp01(b, m, "Clamp", sum)
+                };
+                let blend = binary(
+                    b,
+                    m,
+                    "MaterialExpressionLinearInterpolate",
+                    "Blend",
+                    &[("A", moss, RGB), ("B", rock, RGB), ("Alpha", alpha, RED)],
+                );
+                vec![("DiffuseColor", blend, None)]
+            },
+            "BLEND_Opaque",
+            false,
+        );
+        approx_of(&mut b, m)
+    };
+    let painted = build(false);
+    assert_eq!(
+        bound(&painted),
+        Some("Mats.M_One.Rock_Tex"),
+        "{:?}",
+        painted.notes
+    );
+    assert!(
+        painted
+            .dropped
+            .get("base_color")
+            .is_some_and(|d| d.contains(&"vertex_color"))
+    );
+    // A mask texture varies: input A stands for the blend, as before.
+    let masked = build(true);
+    assert_eq!(bound(&masked), Some("Mats.M_One.Moss_Tex"));
+    assert_eq!(masked.dropped.get("base_color"), Some(&vec!["texture"]));
+}
+
+const RED: Option<[bool; 4]> = Some([true, false, false, false]);
+
+/// What the textures hold decides between two of them: in a product the
+/// coloured one is shown and the grey one (an occlusion map) stands in by
+/// its mean; a texture of one colour is that colour; a lookup that has no
+/// place on the surface (view-dependent coordinates, a cube map) is its
+/// mean; an object filled at run time is named.
+#[test]
+fn texture_statistics_decide_between_textures() {
+    let mut b = Builder::new();
+    let m = material_with(
+        &mut b,
+        |b, m| {
+            // Occlusion (unique, tiling 1) * rock tile (tiling 13) * white.
+            let ao = sample(b, m, "AO");
+            let tc = coordinates(b, m, "TC", [13.0, 13.0]);
+            let tile = sample_at(b, m, "Tile", tc);
+            let white = sample(b, m, "White");
+            let shaded = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Shaded",
+                &[("A", ao, RGB), ("B", tile, RGB)],
+            );
+            let diffuse = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Diffuse",
+                &[("A", white, RGB), ("B", shaded, None)],
+            );
+            // Emissive = colour + reflection lookup * 0.5.
+            let view = bare(b, m, "ReflectionVector", "View");
+            let refl = sample_at(b, m, "Refl", view);
+            let half = constant(b, m, "Half", 0.5);
+            let dim = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Dim",
+                &[("A", refl, RGB), ("B", half, None)],
+            );
+            let colour = constant3(b, m, "Colour", [0.1, 0.2, 0.3]);
+            let emissive = binary(
+                b,
+                m,
+                "MaterialExpressionAdd",
+                "Emissive",
+                &[("A", colour, None), ("B", dim, None)],
+            );
+            // Specular = a cube map sampled by a plain texture sample.
+            let cube = sample(b, m, "Cube");
+            // Opacity mask = occlusion * tile again: no mean is folded in.
+            let ao2 = sample(b, m, "AO2");
+            let tc2 = coordinates(b, m, "TC2", [13.0, 13.0]);
+            let tile2 = sample_at(b, m, "Tile2", tc2);
+            let mask = binary(
+                b,
+                m,
+                "MaterialExpressionMultiply",
+                "Mask",
+                &[("A", ao2, RGB), ("B", tile2, RGB)],
+            );
+            // Normal: a render target.
+            let screen = sample(b, m, "Screen");
+            vec![
+                ("DiffuseColor", diffuse, None),
+                ("EmissiveColor", emissive, None),
+                ("SpecularColor", cube, RGB),
+                ("Normal", screen, RGB),
+                ("OpacityMask", mask, None),
+            ]
+        },
+        "BLEND_Masked",
+        false,
+    );
+    let prepare = |dec: &MaterialDecoder<'_>| {
+        dec.assume_texture(
+            "Mats.M_One.AO_Tex",
+            Some(stats([0.5, 0.5, 0.5], 0.01, false)),
+            false,
+            false,
+        );
+        dec.assume_texture(
+            "Mats.M_One.Tile_Tex",
+            Some(stats([0.2, 0.15, 0.1], 0.1, false)),
+            false,
+            false,
+        );
+        dec.assume_texture(
+            "Mats.M_One.White_Tex",
+            Some(stats([1.0, 1.0, 1.0], 0.0, true)),
+            false,
+            false,
+        );
+        dec.assume_texture(
+            "Mats.M_One.Refl_Tex",
+            Some(stats([0.2, 0.4, 0.6], 0.2, false)),
+            false,
+            false,
+        );
+        dec.assume_texture(
+            "Mats.M_One.Cube_Tex",
+            Some(stats([0.25, 0.25, 0.25], 0.0, false)),
+            false,
+            true,
+        );
+        dec.assume_texture("Mats.M_One.Screen_Tex", None, true, false);
+        dec.assume_texture(
+            "Mats.M_One.AO2_Tex",
+            Some(stats([0.5, 0.5, 0.5], 0.01, false)),
+            false,
+            false,
+        );
+        dec.assume_texture(
+            "Mats.M_One.Tile2_Tex",
+            Some(stats([0.2, 0.15, 0.1], 0.1, false)),
+            false,
+            false,
+        );
+    };
+    let a = approx_with(&mut b, m, prepare);
+    assert_eq!(bound(&a), Some("Mats.M_One.Tile_Tex"), "{:?}", a.notes);
+    let t = a.base_color.texture.as_ref().unwrap();
+    assert_eq!(t.uv.scale, [13.0, 13.0]);
+    assert_eq!(a.base_color.value, [0.5, 0.5, 0.5, 1.0]);
+    assert_eq!(a.dropped.get("base_color"), Some(&vec!["texture"]));
+    assert_eq!(
+        a.dropped_textures,
+        vec![
+            "Mats.M_One.AO2_Tex".to_owned(),
+            "Mats.M_One.AO_Tex".to_owned()
+        ]
+    );
+    assert_eq!(
+        a.texture_stats.get("Mats.M_One.Tile_Tex").map(|s| s.mean),
+        Some([0.2, 0.15, 0.1, 1.0])
+    );
+    // The white texture is a constant: not bound, not dropped.
+    assert!(!a.textures.contains(&"Mats.M_One.White_Tex".to_owned()));
+    // The reflection lookup stands in by its mean: 0.1 + 0.2 * 0.5, ...
+    assert!(a.emissive.texture.is_none());
+    for (got, want) in a.emissive.value.iter().zip([0.2, 0.4, 0.6]) {
+        assert!((got - want).abs() < 1e-6, "{:?}", a.emissive.value);
+    }
+    assert_eq!(a.dropped.get("emissive"), Some(&vec!["view"]));
+    // The cube map too, whatever samples it.
+    assert!(a.specular.texture.is_none());
+    assert_eq!(a.specular.value[0], 0.25);
+    // An opacity keeps the same texture but not the other's mean: a mean
+    // could push a whole cut-out under its clip value.
+    let o = a.opacity.as_ref().unwrap();
+    assert_eq!(
+        o.texture.as_ref().unwrap().texture.as_deref(),
+        Some("Mats.M_One.Tile2_Tex")
+    );
+    assert_eq!(o.value, [1.0, 1.0, 1.0, 1.0]);
+    // The render target stays bound and is named as filled at run time.
+    assert_eq!(a.runtime_textures, vec!["Mats.M_One.Screen_Tex".to_owned()]);
+
+    // Without statistics the old rule holds: the coarser tiling is kept.
+    let b2 = &mut b;
+    let old = approx_of(b2, m);
+    assert_eq!(bound(&old), Some("Mats.M_One.White_Tex"), "{:?}", old.notes);
+    assert!(old.texture_stats.is_empty() && old.runtime_textures.is_empty());
 }

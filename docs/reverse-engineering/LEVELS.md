@@ -78,8 +78,11 @@ Sources:
 
 1. **Workshop.**
    - At level start: story mode is switched on and a slow movement speed is requested by console command.
-   - Interacting with the suit plays the suit-on animation, shows the grapple hand and sets the grapple
-     limit to 0.
+   - Interacting with the suit plays a Matinee, then sets the grapple limit to 0 and plays the hand's suit-on
+     animation, the only time the hand is seen in this level: story mode keeps it lowered, and the level's two
+     toggle-visible-grapple actions both hide (one keeps the mesh, 15 s after the Matinee's fade-in event; one
+     switches it off at the launch). Corrected 2026-10-12: this line used to say the interaction "shows the
+     grapple hand"; the action's wired input is "Hide" (NPCS.md §11).
    - A launch sequence (an interaction, or a touch relayed by a remote event) hides the grapple, shows the
      title logo and opens AG-ParadiseCave.
    - 6 narrator lines, 19 Matinee actions; no Kismet checkpoint triggers.

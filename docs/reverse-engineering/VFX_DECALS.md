@@ -230,8 +230,9 @@ default true) calls `ChangeCrosshair(bEnableCrosshair, bSuitCrosshair)`; no map 
 
 The pause menu is a caller too **(V)** [CONFIRMED (src)]: opening it calls `ToggleCrosshair(false)` and closing it
 `ToggleCrosshair(true)`, without a fade. So a pause and resume shows the crosshair again even where Kismet had
-hidden it, and leaves the enabled look until the gun's next tick. Not ported: the HUD's "+" and the ring keep
-their state across a pause (`kismet.rs` owns the HUD's switch).
+hidden it, and leaves the enabled look until the gun's next tick. Partly ported: the HUD's "+" is hidden while
+any menu is open (`hud.rs`, `plus_crosshair_shown`); the ring keeps its state across a pause and does not re-show
+a crosshair Kismet had hidden (`kismet.rs` owns the HUD's switch).
 
 Consequence: the dot look is only visible until the gun's first tick (and for one tick after
 `EnableGrapple(false)`); a level without grapples shows the disabled suit crosshair. Whether the movie's `normal`
@@ -239,7 +240,12 @@ frame differs visibly from `dot` is UNKNOWN (the movie's art is not ported).
 
 **Runtime** (`vfx/crosshair.rs`): `CrosshairState` ports the three functions; `vfx.rs` draws a ring around the
 HUD's crosshair per look (sizes, colours and the 0.25 s fade are ours) and tints the enabled look with the beam
-colour modes' tint.
+colour modes' tint. The "+" inside the ring (`hud.rs`) stands for the gameplay crosshair only: it is drawn while a
+game is played with no menu open and the pawn is outside story mode. In story mode (the whole Workshop, every
+talk) the original switches to its story frames, and here the small ring alone is drawn (PLACEHOLDER for the
+story frames' art; changed 2026-10-12, when the "+" and the glove showed in the Workshop before the suit).
+The hand lamps of §4 still follow only the "hand hidden" flag, so they show while the hand is merely lowered
+(the Workshop, story sections); `npc::hands::HandPose::shown()` is the state they should follow.
 
 ## 6. Run-time decals: grapple hit and hard landing
 

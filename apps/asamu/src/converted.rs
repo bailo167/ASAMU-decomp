@@ -11,17 +11,19 @@
 //! batch.
 //!
 //! Approximations (render side only; see `asamu_assets::lighting` and
-//! `asamu_assets::materials`): lights use our UE3 → physical mapping, the
-//! original's baked lightmaps are not rendered (a constant ambient term
-//! stands in), fog is a placeholder distance fog enabled only when the level
-//! has a height-fog actor, and materials without a converted description use
-//! untextured neutral colours.
+//! `asamu_assets::materials`): lights use our UE3 → physical mapping; the
+//! original's baked light maps are applied afterwards by `lightmaps.rs`, and
+//! surfaces without one get an ambient term (the level's precomputed light
+//! volume through `light_volume.rs`, or a constant stand-in); fog is a
+//! placeholder distance fog enabled only when the level has a height-fog
+//! actor (`post.rs` replaces it), and materials without a converted
+//! description use untextured neutral colours.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use asamu_assets::manifest::AddressMode;
-use asamu_assets::materials::UvTransform;
+use asamu_assets::materials::{ComposedAlpha, ComposedRgb, ComposedTexture, UvTransform};
 use asamu_assets::{
     BlendMode, ConvertedDir, LevelPlan, PlanOptions, RenderLightKind, RenderMaterial,
     TextureBinding,
@@ -41,7 +43,7 @@ use bevy::math::Affine2;
 use bevy::mesh::{Indices, PrimitiveTopology, UvChannel};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
-use bevy::render::render_resource::Face;
+use bevy::render::render_resource::{Extent3d, Face, TextureDimension, TextureFormat};
 use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 
@@ -314,7 +316,9 @@ fn repair_failed_textures(
                 failed.push(*id);
                 true
             }
-            Some(bevy::asset::LoadState::Loaded) => false,
+            // Loaded, or not a file at all (a picture composed here): there
+            // is nothing to wait for.
+            Some(bevy::asset::LoadState::Loaded) | None => false,
             _ => true,
         });
     for image in failed {
@@ -382,6 +386,7 @@ fn poll_planning(
     mut start: ResMut<LevelStart>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut users: ResMut<TextureUsers>,
+    mut image_assets: ResMut<Assets<Image>>,
     camera: Query<Entity, With<Camera3d>>,
     mut projection: Query<&mut Projection, With<Camera3d>>,
 ) {
@@ -402,12 +407,19 @@ fn poll_planning(
     log_plan(&plan);
     let settings = level.settings;
     let mapping = level.options.lights;
+    let pictures = Pictures {
+        root: level.dir.root().to_path_buf(),
+        images: &mut image_assets,
+        made: HashMap::new(),
+        failed: 0,
+    };
     let summary = spawn_plan(
         &mut commands,
         &asset_server,
         &mut materials,
         &mut mesh_assets,
         &mut users,
+        pictures,
         &plan,
         &settings,
         &mapping,
@@ -535,13 +547,125 @@ fn address(a: AddressMode) -> ImageAddressMode {
     }
 }
 
+/// Composes (once each) the pictures of materials that need one
+/// ([`asamu_assets::materials::ComposedTexture`]) from the converted
+/// texture files.
+struct Pictures<'a> {
+    /// The converted directory.
+    root: PathBuf,
+    images: &'a mut Assets<Image>,
+    /// Pictures by specification (`None`: could not be made).
+    made: HashMap<String, Option<Handle<Image>>>,
+    /// Pictures that could not be made.
+    failed: usize,
+}
+
+impl Pictures<'_> {
+    /// The decoded texels of a bound texture (its first mip within the
+    /// picture size).
+    fn texels(&self, t: &TextureBinding) -> Option<crate::material_pictures::Texels> {
+        // `file` was validated as a relative path when it was bound.
+        let path = self.root.join("textures").join(&t.file);
+        let data =
+            asamu_assets::files::read_bounded(&path, crate::material_pictures::MAX_FILE_BYTES)
+                .ok()?;
+        crate::material_pictures::decode_dds(&data, crate::material_pictures::MAX_EDGE)
+    }
+
+    fn compose(&self, spec: &ComposedTexture) -> Option<Image> {
+        let (rgb, rgb_srgb) = match &spec.rgb {
+            ComposedRgb::Texture(t) | ComposedRgb::Channel { texture: t, .. } => {
+                (Some(self.texels(t)?), t.srgb)
+            }
+            _ => (None, false),
+        };
+        let (alpha, alpha_srgb) = match &spec.alpha {
+            ComposedAlpha::Texture { texture, .. } => (Some(self.texels(texture)?), texture.srgb),
+            _ => (None, false),
+        };
+        let picture = crate::material_pictures::compose(
+            spec,
+            rgb.as_ref(),
+            rgb_srgb,
+            alpha.as_ref(),
+            alpha_srgb,
+        )?;
+        // The picture repeats as the texture that gives it its shape does;
+        // one made of gradients alone ends at the mesh's edges.
+        let modes = match (&spec.alpha, &spec.rgb) {
+            (ComposedAlpha::Texture { texture, .. }, _) => texture.address,
+            (_, ComposedRgb::Texture(t) | ComposedRgb::Channel { texture: t, .. }) => t.address,
+            _ => [AddressMode::Clamp; 2],
+        };
+        let mut image = Image::new_uninit(
+            Extent3d {
+                width: picture.width,
+                height: picture.height,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            if picture.srgb {
+                TextureFormat::Rgba8UnormSrgb
+            } else {
+                TextureFormat::Rgba8Unorm
+            },
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.texture_descriptor.mip_level_count = picture.mips;
+        image.data = Some(picture.data);
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: address(modes[0]),
+            address_mode_v: address(modes[1]),
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            mipmap_filter: ImageFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..default()
+        });
+        Some(image)
+    }
+
+    fn get(&mut self, spec: &ComposedTexture, material: Option<&str>) -> Option<Handle<Image>> {
+        let key = format!("{spec:?}");
+        if let Some(known) = self.made.get(&key) {
+            return known.clone();
+        }
+        let handle = self.compose(spec).map(|image| self.images.add(image));
+        if handle.is_none() {
+            self.failed += 1;
+            warn!(
+                "the picture of material {material:?} could not be composed (a texture it \
+                 needs is missing or in a format the composer does not read): it is drawn \
+                 without its cut-out or fade"
+            );
+        }
+        self.made.insert(key, handle.clone());
+        handle
+    }
+}
+
 /// Loads (once) the images of a plan.
 struct ImageCache<'a> {
     server: &'a AssetServer,
     handles: HashMap<String, Handle<Image>>,
+    /// Composes pictures (`None` where no converted directory is at hand:
+    /// such materials then use their plain base colour texture).
+    pictures: Option<Pictures<'a>>,
 }
 
 impl ImageCache<'_> {
+    /// The composed picture of `m`, if it needs one and it can be made.
+    fn composed(&mut self, m: &RenderMaterial) -> Option<Handle<Image>> {
+        let spec = m.composed.as_ref()?;
+        self.pictures.as_mut()?.get(spec, m.path.as_deref())
+    }
+
+    /// The composed emissive picture of `m`, likewise.
+    fn emissive_composed(&mut self, m: &RenderMaterial) -> Option<Handle<Image>> {
+        let spec = m.emissive_composed.as_ref()?;
+        self.pictures.as_mut()?.get(spec, m.path.as_deref())
+    }
+
     fn get(&mut self, t: &TextureBinding) -> Handle<Image> {
         if let Some(h) = self.handles.get(&t.file) {
             return h.clone();
@@ -603,10 +727,19 @@ fn standard_material(
     } else {
         (false, Some(Face::Back))
     };
+    // A composed picture (colour in RGB, opacity in alpha) stands in for
+    // the base colour texture, and for the emissive texture of a material
+    // that shows its emissive channel alone.
+    let picture = images.composed(m);
+    let emissive_picture = picture
+        .clone()
+        .filter(|_| m.composed.as_ref().is_some_and(|c| c.emissive))
+        .or_else(|| images.emissive_composed(m));
     StandardMaterial {
         base_color: Color::linear_rgba(r, g, b, a),
         base_color_channel: channel.clone(),
-        base_color_texture: m.base_color_texture.as_ref().map(|t| images.get(t)),
+        base_color_texture: picture
+            .or_else(|| m.base_color_texture.as_ref().map(|t| images.get(t))),
         normal_map_channel: channel.clone(),
         normal_map_texture: if settings.normal_maps {
             m.normal_texture.as_ref().map(|t| images.get(t))
@@ -615,7 +748,8 @@ fn standard_material(
         },
         emissive: LinearRgba::rgb(er, eg, eb),
         emissive_channel: channel,
-        emissive_texture: m.emissive_texture.as_ref().map(|t| images.get(t)),
+        emissive_texture: emissive_picture
+            .or_else(|| m.emissive_texture.as_ref().map(|t| images.get(t))),
         perceptual_roughness: m.roughness,
         metallic: m.metallic,
         alpha_mode: match m.blend {
@@ -646,6 +780,7 @@ pub(crate) fn add_render_material(
     let mut images = ImageCache {
         server,
         handles: HashMap::new(),
+        pictures: None,
     };
     let sm = standard_material(m, false, settings, &mut images);
     let handle = materials.add(sm.clone());
@@ -685,6 +820,7 @@ fn spawn_plan(
     materials: &mut Assets<StandardMaterial>,
     mesh_assets: &mut Assets<Mesh>,
     users: &mut TextureUsers,
+    pictures: Pictures<'_>,
     plan: &LevelPlan,
     settings: &RenderSettings,
     mapping: &asamu_assets::LightMapping,
@@ -712,6 +848,7 @@ fn spawn_plan(
     let mut images = ImageCache {
         server,
         handles: HashMap::new(),
+        pictures: Some(pictures),
     };
     let mut material_handles: HashMap<(usize, bool), Handle<StandardMaterial>> = HashMap::new();
     let mut spawned = 0usize;
@@ -796,6 +933,15 @@ fn spawn_plan(
         spawned += 1;
     }
     tracked.extend(images.handles.values().map(|h| h.id().untyped()));
+    if let Some(p) = &images.pictures
+        && !p.made.is_empty()
+    {
+        info!(
+            "{} material pictures composed (colour and opacity in one image), {} could not be",
+            p.made.len() - p.failed,
+            p.failed
+        );
+    }
 
     // Lights. Shadow maps for the directional light(s) and the most
     // powerful point/spot lights only.

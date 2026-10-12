@@ -438,11 +438,11 @@ fn approximations_cover_every_material() {
     assert_eq!(differing, 0, "copies of a path approximate alike");
     assert_eq!(distinct.len(), 1100);
     assert_eq!(status.values().sum::<usize>(), 1710);
-    assert_eq!(status.get("Approximated").copied(), Some(1695));
-    assert_eq!(approximated, 1089);
-    assert_eq!(lossless, 473);
+    assert_eq!(status.get("Approximated").copied(), Some(1703));
+    assert_eq!(approximated, 1093);
+    assert_eq!(lossless, 489);
     assert_eq!(tex_ok, tex_refs, "every bound texture is a texture export");
-    assert_eq!(tex_refs, 3394);
+    assert_eq!(tex_refs, 3069);
     assert_eq!(
         chains,
         BTreeMap::from([(1, 1228), (2, 444), (3, 30), (4, 8)])

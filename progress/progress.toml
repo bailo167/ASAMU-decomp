@@ -605,7 +605,7 @@ id = "materials"
 name = "Material parameters"
 status = "verified"
 evidence = "docs/reverse-engineering/MATERIALS.md; crates/asamu-ue3/tests/material_real_data.rs"
-note = "All materials + 17,449 expressions decode exactly; PBR approximation matched by an independent decoder on 1,100 entries."
+note = "All materials + 17,449 expressions decode exactly. The PBR reduction was reworked after the first play session (1,093 of 1,100 approximated, 489 lossless; it now reads texture statistics, keeps what it dropped per channel, and the app composes cut-outs, fades and glow masks into pictures at load time); the independent decoder's check predates that rework and covers chains, parameters and blend modes, not the new texture choice. Rendering stays an approximation: the up-facing layer blend of the rock families is not drawn, and three effects are render-only placeholders."
 
 [[category.item]]
 id = "collision"
@@ -916,8 +916,8 @@ note = "Approximate PBR from materials.json; neutral fallback for missing textur
 id = "lighting"
 name = "Lighting / lightmaps"
 status = "implemented"
-evidence = "apps/asamu; docs/reverse-engineering/LIGHTMAPS.md"
-note = "Baked lighting from original lightmaps + dynamic lights not baked; approximations documented."
+evidence = "apps/asamu/src/lightmaps.rs; apps/asamu/src/light_volume.rs; docs/reverse-engineering/LIGHTMAPS.md; docs/reverse-engineering/LIGHTING.md"
+note = "Baked light maps on static geometry, with alpha-masked draws unbatched so each binds its own light map; dynamic lights for what is not baked; objects without a light map take their ambient light from the level's precomputed light volume at the viewer (one value per view, no direction, no visibility test for direct light)."
 
 
 [[category.item]]
@@ -966,7 +966,7 @@ id = "hud"
 name = "HUD / subtitles / menus"
 status = "implemented"
 evidence = "apps/asamu/src/ui; apps/asamu/src/hud.rs; docs/UI_AND_SAVES.md"
-note = "Main/pause/settings/chapter-select menus, HUD, collectibles counter (functional replacement, not visual clone)."
+note = "Main/pause/settings/chapter-select menus, HUD, collectibles counter (functional replacement, not visual clone). Developer read-outs are off by default on every start path (F1); the window title follows the level; a system font stands behind the built-in one for the 14 languages (checked on Windows only); the first-person hand is drawn by the original's rule (not before the suit, not under a cutscene camera)."
 
 # --------------------------------------------------------------------------
 # Audio

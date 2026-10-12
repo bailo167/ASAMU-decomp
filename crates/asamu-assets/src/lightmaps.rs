@@ -14,7 +14,11 @@
 //! - the BSP surfaces with their light map coordinates, as render meshes
 //!   ([`LevelLightmaps::bsp_meshes`]); surfaces the original drew without a
 //!   light map come with [`BspLightmapMesh::lightmap`] `None`, so the meshes
-//!   of a level cover its whole visible BSP.
+//!   of a level cover its whole visible BSP;
+//! - where the level's precomputed light volume is
+//!   ([`LevelLightmaps::light_volume_file`]; read with
+//!   [`crate::lighting::LightVolume`]): the baked light for objects that
+//!   have no light map.
 //!
 //! Light baking is keyed by actor ([`LevelLightmaps::light_baked`]): an
 //! actor with several light components counts as baked when any of them is
@@ -131,6 +135,13 @@ struct RawLight {
     shadow_mapped: bool,
 }
 
+/// `light_volume` of a light map file (absent in files written before the
+/// importer exported it, and for levels without a volume).
+#[derive(Debug, Clone, Deserialize)]
+struct RawLightVolume {
+    file: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct RawMapFile {
     format: String,
@@ -146,6 +157,8 @@ struct RawMapFile {
     bsp: Option<RawBsp>,
     #[serde(default)]
     lights: Vec<RawLight>,
+    #[serde(default)]
+    light_volume: Option<RawLightVolume>,
 }
 
 /// How a component's light map is stored.
@@ -226,6 +239,8 @@ pub struct LevelLightmaps {
     components: BTreeMap<ComponentKey, ComponentLightmap>,
     lights: BTreeMap<(String, String), LightBaking>,
     bsp: BTreeMap<String, (PathBuf, Vec<RawBspElement>, Vec<String>)>,
+    /// Light volume file per level package.
+    volumes: BTreeMap<String, PathBuf>,
     /// Packages whose light map file was found.
     pub packages: Vec<String>,
     /// Packages without a light map file.
@@ -379,8 +394,25 @@ impl LevelLightmaps {
                 Err(_) => self.rejected += 1,
             }
         }
+        if let Some(v) = raw.light_volume {
+            match safe_relative_path(&v.file) {
+                Ok(rel) => {
+                    self.volumes
+                        .insert(pk.clone(), root.join("lightmaps").join(rel));
+                }
+                Err(_) => self.rejected += 1,
+            }
+        }
         self.packages.push(package.to_owned());
         Ok(())
+    }
+
+    /// The precomputed light volume file of level `package` (`None` when
+    /// its light map file names none: a level without a volume, or a file
+    /// written before the importer exported it).
+    #[must_use]
+    pub fn light_volume_file(&self, package: &str) -> Option<&Path> {
+        self.volumes.get(&key(package)).map(PathBuf::as_path)
     }
 
     /// Number of components with a light map.
@@ -822,5 +854,45 @@ mod tests {
             (lightmap_exposure(&m) - m.directional_lux_per_brightness / std::f32::consts::PI).abs()
                 < 1e-3
         );
+    }
+
+    #[test]
+    fn the_light_volume_file_is_named_per_level_and_validated() {
+        // A file written before the key existed names none.
+        assert!(loaded().light_volume_file("TestMap").is_none());
+        let with = |file: &str| {
+            let doc = doc().replacen(
+                "\"map\": \"TestMap\",",
+                &format!("\"map\": \"TestMap\", \"light_volume\": {{\"file\": {file:?}, \"samples\": 3}},"),
+                1,
+            );
+            let mut l = LevelLightmaps::default();
+            l.add_json(
+                Path::new("/conv"),
+                Path::new("TestMap.lightmaps.json"),
+                doc.as_bytes(),
+                "TestMap",
+            )
+            .unwrap();
+            l
+        };
+        let l = with("TestMap.lightvolume.bin");
+        assert_eq!(
+            l.light_volume_file("testmap"),
+            Some(
+                Path::new("/conv")
+                    .join("lightmaps")
+                    .join("TestMap.lightvolume.bin")
+                    .as_path()
+            )
+        );
+        assert!(l.light_volume_file("Other").is_none());
+        // A path that leaves the converted directory is dropped and counted.
+        let before = loaded().rejected;
+        for bad in ["../outside.bin", "/etc/passwd", "a/../../b.bin", ""] {
+            let l = with(bad);
+            assert!(l.light_volume_file("TestMap").is_none(), "{bad:?}");
+            assert_eq!(l.rejected, before + 1, "{bad:?}");
+        }
     }
 }

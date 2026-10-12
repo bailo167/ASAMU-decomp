@@ -36,10 +36,34 @@ _Session journal. Newest entry first. Each entry: what was done, what is true no
   the original does at 60 fps, not at the recorded 78).
 - A conversion made before this wave (mesh manifest version 1) must be re-imported (`asamu-import meshes`):
   with it collision is approximate. The Mac's local conversion is version 1.
-- In progress on the local branch `play/fixes` (not pushed): fixes for what the screenshots showed (material
-  reduction and rendering: untextured ground, cut-out cave paintings, outline shells, the checkpoint effect, the
-  Workshop monitor, light beams; a clean screen by default; the window title; no first-person hand before the
-  suit; a system font fallback; black foliage is next). Nothing from it is merged until it is verified.
+- **Fixes for what the play session's screenshots showed are merged** (`play/fixes`; each package built, then
+  checked by an independent agent with its own screenshots in all six story maps):
+  - *Materials.* The reduction no longer folds a depth's scale constant into blend weights and opacities (the
+    cause of black rock and of solid or invisible beams), reads small-mip statistics of every sampled texture and
+    shows the tiling surface texture instead of the occlusion map that modulates it; `materials.json` gained
+    optional fields (version 1 kept); the app composes one picture per material where colour and opacity come
+    from different textures, channels or a gradient. On screen: textured ground and rocks, cut-out glowing cave
+    paintings, no shell over interactables (PLACEHOLDER: the original draws an outline glow), a switched-off
+    Workshop monitor (PLACEHOLDER), a gradient glow at checkpoints, faint lamp beams, textured lamp brackets.
+    Still dropped: the up-facing moss or grass layer and occlusion shading of the rock families, procedural
+    skies, edge glows; skinned meshes get no composed pictures.
+  - *Black plants.* A renderer bug, not data: Bevy 0.20's alpha-mask pass batches across light map groups, so
+    masked leaves were drawn with another draw's atlas (different on every run). Light-mapped draws with an
+    alpha-masked material are now drawn one by one (1,768 in AG-ParadiseCave); the offscreen frame rate at the
+    first checkpoint fell from 33 to 27.
+  - *Light for movable objects.* `asamu-import lightmaps` exports each level's precomputed light volume;
+    surfaces without a light map take their ambient light from it at the viewer instead of a constant.
+  - *Screen.* Developer read-outs and the aim marker are off by default on every start path (F1); the window
+    title follows the level; the first-person hand is drawn by the original's rule (not before the suit; not
+    under a cutscene camera, which is STRONG, not observed); a system font stands behind the built-in one.
+  - **For the owner to look at:** far village lights in AG-BeautifulCity are gone from across the cave (sparse
+    cut-outs vanish in small mips); AG-Darkcave's rock is nearly black (what the data gives); the girl at the
+    start of AG-BeautifulCity is nearly black (no baked light reaches the viewer there); AG-StarHaven's village
+    gets far more ambient light than before; lamps in the Workshop read as switched off from across the room.
+  - **Re-import needed** to see the material and light changes: `asamu-import materials --force` and
+    `asamu-import lightmaps --force` (an older conversion still loads).
+  - Not fixed: the Workshop's darkness away from the lamps (diagnosed: very low baked light and the tone
+    mapper's toe; the original's `Gamma` setting is not understood yet).
 - The laptop's connection drops during long builds (Wi-Fi): long `win_host.sh` commands are repeated when SSH
   exits 255.
 
@@ -52,7 +76,7 @@ _Session journal. Newest entry first. Each entry: what was done, what is true no
   above a spawn point that lies inside a simple body; 13 placements sit exactly on the scale threshold.
 - Actors hidden at level start are not drawn when shown later; the macOS recorder route has never recorded.
 
-**Next, in order:** verify and merge `play/fixes`; Matinee movers in per-sample replays; the floor check's lift; the landing frame.
+**Next, in order:** Matinee movers in per-sample replays; the floor check's lift; the landing frame.
 
 ## 2026-10-10 — Session 2 wrap-up: where to pick up
 
