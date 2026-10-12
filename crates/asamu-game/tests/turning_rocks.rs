@@ -13,11 +13,14 @@
 //! - a pawn standing on a rock that turns about a vertical axis is carried
 //!   with it, neither flung nor sunk;
 //! - a grapple that pulls the pawn onto a slow rock releases by proximity;
-//! - a turning actor is moved by its rate alone and what is attached to it by
-//!   its base alone, in every story level, also after 10 000 ticks;
+//! - a turning actor is moved by its rate alone, at the rate its level gives
+//!   it (the designed rate, what the game plays with), and what is attached
+//!   to it by its base alone, in every story level, also after 10 000 ticks;
 //! - the merry-go-round's two arms, one on its Matinee track and one turned
-//!   by its rate, each follow their own rule, and how far that takes them
-//!   apart at this game's tick;
+//!   by its rate, keep their places opposite each other at the designed rate
+//!   to what the level's own data allows, over 10 000 ticks; and with the
+//!   original's rule selected they part as the original's would at 60
+//!   frames a second;
 //! - a Matinee moves none of the level's three static mesh actors that its
 //!   groups name;
 //! - a snapshot loaded into a fresh level leaves the rocks where a fresh run
@@ -26,7 +29,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use asamu_game::asamu_kismet::load_level_scripts;
+use asamu_game::asamu_kismet::matinee::{CurveMode, MoveAxis, MoveFrame, TrackData};
 use asamu_game::asamu_world::scene::{PlacedActor, PlacedPhysics};
+use asamu_game::kismet_host::TurnRule;
 use asamu_game::{Game, LevelScript, load_level_with_kismet};
 use asamu_player::InputFrame;
 use asamu_player::grapple_gun::ReleaseReason;
@@ -109,9 +115,36 @@ fn turned(d: DVec3, from: [i32; 3], to: [i32; 3]) -> DVec3 {
     rigid(d, (Vec3::ZERO, from), (Vec3::ZERO, to), rows_of_the_table)
 }
 
-/// A tick's turn of a rate (units/s) at the game's 60 Hz tick.
-fn step(rate: i32) -> i32 {
+/// A tick's turn of a rate (units/s) at the game's 60 Hz tick by the
+/// original's rule ([`TurnRule::Native`]): the rate times the tick in single
+/// precision, the fraction dropped.
+fn native_step(rate: i32) -> i32 {
     (rate as f32 * (1.0_f32 / 60.0)) as i32
+}
+
+/// What an actor of `rate` units/s has turned by after `ticks` ticks of the
+/// 60 Hz game at its designed rate ([`TurnRule::DesignedRate`]): the
+/// truncation, towards zero, of the rate times the time that passed. The
+/// tick is the `f32` nearest 1/60 s, which is 8 947 849 / 2^29 (28 parts in
+/// 2^29 longer than 1/60 s); in whole numbers, so that nothing rounds here.
+/// Wrapped to 32 bits as a rotator's member is.
+fn designed_turn(rate: i32, ticks: i32) -> i32 {
+    assert_eq!(1.0_f32 / 60.0, 8_947_849.0 / 536_870_912.0);
+    (i128::from(rate) * i128::from(ticks) * 8_947_849 / 536_870_912) as i32
+}
+
+#[test]
+fn the_designed_turns_of_the_level_s_rates() {
+    // 2184 units/s are 36.4 units a tick: 36.4, 72.8, 109.2, 145.6, 182.0.
+    let turns: Vec<i32> = (1..=5).map(|n| designed_turn(2184, n)).collect();
+    assert_eq!(turns, [36, 72, 109, 145, 182]);
+    // The other way, towards zero as well.
+    assert_eq!(designed_turn(-2184, 3), -109);
+    // 10 000 ticks: 364 000 units and 0.019 more for the `f32` tick; the
+    // original's rule makes it 10 000 steps of 36.
+    assert_eq!(designed_turn(2184, 10_000), 364_000);
+    assert_eq!(native_step(2184), 36);
+    assert_eq!(native_step(-9102), -151);
 }
 
 /// The bounds (centre, half diagonal) of the actor's collision that blocks
@@ -788,8 +821,10 @@ fn a_grapple_that_pulls_the_pawn_onto_a_rock_releases_by_proximity() {
 // ---------------------------------------------------------------------------
 
 /// Checks, after `ticks` ticks from the level's start, that every turning
-/// actor is at its placement turned by its rate's steps and nothing else,
-/// and that everything attached to one is where its base's motion takes its
+/// actor is at its placement turned by its rate and nothing else (by the
+/// rule the script turns by: at the designed rate the truncation of the rate
+/// times the time, with the original's rule its truncated steps), and that
+/// everything attached to one is where its base's motion takes its
 /// placement. Returns how many of each were checked.
 fn check_turns_and_attachments(
     map: &str,
@@ -799,12 +834,16 @@ fn check_turns_and_attachments(
 ) -> (usize, usize) {
     let placed = &game.scene_map().expect("a converted level").placed;
     let turning = script.turning_actors();
+    let by_rate = |rate: i32| match script.turn_rule() {
+        TurnRule::DesignedRate => designed_turn(rate, ticks),
+        TurnRule::Native => ticks.wrapping_mul(native_step(rate)),
+    };
     for (id, rate) in &turning {
         let (at, rotation) = script.actor_placement(*id).expect("placed");
         let expected = [
-            rotation[0].wrapping_add(ticks.wrapping_mul(step(rate[0]))),
-            rotation[1].wrapping_add(ticks.wrapping_mul(step(rate[1]))),
-            rotation[2].wrapping_add(ticks.wrapping_mul(step(rate[2]))),
+            rotation[0].wrapping_add(by_rate(rate[0])),
+            rotation[1].wrapping_add(by_rate(rate[1])),
+            rotation[2].wrapping_add(by_rate(rate[2])),
         ];
         assert_eq!(
             script.mover_transform(*id),
@@ -877,6 +916,8 @@ fn a_turning_actor_is_moved_by_its_rate_alone_in_every_story_level() {
         let Some((mut game, mut script)) = load_map(map) else {
             continue;
         };
+        // What the loaders give the game: the designed rate.
+        assert_eq!(script.turn_rule(), TurnRule::DesignedRate, "{map}");
         let mut done = 0;
         for until in [1, 300, 2000] {
             while done < until {
@@ -909,38 +950,375 @@ fn a_rock_and_what_is_attached_to_it_stay_together_for_ten_thousand_ticks() {
     assert!(attached >= 7, "{attached} attached actors");
 }
 
-/// The merry-go-round has two arms at one location, half a turn apart: the
-/// same platform mesh twice, each with four attached rocks, both named by
-/// one Matinee group whose track is one turn of yaw (less a tenth of a
-/// degree) in 30 s. `InterpActor_136` is in the interpolating physics and
-/// follows the track; `InterpActor_16` is in the rotating physics and turns
-/// by its rate, 2184 units/s (a turn in 30 s), the fraction of each tick's
-/// step dropped. So the two arms keep their half turn only at a frame time
-/// whose step loses nothing: 28.0002 units in the recorded frames of
-/// 12.8206 ms (KM1: the pawn at rest on `InterpActor_16` turned 28 units a
-/// frame), 36 of 36.4 at this game's 60 Hz, where the arm that turns by its
-/// rate falls 0.4 units a tick behind the other.
+// ---------------------------------------------------------------------------
+// The merry-go-round.
+// ---------------------------------------------------------------------------
+//
+// The merry-go-round has two arms at one location, half a turn apart: the
+// same platform mesh twice, each with four attached rocks, both named by one
+// Matinee group whose track is one turn of yaw less a tenth of a degree in
+// 30 s, looping. `InterpActor_136` is in the interpolating physics and
+// follows the track; `InterpActor_16` is in the rotating physics and turns
+// by its rate, 2184 units/s.
+//
+// The original turns `InterpActor_16` by its rate times the frame time with
+// the fraction dropped: 28.0002 units in the recorded frames of 12.8206 ms
+// lose nothing (KM1: the pawn at rest on it turned 28 units a frame), 36.4
+// units in a tick of 1/60 s lose 0.4. The game turns it at its designed
+// rate, and the original's rule is there to be selected: one test for each.
+
+/// The yaw rate of the arm in the rotating physics, units/s (level data).
+const ARM_RATE: i32 = -2184;
+
+/// The two arms as the level places them: `(id, placed yaw)` of the arm in
+/// the rotating physics and of the arm on the track.
+fn the_two_arms(game: &Game) -> ((u32, i32), (u32, i32)) {
+    let map = game.scene_map().expect("a converted level");
+    let a = map.placed_actor_named("InterpActor_16").expect("placed");
+    let b = map.placed_actor_named("InterpActor_136").expect("placed");
+    assert_eq!(a.location, b.location, "one axis");
+    assert_eq!(a.rotation_rate, [0, ARM_RATE, 0]);
+    assert_eq!(b.rotation_rate, [0, ARM_RATE, 0]);
+    assert_eq!(a.physics, PlacedPhysics::Rotating);
+    assert_eq!(b.physics, PlacedPhysics::Interpolating);
+    // Half a turn apart as placed.
+    assert_eq!((a.rotation[1] - b.rotation[1]).rem_euclid(65_536), 32_768);
+    ((a.id, a.rotation[1]), (b.id, b.rotation[1]))
+}
+
+/// The merry-go-round's Matinee, from the level's own Kismet and Matinee
+/// data.
+struct ArmTrack {
+    /// The Kismet node of the Matinee action.
+    node: usize,
+    /// The activation delay of the action's Play input, seconds.
+    play_delay: f64,
+    /// The length of the track, seconds.
+    length: f64,
+    /// What the track turns the arm by over its length, rotator units of
+    /// yaw (negative, like the rate).
+    sweep: f64,
+}
+
+/// Reads [`ArmTrack`] and checks what the tests below rely on: one group
+/// names both arms; the action loops at the game's own speed and a loop
+/// starts again from the arm's placement; the group's movement track is
+/// relative to the placement and its yaw goes linearly from 0 to its last
+/// key, with no roll, no pitch and no translation to speak of.
+fn merry_go_round_track(game: &Game) -> ArmTrack {
+    let dir = converted_dir().expect("the level was loaded from it");
+    let levels = &game.scene_map().expect("a converted level").levels;
+    let subs: Vec<String> = levels.iter().skip(1).map(|l| l.name.clone()).collect();
+    let scripts = load_level_scripts(&dir, MAP, &subs).expect("the level's Kismet");
+    let path = |name: &str| format!("{MAP}.TheWorld.PersistentLevel.{name}");
+    let names = |b: &asamu_game::asamu_kismet::matinee::GroupBinding, name: &str| {
+        b.targets
+            .iter()
+            .any(|t| t.object.as_deref() == Some(path(name).as_str()))
+    };
+    let (node, action, binding) = scripts
+        .matinee
+        .actions
+        .iter()
+        .find_map(|(node, action)| {
+            let b = action
+                .bindings
+                .iter()
+                .find(|b| names(b, "InterpActor_136"))?;
+            Some((*node, action, b))
+        })
+        .expect("a Matinee group names the arm on the track");
+    assert!(
+        names(binding, "InterpActor_16"),
+        "the same group names the arm in the rotating physics"
+    );
+    assert!(action.settings.looping, "the Matinee loops");
+    assert_eq!(action.settings.play_rate, 1.0);
+    assert!(!action.settings.no_reset_on_rewind);
+    let play = scripts
+        .graph
+        .node(node)
+        .and_then(|n| n.inputs.first())
+        .expect("the action's Play input");
+    assert_eq!(play.desc, "Play");
+    let data = action
+        .interp_data
+        .as_deref()
+        .and_then(|p| scripts.matinee.data.get(&p.to_ascii_lowercase()))
+        .expect("the action's data");
+    let group = data
+        .groups
+        .iter()
+        .find(|g| {
+            binding
+                .group
+                .as_deref()
+                .is_some_and(|n| g.name.eq_ignore_ascii_case(n))
+        })
+        .expect("the bound group");
+    let mut tracks = group.tracks.iter().filter_map(|t| match &t.data {
+        TrackData::Move(m) => Some(m),
+        _ => None,
+    });
+    let track = tracks.next().expect("a movement track");
+    assert!(tracks.next().is_none(), "one movement track");
+    assert_eq!(track.move_frame, MoveFrame::RelativeToInitial);
+    let mut yaw = None;
+    for axis in &track.axes {
+        let keys = &axis.curve.points;
+        match axis.axis {
+            MoveAxis::RotationZ => {
+                assert_eq!(keys.len(), 2, "two keys of yaw");
+                assert_eq!((keys[0].in_val, keys[0].out_val), (0.0, 0.0));
+                assert_eq!(keys[1].in_val, data.length, "the last key ends the track");
+                assert!(keys.iter().all(|k| k.mode == CurveMode::Linear));
+                yaw = Some(f64::from(keys[1].out_val));
+            }
+            MoveAxis::RotationX | MoveAxis::RotationY => {
+                assert!(keys.iter().all(|k| k.out_val == 0.0), "{:?}", axis.axis);
+            }
+            // The arm's location stays within 0.05 uu of its placement.
+            _ => assert!(keys.iter().all(|k| k.out_val.abs() < 0.05)),
+        }
+    }
+    let degrees = yaw.expect("the track has a yaw curve");
+    ArmTrack {
+        node,
+        play_delay: f64::from(play.delay),
+        length: f64::from(data.length),
+        sweep: degrees * 65_536.0 / 360.0,
+    }
+}
+
+/// How far the arm on the track is from its track's value, in units of yaw,
+/// at most: the track's degrees become whole units (towards zero: up to one
+/// unit short of a negative turn), and the arm is placed through the sine
+/// table's matrix of them (floored to 4 units: up to 3 units further). So
+/// the arm's yaw is from 3 units below to 1 unit above the track's value;
+/// 0.1 more for the single-precision curve and matrix.
+const TRACK_BELOW: f64 = 3.1;
+const TRACK_ABOVE: f64 = 1.1;
+
+/// What a tick of the Matinee's clock can be off by, seconds: its position
+/// is a single-precision sum of ticks, and below the track's 30 s (32 s is
+/// the next power of two) one sum rounds by at most half a step of the
+/// float, 2^-20 s.
+const CLOCK_SLIP: f64 = 1.0 / 1_048_576.0;
+
+/// The arm on the track against the arm in the rotating physics, tick by
+/// tick. Asserts in every tick that the arm on the track is where its track
+/// puts it, and hands each tick to `each`: `(tick, loops the track has
+/// completed, lead)`, where the lead is how far the arm in the rotating
+/// physics is ahead of the place opposite the other arm, in units of yaw in
+/// the direction of the turn, counted from the first tick the track plays.
+fn ride_the_merry_go_round(
+    game: &mut Game,
+    script: &mut LevelScript,
+    track: &ArmTrack,
+    ticks: i32,
+    mut each: impl FnMut(i32, i32, f64),
+) -> RideSummary {
+    let ((by_rate, rate_placed), (by_track, track_placed)) = the_two_arms(game);
+    let yaw = |script: &LevelScript, id: u32| script.mover_transform(id).expect("a mover").1[1];
+    let mut loops = 0;
+    let mut last: Option<f32> = None;
+    let mut first: Option<(i32, f64)> = None;
+    let (mut lowest, mut highest) = (0.0_f64, 0.0_f64);
+    for n in 1..=ticks {
+        script.tick(game, &idle()).expect("playing");
+        // The arm in the rotating physics, in the direction of the turn
+        // (the rate is negative).
+        let rate_turned = f64::from(rate_placed.wrapping_sub(yaw(script, by_rate)));
+        // The arm on the track: nothing moves it before its Matinee plays.
+        let position = script
+            .runtime()
+            .interp_position(track.node)
+            .filter(|p| *p > 0.0);
+        let Some(position) = position else {
+            assert!(first.is_none(), "tick {n}: the Matinee stopped");
+            assert_eq!(yaw(script, by_track), track_placed, "tick {n}");
+            continue;
+        };
+        if last.is_some_and(|l| position < l) {
+            loops += 1;
+        }
+        last = Some(position);
+        // Its yaw relative to its placement, as the track counts it: from 0
+        // down to the track's last key (whole turns left out by the
+        // rotation rebuilt from a matrix).
+        let relative = match yaw(script, by_track)
+            .wrapping_sub(track_placed)
+            .rem_euclid(65_536)
+        {
+            0 => 0,
+            r => r - 65_536,
+        };
+        let on_track = track.sweep * f64::from(position) / track.length;
+        let off = f64::from(relative) - on_track;
+        lowest = lowest.min(off);
+        highest = highest.max(off);
+        assert!(
+            (-TRACK_BELOW..=TRACK_ABOVE).contains(&off),
+            "tick {n}: the arm on the track is at {relative} units, the track at {position} s \
+             is {on_track}"
+        );
+        let track_turned = f64::from(loops) * 65_536.0 - f64::from(relative);
+        let lead = rate_turned - track_turned;
+        let (_, lead0) = *first.get_or_insert((n, lead));
+        each(n, loops, lead - lead0);
+    }
+    let (started, head_start) = first.expect("the Matinee plays");
+    eprintln!(
+        "the arm on the track: started in tick {started}, {loops} loops, from {lowest:.2} to \
+         {highest:.2} units off its track's value; the other arm was {head_start:.0} units \
+         ahead of its place when it started"
+    );
+    RideSummary {
+        started,
+        head_start,
+        loops,
+    }
+}
+
+/// What [`ride_the_merry_go_round`] saw.
+struct RideSummary {
+    /// The first tick in which the track moved its arm.
+    started: i32,
+    /// How far the arm in the rotating physics was ahead of its place
+    /// opposite the other arm after that tick, units.
+    head_start: f64,
+    /// Loops the track completed.
+    loops: i32,
+}
+
+/// At the designed rate (what the game plays with) the two arms keep their
+/// places to what the level's own data allows, over 10 000 ticks.
+///
+/// From the track's data (asserted where it is read): it turns its arm by
+/// 359.9 degrees (65 517.8 units) in 30 s, 2183.93 units/s, and starts again
+/// from the placement, a hop of 18.2 units that makes each loop a whole
+/// turn. The other arm turns 2184 × 30 = 65 520 units in a loop. So:
+///
+/// - inside a loop the arm in the rotating physics gains (2184 − 2183.93) ×
+///   30 = 2.2 units at most;
+/// - each loop it loses 65 536 − 65 520 = 16 units (0.088 degrees) to the
+///   arm on the track: 0.53 units a second on the average, which is the
+///   level's data and the same in the original wherever its frames lose
+///   nothing;
+/// - against 0.4 units a tick, 24 units (0.131 degrees) a second, by the
+///   original's rule at this tick (the next test).
+///
+/// The Matinee's Play input has an activation delay of one second (level
+/// data), so the arm in the rotating physics is a second's turn and a tick
+/// or two ahead of its place opposite the other arm before the track starts;
+/// that head start is not part of the turn and is only reported here.
 #[test]
-fn the_two_arms_of_the_merry_go_round_turn_each_by_its_own_rule() {
+fn the_two_arms_of_the_merry_go_round_keep_their_places_at_the_designed_rate() {
     let Some((mut game, mut script)) = load() else {
         return;
     };
-    let (by_rate, by_track) = {
-        let map = game.scene_map().expect("a converted level");
-        let a = map.placed_actor_named("InterpActor_16").expect("placed");
-        let b = map.placed_actor_named("InterpActor_136").expect("placed");
-        assert_eq!(a.location, b.location, "one axis");
-        assert_eq!(a.rotation_rate, [0, -2184, 0]);
-        assert_eq!(b.rotation_rate, [0, -2184, 0]);
-        assert_eq!(a.physics, PlacedPhysics::Rotating);
-        assert_eq!(b.physics, PlacedPhysics::Interpolating);
-        // Half a turn apart as placed.
-        assert_eq!((a.rotation[1] - b.rotation[1]).rem_euclid(65_536), 32_768);
-        (a.id, b.id)
+    assert_eq!(script.turn_rule(), TurnRule::DesignedRate);
+    let track = merry_go_round_track(&game);
+    assert_eq!(track.length, 30.0);
+    assert!(
+        (track.sweep + 359.9 / 360.0 * 65_536.0).abs() < 0.01,
+        "{}",
+        track.sweep
+    );
+    let rate = f64::from(-ARM_RATE);
+    let sweep = -track.sweep;
+    // 16 units a loop, 2.2 units inside one.
+    let per_loop = 65_536.0 - rate * track.length;
+    let in_loop = (rate - sweep / track.length) * track.length;
+    assert!((per_loop - 16.0).abs() < 1e-9 && (in_loop - 2.2).abs() < 0.01);
+    // The Matinee's clock: a loop is 1800 ticks, each of which can round
+    // its position by `CLOCK_SLIP`: 1.7 ms a loop, in which the arm in the
+    // rotating physics turns 3.75 units.
+    let slip = rate * CLOCK_SLIP * track.length * 60.0;
+    assert!((slip - 3.75).abs() < 0.01, "{slip}");
+    // Both ends of a difference of the arm on the track.
+    let room = TRACK_BELOW + TRACK_ABOVE;
+    let ((by_rate, rate_placed), _) = the_two_arms(&game);
+
+    const TICKS: i32 = 10_000;
+    let mut furthest = 0.0_f64;
+    let mut last = 0.0_f64;
+    let mut checked = 0;
+    let summary = {
+        let mut each = |n: i32, loops: i32, lead: f64| {
+            // After `loops` loops and a part of the next: the loops' 16
+            // units each behind, at most 2.2 ahead inside the loop, and the
+            // clock's slip of every loop begun, either way.
+            let loops_f = f64::from(loops);
+            let slipped = slip * (loops_f + 1.0);
+            assert!(
+                lead >= -per_loop * loops_f - slipped - room
+                    && lead <= -per_loop * loops_f + in_loop + slipped + room,
+                "tick {n}: after {loops} loops the arm in the rotating physics is {lead} units \
+                 from its place"
+            );
+            furthest = furthest.max(lead.abs());
+            last = lead;
+            checked += 1;
+        };
+        ride_the_merry_go_round(&mut game, &mut script, &track, TICKS, &mut each)
     };
+    // The arm in the rotating physics: at its placement turned by the
+    // truncation of 2184 × the time that passed, to the unit: 10 000 ticks
+    // are 364 000 units.
+    let yaw = script.mover_transform(by_rate).expect("a mover").1[1];
+    assert_eq!(designed_turn(ARM_RATE, TICKS), -364_000);
+    assert_eq!(yaw, rate_placed + designed_turn(ARM_RATE, TICKS));
+    // The track started after its delay of a second: the level's event
+    // fires in the first update and queues the Play impulse with the delay;
+    // the updates after it count the second down in single precision, 60 or
+    // 61 of them; the action takes its first step in that update or the
+    // next. It has played for the rest: 165.6 s, five loops and half of a
+    // sixth.
+    assert_eq!(track.play_delay, 1.0);
+    assert!((61..=63).contains(&summary.started), "{}", summary.started);
+    assert_eq!(summary.loops, 5);
+    assert_eq!(checked, TICKS - summary.started + 1);
+    // The head start: what 2184 units/s turn in the ticks before the track
+    // started, less the track's own first step (36.4 units).
+    let before = f64::from(designed_turn(-ARM_RATE, summary.started));
+    assert!(
+        (summary.head_start - (before - sweep / track.length / 60.0)).abs() <= room,
+        "{} against {before}",
+        summary.head_start
+    );
+    // So in 10 000 ticks the arms have not moved from their places by more
+    // than five loops' 16 units and the room above: 106.7 units, 0.59
+    // degrees, where the original's rule at this tick takes 4000 units, 22
+    // degrees (10 000 × 0.4).
+    let bound = per_loop * 5.0 + slip * 6.0 + room;
+    assert!((bound - 106.7).abs() < 0.1, "{bound}");
+    assert!(furthest <= bound, "{furthest}");
+    eprintln!(
+        "in {TICKS} ticks at the designed rate the arm in the rotating physics went from its \
+         place opposite the other arm by {last:.0} units ({:.2} degrees; {:.4} degrees a second), \
+         {furthest:.0} units at most",
+        last * 360.0 / 65_536.0,
+        last * 360.0 / 65_536.0 / (f64::from(TICKS - summary.started) / 60.0)
+    );
+}
+
+/// With the original's rule selected ([`TurnRule::Native`]) the arm in the
+/// rotating physics turns 36 of its 36.4 units a tick, as the original's
+/// would at 60 frames a second, and falls 0.4 units a tick behind the arm
+/// on the track: 0.131 degrees a second. This is the fact the owner decided
+/// the game does not show (2026-10-12); it stays tested here.
+#[test]
+fn the_two_arms_of_the_merry_go_round_part_by_the_original_s_rule_at_60_hz() {
+    let Some((mut game, mut script)) = load() else {
+        return;
+    };
+    script.set_turn_rule(TurnRule::Native);
+    assert_eq!(script.turn_rule(), TurnRule::Native);
+    let ((by_rate, _), (by_track, _)) = the_two_arms(&game);
     let yaw = |script: &LevelScript, id: u32| script.mover_transform(id).expect("a mover").1[1];
-    // Two seconds in, then twenty more: the track (started with the level)
-    // does not loop in them.
+    // Two seconds in, then twenty more: the track (started a second after
+    // the level) does not loop in them.
     for _ in 0..120 {
         script.tick(&mut game, &idle()).expect("playing");
     }
@@ -951,6 +1329,7 @@ fn the_two_arms_of_the_merry_go_round_turn_each_by_its_own_rule() {
     }
     let (rate1, track1) = (yaw(&script, by_rate), yaw(&script, by_track));
     // By its rate: 2184 / 60 = 36.4, so 36 units a tick.
+    assert_eq!(native_step(ARM_RATE), -36);
     assert_eq!(rate1 - rate0, -36 * TICKS);
     // By its track: 359.9 / 360 of a turn in 30 s, 36.399 units a tick (the
     // rotation is rebuilt from a matrix: whole turns left out, each end
@@ -972,6 +1351,13 @@ fn the_two_arms_of_the_merry_go_round_turn_each_by_its_own_rule() {
         behind * 360.0 / 65_536.0 / (f64::from(TICKS) / 60.0)
     );
     assert!((behind - 478.6).abs() < 1.0, "{behind}");
+    // At the designed rate the same 1200 ticks are 43 680 units, 480 more:
+    // inside a loop that arm is then 1.5 units ahead of the track's 43 678.5
+    // instead of 478.5 behind.
+    assert_eq!(
+        designed_turn(ARM_RATE, 120 + TICKS) - designed_turn(ARM_RATE, 120),
+        -43_680
+    );
 }
 
 /// A Matinee's movement track moves an actor only in the interpolating

@@ -21,12 +21,15 @@
 //! What is asserted is the rule, never a number taken from a run: the
 //! anchor's place is the rigid motion of the rock's base applied to the
 //! place the grapple hit, computed here in `f64` from the base's transforms;
-//! the base's own turn is the level's rate times the tick, the fraction
-//! dropped.
+//! the base's own turn is the level's rate times the time that passed, in
+//! whole units (the designed rate, which the game plays with: `kismet_host`,
+//! "Turning actors"), or, with the original's rule selected, the rate times
+//! the tick with the fraction dropped, every tick.
 
 use std::path::PathBuf;
 
 use asamu_game::asamu_world::scene::PlacedPhysics;
+use asamu_game::kismet_host::TurnRule;
 use asamu_game::{Game, LevelScript, load_level_with_kismet};
 use asamu_player::InputFrame;
 use asamu_player::world::{ActorClass, CollisionWorld};
@@ -308,12 +311,24 @@ fn the_anchor_rides_a_rock_a_matinee_turns() {
 
 // --- The rocks the engine turns by itself.
 
-/// A tick's turn of an actor with the rate `rate` (units/s): the rate times
-/// the tick's time in single precision, the fraction dropped towards zero.
-/// With the 60 Hz tick: 9102 / 60 = 151.7, 151 units; 4551 / 60 = 75.85, 75;
-/// 2184 / 60 = 36.4, 36.
+/// A tick's turn of an actor with the rate `rate` (units/s) by the
+/// original's rule ([`TurnRule::Native`]): the rate times the tick's time in
+/// single precision, the fraction dropped towards zero. With the 60 Hz tick:
+/// 9102 / 60 = 151.7, 151 units; 4551 / 60 = 75.85, 75; 2184 / 60 = 36.4, 36.
 fn step(rate: i32) -> i32 {
     (rate as f32 * (1.0_f32 / 60.0)) as i32
+}
+
+/// What an actor with the rate `rate` (units/s) has turned by after `ticks`
+/// ticks of the 60 Hz game at its designed rate
+/// ([`TurnRule::DesignedRate`], what the game plays with): the truncation,
+/// towards zero, of the rate times the time that passed. The tick is the
+/// `f32` nearest 1/60 s, 8 947 849 / 2^29 (28 parts in 2^29 longer than
+/// 1/60 s); in whole numbers, so that nothing rounds here.
+fn designed_turn(rate: i32, ticks: i32) -> i32 {
+    assert_eq!(1.0_f32 / 60.0, 8_947_849.0 / 536_870_912.0);
+    let turn = i128::from(rate) * i128::from(ticks) * 8_947_849 / 536_870_912;
+    i32::try_from(turn).expect("a turn of these tests fits a rotator's member")
 }
 
 #[test]
@@ -321,6 +336,28 @@ fn the_steps_of_the_level_s_rates() {
     assert_eq!(step(-9102), -151);
     assert_eq!(step(-4551), -75);
     assert_eq!(step(-2184), -36);
+}
+
+#[test]
+fn the_designed_turns_of_the_level_s_rates() {
+    // 90 ticks, a second and a half: 9102 × 1.5 = 13 653, 4551 × 1.5 =
+    // 6826.5 and 2184 × 1.5 = 3276 units (the `f32` tick adds less than a
+    // thousandth of a unit), where 90 truncated steps are 13 590, 6750 and
+    // 3240.
+    assert_eq!(designed_turn(-9102, 90), -13_653);
+    assert_eq!(designed_turn(-4551, 90), -6826);
+    assert_eq!(designed_turn(-2184, 90), -3276);
+    assert_eq!(
+        [90 * step(-9102), 90 * step(-4551), 90 * step(-2184)],
+        [-13_590, -6750, -3240]
+    );
+    // The ticks of the anchor tests: 31 × 151.7 = 4702.7, 51 × 151.7 =
+    // 7736.7; 30 × 36.4 = 1092, 31 × 36.4 = 1128.4, 51 × 36.4 = 1856.4.
+    assert_eq!(designed_turn(-9102, 31), -4702);
+    assert_eq!(designed_turn(-9102, 51), -7736);
+    assert_eq!(designed_turn(-2184, 30), -1092);
+    assert_eq!(designed_turn(-2184, 31), -1128);
+    assert_eq!(designed_turn(-2184, 51), -1856);
 }
 
 /// The id, placement and rate of the actor named `name`, which the level
@@ -384,62 +421,75 @@ fn the_turning_actors_of_the_story_levels() {
 
 #[test]
 fn the_engine_turns_the_rocks_in_the_rotating_physics() {
-    let Some((mut game, mut script)) = load() else {
-        return;
-    };
-    let idle = InputFrame::default();
-    // (name, RotationRate as pitch, yaw, roll): the level's values.
-    let rocks = [
-        // Bound to no Matinee.
-        ("InterpActor_51", [0, -9102, 0]),
-        // Named by a Matinee group (a roll of −359 degrees in 14.4 s), which
-        // does not move an actor that is not in the interpolating physics:
-        // the recorded rock turns 58 units a frame of 12.82 ms, the
-        // truncated 4551 × 0.01282 = 58.3 (KM1 from frame 50 368: within 3.5
-        // units over 105 968; the track would be 318 units ahead by then).
-        ("InterpActor_25", [0, 0, -4551]),
-        ("InterpActor_16", [0, -2184, 0]),
-    ];
-    let placed: Vec<(u32, Vec3, [i32; 3])> = rocks
-        .iter()
-        .map(|(name, rate)| turning(&game, name, *rate))
-        .collect();
-    let known = script.turning_actors();
-    for ((name, rate), (id, _, _)) in rocks.iter().zip(&placed) {
-        assert!(known.contains(&(*id, *rate)), "{name} turns by itself");
-    }
-    const TICKS: i32 = 90;
-    for _ in 0..TICKS {
-        script.tick(&mut game, &idle).expect("the game is playing");
-    }
-    for ((name, rate), (id, at, rotation)) in rocks.iter().zip(&placed) {
-        let (now_at, now) = script.mover_transform(*id).expect("a mover");
-        // Every tick adds the truncated step to each member; nothing else
-        // moves the actor.
-        let expected = [
-            rotation[0] + TICKS * step(rate[0]),
-            rotation[1] + TICKS * step(rate[1]),
-            rotation[2] + TICKS * step(rate[2]),
+    // At the designed rate, which the loaders give the game, and by the
+    // original's rule, which a script turns by when it is told to.
+    for rule in [TurnRule::DesignedRate, TurnRule::Native] {
+        let Some((mut game, mut script)) = load() else {
+            return;
+        };
+        assert_eq!(script.turn_rule(), TurnRule::DesignedRate);
+        script.set_turn_rule(rule);
+        let idle = InputFrame::default();
+        // (name, RotationRate as pitch, yaw, roll): the level's values.
+        let rocks = [
+            // Bound to no Matinee.
+            ("InterpActor_51", [0, -9102, 0]),
+            // Named by a Matinee group (a roll of −359 degrees in 14.4 s),
+            // which does not move an actor that is not in the interpolating
+            // physics: the recorded rock turns 58 units a frame of 12.82 ms,
+            // the truncated 4551 × 0.01282 = 58.3 (KM1 from frame 50 368:
+            // within 3.5 units over 105 968; the track would be 318 units
+            // ahead by then).
+            ("InterpActor_25", [0, 0, -4551]),
+            ("InterpActor_16", [0, -2184, 0]),
         ];
-        assert_eq!(now, expected, "{name} after {TICKS} ticks");
-        assert_eq!(now_at, *at, "{name} turns about its own location");
-        // What draws the level sees it.
+        let placed: Vec<(u32, Vec3, [i32; 3])> = rocks
+            .iter()
+            .map(|(name, rate)| turning(&game, name, *rate))
+            .collect();
+        let known = script.turning_actors();
+        for ((name, rate), (id, _, _)) in rocks.iter().zip(&placed) {
+            assert!(known.contains(&(*id, *rate)), "{name} turns by itself");
+        }
+        const TICKS: i32 = 90;
+        for _ in 0..TICKS {
+            script.tick(&mut game, &idle).expect("the game is playing");
+        }
+        // Nothing but its rate moves the actor. At the designed rate each
+        // member has turned by the truncation of its rate times the time
+        // that passed (13 653, 6826 and 3276 units); by the original's rule
+        // every tick added the truncated step (90 × 151, 75 and 36).
+        let turned = |rate: i32| match rule {
+            TurnRule::DesignedRate => designed_turn(rate, TICKS),
+            TurnRule::Native => TICKS * step(rate),
+        };
+        for ((name, rate), (id, at, rotation)) in rocks.iter().zip(&placed) {
+            let (now_at, now) = script.mover_transform(*id).expect("a mover");
+            let expected = [
+                rotation[0] + turned(rate[0]),
+                rotation[1] + turned(rate[1]),
+                rotation[2] + turned(rate[2]),
+            ];
+            assert_eq!(now, expected, "{name} after {TICKS} ticks ({rule:?})");
+            assert_eq!(now_at, *at, "{name} turns about its own location");
+            // What draws the level sees it.
+            assert!(
+                script.moved_actors().contains(&(*id, now_at, now)),
+                "{name} is reported as moved"
+            );
+            assert_eq!(
+                script.actor_placement(*id),
+                Some((*at, *rotation)),
+                "{name}"
+            );
+        }
         assert!(
-            script.moved_actors().contains(&(*id, now_at, now)),
-            "{name} is reported as moved"
-        );
-        assert_eq!(
-            script.actor_placement(*id),
-            Some((*at, *rotation)),
-            "{name}"
+            script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+            "{:?} {:?}",
+            script.runtime().errors(),
+            script.host_errors()
         );
     }
-    assert!(
-        script.runtime().errors().is_empty() && script.host_errors().is_empty(),
-        "{:?} {:?}",
-        script.runtime().errors(),
-        script.host_errors()
-    );
 }
 
 #[test]
@@ -454,20 +504,21 @@ fn the_anchor_rides_a_rock_the_engine_turns() {
     }
     let (from, to, anchor0, anchor1) =
         grapple_and_ride(&mut game, &mut script, hub, hub, CARRY_TOLERANCE);
-    // 30 ticks, the attach tick, then HOLD_TICKS: each 151 units of yaw.
-    assert_eq!(
-        from,
-        (at, [rotation[0], rotation[1] - 31 * 151, rotation[2]])
-    );
+    // 30 ticks and the attach tick, then HOLD_TICKS more, at 151.7 units of
+    // yaw a tick: 31 × 151.7 = 4702.7 and 51 × 151.7 = 7736.7, so the rock
+    // is 4702 units from its placement at the attach and 7736 at the end.
     let held = HOLD_TICKS as i32;
-    assert_eq!(to, (at, [from.1[0], from.1[1] - held * 151, from.1[2]]));
+    let (attach, end) = (designed_turn(-9102, 31), designed_turn(-9102, 31 + held));
+    assert_eq!((attach, end), (-4702, -7736));
+    assert_eq!(from, (at, [rotation[0], rotation[1] + attach, rotation[2]]));
+    assert_eq!(to, (at, [rotation[0], rotation[1] + end, rotation[2]]));
     // The anchor went along its circle about the vertical through the
-    // rock's location (a yaw turns about Z): the chord of 20 × 151 = 3020
-    // units, 0.2895 rad, on its horizontal distance from that axis. The
-    // table floors each end to 4 units.
+    // rock's location (a yaw turns about Z): the chord of 7736 − 4702 =
+    // 3034 units, 0.2909 rad, on its horizontal distance from that axis.
+    // The table floors each end to 4 units.
     let arm = anchor0 - at.as_dvec3();
     let radius = arm.truncate().length();
-    let angle = f64::from(held * 151) * std::f64::consts::TAU / 65_536.0;
+    let angle = f64::from(attach - end) * std::f64::consts::TAU / 65_536.0;
     let chord = 2.0 * radius * (angle / 2.0).sin();
     let moved = (anchor1 - anchor0).length();
     let room = radius * 8.0 * std::f64::consts::TAU / 65_536.0 + CARRY_TOLERANCE;
@@ -506,8 +557,9 @@ fn the_anchor_rides_a_rock_attached_to_a_turning_actor() {
     // (a hard attachment keeps the transform relative to the base). Its
     // location is rebuilt in `f32` from that relative transform: within a
     // few steps of 1/64 uu.
+    // 30 ticks of 36.4 units of yaw: 1092.
     let hub30 = script.mover_transform(hub).expect("a mover");
-    assert_eq!(hub30.1[1], hub0.1[1] - 30 * 36);
+    assert_eq!(hub30.1[1], hub0.1[1] + designed_turn(-2184, 30));
     let (rock_now, _) = script.mover_transform(rock).expect("a mover");
     let expected = rigid(rock_at.as_dvec3(), hub0, hub30);
     assert!(
@@ -529,16 +581,22 @@ fn the_anchor_rides_a_rock_attached_to_a_turning_actor() {
     let (from, to, anchor0, anchor1) =
         grapple_and_ride(&mut game, &mut script, rock, hub, tolerance);
     assert_eq!(from.0, hub_at);
+    // The attach tick is the 31st and the last the 51st: 31 × 36.4 = 1128.4
+    // and 51 × 36.4 = 1856.4, so the hub is at 1128 and then 1856 units from
+    // its placement, 728 apart.
     let held = HOLD_TICKS as i32;
-    assert_eq!(to.1[1], from.1[1] - held * 36);
+    let (attach, end) = (designed_turn(-2184, 31), designed_turn(-2184, 31 + held));
+    assert_eq!((attach, end), (-1128, -1856));
+    assert_eq!(from.1[1], hub0.1[1] + attach);
+    assert_eq!(to.1[1], hub0.1[1] + end);
     assert!(
         (anchor0 - rock_now.as_dvec3()).length() < 600.0,
         "the anchor is on the rock"
     );
-    // 20 × 36 = 720 units of yaw, 0.069 rad, on the rock's distance from the
-    // hub's vertical axis.
+    // 728 units of yaw, 0.070 rad, on the rock's distance from the hub's
+    // vertical axis.
     let radius = (anchor0 - hub_at.as_dvec3()).truncate().length();
-    let chord = 2.0 * radius * (f64::from(held * 36) * std::f64::consts::PI / 65_536.0).sin();
+    let chord = 2.0 * radius * (f64::from(attach - end) * std::f64::consts::PI / 65_536.0).sin();
     let moved = (anchor1 - anchor0).length();
     let room = radius * 8.0 * std::f64::consts::TAU / 65_536.0 + tolerance;
     assert!(
