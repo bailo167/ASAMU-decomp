@@ -18,6 +18,8 @@
 //! - the merry-go-round's two arms, one on its Matinee track and one turned
 //!   by its rate, each follow their own rule, and how far that takes them
 //!   apart at this game's tick;
+//! - a Matinee moves none of the level's three static mesh actors that its
+//!   groups name;
 //! - a snapshot loaded into a fresh level leaves the rocks where a fresh run
 //!   has them, and a respawn does not disturb them.
 
@@ -970,6 +972,75 @@ fn the_two_arms_of_the_merry_go_round_turn_each_by_its_own_rule() {
         behind * 360.0 / 65_536.0 / (f64::from(TICKS) / 60.0)
     );
     assert!((behind - 478.6).abs() < 1.0, "{behind}");
+}
+
+/// A Matinee's movement track moves an actor only in the interpolating
+/// physics, so not a static mesh actor either (`kismet_host`, "Turning
+/// actors"). The level has three in groups that have a movement track and
+/// nothing else; the recorded pawn stood at rest on one of them
+/// (`StaticMeshActor_173`, KM1 frames 25 453 to 25 469 and 25 578 to 25 585)
+/// and was not moved, where the group's track goes 50 uu down in 5 s and
+/// back.
+#[test]
+fn a_matinee_moves_no_static_mesh_actor_of_the_level() {
+    let Some((mut game, mut script)) = load() else {
+        return;
+    };
+    let path = |name: &str| format!("{MAP}.TheWorld.PersistentLevel.{name}");
+    let statics: Vec<(String, u32, Pose)> = [
+        "StaticMeshActor_4",
+        "StaticMeshActor_173",
+        "StaticMeshActor_347",
+    ]
+    .iter()
+    .map(|name| {
+        let id = script
+            .actor_id_by_path(&path(name))
+            .unwrap_or_else(|| panic!("the level's script names {name}"));
+        let placed = script.actor_placement(id).expect("placed");
+        ((*name).to_owned(), id, placed)
+    })
+    .collect();
+    // An actor of the group that names `StaticMeshActor_173`, in the
+    // interpolating physics: the track moves it.
+    let mover = script
+        .actor_id_by_path(&path("InterpActor_8"))
+        .expect("the level's script names it");
+    let mover_placed = script.actor_placement(mover).expect("placed");
+    let mut furthest = 0.0_f32;
+    // 15 s: the tracks' way there and back, and half again.
+    for tick in 1..=900 {
+        script.tick(&mut game, &idle()).expect("playing");
+        for (name, id, placed) in &statics {
+            // A static mesh actor may have no collision to carry; where it
+            // has a body, the body stays at the placement.
+            if let Some(now) = script.mover_transform(*id) {
+                assert_eq!(now, *placed, "{name} moved in tick {tick}");
+            }
+        }
+        if let Some(now) = script.mover_transform(mover) {
+            furthest = furthest.max((now.0 - mover_placed.0).length());
+        }
+    }
+    let moved = script.moved_actors();
+    for (name, id, _) in &statics {
+        assert!(
+            moved.iter().all(|m| m.0 != *id),
+            "{name} is reported as moved"
+        );
+    }
+    // The same group's track took the actor in the interpolating physics
+    // its 50 uu.
+    assert!(
+        (furthest - 50.0).abs() < 0.5,
+        "the group's interpolating actor went {furthest} uu"
+    );
+    assert!(
+        script.runtime().errors().is_empty() && script.host_errors().is_empty(),
+        "{:?} {:?}",
+        script.runtime().errors(),
+        script.host_errors()
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -73,9 +73,18 @@
 //!
 //! A Matinee movement track moves an actor only in the interpolating
 //! physics (above: the dispatch calls `physInterpolating` for physics 7
-//! only). So an actor the level places in `PHYS_Rotating` with a rate turns
-//! by that rate even when a Matinee group names it, and an actor in
-//! `PHYS_Interpolating` with a rate follows its track and never the rate.
+//! only), and nothing puts an actor into it when its Matinee starts
+//! (NATIVE_PHYSICS.md 10.5). So an actor the level places in `PHYS_Rotating`
+//! with a rate turns by that rate even when a Matinee group names it, and an
+//! actor in `PHYS_Interpolating` with a rate follows its track and never the
+//! rate. A static mesh actor (static, not movable, in no physics by its
+//! class's defaults) that a group names is not moved at all: AG-ParadiseCave
+//! has three, each in a group with a movement track and nothing else
+//! (`StaticMeshActor_4`, `_173` and `_347`; tracks of a wiggle, of 50 uu and
+//! of 256 uu). Measured on KM1 for `_173`, whose track goes 50 uu down in
+//! 5 s and back without a rest: the pawn stood on it at rest for 17 and for
+//! 8 frames, 1.4 s apart, and its location did not change by one step of
+//! the float in either.
 //!
 //! Measured on the recording KM1 in AG-ParadiseCave, from the path of the
 //! grapple's anchor helper riding these rocks (`InterpActor_*`; frames of
@@ -94,7 +103,8 @@
 //! Ours: the level's own data names these actors
 //! (`asamu_world::scene::PlacedActor`: `PHYS_Rotating` and a rate). Each is
 //! a mover, with everything attached to it; it is taken out of the Matinee
-//! groups that name it, and step 2 turns it by [`rotation_step`] of the
+//! groups that name it (as a static mesh actor is out of a group that has
+//! only movement tracks), and step 2 turns it by [`rotation_step`] of the
 //! game's tick. The shipped story levels have 14: 7 in AG-ParadiseCave (3
 //! of them in Matinee groups), 2 in AG-BeautifulCity and 5 in AG-StarHaven,
 //! which has 8 more in that physics without a rate; those never turn
@@ -233,7 +243,7 @@ use asamu_core::DEFAULT_TICK_RATE_HZ;
 use asamu_kismet::anim::AnimPosition;
 use asamu_kismet::camera_anim::{CameraAnimSet, CameraAnims, GameplayCue};
 use asamu_kismet::matinee::{
-    Matrix, matrix_mul, matrix_rotator, rigid_inverse, rotation_translation_matrix,
+    Matrix, TrackData, matrix_mul, matrix_rotator, rigid_inverse, rotation_translation_matrix,
 };
 use asamu_kismet::{
     ActorInfo, ActorRef, Host, LoadError, Output, PropertyValue, Runtime, ToggleMode,
@@ -596,27 +606,56 @@ fn turning_actors(map: &LoadedMap) -> BTreeSet<u32> {
     out
 }
 
-/// Takes the actors the engine turns by itself out of the Matinee groups
-/// they are bound to: a movement track moves an actor only in
-/// `PHYS_Interpolating` (module docs, "Turning actors"). Returns how many
-/// bindings were removed.
-fn unbind_turning_actors(scripts: &mut asamu_kismet::LevelScripts, map: &LoadedMap) -> usize {
+/// `true` for a static mesh actor: by its class's defaults it is static, not
+/// movable and in no physics, so a Matinee's movement track does not move
+/// it (module docs, "Turning actors").
+fn is_static_mesh_actor(info: &ActorInfo) -> bool {
+    info.class == "Engine.StaticMeshActor"
+}
+
+/// Takes out of the Matinee groups they are bound to the actors a movement
+/// track does not move, because they are not in `PHYS_Interpolating`
+/// (module docs, "Turning actors"): the actors the engine turns by itself,
+/// and static mesh actors in groups that have movement tracks and nothing
+/// else (another kind of track reaches an actor whatever its physics, so
+/// such a binding stays). Returns how many bindings were removed.
+fn unbind_actors_no_track_moves(
+    scripts: &mut asamu_kismet::LevelScripts,
+    map: &LoadedMap,
+) -> usize {
     let graph = &scripts.graph;
+    let info_of = |path: &str| graph.actor_by_path(path).and_then(|r| graph.actor(r));
     let turning = |path: &str| {
-        graph
-            .actor_by_path(path)
-            .and_then(|r| graph.actor(r))
+        info_of(path)
             .and_then(|info| world_id(map, info))
             .and_then(|id| map.placed_actor(id))
             .is_some_and(turns_by_itself)
     };
+    let fixed = |path: &str| info_of(path).is_some_and(is_static_mesh_actor);
+    let asamu_kismet::MatineeSet { actions, data } = &mut scripts.matinee;
     let mut removed = 0;
-    for action in scripts.matinee.actions.values_mut() {
+    for action in actions.values_mut() {
+        let groups = action
+            .interp_data
+            .as_deref()
+            .and_then(|path| data.get(&path.to_ascii_lowercase()))
+            .map_or(&[][..], |d| d.groups.as_slice());
         for binding in &mut action.bindings {
+            let only_moves = binding.group.as_deref().is_some_and(|name| {
+                groups.iter().any(|g| {
+                    g.name.eq_ignore_ascii_case(name)
+                        && !g.tracks.is_empty()
+                        && g.tracks
+                            .iter()
+                            .all(|t| matches!(t.data, TrackData::Move(_)))
+                })
+            });
             let before = binding.targets.len();
-            binding
-                .targets
-                .retain(|t| !t.object.as_deref().is_some_and(turning));
+            binding.targets.retain(|t| {
+                !t.object
+                    .as_deref()
+                    .is_some_and(|path| turning(path) || (only_moves && fixed(path)))
+            });
             removed += before - binding.targets.len();
         }
     }
@@ -857,7 +896,7 @@ pub fn load_level_with_kismet_options(
     if let Some(s) = &mut scripts {
         // After the movers are chosen: what is attached to such an actor
         // stays a mover.
-        unbind_turning_actors(s, &loaded);
+        unbind_actors_no_track_moves(s, &loaded);
     }
     if let Some(s) = &scripts {
         prepare_switchable_volumes(&mut loaded, s);
@@ -4865,8 +4904,8 @@ mod tests {
         ];
         let movers = prepare_movers(&mut map, &s);
         assert_eq!(movers.keys().copied().collect::<Vec<_>>(), vec![5, 6]);
-        assert_eq!(unbind_turning_actors(&mut s, &map), 1);
-        assert_eq!(unbind_turning_actors(&mut s, &map), 0);
+        assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 1);
+        assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 0);
         let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
         let mut script = LevelScript::attach(&mut game, s, movers);
         game.start();
@@ -5234,5 +5273,87 @@ mod tests {
             "the pawn is at {}, the hub took it from {put} to {carried}",
             p.position
         );
+    }
+
+    /// A Matinee movement track does not move a static mesh actor either:
+    /// the lift of [`lift_map`] as one stays where it is placed, and so does
+    /// what stands on it. Its Matinee still plays to its end.
+    #[test]
+    fn a_matinee_does_not_move_a_static_mesh_actor() {
+        let (mut map, mut s) = lift_map();
+        for a in &mut s.graph.actors {
+            if a.name == "Lift" {
+                a.class = "Engine.StaticMeshActor".into();
+            }
+        }
+        let movers = prepare_movers(&mut map, &s);
+        assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 1);
+        assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 0);
+        let mut game = Game::from_loaded_map(map, PlayerParams::asamu_original(), 60.0).unwrap();
+        let mut script = LevelScript::attach(&mut game, s, movers);
+        game.start();
+        for _ in 0..5 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        let stood_at = game.player().position;
+        for _ in 0..90 {
+            script.tick(&mut game, &InputFrame::default()).unwrap();
+        }
+        // Not lifted (the track's 200 uu in a second), and neither is its
+        // passenger or the pawn on it.
+        assert_eq!(script.mover_transform(5), Some((Vec3::ZERO, [0; 3])));
+        assert_eq!(
+            script.mover_transform(6),
+            Some((Vec3::new(100.0, 100.0, 50.0), [0; 3]))
+        );
+        assert!(
+            (game.player().position - stood_at).length() < 1e-3,
+            "the pawn went from {stood_at} to {}",
+            game.player().position
+        );
+        assert!(script.moved_actors().is_empty(), "nothing moved");
+        // The Matinee ran to its end all the same: `Completed` set the
+        // grapple limit.
+        assert_eq!(game.player().script.gun.max_grapples, 2);
+        assert!(
+            script.runtime().errors().is_empty(),
+            "{:?}",
+            script.runtime().errors()
+        );
+    }
+
+    /// A static mesh actor stays bound where the group's tracks are not all
+    /// movement tracks, or are not known: another kind of track reaches an
+    /// actor whatever its physics.
+    #[test]
+    fn a_static_mesh_actor_stays_in_a_group_that_is_not_only_movement() {
+        let as_static = |s: &mut asamu_kismet::LevelScripts| {
+            for a in &mut s.graph.actors {
+                if a.name == "Lift" {
+                    a.class = "Engine.StaticMeshActor".into();
+                }
+            }
+        };
+        // The binding matched no group.
+        let (map, mut s) = lift_map();
+        as_static(&mut s);
+        for action in s.matinee.actions.values_mut() {
+            for binding in &mut action.bindings {
+                binding.group = None;
+            }
+        }
+        assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 0);
+        // The group has no track at all.
+        let (map, mut s) = lift_map();
+        as_static(&mut s);
+        for data in s.matinee.data.values_mut() {
+            for group in &mut data.groups {
+                group.tracks.clear();
+            }
+        }
+        assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 0);
+        // An actor of another class in the same group is not touched.
+        let (map, mut s) = lift_map();
+        assert_eq!(unbind_actors_no_track_moves(&mut s, &map), 0);
     }
 }
