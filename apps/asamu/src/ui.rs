@@ -21,6 +21,8 @@
 //!   chapter titles, tutorial pop-ups, achievement names, the title and
 //!   credits text, the subtitle language. See
 //!   `docs/reverse-engineering/LOCALIZATION.md`.
+//! - [`fonts`]: a font found on the machine at start-up, drawn behind the
+//!   built-in (ASCII-only) one so that the translated texts display.
 //!
 //! Saves live in the user-local data directory
 //! ([`asamu_game::save::SaveStore::default_root`], `ASAMU_SAVE_DIR`
@@ -28,6 +30,7 @@
 //! saves in memory only.
 
 mod flow;
+mod fonts;
 mod locale;
 mod menus;
 mod notify;
@@ -275,6 +278,7 @@ impl Plugin for UiPlugin {
             .init_resource::<UserSettings>()
             .init_resource::<strings::UiStrings>()
             .init_resource::<locale::Locale>()
+            .init_resource::<fonts::FallbackFont>()
             .init_resource::<notify::Toasts>()
             .init_resource::<notify::TimeTrialClock>()
             .init_resource::<flow::LevelLoad>()
@@ -291,6 +295,7 @@ impl Plugin for UiPlugin {
             .add_message::<OpenMap>()
             .add_observer(menus::on_activate)
             .add_systems(Startup, (setup, notify::spawn_hud).chain())
+            .add_systems(Startup, fonts::load_fallback_font)
             .add_systems(
                 Update,
                 (
@@ -323,6 +328,13 @@ impl Plugin for UiPlugin {
             .add_systems(
                 PostUpdate,
                 (flow::enforce_menu_cursor, settings::hide_subtitles_when_off),
+            )
+            // Before the text renderer picks up fonts and re-lays-out
+            // changed text, so a new line never shows a frame of gaps.
+            .add_systems(
+                PostUpdate,
+                fonts::apply_fallback_font
+                    .before(bevy::text::load_font_assets_into_font_collection),
             );
     }
 }
