@@ -60,6 +60,31 @@ fn magnitude(p: &RawPlayer) -> f64 {
     horizontal_magnitude(p.acceleration.x, p.acceleration.y)
 }
 
+/// `true` if the grapple that `now` flies on was attached by the weapon's
+/// refire check, as far as two consecutive records of recorder 0.2.0 can
+/// show it: the record before does not fly yet, its weapon is already in
+/// its firing state, and the refire timer's count is smaller in `now` (the
+/// looping timer has reached its period in that tick and called its
+/// function). A record without the weapon's state and timers (recorder
+/// 0.1.0) shows none of this and is never one.
+fn attached_by_the_refire_check(before: &RawPlayer, now: &RawPlayer) -> bool {
+    let count = |p: &RawPlayer| {
+        p.gun
+            .as_ref()
+            .and_then(|g| g.refire_timer())
+            .map(|t| t.count)
+    };
+    let firing = before
+        .gun
+        .as_ref()
+        .and_then(|g| g.state.clone())
+        .flatten()
+        .is_some_and(|s| s.eq_ignore_ascii_case("WeaponFiring"));
+    before.physics != PHYS_FLYING
+        && firing
+        && matches!((count(before), count(now)), (Some(b), Some(n)) if n < b)
+}
+
 fn angle_deg(rotation: [i32; 3], p: &RawPlayer, frame: MoveFrame) -> Option<f64> {
     move_direction(rotation, p.acceleration.x, p.acceleration.y, frame)
         .map(|d| f64::from(d.right).atan2(f64::from(d.forward)).to_degrees())
@@ -91,6 +116,10 @@ fn recordings_agree_with_the_acceleration_mapping() {
     // M2: magnitudes while walking or falling. M3: none while flying.
     let mut magnitudes: BTreeMap<&str, usize> = BTreeMap::new();
     let (mut flying, mut flying_zero) = (0, 0);
+    // M3: flying records with an acceleration: the first record of a flight
+    // whose attach the refire check made, and any other (there is none).
+    let mut flying_after_refire = 0;
+    let mut flying_unexplained: Vec<String> = Vec::new();
     // M3: zero records after a release, by whether the button was still held.
     let mut after_release: BTreeMap<(&str, usize), usize> = BTreeMap::new();
     // M4/M5: samples within 0.03° of an axis in the previous record's
@@ -118,11 +147,19 @@ fn recordings_agree_with_the_acceleration_mapping() {
         );
         for run in split_runs(&file.records) {
             let players: Vec<&RawPlayer> = run.iter().map(|r| r.player.as_ref().unwrap()).collect();
-            for p in &players {
+            for (k, p) in players.iter().enumerate() {
                 let m = magnitude(p);
                 if p.physics == PHYS_FLYING {
                     flying += 1;
                     flying_zero += usize::from(m == 0.0);
+                    if m != 0.0 {
+                        let before = k.checked_sub(1).map(|i| players[i]);
+                        if before.is_some_and(|b| attached_by_the_refire_check(b, p)) {
+                            flying_after_refire += 1;
+                        } else {
+                            flying_unexplained.push(format!("{name} frame {}", run[k].frame));
+                        }
+                    }
                 } else {
                     let class = if m == 0.0 {
                         "0"
@@ -245,7 +282,11 @@ fn recordings_agree_with_the_acceleration_mapping() {
          the full axes in {still_full}, in yaw-only axes in {still_yaw}"
     );
     println!("M2 horizontal |Acceleration| while walking or falling: {magnitudes:?}");
-    println!("M3 flying records: {flying}, with zero acceleration: {flying_zero}");
+    println!(
+        "M3 flying records: {flying}, with zero acceleration: {flying_zero}, with the acceleration \
+         of the tick in which the refire check attached: {flying_after_refire}, others: \
+         {flying_unexplained:?}"
+    );
     println!(
         "M3 zero-acceleration records after a release (button, count) -> releases: {after_release:?}"
     );
@@ -264,7 +305,27 @@ fn recordings_agree_with_the_acceleration_mapping() {
         f64::from(largest_pitch) * 360.0 / 65536.0
     );
     assert_eq!(magnitudes.get("other"), None, "M2: {magnitudes:?}");
-    assert_eq!(flying, flying_zero, "M3: steering while attached");
+    // M3: no steering while attached. A flying record has no acceleration,
+    // with one kind of exception that only a recording of recorder 0.2.0
+    // can show (the weapon's state and timers): the first record of a
+    // flight whose attach was made by the weapon's refire check instead of
+    // the button press keeps the acceleration of the move of that tick; the
+    // next record has none. In the recording of 2026-10-12 (52,266 records,
+    // keyboard and mouse) 66 flights begin after a record of the frame
+    // before: 62 by the press (weapon `Active` before; no acceleration in
+    // the first flying record of any, 27 of them with a move held in the
+    // record before) and 4 by the refire check (weapon `WeaponFiring`
+    // before, the refire count wraps in that tick), of which 1 had a move
+    // held and keeps its acceleration (frame 38296) and 3 had none. The
+    // three recordings of 2026-10-10 (recorder 0.1.0, 9,601 flying records)
+    // have no flying record with an acceleration at all, and for them this
+    // is the assertion it was: `flying == flying_zero`.
+    assert_eq!(
+        flying_unexplained,
+        Vec::<String>::new(),
+        "M3: steering while attached"
+    );
+    assert_eq!(flying, flying_zero + flying_after_refire, "M3");
     assert!(
         !after_release.keys().any(|(_, zero)| *zero == 0),
         "M3: a move in the frame of a release: {after_release:?}"
