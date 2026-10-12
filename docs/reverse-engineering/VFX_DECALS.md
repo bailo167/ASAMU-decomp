@@ -726,7 +726,7 @@ opaque blue wedge that started at the bottom edge of the screen under the wrist 
 change, with `ASAMU_VFX_SELFTEST=17 asamu --level AG-ParadiseCave --hidden-window --screenshot … --screenshot-window`
 and the self-test's options (`vfx/selftest.rs`: `_RANGE`, `_HOLD`, `_PIN`, `_TARGET=turning,…`):
 
-- a pinned grapple held for 1.5 s on a wall 450 UU away and one on a rock face 1,148 UU away: the hand is in the
+- a pinned grapple held for 1.5 s on a wall 451 UU away and one on a rock face 1,147 UU away: the hand is in the
   `Grapple_Loop` pose (raised, open, the back plate with its lens towards the camera), and the beam comes out from
   behind the hand at the gap between thumb and fingers, a white-hot line with a blue edge about a finger wide at
   the hand, bends gently towards the anchor and thins to a fine line there; thin side strands wander around it;
@@ -734,10 +734,12 @@ and the self-test's options (`vfx/selftest.rs`: `_RANGE`, `_HOLD`, `_PIN`, `_TAR
 - a recording of the same grapple, frame by frame: no beam in the frame before the attach; 0.2 s after it the
   hand is opening, the beam is there from the palm to the anchor, a faint star of the attach flash shows beside
   the hand (nearer the middle of the screen than the hand, as the data has it) and a small glow at the anchor.
-- a pinned grapple on a rock of a turning wheel (`InterpActor_64`), 1,865 UU away, two seconds into the hold: the
+- a pinned grapple on a rock of a turning wheel (`InterpActor_64`), 1,854 UU away, two seconds into the hold: the
   anchor has turned from the middle of the view to its top edge and the beam's end is on it; and the same rock
-  from 4,350 UU: the beam reaches the anchor as a hair-thin line. Both are in the level's dense teal fog, which
+  from 4,351 UU: the beam reaches the anchor as a hair-thin line. Both are in the level's dense teal fog, which
   the beam is not dimmed by.
+- AG-IceCave (`ASAMU_VFX_SELFTEST=20`), a grapple 2,480 UU into the blue ice: the same beam, its white core and
+  lighter edge clear of the saturated blue walls behind it.
 - the log's one line per grapple puts the socket, in the idle pose at the attach, at 58 % of the screen's half
   width to the right and 70 % of its half height below the middle, 33 UU ahead of the eye.
 
