@@ -248,6 +248,9 @@ Functional replacement of the Scaleform menus; the look is ours. Screens are des
   is re-planned or renamed (`reset_on_level_change`).
 - `ASAMU_MENU_ACTION` (unattended checks): `new-game`, `continue`, `chapter:<Name>`, `time-trial:<Name>`;
   a confirmation it raises is answered with yes.
+  `ASAMU_MENU_ACTION_DELAY=<seconds>` (up to 600) shows the main menu that long first, so that a frame
+  recording that starts by itself (`--record-frames` with `ASAMU_RECORD_AUTOSTART`) is already running
+  when the level loads and holds the level's first frames.
 
 ### Menu text
 
@@ -322,6 +325,10 @@ ASAMU_CONVERTED_DIR=<converted dir> ASAMU_CONTINUE_SAVE_OUT=<scratch dir> \
   cargo test -p asamu-game --test continue_from_checkpoint
 ASAMU_SAVE_DIR=<scratch dir> ASAMU_MENU_ACTION=continue \
   cargo run -p asamu -- --converted <converted dir> --exit-after 30
+# the first seconds after Continue as frames (a folder outside the repository)
+ASAMU_SAVE_DIR=<scratch dir> ASAMU_MENU_ACTION=continue ASAMU_MENU_ACTION_DELAY=12 \
+  ASAMU_RECORD_AUTOSTART=1 cargo run -p asamu -- --converted <converted dir> --hidden-window \
+  --record-frames <frames dir> --exit-after 50
 ```
 
 On AG-ParadiseCave the save at the fifth checkpoint holds 83 events, 150 variables, 35 Matinees and 5

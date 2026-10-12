@@ -943,6 +943,215 @@ mod tests {
     }
 
     #[test]
+    fn the_pause_menu_s_restart_reloads_only_workshop_and_epilogue() {
+        for chapter in ChapterId::ALL {
+            assert_eq!(
+                restart_reloads_level(Some(chapter)),
+                matches!(chapter, ChapterId::Workshop | ChapterId::Epilogue),
+                "{chapter:?}"
+            );
+            // The original's test is on the level index: 1 and 7.
+            assert_eq!(
+                restart_reloads_level(Some(chapter)),
+                matches!(chapter.level_index(), 1 | 7)
+            );
+        }
+        assert!(!restart_reloads_level(None));
+    }
+
+    /// Restart in a chapter that does not reload: the death sequence, the
+    /// same game, no load. In Workshop without converted data to load it
+    /// from, the reload cannot start and the death sequence stands in.
+    #[test]
+    fn restart_runs_the_death_sequence_and_loads_nothing() {
+        for chapter in [ChapterId::Sanctuary, ChapterId::Workshop] {
+            let mut app = App::new();
+            let mut sim = Sim::new(Game::graybox().unwrap(), String::new());
+            sim.game.start();
+            let ticks_before = sim.game.clock().tick();
+            app.add_message::<FlowRequest>()
+                .add_message::<AppExit>()
+                .init_resource::<UiLaunch>()
+                .init_resource::<UiState>()
+                .insert_resource(Play {
+                    chapter: Some(chapter),
+                    mode: PlayMode::Story,
+                    map: Some(chapter.map_name().to_owned()),
+                })
+                .init_resource::<LevelLoad>()
+                .insert_resource(sim)
+                .add_systems(Update, run_flow);
+            app.world_mut().write_message(FlowRequest::Restart);
+            app.update();
+            assert!(!app.world().resource::<LevelLoad>().is_loading());
+            assert_eq!(app.world().resource::<UiState>().screen, Screen::None);
+            let sim = app.world().resource::<Sim>();
+            assert_eq!(sim.game.state(), GameState::Playing);
+            assert_eq!(sim.game.clock().tick(), ticks_before, "the same game");
+        }
+    }
+
+    /// Real-data check (skipped unless `ASAMU_CONVERTED_DIR` names a
+    /// user-local conversion with `AG-ParadiseCave`, its Kismet and Matinee):
+    /// the app's own level start, checkpoint save and Continue. A checkpoint
+    /// reached after the opening is saved by [`process_ticks`] with the level
+    /// script's state; a second level start from that save
+    /// ([`level_start`], [`prepare_script`]) leaves the view with the player
+    /// from the first tick: no director cut, no view target, no cinematic
+    /// mode, no Matinee fade, where the first start's opening took it.
+    #[test]
+    fn continue_starts_in_the_player_s_view() {
+        use crate::audio::AudioCommandMessage;
+        use crate::audio::music::MusicCommandMessage;
+        use crate::kismet::{
+            KismetFrame, Presentation, route_frames, update_presentation, view_override,
+        };
+        use asamu_game::save::SaveSession;
+        let Some(root) = std::env::var_os("ASAMU_CONVERTED_DIR").map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: ASAMU_CONVERTED_DIR is not set");
+            return;
+        };
+        const MAP: &str = "AG-ParadiseCave";
+        let load = || match load_level(&root, MAP, PlayMode::Story) {
+            Ok((game, Some(script))) => Some((game, script)),
+            Ok(_) => {
+                eprintln!("skipped: {MAP} has no converted Kismet");
+                None
+            }
+            Err(e) => {
+                eprintln!("skipped: {MAP} not loadable ({e})");
+                None
+            }
+        };
+        // An app that routes each tick's outputs to the presentation and
+        // saves checkpoints, as the real one does.
+        fn app_with(sim: Sim, saves: SaveSession) -> App {
+            let mut app = App::new();
+            app.add_message::<KismetFrame>()
+                .add_message::<GameTick>()
+                .add_message::<AudioCommandMessage>()
+                .add_message::<MusicCommandMessage>()
+                .add_message::<OpenMap>()
+                .add_message::<AchievementEarned>()
+                .add_message::<GameFinished>()
+                .add_message::<TimeTrialStart>()
+                .add_message::<TimeTrialEnd>()
+                .add_message::<CollectibleFound>()
+                .add_message::<StoryItemFound>()
+                .init_resource::<Presentation>()
+                .init_resource::<UiStrings>()
+                .init_resource::<TimeTrialClock>()
+                .init_resource::<Toasts>()
+                .init_resource::<Time>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .insert_resource(Saves(saves))
+                .insert_resource(Play {
+                    chapter: Some(ChapterId::Sanctuary),
+                    mode: PlayMode::Story,
+                    map: Some(MAP.into()),
+                })
+                .insert_resource(sim)
+                .add_systems(
+                    Update,
+                    (route_frames, update_presentation, process_ticks).chain(),
+                );
+            app
+        }
+        // One fixed tick and the frame after it; returns whether the view
+        // was the player's own in that frame.
+        fn step(app: &mut App) -> bool {
+            let (report, frame) = {
+                let mut sim = app.world_mut().resource_mut::<Sim>();
+                let Sim { game, script, .. } = &mut *sim;
+                let t = script
+                    .as_mut()
+                    .expect("a level script")
+                    .tick(game, &asamu_player::InputFrame::default())
+                    .expect("playing");
+                (
+                    t.report,
+                    KismetFrame {
+                        outputs: t.outputs,
+                        npc_events: t.npc_events,
+                    },
+                )
+            };
+            app.world_mut().write_message(GameTick(report));
+            app.world_mut().write_message(frame);
+            app.update();
+            let world = app.world();
+            let pres = world.resource::<Presentation>();
+            view_override(world.resource::<Sim>(), pres).is_none()
+                && pres.cinematic.is_none()
+                && pres.matinee_fade.is_empty()
+        }
+
+        // New Game's snapshot, the level's first start: the opening plays.
+        let Some((mut game, mut script)) = load() else {
+            return;
+        };
+        let mut saves = SaveSession::in_memory();
+        saves.new_game().unwrap();
+        let (start, result, index) = level_start(&mut game, &mut saves, MAP, PlayMode::Story);
+        result.unwrap();
+        assert_eq!(index, Some(-1));
+        prepare_script(&mut script, &saves, index, start.snapshot.as_ref());
+        game.start();
+        let banner = crate::banner(&game);
+        let mut app = app_with(Sim::new(game, banner).with_script(Some(script)), saves);
+        let own_view: Vec<bool> = (0..900).map(|_| step(&mut app)).collect();
+        assert!(!own_view[0], "the opening takes the view at the first tick");
+        let taken = own_view.iter().filter(|v| !**v).count();
+        assert!(taken > 300, "the opening lasts seconds: {taken} ticks");
+        assert!(own_view[899], "and ends");
+        // A checkpoint beyond the first becomes the latest: the app saves.
+        let id = {
+            let sim = app.world().resource::<Sim>();
+            let mut cps = sim.game.scene_map().unwrap().actors.checkpoints.clone();
+            cps.sort_by_key(|c| c.index);
+            cps[1].id
+        };
+        assert!(
+            app.world_mut()
+                .resource_mut::<Sim>()
+                .game
+                .trigger_checkpoint(id)
+        );
+        step(&mut app);
+        let saves = std::mem::replace(
+            &mut app.world_mut().resource_mut::<Saves>().0,
+            SaveSession::in_memory(),
+        );
+        let snapshot = saves.snapshot.clone().expect("the checkpoint was saved");
+        assert_eq!(snapshot.map, MAP);
+        assert!(snapshot.script_saved, "with the level script's state");
+        assert!(snapshot.checkpoints[&ChapterId::Sanctuary] >= 1);
+
+        // Continue.
+        let mut saves = saves;
+        assert_eq!(saves.continue_game(), Some(ChapterId::Sanctuary));
+        let (mut game, mut script) = load().expect("loaded a moment ago");
+        let (start, result, index) = level_start(&mut game, &mut saves, MAP, PlayMode::Story);
+        result.unwrap();
+        assert_eq!(index, Some(snapshot.checkpoints[&ChapterId::Sanctuary]));
+        prepare_script(&mut script, &saves, index, start.snapshot.as_ref());
+        game.start();
+        let banner = crate::banner(&game);
+        let mut app = app_with(Sim::new(game, banner).with_script(Some(script)), saves);
+        // Before any tick, and through what was the opening's whole length.
+        {
+            let world = app.world();
+            assert!(
+                view_override(world.resource::<Sim>(), world.resource::<Presentation>()).is_none()
+            );
+        }
+        for tick in 1..=900 {
+            assert!(step(&mut app), "the view left the player at tick {tick}");
+        }
+    }
+
+    #[test]
     fn graybox_restart_keeps_the_configuration() {
         let g = Game::graybox_placeholder().unwrap();
         let fresh = fresh_graybox(&g).unwrap();
