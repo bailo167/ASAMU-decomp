@@ -100,6 +100,9 @@ fn shown(shown: Res<Shown>) -> bool {
 struct Paint {
     top: [f32; 3],
     side: [f32; 3],
+    /// The band of the sides just under the top (`None`: like the sides):
+    /// an island shows its green from below too.
+    lip: Option<[f32; 3]>,
     emissive: [f32; 3],
     /// Drawn without lighting (a light source).
     unlit: bool,
@@ -111,6 +114,7 @@ const fn paint(top: [f32; 3], side: [f32; 3]) -> Paint {
     Paint {
         top,
         side,
+        lip: None,
         emissive: [0.0; 3],
         unlit: false,
         alpha: 1.0,
@@ -121,6 +125,7 @@ const fn glow(colour: [f32; 3], emissive: [f32; 3]) -> Paint {
     Paint {
         top: colour,
         side: colour,
+        lip: None,
         emissive,
         unlit: false,
         alpha: 1.0,
@@ -131,6 +136,7 @@ const fn lamp(colour: [f32; 3]) -> Paint {
     Paint {
         top: colour,
         side: colour,
+        lip: None,
         emissive: [0.0; 3],
         unlit: true,
         alpha: 1.0,
@@ -152,8 +158,14 @@ const BEACONS: [[f32; 3]; 5] = [
 /// white start arches, gold finish frames.
 fn paint_of(look: Look) -> Paint {
     match look {
-        Look::Paving => paint([0.82, 0.79, 0.71], [0.50, 0.48, 0.47]),
-        Look::Island => paint([0.38, 0.63, 0.30], [0.47, 0.38, 0.31]),
+        Look::Paving => Paint {
+            lip: Some([0.70, 0.67, 0.61]),
+            ..paint([0.82, 0.79, 0.71], [0.50, 0.48, 0.47])
+        },
+        Look::Island => Paint {
+            lip: Some([0.30, 0.50, 0.25]),
+            ..paint([0.38, 0.63, 0.30], [0.47, 0.38, 0.31])
+        },
         Look::Rock => paint([0.62, 0.61, 0.64], [0.43, 0.43, 0.49]),
         Look::Hook => glow([0.08, 0.66, 0.62], [0.0, 0.42, 0.38]),
         Look::Ramp => paint([0.96, 0.56, 0.14], [0.70, 0.36, 0.10]),
@@ -177,6 +189,13 @@ fn paint_of(look: Look) -> Paint {
 
 /// A used-up crystal: the same shape, grey and dark.
 const SPENT_CRYSTAL: Paint = paint([0.36, 0.42, 0.46], [0.30, 0.34, 0.38]);
+
+/// The band under an island's top is green: it reads as an island from the
+/// side and from below.
+#[cfg(test)]
+fn greenish(colour: [f32; 4]) -> bool {
+    colour[1] > colour[0] && colour[1] > colour[2]
+}
 
 /// An sRGB triple as the linear colour a vertex carries.
 fn linear(srgb: [f32; 3], shade: f32) -> [f32; 4] {
@@ -224,6 +243,10 @@ const SUN_TRAVELS: sim_glam::Vec3 = sim_glam::Vec3::new(0.55, 0.38, -0.74);
 // Meshes.
 // ---------------------------------------------------------------------------
 
+/// How far down the sides the band under the top reaches, as a part of the
+/// solid's height (ours).
+const LIP: f32 = 0.14;
+
 /// The vertices of a flat-shaded mesh: positions, normals, colours.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Flat {
@@ -269,9 +292,17 @@ fn flat(shape: &Shape, paint: Paint) -> Flat {
             std::mem::swap(&mut b, &mut c);
             normal = -normal;
         }
+        // The band right under the top (a face that lies wholly in the top
+        // seventh of the solid) may have its own colour.
+        let middle = (a.y + b.y + c.y) / 3.0;
+        let lip = paint
+            .lip
+            .filter(|_| normal.y <= 0.75 && (high - middle) / span < LIP);
         for p in [a, b, c] {
             let colour = if normal.y > 0.75 {
                 linear(paint.top, 1.0)
+            } else if let Some(lip) = lip {
+                linear(lip, 1.0)
             } else {
                 // Darker towards the bottom, and under an overhang.
                 let height = (p.y - low) / span;
@@ -440,8 +471,8 @@ impl Scene<'_, '_> {
         };
         let horizon = sky_colour(0.0);
         self.clear.0 = Color::srgb(horizon[0], horizon[1], horizon[2]);
-        self.ambient.color = Color::srgb(0.80, 0.84, 1.0);
-        self.ambient.brightness = 1500.0;
+        self.ambient.color = Color::srgb(0.86, 0.88, 1.0);
+        self.ambient.brightness = 2200.0;
         // A clean screen: no developer read-out, no level gizmos.
         if let Some(debug) = self.debug.as_mut()
             && debug.0
@@ -1029,6 +1060,33 @@ mod tests {
                 .iter()
                 .zip(&hub.colours)
                 .all(|(n, c)| (n[1] > 0.99) == (*c == top))
+        );
+        // An island shows green under its top too, and brown further down.
+        let island = level.piece("near island 1").unwrap();
+        let mesh = flat(&level.shapes[island.shape], paint_of(Look::Island));
+        let sides: Vec<(f32, bool)> = mesh
+            .positions
+            .chunks(3)
+            .zip(mesh.normals.chunks(3))
+            .zip(mesh.colours.chunks(3))
+            .filter(|((_, n), _)| n[0][1].abs() < 0.75)
+            .map(|((p, _), c)| ((p[0][1] + p[1][1] + p[2][1]) / 3.0, greenish(c[0])))
+            .collect();
+        let lowest_green = sides
+            .iter()
+            .filter(|(_, green)| *green)
+            .map(|(y, _)| *y)
+            .fold(f32::MAX, f32::min);
+        let highest_brown = sides
+            .iter()
+            .filter(|(_, green)| !*green)
+            .map(|(y, _)| *y)
+            .fold(f32::MIN, f32::max);
+        assert!(sides.iter().any(|(_, green)| *green));
+        assert!(sides.iter().any(|(_, green)| !*green));
+        assert!(
+            lowest_green > highest_brown,
+            "only the band under the top is green ({lowest_green} against {highest_brown})"
         );
         // Nothing to draw is nothing, not a panic.
         let nothing = Shape {

@@ -416,7 +416,7 @@ From the start, facing ahead:
 | Ahead | **The near chain**: five islands, each higher than the last. Three gaps a walking jump crosses, one wide gap for the power leap, one tall step for the power jump; a hook hangs over every landing | The warm-up, with or without the grapple |
 | To the right | **The medium chain**: five islands 3,700 to 4,250 uu apart as the grapple flies, going down and up by as much as 1,000 uu | Grapple runs: every gap is far beyond a jump |
 | To the left, past the runway | **The far chain**: two shots at 93 % of the Classic grapple range, then a stretch of five hooks without a landing, where two recharge crystals hang beside the line | Long pulls, and the budget: five hooks, three grapples |
-| Left | **The runway**: a straight of 9,000 uu between two launch ramps, with a landing beyond each | Speed, the sprint, the ramps |
+| Left | **The runway**: a straight of 9,000 uu between two launch ramps; a sprint up either ramp lands on the island beyond it | Speed, the sprint, the ramps |
 | Behind | **The ferry** to **the yard**, **the carousel** (six rocks on a hub that turns once in 40 s, at two heights) and **the wheel** (six gondolas that stay level, once round in 48 s). A hook rides over every rock and every gondola | Things that move: ride them, grapple them, be carried |
 | Ahead and to the right | **The tower**: seven ledges a jump apart, the top a power jump above the last (or one pull from the bridge to the hook beside the top), a board, and under it **the catch** | Height, and a drop of more than 6,000 uu that ends at the hub |
 
@@ -456,8 +456,8 @@ The rules behind the picture are the game's own, unchanged:
   the ferry is moved by a Matinee of ours, and a grapple's anchor rides all of them (section 11 says how the
   level reaches the simulation).
 
-**Timed routes.** Three routes have a clock: the near chain, the medium chain and the far chain from their arch at
-the hub (or the runway's edge) to the frame on their last island, and the runway sprint between its two gates. The
+**Timed routes.** Four routes have a clock: the near chain, the medium chain and the far chain, each from its arch
+at the hub (or the runway's edge) to the frame on its last island, and the runway sprint between its two gates. The
 clock of a route starts on the last tick you are under its arch (standing there does not run it) and stops on the
 first tick you are inside its frame; its line appears under the watermark while it runs and after a finish, with
 the best time of the session. A death, a respawn, a teleport or a loaded save state ends the attempt without a
@@ -472,19 +472,24 @@ steers at the landing, so a route it finishes is one a player can):
 |---|---|
 | `it_loads_through_the_games_loader_without_game_data` | The generated data loads through the game's loader without a warning; two hubs turn; nothing stays on disk |
 | `the_pawn_starts_on_the_hub_with_the_full_suit` | Standing at the start with three grapples and the boots, from the level's own script |
+| `the_layout_fits_what_the_classic_set_does` | The jumps the layout was fitted to, measured and printed; a ledge is less than a jump apart, the wide gap more than a walking jump |
 | `the_near_chain_can_be_done_on_foot_and_is_timed` | Three walking jumps, the leap, the power jump; the route's clock times it, and a teleport ends an attempt |
 | `the_chains_can_be_done_by_grapple` | Every landing of the near and the medium chain by a pull to its hook and the drop; a landing gives the budget back |
 | `the_far_chain_needs_its_crystals_and_can_be_done` | Both long shots (over 90 % of the reach), the stretch in the air with the budget at 1, 2, 0, 1, 2, 0, 1, the landing at the end |
 | `the_tower_is_climbed_and_the_long_drop_ends_at_the_hub` | Up by seven jumps and a power jump; up by the hook from the bridge; off the board, more than 5,000 uu down into the catch, awake at the hub |
+| `the_runway_is_timed_and_its_ramps_reach_their_landings` | The sprint between the gates is timed (about six seconds); a sprint up each ramp ends on its landing |
 | `the_wheels_turn_and_the_ferry_keeps_its_timetable` | The hubs turn by their rate times the time; rocks keep their height and arm; gondolas keep level; the ferry is across after a crossing and home after the timetable |
 | `a_pawn_rides_the_ferry_the_carousel_and_the_wheel` | A pawn stands on each of them for 24 s |
 | `a_grapple_takes_a_moving_hook_and_the_pawn_ends_on_what_carries_it` | The anchor rides the hook; the pull ends over the rock or the gondola; the pawn rides on |
 | `a_session_on_the_playground_keeps_its_promises` | The level's name everywhere, save states with what moves, and a pristine session against none, tick for tick |
 
-What the Classic set does there, measured in this recreation by those tests' pilot (not the original's numbers,
-and they move if the recreation's physics is corrected): a jump rises 481 uu and covers 851 uu walking and
-1,109 uu sprinting; a power jump rises 1,231 uu; a power leap covers 2,563 uu; a pull arrives at about 1,430 uu/s.
-The layout was fitted to these.
+What the Classic set does there, measured in this recreation (not the original's numbers, and they move if the
+recreation's physics is corrected): a jump rises 481 uu and covers 851 uu walking and 1,096 uu sprinting; a power
+jump rises 1,231 uu; a power leap covers 2,563 uu. The layout was fitted to these, and
+`cargo test -p asamu-sandbox --test playground the_layout_fits -- --nocapture` prints them (the lines starting with
+`MEASURE`); the test asserts only the relations the level relies on (a ledge is less than a jump, the tower's top
+more, and so on). A pull arrives under its hook at about 1,430 uu/s (one measurement, made while the level was
+laid out).
 
 **How it looks** is ours as well (`apps/asamu/src/sandbox/playground_view.rs`): flat-shaded meshes of the level's
 own solids, an evening sky, a low sun with shadows, a light haze, lamps on the hub. Nothing of it imitates the

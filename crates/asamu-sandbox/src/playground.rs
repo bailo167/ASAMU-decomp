@@ -43,10 +43,11 @@
 //! | Far chain (left, past the runway) | Shots at the edge of the grapple's reach, then a stretch of hooks without a landing, with recharge crystals where the budget runs out |
 //! | Yard (behind) | A ferry of ours to ride there, a carousel of rocks and a big wheel with level gondolas to grapple and ride |
 //! | Tower | Ledges a jump apart up a column, a board at the top, and a long drop into the red catch, which returns you to the hub |
-//! | Runway | A long flat straight between two launch ramps |
+//! | Runway | A long flat straight between two launch ramps, each of which throws a sprinting pawn onto the landing beyond it |
 //!
-//! Three routes are timed ([`Course`], [`CourseClock`]): each has an open
-//! start arch and a closed finish frame.
+//! Four routes are timed ([`Course`], [`CourseClock`]): the three chains and
+//! the runway's sprint. Each has an open start arch and a closed finish
+//! frame.
 //!
 //! Reading the level by sight ([`Look`]): pale paving is built ground,
 //! green-topped rock is an island, teal rocks that hang in the air are
@@ -1056,7 +1057,7 @@ impl Builder {
     /// A landmark: a tall rock on `foot` with a light of colour `beacon` on
     /// top.
     fn landmark(&mut self, name: &str, foot: Vec3, height: f32, beacon: u8, seed: u32) {
-        self.spire(name, foot, height * 0.12, height, Look::Rock, seed);
+        self.spire(name, foot, height * 0.08, height, Look::Rock, seed);
         self.light(
             &format!("{name} light"),
             foot + Vec3::Z * (height + 110.0),
@@ -1446,14 +1447,14 @@ fn build() -> Playground {
     );
     b.island(
         "runway landing ahead",
-        v(8700.0, RUNWAY_Y, -150.0),
+        v(8500.0, RUNWAY_Y, -150.0),
         900.0,
         Look::Island,
         80,
     );
     b.island(
         "runway landing behind",
-        v(-5300.0, RUNWAY_Y, -150.0),
+        v(-5100.0, RUNWAY_Y, -150.0),
         900.0,
         Look::Island,
         81,
@@ -1589,7 +1590,7 @@ fn build() -> Playground {
         fixed(),
     );
     b.station("ferry", v(-1500.0, 0.0, 0.0), 180.0, 0.0);
-    b.station("yard", YARD + v(300.0, 0.0, 0.0), 180.0, 12.0);
+    b.station("yard", YARD + v(520.0, 0.0, 0.0), 138.0, 16.0);
 
     // The carousel: a hub the engine turns about the vertical, rocks
     // attached to it at two heights.

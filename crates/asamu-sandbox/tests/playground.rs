@@ -20,8 +20,8 @@ use asamu_sandbox::playground::{
     self, CAROUSEL_CENTRE, CAROUSEL_RADIUS, CAROUSEL_RATE, CAROUSEL_ROCKS, CATCH_CENTRE, FAR_AIR,
     FAR_EDGE, FAR_SHOT_FRACTION, FAR_SHOTS, FERRY_CROSSING, FERRY_TRAVEL, FERRY_WAIT, HUB_RADIUS,
     HUB_START, MEDIUM_CHAIN, NEAR_CHAIN, PLAYGROUND_GRAPPLES, PLAYGROUND_LEVEL_NAME,
-    PLAYGROUND_MAP, Role, TOWER_BASE, TOWER_HEIGHT, TOWER_HOOK, TOWER_LEDGES, WHEEL_CENTRE,
-    WHEEL_GONDOLAS, WHEEL_RADIUS, WHEEL_RATE, YARD, load_playground, playground,
+    PLAYGROUND_MAP, RUNWAY_Y, Role, TOWER_BASE, TOWER_HEIGHT, TOWER_HOOK, TOWER_LEDGES,
+    WHEEL_CENTRE, WHEEL_GONDOLAS, WHEEL_RADIUS, WHEEL_RATE, YARD, load_playground, playground,
 };
 use asamu_sandbox::session::{Outcome, Session, SimCx};
 use glam::Vec3;
@@ -295,6 +295,74 @@ fn the_pawn_starts_on_the_hub_with_the_full_suit() {
     );
     // A pristine session is still pristine after watching all this.
     assert!(rig.session.is_pristine());
+}
+
+/// What the layout was fitted to: the jumps of the Classic set in this
+/// recreation, measured on the runway and printed (`--nocapture`). The
+/// asserts are the relations the level relies on, not the numbers.
+#[test]
+fn the_layout_fits_what_the_classic_set_does() {
+    let mut measured = Vec::new();
+    for (label, forward, sprint, power) in [
+        ("standing jump", 0.0, false, false),
+        ("walking jump", 1.0, false, false),
+        ("sprinting jump", 1.0, true, false),
+        ("power jump", 0.0, false, true),
+        ("power leap", 1.0, true, true),
+    ] {
+        let mut rig = Rig::new();
+        rig.stand_at(Vec3::new(-2000.0, RUNWAY_Y, 0.0), 0.0);
+        let run = InputFrame {
+            move_forward: forward,
+            sprint_held: sprint,
+            ..InputFrame::default()
+        };
+        // Up to speed, the power jump charged meanwhile.
+        for _ in 0..120 {
+            rig.tick(&InputFrame {
+                power_jump_held: power,
+                ..run
+            });
+        }
+        let from = rig.game.player().position;
+        let (mut apex, mut ticks) = (0.0f32, 0);
+        for i in 0..2000 {
+            rig.tick(&InputFrame {
+                jump_pressed: i == 0 && !power,
+                jump_held: !power,
+                ..run
+            });
+            apex = apex.max(rig.game.player().position.z - from.z);
+            ticks = i;
+            if i > 8 && rig.game.player().grounded {
+                break;
+            }
+        }
+        let far = rig.game.player().position.x - from.x;
+        eprintln!(
+            "MEASURE {label}: apex {apex:.0} uu, {:.2} s, {far:.0} uu far",
+            ticks as f32 / TICKS_PER_SECOND as f32
+        );
+        measured.push((apex, far));
+    }
+    let (jump_apex, _) = measured[0];
+    let (_, walking_far) = measured[1];
+    let (power_apex, _) = measured[3];
+    let (_, leap_far) = measured[4];
+    // The tower's ledges are a jump apart, its top is not, and a power jump
+    // reaches it.
+    let step = TOWER_LEDGES[0];
+    assert!(TOWER_LEDGES.windows(2).all(|w| w[1] - w[0] <= step));
+    let last = TOWER_HEIGHT - TOWER_LEDGES[TOWER_LEDGES.len() - 1];
+    assert!(jump_apex > step && jump_apex < last && power_apex > last);
+    // The near chain: gaps of 520 uu for a walking jump, 1,700 for the
+    // leap, and a step of 880 for the power jump.
+    let rise = NEAR_CHAIN[4].0.z - NEAR_CHAIN[3].0.z;
+    assert!(walking_far > 520.0 * 1.3 && leap_far > 1700.0 * 1.2 && power_apex > rise * 1.2);
+    assert!(
+        walking_far < 1700.0,
+        "the wide gap is wide to a walking jump"
+    );
 }
 
 /// The near chain without the grapple: three walking jumps, the leap over
@@ -633,6 +701,69 @@ fn the_tower_is_climbed_and_the_long_drop_ends_at_the_hub() {
     assert!(woke);
     rig.idle(30);
     assert!(rig.stands_on(HUB_START, 60.0), "{}", rig.feet());
+}
+
+/// The runway: the sprint between its gates is timed, and each ramp throws
+/// a sprinting pawn onto the landing beyond it.
+#[test]
+fn the_runway_is_timed_and_its_ramps_reach_their_landings() {
+    let sprint = playground()
+        .courses
+        .iter()
+        .position(|c| c.id == "sprint")
+        .unwrap();
+    for (label, from, heading, landing) in [
+        (
+            "ahead",
+            Vec3::new(200.0, RUNWAY_Y, 0.0),
+            0.0f32,
+            "runway landing ahead",
+        ),
+        (
+            "behind",
+            Vec3::new(-500.0, RUNWAY_Y, 0.0),
+            std::f32::consts::PI,
+            "runway landing behind",
+        ),
+    ] {
+        let mut rig = Rig::new();
+        rig.stand_at(from, heading);
+        let top = piece_location(landing);
+        let mut left_the_ramp = false;
+        let mut highest = 0.0f32;
+        for _ in 0..(30 * TICKS_PER_SECOND) {
+            rig.game.player_mut().yaw = heading;
+            rig.game.player_mut().pitch = 0.0;
+            let report = rig.tick(&InputFrame {
+                move_forward: 1.0,
+                sprint_held: true,
+                ..InputFrame::default()
+            });
+            assert!(!report.respawned, "{label}: fell at {}", rig.feet());
+            highest = highest.max(rig.feet().z);
+            left_the_ramp |= highest > 300.0 && !rig.game.player().grounded;
+            if left_the_ramp && rig.game.player().grounded {
+                break;
+            }
+        }
+        eprintln!(
+            "MEASURE ramp {label}: up to {highest:.0} uu, down at {:.0}",
+            rig.feet()
+        );
+        assert!(highest > 350.0, "{label}: the ramp was climbed ({highest})");
+        assert!(
+            rig.stands_on(top, 900.0),
+            "{label}: feet at {}, the landing is at {top}",
+            rig.feet()
+        );
+        if label == "ahead" {
+            let run = rig.session.course().last().expect("the sprint was timed");
+            assert_eq!(run.course, sprint);
+            // 5,300 uu between the gates at the sprinting speed (880 uu/s
+            // with the Classic set): about six seconds.
+            assert!(run.seconds > 4.0 && run.seconds < 9.0, "{run:?}");
+        }
+    }
 }
 
 /// The carousel, the wheel and the ferry move by the game layer's own
