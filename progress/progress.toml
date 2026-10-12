@@ -661,8 +661,8 @@ note = "Pure fixed-step step(); byte-identical determinism tests; NaN/dt guards.
 id = "ground-move"
 name = "Ground movement / acceleration"
 status = "implemented"
-evidence = "crates/asamu-player; docs/PARITY.md"
-note = "Native physics port with original values (GroundSpeed 440, AccelRate 2048, friction 8). Not trace-verified."
+evidence = "crates/asamu-player; docs/PARITY.md (Second comparison); tools/asamu-trace/tests/parity_measurement.rs"
+note = "Native physics port with original values (GroundSpeed 440, AccelRate 2048, friction 8). Measured on recordings of the original (2026-10-12): walking one step inside tolerance on 27,237 of 27,436 ticks (gamepad) and 24,911 of 25,020 (keyboard); braking 86 of 86 stretches in the keyboard recording. Not verified: some wall contacts, slope drift and a floor-check lift of the original are not reproduced."
 
 [[category.item]]
 id = "air-control"
@@ -675,15 +675,15 @@ note = "Native limiter with original AirControl 0.3 -> 0.35 after first landing,
 id = "jump"
 name = "Jump"
 status = "implemented"
-evidence = "crates/asamu-player; docs/PARITY.md"
-note = "JumpZ 1000 + releasable-jump damping x0.7 per ABILITIES.md."
+evidence = "crates/asamu-player; docs/PARITY.md (Second comparison); tools/asamu-trace/tests/parity_measurement.rs"
+note = "JumpZ 1000 + releasable-jump damping x0.7 per ABILITIES.md. Measured on the keyboard recording of the original (78 fps): 25 of 26 jumps agree one step, 22 free-running. Not verified: one jump and the free-running take-off after forced starts differ."
 
 [[category.item]]
 id = "gravity"
 name = "Gravity"
-status = "implemented"
-evidence = "crates/asamu-player/src/ue3_movement.rs; tests/ue3_spec_conformance.rs"
-note = "Native gravity chain + 2x falling integrator ported; DefaultGravityZ=-520 from config. Not trace-verified."
+status = "verified"
+evidence = "tools/asamu-trace/tests/parity_regressions.rs (free fall of PLAY2 seg4 from tick 3014; the five respawn falls), gated on local recordings of the original; docs/PARITY.md (Second comparison)"
+note = "Native gravity chain + 2x falling integrator ported; DefaultGravityZ=-520 from config. Scope of the verification: vertical velocity in free fall, which equals the original's on every tick of a 59-tick fall and of five respawn falls (0 doubled quanta off), with equal landing ticks. Terminal velocity is in no recording."
 
 [[category.item]]
 id = "collision-capsule"
@@ -702,9 +702,9 @@ note = "Eye height smoothing, bob, previous-frame view for aims."
 [[category.item]]
 id = "fov"
 name = "FOV"
-status = "implemented"
-evidence = "crates/asamu-player; docs/PARITY.md"
-note = "FOV 90 (settings), zoom 90->50."
+status = "verified"
+evidence = "tools/asamu-trace/tests/parity_regressions.rs (the Workshop zoom of the keyboard recording), gated on local recordings of the original; docs/PARITY.md (Second comparison)"
+note = "FOV 90 (settings), zoom 90->50. Scope of the verification: the zoom, bit-equal to the original's FOV on 800 consecutive samples through two holds and two taps (425 not at 90, 278 at 50). FOV while charging a power jump or at speed is not compared."
 
 [[category.item]]
 id = "input-map"
@@ -1223,7 +1223,7 @@ id = "trace-replay"
 name = "Trace replay harness"
 status = "implemented"
 evidence = "crates/asamu-player/src/trace.rs (record_run, compare); tests/slice.rs"
-note = "Replay + per-field max/mean/RMS diff with first divergence, fixed or per-frame step. First recordings of the original exist locally; no comparison passes within a tolerance yet."
+note = "Replay + per-field max/mean/RMS diff with first divergence, fixed or per-frame step, one-step mode, recorder 0.2.0 recordings. Four recordings of the original exist locally; replays do not run Matinee movers or Kismet per sample, so about 15% of recorded ticks cannot be compared yet."
 
 [[category.item]]
 id = "trace-capture"
@@ -1235,8 +1235,9 @@ note = "Read-only recorders + convert/replay/compare. Windows poller: first live
 [[category.item]]
 id = "parity-suite"
 name = "Trace-replay parity suite against original traces"
-status = "partial"
-note = "First recordings of the original exist locally (2026-10-10, Windows build: story-mode walk, free play with sprint, jumps and grapples). The record -> convert -> replay -> compare pipeline runs end to end; the first comparison diverges (docs/PARITY.md, First comparison). No regression suite yet."
+status = "implemented"
+evidence = "tools/asamu-trace/tests/{parity_regressions,parity_measurement,real_recordings}.rs (gated on local recordings and converted data; they skip on CI); docs/PARITY.md (Second comparison)"
+note = "Four recordings of the original (97,503 frames: three gamepad, one keyboard and mouse). Regression tests pin the named comparisons of docs/PARITY_FINDINGS.md (16 pass, 5 are ignored with their measured numbers) and twelve free runs that agree on every tick; a measurement prints agreement by phase and family (one step 99.0% and 98.8% of the ticks a per-sample replay can run). Not parity: see the list of remaining differences in docs/PARITY.md. Three of six story levels are in no recording."
 
 # --------------------------------------------------------------------------
 # Sandbox — ours, experimental, not original content (docs/SANDBOX.md).

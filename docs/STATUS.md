@@ -2,44 +2,55 @@
 
 _Session journal. Newest entry first. Each entry: what was done, what is true now, what to do next._
 
-## 2026-10-12 — Session 3: everything parked is merged, second wave of parity fixes running
+## 2026-10-12 — Session 3: second parity wave merged, first measured comparison, owner's play session
 
 **Done**
-- The five branches parked at the end of Session 2 were each verified by an independent agent and merged into
-  `main` (`dcd3d3c`): the first wave of parity fixes (swept axis-aligned box, primitive kinds and an enabled
-  switch in the collision world; the engine's angle table, integer view angles and a `SetSpeed` entry point; the
-  reciprocal float form of the velocity update) and the four Windows-machine packages (hardened
-  `tools/dev/win_host.sh`, Windows test-suite fixes, the importer on the Windows build of the game with a
-  portable math module, the desk runner).
-- The whole suite now passes on Windows as well as on CI: 2,328 passed, 0 failed, 5 ignored, both with the game
-  install hidden (as on CI) and with the real install and a fresh conversion visible. The three "known and not
-  yet fixed" test failures of the previous entry are fixed.
-- A flaky recorder test (`test_markers`, timing-dependent) that turned one macOS CI run red was made sequential.
-- The Windows machine holds a complete, verified conversion made from the Windows install (12 of 12 stages,
-  13,407 files, mesh manifest version 2 with simple collision).
+- Everything parked at the end of Session 2 was verified and merged (first parity wave, the four Windows-machine
+  packages); the whole suite passes on Windows as well as on CI.
+- **Second parity wave merged** (`parity/wave2`, 48 commits, each package built and then checked by an independent
+  agent, plus a final review): the pawn is swept as an axis-aligned box against simple-collision bodies, the BSP
+  and switched blocking volumes, with the engine's hit pull-back; `SetSpeed`, `ChangeSize` and volume toggles run
+  from level script; a level starts as the original starts it; the trace tool reads recorder 0.2.0 recordings;
+  gated regression tests and a measurement on the recordings.
+- **A keyboard-and-mouse recording of the original** (KM1: 52,266 frames at 78 fps, exact keys, all optional
+  fields; AG-Workshop, AG-ParadiseCave and the start of AG-BeautifulCity). Local only.
+- **First measured comparison** (`docs/PARITY.md`, "Second comparison"; `docs/PARITY_FINDINGS.md` section 8): one
+  tick of our rules from the original's state is inside the measured-noise tolerances on 99.03% (gamepad
+  recordings) and 98.76% (KM1) of the ticks a per-sample replay can run, 70.54% before the wave. Tracker: gravity
+  and the zoom moved to verified (scoped); the parity suite to implemented.
+- **The owner played our build on the Windows machine** (AG-Workshop into AG-ParadiseCave) and took 17
+  screenshots. Notes and root causes are local (`research/local/play-shots/2026-10-12/NOTES.md`).
+- Runs with a hidden window are silent (`ASAMU_MUTE` does the same for any run): background screenshot runs had
+  been playing the level's audio on the owner's machine.
 
 **True now**
-- The first wave changed the collision *kernel* and the player's arithmetic, not yet what the simulation asks of
-  them: every comparison with the recordings still ends "diverged". No parity is claimed.
-- The second wave is in progress on the local branch `parity/wave2` (worktree
-  `.claude/worktrees/parity-wave2`, not pushed): the native hit pull-back and the box-shaped pawn in the movement
-  port, simple-collision bodies, per-mesh switches and switchable blocking volumes in the level world, the
-  bridge between them, `setspeed` from level script, the fall at level start, the Rust reader for the extended
-  recorder, and gated tests on the real recordings with a re-measurement. Nothing from it is merged until it is
-  verified.
-- The laptop's connection drops during long builds (Wi-Fi): long `win_host.sh` commands are simply repeated when
-  SSH exits 255, with `CARGO_BUILD_JOBS=16`.
+- Not parity. Remaining differences are listed in `docs/PARITY.md`: moving level objects in replays, a 2.15 uu
+  floor-check lift of the original, the landing frame in about a quarter of landings, some wall contacts, three of
+  52 airborne anchors, float-spacing drift. Three story levels are in no recording.
+- **A route blocker found in play:** a grapple anchor on a mover that is attached to a rotating mover (the wheels
+  of rocks in AG-ParadiseCave: 70 `InterpActor`s hard-attached to `InterpActor` hubs) stays at the world point of
+  the hit instead of riding the rock. In the original the anchor rides it (KM1: the anchor moved on 13 of 66
+  attachments, by up to 9,547 uu).
+- A conversion made before this wave (mesh manifest version 1) must be re-imported (`asamu-import meshes`):
+  with it collision is approximate. The Mac's local conversion is version 1.
+- In progress on the local branch `play/fixes` (not pushed): fixes for what the screenshots showed (material
+  reduction and rendering: untextured ground, cut-out cave paintings, outline shells, the checkpoint effect, the
+  Workshop monitor, light beams; a clean screen by default; the window title; no first-person hand before the
+  suit; a system font fallback; black foliage is next). Nothing from it is merged until it is verified.
+- The laptop's connection drops during long builds (Wi-Fi): long `win_host.sh` commands are repeated when SSH
+  exits 255.
 
 **Still open**
-- Needs the owner: a keyboard-and-mouse recording session on a quiet machine (`docs/PARITY_FINDINGS.md`
-  section 6), starting the desk runner once on the Windows machine, a short gameplay clip for the README, a try
-  of the Sandbox by hand, a real-controller test.
-- Rendering defects seen in screenshots (flat cyan surfaces, black boxes near some checkpoints, black cut-outs in
-  some foliage); actors hidden at level start are not drawn when shown later; on-screen text is ASCII-only.
-- The macOS recorder route has never recorded anything.
+- Needs the owner: a next recording with a straight wall hold, a low frame rate and a deliberate 5000 uu grapple;
+  a short gameplay clip for the README; a try of the Sandbox by hand; a real-controller test.
+- From the wave's reviews: the cylinder and box overlap tests of `asamu-world` disagree on convex solids (the
+  Sandbox helpers and the eye-height probe still use the cylinder); graybox and Sandbox spawns place the pawn 0.05
+  uu above the floor; a replay start forces the floor check on a resting pawn; AG-StarHaven's respawn is 31.9 uu
+  above a spawn point that lies inside a simple body; 13 placements sit exactly on the scale threshold.
+- Actors hidden at level start are not drawn when shown later; the macOS recorder route has never recorded.
 
-**Next:** verify and merge the second wave; publish the first measured comparison table it produces, labelled
-exactly; then the next root causes that table names.
+**Next, in order:** the anchor on attached and rotating movers (with KM1 as evidence); verify and merge
+`play/fixes`; Matinee movers in per-sample replays; the floor check's lift; the landing frame.
 
 ## 2026-10-10 — Session 2 wrap-up: where to pick up
 

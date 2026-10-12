@@ -401,3 +401,72 @@ Use keyboard and mouse for the whole session: move keys are recorded exactly, wh
 - Two landings end slightly above `GroundSpeed` (443.4 and 883.6); one frame of grapple flight is 72 uu/s off (PLAY2 seg0 tick 1342); the speed-cap normalisation misses by 1 ulp on 13 to 17 Workshop frames.
 - Why single frames are dropped during ordinary play in PLAY2 (10 resyncs).
 - Maximum step height, terminal velocity 10,000, the lower pitch limit, rocket boots, release-instant targets, AG-StarHaven, AG-IceCave and AG-Epilogue are in no recording.
+
+## 8. State after the second wave (measured 2026-10-12)
+
+The work packages of section 4 are merged (first wave: WP-A, WP-D, WP-C1; second wave: WP-C2, WP-B, WP-E, WP-T3,
+WP-T2). This section records what was measured afterwards and what it changes in the sections above; the text
+above is left as written on 2026-10-10.
+
+Measured with `tools/asamu-trace/tests/parity_measurement.rs` on the Windows conversion (mesh manifest version 2),
+at the tolerances of section 5, vertical while walking at the hover band's width (0.5 uu). "Before" is the same
+test on `main` before the second wave. Recordings are never pooled: WS1+DC1+PLAY2 (input derived from the
+acceleration, 61 fps, 45,237 records) and KM1 (2026-10-12, exact move keys, 78 fps, recorder 0.2.0, 52,266
+records). A final reviewer recomputed the one-step phase rows from the raw recordings with separate code and got
+the same counts (one tick apart in one KM1 row).
+
+- **One step.** One tick of our rules from the original's state is inside the tolerances on 38,124 of 38,497
+  ticks of the gamepad recordings (99.03%; 98.82% with a vertical tolerance of 4 float spacings; 70.54% before)
+  and on 43,892 of 44,445 of KM1 (98.76%; 98.40%). Walking: 27,237 of 27,436 (17,200 before) and 24,911 of
+  25,020. Falling: 6,162 of 6,231 and 15,106 of 15,341. Attached to a still target: 4,382 of 4,421 and 3,588 of
+  3,746. Landing: 76 of 107 (1 before) and 83 of 102.
+- **Not compared.** A further 6,714 and 7,802 ticks, because a per-sample replay does not run what acts on the
+  pawn there: moving grapple targets and the air after them, movers under the pawn, a pusher, a cinematic input
+  lock. Counting every tick, the one-step figures are 94.5% and 92.5%. Another 24 ticks at teleports and
+  level-script changes are dropped.
+- **Free-running** from a standing start, the walk that follows stays inside the tolerances for 11,935 of 18,249
+  ticks (31 before) and 8,935 of 15,398 in KM1; 40 of 76 and 19 of 35 walks are inside to their end. Twelve free
+  runs of up to 1,500 ticks (9,917 ticks, with jumps, grapples and landings) are inside on every tick and pinned.
+- **One-step ticks that start inside our collision** (tested with the pawn's box): 1,354 before; 139 after in the
+  gamepad group, 244 in KM1.
+- **Regression tests** (`tools/asamu-trace/tests/parity_regressions.rs`): 16 pass, 5 are ignored with their
+  numbers (WS1 after tick 1586, where the recorded pawn's box overlaps our collision at a second wall; DC1 seg0
+  ticks 1011 to 1015, a replay start forcing the floor check; the DC1 seg0 slope after tick 3758; the fall after
+  PLAY2 seg4's flight; three of 52 airborne anchors).
+
+Changes to the sections above:
+
+- **Section 5, vertical position ("none yet").** Measured one-step vertical noise while walking: within 4 spacings
+  of `f32` on 99.42% (gamepad) and 99.70% (KM1) of ticks. Use 4 spacings as the one-step vertical tolerance;
+  free-running stays at the hover band's width.
+- **Section 5, new row.** Horizontal velocity while falling, one step: 2 quanta of twice the size, per coordinate
+  (KM1's differences of 2.44, 3.45 and 4.87 uu/s are one and two spacings of position).
+- **P6 and N12:** closed (`SetSpeed` from level script; sprint does not overwrite the Workshop's 132 on 1,950
+  frames of KM1).
+- **P11:** still not reproduced. On `StaticMeshActor_1508` in AG-BeautifulCity the original alternates every tick
+  between two heights 2.148 uu apart (PLAY2 seg5 3139 to 3199, 4888 to 4917); 9 lifts go straight into a fall.
+- **Section 7:** the lower pitch limit is settled (−18001, 118 records of KM1); the crosshair trace is a bullet
+  trace (read from the executable, WP-E).
+- **New rule read from the executable, not in section 2:** after a BSP hit the trace given to everything else is
+  shortened to 5 uu beyond it and their times rescaled (`UWorld::MultiLineCheck`); CONFIRMED in code, not measured.
+- **Settled by KM1:** the zoom reaches 50 in 20 frames and ours is bit-equal on 800 samples; the Workshop stairs
+  are a ramp (constant floor normal); the leap's move lock holds to the landing and a flight ends it; ground-press
+  anchors agree one step with the recorded eye height (61 of 62 within 0.15 uu); a jump press while attached does
+  nothing; the anchor moves with its target while attached (13 of 66 attachments, by 13 to 9,547 uu).
+- **Not settled:** the straight wall hold, the 5000 uu limit, low frame rates (items 3 and 7 of section 6 remain
+  for a next session).
+
+Next root causes, in the order of how much they explain:
+
+1. **Level objects that Matinee or Kismet move are not run in per-sample replays** (14,516 of 97,458 one-step
+   ticks are uncompared for this reason; at least 54 walking failures are the Workshop's observatory doors, shut
+   in the level file). Cleanest segment: KM1 seg0 from tick 9856, 50 ticks. In play the same area shows a defect:
+   a grapple anchor on a mover attached to a rotating mover stays at the world point of the hit.
+2. **The original's floor check lifts the pawn 2.15 uu where ours does not** (60 one-step ticks 2.15 uu apart plus
+   27 walking-flag differences). Cleanest: PLAY2 seg5 from 3136, 64 ticks; KM1 seg1 from 2440, 40 ticks. Cause
+   not established.
+3. **The landing frame** (50 of 209 one-step landing ticks outside tolerance; the first failure in 69 of 103
+   failing free-running landings). Cleanest: KM1 seg1 from 4416, 240 ticks.
+
+Below these: wall and blocked-pull contact responses (KM1 seg5 8779 to 8895), and float-spacing drift.
+

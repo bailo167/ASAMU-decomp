@@ -7,8 +7,8 @@ deterministic export and behavioural parity are separate numbers and are never a
 |---|---|---|---|
 | Package reading | Every shipped package parses; offsets/sizes cross-check against file size and each other | The original files | verified (see `docs/reverse-engineering/PACKAGE_ANALYSIS.md`) |
 | Gameplay constants | Value recovered from script defaults / native code / config, cited | The original files | movement, camera, pawn-script, grapple-gun and rocket-boots values recovered and wired with provenance (drift-tested against `docs/reverse-engineering/data/defaults/*.json`) |
-| Player movement | Tick-by-tick position/velocity error vs original trace | Recordings of the original game (`docs/TRACE_CAPTURE.md`) | native physics (walking, falling, flying) + ASAMU pawn script, power jump and rocket boots ported from the specs; **not measured yet**: the first recordings of the original exist (2026-10-10, Windows build) and the first replay diverges, see "First comparison" below |
-| Grapple | Attach point, pull path, release velocity vs original trace | Recordings of the original game | original `GrappleGun` ported from `GRAPPLE.md` (targeting, acceptance, attach, flying pull, every release path, budget, Kismet events); reproduces the spec's re-simulated numbers (G-PH-5); **not measured** against the recordings yet |
+| Player movement | Tick-by-tick position/velocity error vs original trace | Recordings of the original game (`docs/TRACE_CAPTURE.md`) | native physics (walking, falling, flying) + ASAMU pawn script, power jump and rocket boots ported from the specs. **Measured, not at parity:** one tick of our rules from the original's own state is inside the measured-noise tolerances on 99.0% (gamepad recordings) and 98.8% (keyboard recording) of the ticks a per-sample replay can run; free-running replays still drift. See "Second comparison" below for what is and is not covered |
+| Grapple | Attach point, pull path, release velocity vs original trace | Recordings of the original game | original `GrappleGun` ported from `GRAPPLE.md` (targeting, acceptance, attach, flying pull, every release path, budget, Kismet events). **Measured, not at parity:** airborne anchors within 0.15 uu on 49 of 52 presses (gamepad) and 38 of 46 (keyboard); attached to a still target one step inside tolerance on 4,382 of 4,421 and 3,588 of 3,746 ticks; grapples on moving targets are not compared yet, and the anchor does not ride attached rotating movers correctly in play (owner's play session, 2026-10-12) |
 | Levels | Geometry/transforms match original placement | Original maps (converted locally) | structure verified by the importer (30,284 actor transforms and all static meshes agree with an independent decoder, `LEVEL_FORMAT.md`, `MESHES.md`); collision and visual agreement with the running original **not measured** |
 | Story flow | Kismet-driven event order matches original | Kismet graphs + playthrough | the interpreter runs every sequence-object class the maps use and each level's scripted exit leads to the next in the smoke run (`INTEGRATION.md` §8); event order and timing against a playthrough of the original **not measured** |
 
@@ -27,6 +27,43 @@ This is a first look, not a parity number.
 | FOV differs by 40° from the first zoom | consistent with the story-mode zoom not being reproduced in the replay; not yet classified |
 
 No tolerance was changed and no item was upgraded on the strength of this run.
+
+### Second comparison (2026-10-12)
+
+After the second wave of fixes (`docs/PARITY_FINDINGS.md`, sections 4 and 8) the runtime collides the pawn as the
+original does: an axis-aligned box against each mesh's simple-collision body (or nothing, or its triangles, by the
+mesh's switches), the BSP and switched blocking volumes, with every hit reported short of the surface by the
+engine's own rule, and it runs the level script's `SetSpeed`, `ChangeSize` and volume toggles. Every constant is
+read from the user's executable.
+
+Measured against four recordings of the original (three gamepad recordings at 61 fps with the move input derived
+from the recorded acceleration, and one keyboard-and-mouse recording at 78 fps with exact keys; 97,503 frames;
+Windows conversion with mesh manifest version 2). The two groups are never pooled.
+
+| What | Gamepad recordings | Keyboard recording | Before the wave (gamepad) |
+|---|---|---|---|
+| **One step** (each tick restarts from the original's previous sample), ticks inside the tolerances, of the ticks a per-sample replay can run | 38,124 of 38,497 (99.03%) | 43,892 of 44,445 (98.76%) | 27,157 of 38,497 (70.54%) |
+| The same with the stricter vertical tolerance (4 float spacings instead of the 0.5 uu hover band) | 98.82% | 98.40% | |
+| The same counting every tick, including those the replay cannot run | 94.5% | 92.5% | |
+| Ticks left out because moving level objects are not run in such replays (movers under or against the pawn, moving grapple targets and the air after them, a cinematic input lock) | 6,714 | 7,802 | 6,714 |
+| Walking, one step | 27,237 of 27,436 | 24,911 of 25,020 | 17,200 of 27,436 |
+| Falling, one step | 6,162 of 6,231 | 15,106 of 15,341 | 6,032 of 6,231 |
+| Landing tick, one step | 76 of 107 | 83 of 102 | 1 of 107 |
+| **Free-running** walk from a standing start: ticks before the first one outside tolerance | 11,935 of 18,249 | 8,935 of 15,398 | 31 of 18,249 |
+
+Twelve free runs of up to 1,500 ticks (9,917 ticks, with jumps, grapples and landings) agree on every tick and are
+pinned by a test. The figures come from `tools/asamu-trace/tests/parity_measurement.rs`; the named comparisons of
+the findings are `tools/asamu-trace/tests/parity_regressions.rs` (16 pass; 5 do not and are kept ignored with
+their measured numbers). Both are gated on the local recordings and converted data and skip elsewhere, so CI does
+not run them. A final reviewer recomputed the one-step rows from the raw recordings with separate code.
+
+**This is not parity.** Still different: level objects that move (not run in per-sample replays, and grapple
+anchors on attached rotating movers fail in play), a 2.15 uu floor-check lift the original makes and ours does not
+(cause unknown), the landing frame in about a quarter of landings, some wall contacts, three of 52 airborne
+anchors, and drift at float spacing in long free runs. AG-StarHaven, AG-IceCave and AG-Epilogue are in no
+recording; low frame rates, the 5000 uu limit and two pull-back cases (BSP-first, zero-extent BSP and brush) are
+read from the executable but not measured. A conversion made before this wave (mesh manifest version 1) must be
+re-imported: with it collision is approximate and in places worse than before.
 
 ## Parameters
 

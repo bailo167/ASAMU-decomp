@@ -53,12 +53,13 @@ With your own copy imported, this works today:
 
 ## Current limitations
 
-- **Behavioural parity is not measured yet.** Movement, grapple and abilities are ported from recovered values and
-  specifications, but they have not been compared tick by tick against recordings of the original game. The
-  recorder and comparison tools exist, the first recordings were made in October 2026, and the first replay
-  diverges; the causes found so far are tooling limits and open questions, not yet classified simulation
-  differences ([docs/PARITY.md](docs/PARITY.md)). Until those numbers exist, nothing about "feels like the
-  original" is claimed as verified.
+- **Behavioural parity is measured, and not reached.** Four recordings of the original (97,503 frames, October
+  2026) are replayed through the simulation. Restarting every tick from the original's own state, one tick of our
+  rules lands inside the measured-noise tolerances on about 99% of the ticks such a replay can run (70.5% before
+  the collision fixes of October 2026); about 15% of all ticks are left out because moving level objects are not
+  run in those replays. Left running freely, replays still drift, landings differ in about a quarter of cases, and
+  three of the six story levels are in no recording. The numbers, what they cover and what they do not are in
+  [docs/PARITY.md](docs/PARITY.md); nothing about "feels like the original" is claimed as verified.
 - **Nobody has played it start to finish.** The campaign chain above is proven by an automated run that jumps to
   each level's exit trigger. It shows the scripted transitions work, not that every route is traversable by hand.
 - **Rendering is an approximation.** Materials are reduced to a standard PBR model, lightmaps lose their
@@ -168,7 +169,7 @@ renderer at a fixed step, which is what makes it testable in CI and comparable w
   decoded fields; 8,920 textures and 30,284 placed actors agree with an independent decoder.
 - **Native physics recovered from an unstripped binary.** The macOS executable still carries about 135,000
   symbols, which made it possible to write a detailed specification of the engine's pawn movement and port from
-  it. Agreement with the running game is not measured yet.
+  it. Agreement with the running game is measured on recordings and is partial ([docs/PARITY.md](docs/PARITY.md)).
 - **Every gameplay constant has provenance.** Ground speed 440, jump velocity 1000, grapple range 5000: each value
   in the runtime cites the class default, config file or native code it came from, and a test fails if they drift.
 - **Read-only parity recorders for the original game:** a memory-reading recorder for the Windows build, which
@@ -213,8 +214,8 @@ and Linux has not been tested by hand yet.
 "Implemented" below means the code exists and passes its own tests. "Verified" is counted separately: for format,
 asset and importer items the result was checked against the original's data or a second, separately written
 decoder; for tooling items the check runs green in CI; for collision our queries agree with a brute-force
-oracle. Nothing is verified against the running game's behaviour, and gameplay items stay unverified until the
-parity comparisons pass.
+oracle. Gameplay items are verified only where a comparison with recordings of the running game passes at
+measured-noise tolerance and a test pins it (so far: gravity and the zoom); the rest stay unverified.
 
 <p align="center"><img src="progress/progress.svg" alt="Progress matrix generated from progress/progress.toml" width="100%"></p>
 
@@ -232,7 +233,7 @@ parity comparisons pass.
 | Kismet | 6 | 6 | 3 | 0 | 100% | 50% |
 | Maps | 7 | 7 | 6 | 0 | 100% | 85% |
 | Assets | 10 | 10 | 10 | 0 | 100% | 100% |
-| Player | 10 | 10 | 0 | 0 | 100% | 0% |
+| Player | 10 | 10 | 2 | 0 | 100% | 20% |
 | Grapple | 8 | 8 | 0 | 0 | 100% | 0% |
 | World | 13 | 13 | 0 | 0 | 100% | 0% |
 | Rendering | 12 | 12 | 1 | 0 | 100% | 8% |
@@ -240,9 +241,9 @@ parity comparisons pass.
 | Save/Progression | 5 | 5 | 0 | 0 | 100% | 0% |
 | Importer | 7 | 7 | 5 | 0 | 100% | 71% |
 | Platforms | 5 | 5 | 0 | 0 | 100% | 0% |
-| Tests | 10 | 9 | 3 | 1 | 90% | 30% |
+| Tests | 10 | 10 | 3 | 0 | 100% | 30% |
 | Sandbox (not original) | 7 | 5 | 0 | 2 | 71% | 0% |
-| **Overall** | **150** | **147** | **62** | **3** | **98%** | **41%** |
+| **Overall** | **150** | **148** | **64** | **2** | **98%** | **42%** |
 
 <!-- progress-table:end -->
 
