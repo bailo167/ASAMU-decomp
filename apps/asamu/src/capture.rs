@@ -138,6 +138,9 @@ pub struct FrameRecorder {
 /// Seconds between the level's assets settling and an automatic start
 /// (the baked lighting is applied a few seconds after the meshes; ours).
 pub const RECORD_AUTOSTART_DELAY: f32 = 6.0;
+/// The longest an automatic start waits for the level's assets to settle,
+/// seconds since the app started (ours).
+pub const RECORD_AUTOSTART_WAIT: f32 = 10.0;
 
 impl FrameRecorder {
     /// A recorder writing into `dir` (already checked with
@@ -184,7 +187,11 @@ fn record_frames(
     };
     let now = time.elapsed_secs();
     if let Some(delay) = recorder.autostart {
-        if recorder.settled_at.is_none() && level.as_ref().is_none_or(|l| l.assets_settled()) {
+        // A level whose assets never report settled (a hand-made level drawn
+        // beside converted data) must not hold an automatic start for ever.
+        if recorder.settled_at.is_none()
+            && (level.as_ref().is_none_or(|l| l.assets_settled()) || now >= RECORD_AUTOSTART_WAIT)
+        {
             recorder.settled_at = Some(now);
         }
         if recorder.settled_at.is_some_and(|t| now >= t + delay) {
