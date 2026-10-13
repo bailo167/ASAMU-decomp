@@ -1,5 +1,16 @@
 # ASAMU-decomp
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/gameplay-cave-grapple.gif" alt="Ten seconds of ASAMU-decomp being played: in first person the grappling glove fires a blue beam at floating rocks in a misty green cave, pulls the player across and lands on a wooden bridge" width="100%"></td>
+    <td width="50%"><img src="docs/images/sandbox-playground.gif" alt="The Sandbox playground: a low-poly level of floating islands, a tower and coloured platforms under an evening sky, the player grappling between them" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><em>The recreation being played in <code>AG-ParadiseCave</code>, with data imported locally from an owned copy of the game</em></td>
+    <td align="center"><em>The <a href="#sandbox-experimental">Sandbox</a> playground: a level of our own, not part of the original</em></td>
+  </tr>
+</table>
+
 [![CI](https://github.com/bailo167/ASAMU-decomp/actions/workflows/ci.yml/badge.svg)](https://github.com/bailo167/ASAMU-decomp/actions/workflows/ci.yml)
 ![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
 ![platforms: Windows | Linux | macOS](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-blue)
@@ -7,13 +18,6 @@
 
 **An open-source engine recreation of *A Story About My Uncle*, written from scratch in Rust and Bevy, that plays
 the original game's levels from your own legitimately owned copy.**
-
-<p align="center">
-  <img src="docs/images/gameplay-cave-grapple.gif" alt="Ten seconds of ASAMU-decomp being played: in first person the grappling glove fires a blue beam at floating rocks in a misty green cave, pulls the player across and lands on a wooden bridge" width="100%">
-  <br>
-  <em>The recreation being played in <code>AG-ParadiseCave</code> (October 2026), with data imported locally from
-  an owned copy of the game. <a href="#screenshots">Screenshots</a></em>
-</p>
 
 > **Unofficial project.** Not affiliated with, endorsed by, or connected to Gone North Games or Coffee Stain Studios.
 > This repository contains **no original copyrighted game assets, code or data**. To use it you will need your own
@@ -82,10 +86,6 @@ Known gameplay differences are listed in [docs/PARITY.md](docs/PARITY.md), and o
 gaps in [docs/INTEGRATION.md](docs/INTEGRATION.md) (section 10).
 
 ## Sandbox (experimental)
-
-<p align="center">
-  <img src="docs/images/sandbox-playground.gif" alt="The Sandbox playground: a low-poly level of floating islands, a tower and coloured platforms under an evening sky, the player grappling between them" width="70%">
-</p>
 
 `asamu --sandbox` opens straight into the Playground, a level of our own built for this game's movement (grapple
 chains, a wheel and a carousel to ride, crystals, a runway), with tools behind one key: change the movement and
