@@ -9,10 +9,10 @@
 the original game's levels from your own legitimately owned copy.**
 
 <p align="center">
-  <img src="docs/images/star-haven-first-person.jpg" alt="ASAMU-decomp running the AG-StarHaven level in first person: the grappling glove in the foreground, a wooden walkway, pink trees and floating islands above a sea of cloud" width="100%">
+  <img src="docs/images/gameplay-cave-grapple.gif" alt="Ten seconds of ASAMU-decomp being played: in first person the grappling glove fires a blue beam at floating rocks in a misty green cave, pulls the player across and lands on a wooden bridge" width="100%">
   <br>
-  <em>The recreation running <code>AG-StarHaven</code>, imported locally from an owned copy of the game.
-  <a href="#screenshots">More screenshots</a></em>
+  <em>The recreation being played in <code>AG-ParadiseCave</code> (October 2026), with data imported locally from
+  an owned copy of the game. <a href="#screenshots">Screenshots</a></em>
 </p>
 
 > **Unofficial project.** Not affiliated with, endorsed by, or connected to Gone North Games or Coffee Stain Studios.
@@ -83,14 +83,19 @@ gaps in [docs/INTEGRATION.md](docs/INTEGRATION.md) (section 10).
 
 ## Sandbox (experimental)
 
-`asamu --sandbox` opens a lab on top of the recreation: change the movement and ability parameters while playing,
-freeze and single-step time, keep in-memory save states, teleport, watch speed, jump and swing read-outs, and try
-it all in two hand-made test arenas. It is our own tooling (`crates/asamu-sandbox` and an optional feature of the
+<p align="center">
+  <img src="docs/images/sandbox-playground.gif" alt="The Sandbox playground: a low-poly level of floating islands, a tower and coloured platforms under an evening sky, the player grappling between them" width="70%">
+</p>
+
+`asamu --sandbox` opens straight into the Playground, a level of our own built for this game's movement (grapple
+chains, a wheel and a carousel to ride, crystals, a runway), with tools behind one key: change the movement and
+ability parameters while playing, freeze and single-step time, keep in-memory save states, rewind, teleport, and
+watch speed, jump and swing read-outs. It is our own tooling (`crates/asamu-sandbox` and an optional feature of the
 app), not the original's behaviour, and nothing it shows or records is evidence of parity. It keeps saves in
 memory, never touches the faithful game's saves, progress or time-trial records, and can be compiled out; a guard
 test suite checks that a game which met an unchanged Sandbox session is bit-identical to one that did not. This
-is a first version, covered by automated tests and unattended screenshots but not yet used by hand:
-[docs/SANDBOX.md](docs/SANDBOX.md).
+is a first version, covered by automated tests; it has been played by hand once (it stutters beside converted
+data, which is not fixed yet): [docs/SANDBOX.md](docs/SANDBOX.md).
 
 ## Quick start
 
@@ -196,6 +201,8 @@ All of these are the recreation, rendering data imported locally from an owned c
 | *`AG-StarHaven`* | *`AG-BeautifulCity`* |
 | ![Beautiful City: market stalls and a blossoming tree inside the cave village](docs/images/beautiful-city-market.jpg) | ![Star Haven in first person with the grappling glove](docs/images/star-haven-first-person.jpg) |
 | *The village market in `AG-BeautifulCity`* | *First person, with the converted glove and the stand-in HUD* |
+| ![Beautiful City: a villager on a path between wooden houses under strings of coloured lights](docs/images/beautiful-city-village.jpg) | ![Beautiful City: stilt houses, vegetable beds and strings of coloured lights in the cave village](docs/images/beautiful-city-lights.jpg) |
+| *A villager in `AG-BeautifulCity` (from a play session)* | *The village street in `AG-BeautifulCity`* |
 
 ## Platforms
 

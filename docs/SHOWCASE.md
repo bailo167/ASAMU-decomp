@@ -108,8 +108,9 @@ the CI workflow (platforms).
 
 ## Images
 
-Curated screenshots of the recreation live in [`docs/images/`](images) and may be reused with a link to the
-repository. They show the recreation rendering data converted locally from an owned copy of the game; the game's
+Curated screenshots and two short silent clips of the recreation live in [`docs/images/`](images) and may be
+reused with a link to the repository (`gameplay-cave-grapple.gif`: ten seconds of play in the first cave;
+`sandbox-playground.gif`: the Sandbox's own level). They show the recreation rendering data converted locally from an owned copy of the game; the game's
 art belongs to its owners.
 
 ## Legal line
